@@ -1,0 +1,67 @@
+Legion Go 2 Companion
+Copyright (c) 2026 Rayekkk
+
+This product is licensed under the BSD 3-Clause License. See LICENSE for the
+full text. Parts of the vibration module are inherited from an earlier
+MIT-licensed project and remain under those terms; see LICENSE.MIT.
+
+================================================================================
+Provenance
+================================================================================
+
+This plugin combines code from LeGoTDP, LeGo Vibe Control,
+LeGo2BrightnessFix and WiFi Optimizer Go 2 by Rayekkk. The WiFi module is based
+on Arcada Labs' WiFi Optimizer under the same BSD-3-Clause terms. LeGo Vibe
+Control began as Ally Vibe Control by
+piyush-tyagi-13 (https://github.com/piyush-tyagi-13/ally-vibe-control, MIT), and
+M4ttiA contributed its original per-game profiles. Inherited code remains under
+the MIT notice distributed in LICENSE.MIT.
+
+The RGB module's interface design and Legion Go 2 sysfs implementation were
+informed by HueSync 3.9.0 by honjow and Steam Deck Homebrew
+(https://github.com/honjow/HueSync, BSD-3-Clause). Its notice and license are
+distributed in LICENSE.HUESYNC. The power-button register mapping itself was
+re-audited against the target Go 2's RRCN16WW ACPI DSDT and is intentionally
+different from HueSync's older Go 2 mapping.
+
+================================================================================
+Third-party components
+================================================================================
+
+RyzenAdj 0.19.0
+Copyright (C) 2018-2024 Jiaxun Yang and contributors
+https://github.com/FlyGoat/RyzenAdj
+License: GNU Lesser General Public License v3
+
+RyzenAdj is not distributed in the release archive. The TDP backend downloads
+the pinned official binary over HTTPS when the extended range is needed and
+invokes it as a separate process.
+
+pyudev 0.24.4 (the pyudev/ directory)
+Copyright (C) 2010-2015 Sebastian Wiesner and contributors
+https://github.com/pyudev/pyudev
+License: GNU Lesser General Public License v2.1 or later
+
+pyudev is bundled unmodified in source form and dynamically imported by the
+vibration module. Its source headers carry the license notice and it may be
+replaced by another compatible copy.
+
+@decky/api 1.1.3
+Copyright SteamDeckHomebrew Team
+https://www.npmjs.com/package/@decky/api/v/1.1.3
+License: GNU Lesser General Public License v2.1
+
+The compiled frontend bundles portions of @decky/api. The release archive
+therefore includes its license under THIRD_PARTY_LICENSES, its complete package
+under THIRD_PARTY_SOURCES, and the plugin frontend source/build inputs described
+in SOURCE.md.
+
+The display module shells out to xprop from SteamOS. xprop is not redistributed.
+
+InputPlumber 0.78.0 (external SteamOS service)
+Copyright (C) ShadowBlip contributors
+https://github.com/ShadowBlip/InputPlumber
+License: GNU General Public License v3 or later
+
+InputPlumber is not redistributed or modified by this archive. The Button
+Remapper invokes its public D-Bus profile API as a separate system service.

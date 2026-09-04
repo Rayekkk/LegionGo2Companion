@@ -1,0 +1,7 @@
+# Intentionally empty.
+#
+# This plugin has no pip dependencies. The backend uses nothing outside the
+# standard library, and RyzenAdj is an external binary fetched at runtime
+# rather than a Python package. See NOTICE for its license. If that download
+# fails the plugin still works through the Lenovo WMI firmware attributes and
+# only loses the extended TDP range.

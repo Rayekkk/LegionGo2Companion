@@ -1,0 +1,35 @@
+# Dependencies and generated build/release artifacts
+/node_modules/
+/dist/
+/build/
+/bin/
+*.zip
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Private console maintenance helpers (not needed to build or run the plugin)
+/scripts/*_live.py
+
+# Local configuration, credentials and runtime data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+/*settings.json
+/*settings.json.bak
+/.wifi-backend-ready
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
