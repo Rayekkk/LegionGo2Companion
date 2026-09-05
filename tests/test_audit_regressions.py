@@ -132,6 +132,7 @@ class AuditProbes(unittest.TestCase):
         with patch.object(remap, "settings", MemorySettings(state)), \
              patch.object(remap, "_find_device", return_value=("device", "Go2")), \
              patch.object(remap, "_get_profile", return_value=current), \
+             patch.object(remap._service_watch, "capture"), \
              patch.object(remap, "_load_profile", return_value=current) as load:
             remap._repair_sync()
         load.assert_not_called()
@@ -144,6 +145,7 @@ class AuditProbes(unittest.TestCase):
         with patch.object(remap, "settings", MemorySettings(state)), \
              patch.object(remap, "_find_device", return_value=("device", "Go2")), \
              patch.object(remap, "_get_profile", return_value=externally_edited), \
+             patch.object(remap._service_watch, "capture"), \
              patch.object(remap, "_load_profile", side_effect=lambda p, data: data) as load:
             remap._repair_sync()
         load.assert_not_called()

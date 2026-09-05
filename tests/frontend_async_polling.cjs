@@ -5,7 +5,7 @@ const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_m
 const settle = async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 function harness(file, component, initiallyVisible = true) {
   const slots = [], effects = new Map(), pending = [], timers = new Map(), calls = [], callbacks = {};
-  let cursor = 0, visible = initiallyVisible, nextTimer = 0, writes = 0, props = {};
+  let cursor = 0, visible = initiallyVisible, nextTimer = 0, writes = 0, props = {}, now = 100000;
   const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);
   const hooks = {
     useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial;
@@ -25,7 +25,7 @@ function harness(file, component, initiallyVisible = true) {
   const source = fs.readFileSync(path.join(root, 'src', file), 'utf8') + `\nexport { ${component} as Tested };`;
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
-    module: mod, exports: mod.exports, console,
+    module: mod, exports: mod.exports, console, Date: class extends Date { static now() { return now; } },
     window: { SteamClient: { GameSessions: { RegisterForAppLifetimeNotifications(fn) { callbacks.lifetime = fn; return { unregister() {} }; } } },
       SleepManager: { RegisterForNotifyResumeFromSuspend(fn) { callbacks.resume = fn; return () => {}; } } },
     setTimeout: (fn, delay) => timer('timeout', fn, delay), clearTimeout: id => timers.delete(id),
@@ -50,10 +50,13 @@ function harness(file, component, initiallyVisible = true) {
   return { calls, timers, callbacks, render, exported: mod.exports.Tested,
     initialize: () => mod.exports.default(),
     get writes() { return writes; },
+    advance(milliseconds) { now += milliseconds; },
     visible(value) { visible = value; return render(); },
     fire() { [...timers.values()].filter(t => t.kind === 'interval').forEach(t => t.fn()); },
     respond(name, value) { const call = calls.find(c => c.name === name && !c.settled); assert.ok(call, `pending ${name}`);
       call.settled = true; call.resolve(value); },
+    reject(name) { const call = calls.find(c => c.name === name && !c.settled); assert.ok(call, `pending ${name}`);
+      call.settled = true; call.reject(new Error('temporary RPC failure')); },
     unmount() { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); },
     remount() { slots.length = 0; pending.length = 0; return render(); },
   };
@@ -220,6 +223,137 @@ const cases = [
     refresh.settled = true; refresh.reject(new Error('temporary RPC failure'));
     answerOverview(h); await settle();
     assertPowerSummary(h);
+  });
+  const section = (h, title = 'TDP') => findSection(h.render(), title).props;
+  const failPower = async h => { h.reject('get_settings'); answerOverview(h); await settle(); };
+  await testOverview('an initial failure has a retry hint and recovers without leaving stale metadata', async h => {
+    await failPower(h);
+    assert.equal(section(h).description, 'Status unavailable');
+    assert.match(section(h).statusNote, /Retrying while this menu is open/);
+    assert.equal(section(h, 'Vibration').statusNote, undefined);
+    h.advance(10000); h.fire(); answerOverview(h); await settle();
+    assertPowerSummary(h); assert.equal(section(h).statusNote, undefined);
+  });
+  await testOverview('only repeated failures mark confirmed data older and the existing tick updates its age', async h => {
+    answerOverview(h); await settle();
+    h.advance(10000); h.fire(); await failPower(h);
+    assertPowerSummary(h); assert.equal(section(h).statusNote, undefined, 'one transient failure is quiet');
+    h.advance(10000); h.fire(); await failPower(h);
+    assertPowerSummary(h); assert.match(section(h).statusNote, /Older data.*Last read 20s ago/);
+    assert.equal(section(h, 'Vibration').statusNote, undefined, 'failure metadata stays with its own RPC');
+    h.advance(10000); h.fire(); answerOverview(h, ['get_settings']); await settle();
+    assert.match(section(h).statusNote, /Last read 30s ago/);
+    h.respond('get_settings', overviewValues.get_settings); await settle();
+    assert.equal(section(h).statusNote, undefined, 'a confirmed refresh clears the warning');
+    assert.ok([...h.timers.values()].every(timer => timer.delay >= 10000), 'freshness adds no fast timer');
+  });
+  await testOverview('a hung cached read is marked delayed without starting overlapping RPCs', async h => {
+    answerOverview(h); await settle(); h.advance(10000); h.fire();
+    answerOverview(h, ['get_settings']); await settle();
+    h.advance(20000); h.fire(); answerOverview(h, ['get_settings']); await settle();
+    assert.doesNotMatch(section(h).statusNote || '', /Older data|delayed/);
+    h.advance(10000); h.fire(); answerOverview(h, ['get_settings']); await settle();
+    assertPowerSummary(h); assert.match(section(h).statusNote, /Older data.*Last read 40s ago.*Update delayed/);
+    assert.equal(h.calls.filter(call => call.name === 'get_settings').length, 2);
+    h.respond('get_settings', overviewValues.get_settings); await settle();
+    assert.equal(section(h).statusNote, undefined);
+  });
+  await testOverview('a hung initial read becomes unavailable only after thirty visible seconds', async h => {
+    answerOverview(h, ['get_settings']); await settle();
+    h.advance(20000); h.fire(); answerOverview(h, ['get_settings']); await settle();
+    assert.notEqual(section(h).description, 'Status unavailable');
+    h.advance(10000); h.fire(); answerOverview(h, ['get_settings']); await settle();
+    assert.equal(section(h).description, 'Status unavailable');
+    assert.match(section(h).statusNote, /Still waiting/);
+    assert.equal(section(h, 'Vibration').statusNote, undefined);
+    assert.equal(h.calls.filter(call => call.name === 'get_settings').length, 1);
+  });
+  await testOverview('hidden time never turns a pending read into a failure', async h => {
+    answerOverview(h); await settle(); h.advance(10000); h.fire();
+    answerOverview(h, ['get_settings']); await settle(); h.advance(10000);
+    const queuedTicks = [...h.timers.values()].filter(timer => timer.kind === 'interval').map(timer => timer.fn);
+    h.visible(false); const before = h.calls.length;
+    h.advance(3600000); queuedTicks.forEach(tick => tick());
+    assert.equal(h.calls.length, before, 'hidden age checks never start work');
+    h.visible(true);
+    assert.match(section(h).statusNote, /^Updating….*Last read 1h ago/);
+    assert.doesNotMatch(section(h).statusNote, /Older data|delayed/);
+    h.advance(20000); h.fire(); answerOverview(h, ['get_settings']); await settle();
+    assert.match(section(h).statusNote, /Older data.*Update delayed/, 'only accumulated visible waiting counts');
+    h.respond('get_settings', overviewValues.get_settings); await settle();
+    assert.equal(section(h).statusNote, undefined);
+  });
+  await testOverview('hidden rejections do not count toward a visible failure streak', async h => {
+    answerOverview(h); await settle(); h.advance(10000); h.fire();
+    h.visible(false); await failPower(h); h.advance(3600000); h.visible(true);
+    await failPower(h);
+    assert.equal(section(h).statusNote, undefined, 'the first visible error still tolerates a transient failure');
+    h.advance(10000); h.fire(); await failPower(h);
+    assert.match(section(h).statusNote, /Older data/);
+  });
+  await testOverview('fresh backend warnings replace old healthy data and survive later transport failures', async h => {
+    answerOverview(h); await settle(); h.advance(10000); h.fire();
+    h.respond('battery_get_status', { supported: false, reason: 'Battery firmware unavailable' });
+    h.respond('controller_get_status', { available: true, recovery_pending: true, reason: 'Restore the interrupted controller change' });
+    h.respond('wifi_get_status', { success: false, error: 'unexpected', message: 'Wireless settings could not be verified' });
+    answerOverview(h); await settle();
+    assert.equal(section(h, 'Battery').description, 'Battery firmware unavailable');
+    assert.equal(section(h, 'Gyro & Touchpad').description, 'Restore the interrupted controller change');
+    assert.equal(section(h, 'WiFi').description, 'Wireless settings could not be verified');
+    for (let i = 0; i < 2; i++) {
+      h.advance(10000); h.fire(); h.reject('battery_get_status'); answerOverview(h); await settle();
+    }
+    assert.equal(section(h, 'Battery').description, 'Battery firmware unavailable');
+    assert.match(section(h, 'Battery').statusNote, /Older data/);
+  });
+  await testOverview('driver warnings are not masked by missing vibration settings', async h => {
+    h.respond('vibe_get_driver_status', { found: false }); h.reject('vibe_get_settings');
+    answerOverview(h); await settle();
+    assert.equal(section(h, 'Vibration').description, 'Controller driver not detected');
+    assert.match(section(h, 'Vibration').statusNote, /Retrying/);
+  });
+  for (const field of ['settings_error', 'setup_error']) {
+    await testOverview(`OLED ${field} replaces its earlier healthy summary`, async h => {
+      answerOverview(h); await settle(); h.advance(10000); h.fire();
+      h.respond('display_get_state', { ...display, [field]: 'Display controls need attention' });
+      answerOverview(h); await settle();
+      assert.equal(section(h, 'OLED Display').description, 'Display controls need attention');
+      h.advance(10000); h.fire(); answerOverview(h); await settle();
+      assert.notEqual(section(h, 'OLED Display').description, 'Display controls need attention');
+    });
+  }
+  await testOverview('stale rejected page reads cannot seed the returned overview metadata', async h => {
+    answerOverview(h); await settle(); h.advance(10000); h.fire();
+    findSection(h.render(), 'TDP').props.onClick(); h.render();
+    h.reject('get_settings'); await settle();
+    findSection(h.render(), 'TDP', 'onBack').props.onBack(); h.render();
+    await failPower(h);
+    assertPowerSummary(h); assert.equal(section(h).statusNote, undefined, 'only the post-page error counts');
+  });
+  for (const gate of [{ enabled: false }, { enabled: true, pending: true }]) {
+    await testOverview(`module gate ${JSON.stringify(gate)} clears freshness and ignores rejected prior reads`, async h => {
+      answerOverview(h); await settle(); h.advance(10000); h.fire(); await failPower(h);
+      h.advance(10000); h.fire(); await failPower(h);
+      assert.match(section(h).statusNote, /Older data/);
+      h.fire();
+      const gated = { ...structuredClone(modules), tdp: gate };
+      h.callbacks.companion_guard({ ...overviewValues.get_version, modules: gated }); h.render({ modules: gated });
+      h.reject('get_settings'); await settle();
+      h.callbacks.companion_guard(overviewValues.get_version); h.render({ modules });
+      assert.equal(section(h).statusNote, undefined);
+      assert.notEqual(section(h).description, '23 / 30 / 35 W');
+      answerOverview(h); await settle(); assertPowerSummary(h);
+    });
+  }
+  await testOverview('an old plugin rejection cannot add freshness warnings to its replacement', async h => {
+    const oldRead = h.calls.find(call => call.name === 'get_settings' && !call.settled);
+    h.dispose(); h.advance(3600000);
+    const plugin = h.initialize(); h.dispose = () => { h.unmount(); plugin.onDismount(); };
+    h.respond('get_version', overviewValues.get_version); await settle(); h.remount();
+    oldRead.settled = true; oldRead.reject(new Error('old plugin disconnected')); await settle();
+    assert.equal(section(h).statusNote, undefined);
+    assert.notEqual(section(h).description, 'Status unavailable');
+    answerOverview(h); await settle(); assertPowerSummary(h);
   });
   await testOverview('late replies from a disposed plugin cannot populate or unlock the new instance', async h => {
     const oldRead = h.calls.find(c => c.name === 'get_settings' && !c.settled);

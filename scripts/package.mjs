@@ -26,6 +26,7 @@ const CONTENTS = [
   "module_runtime.py",
   "conflict_guard.py",
   "safe_settings.py",
+  "inputplumber_process.py",
   "tdp_backend.py",
   "vibration_backend.py",
   "display_backend.py",

@@ -2,7 +2,7 @@
 
 <h1>Legion Go 2 Companion</h1>
 
-[![Version](https://img.shields.io/badge/version-0.6.1-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.2-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
 [![Device](https://img.shields.io/badge/device-Legion_Go_2-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-424A53?style=for-the-badge&labelColor=141417)](LICENSE)
@@ -345,6 +345,10 @@ minute. Battery changes keep a durable recovery record before writing to the ker
 an interrupted first change retains the original charging mode. Diagnostic readers are
 closed outside a test; merely installing Companion does not start sampling HID reports.
 
+If the verified InputPlumber process exits, the existing monitor tick schedules an earlier
+check of gyro and button mappings. Recovery still verifies the controller and ownership
+before applying saved choices; failed attempts use increasing retry intervals.
+
 Wi-Fi recovery journals are stored persistently so a reboot cannot erase an unfinished
 transaction. Recovery stops on a conflicting external change instead of overwriting it.
 
@@ -353,6 +357,11 @@ transaction. Recovery stops on a conflicting external change instead of overwrit
 Page-specific periodic status refreshes pause while Quick Access is hidden. Decky's
 `alwaysRender` keeps the selected page mounted during a native dropdown, preserving its
 navigation state without keeping those refresh timers running.
+
+The main menu keeps the last received summaries when reopened. Repeated read failures
+or a delayed response add a small note with the age of the data; a fresh response clears
+it automatically. InputPlumber's version label is cached separately from live controller
+state, with invalidation when its executable changes.
 
 RGB effects run on the controller. Backlight notifications are event-driven where the
 kernel supports them; gamescope state still needs periodic checks, with the shorter

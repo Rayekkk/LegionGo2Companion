@@ -357,6 +357,49 @@ class FilterTests(unittest.TestCase):
             self.backend._select("right", reconcile=True)
         self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("right"))
 
+    def test_process_watch_is_captured_only_after_success_and_is_not_refreshed_by_status(self):
+        with patch.object(self.backend._service_watch, "capture") as capture, \
+                patch.object(self.backend._service_watch, "clear") as clear, \
+                patch.object(module, "_iio_inventory", return_value=[]):
+            self.backend._select("left")
+            capture.assert_called_once()
+            self.backend._status(True)
+            capture.assert_called_once()
+            self.backend._select("system")
+            clear.assert_called_once()
+            capture.assert_called_once()
+
+    def test_failed_selection_cannot_capture_a_new_service_process(self):
+        self.store.fail_commit = 1
+        with patch.object(self.backend._service_watch, "capture") as capture:
+            with self.assertRaises(OSError):
+                self.backend._select("left")
+        capture.assert_not_called()
+
+    def test_process_exit_hint_cannot_authorize_overwriting_same_generation_external_filters(self):
+        self.backend._select("left")
+        self.current[SOURCE] = module._desired_filters("combined")
+        original = copy.deepcopy(self.current)
+        clock = [0.0]
+
+        async def sleep(_seconds):
+            clock[0] += 5
+            if clock[0] > 5:
+                raise asyncio.CancelledError
+
+        async def watch():
+            with self.assertRaises(asyncio.CancelledError):
+                await self.backend._watch()
+
+        with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch.object(module, "_suspend_offset", return_value=0), \
+                patch.object(module.asyncio, "sleep", side_effect=sleep), \
+                patch.object(self.backend._service_watch, "consume_exit", return_value=True):
+            asyncio.run(watch())
+        self.assertTrue(self.backend._conflict)
+        self.assertEqual(self.current, original)
+        self.assertEqual(self.backend._generation, DEVICE["generation"])
+
     def test_release_with_another_active_imu_restores_only_our_controls(self):
         self.backend._select("left")
         self.current["iio://device4"] = ["Accelerometer:Center"]
@@ -453,6 +496,8 @@ class WatchScheduleTests(unittest.TestCase):
             ("persistent_failure", True, "", 145, [5, 10, 20, 40, 80, 140]),
             ("startup_retry", False, "controller unavailable", 70, [5, 10, 70]),
             ("external_conflict", True, "", 70, [5, 65]),
+            ("service_restart", False, "", 70, [5, 65]),
+            ("service_failure", False, "", 145, [5, 10, 20, 40, 80, 140]),
         )
         for kind, resume, initial_error, end, expected in cases:
             with self.subTest(kind=kind):
@@ -470,7 +515,7 @@ class WatchScheduleTests(unittest.TestCase):
                     if kind == "external_conflict":
                         backend._conflict = True
                         raise module.ControllerError("An external filter changed")
-                    if kind == "persistent_failure" or (kind == "startup_retry" and clock[0] < 10):
+                    if kind in {"persistent_failure", "service_failure"} or (kind == "startup_retry" and clock[0] < 10):
                         raise module.ControllerError("The controller is unavailable")
                     backend._error = ""
 
@@ -482,9 +527,12 @@ class WatchScheduleTests(unittest.TestCase):
                         patch.object(module, "_suspend_offset", side_effect=lambda: 2.0 if resume and clock[0] >= 5 else 0.0), \
                         patch.object(module.asyncio, "sleep", side_effect=sleep), \
                         patch.object(module, "_state", return_value={"gyro_source": "left"}), \
+                        patch.object(backend._service_watch, "consume_exit", side_effect=lambda: kind.startswith("service_") and clock[0] == 5), \
+                        patch.object(module, "_json_value") as query, \
                         patch.object(backend, "_select", side_effect=select):
                     asyncio.run(watch())
                 self.assertEqual(calls, expected)
+                query.assert_not_called()
 
 
 class CaptureTests(unittest.TestCase):

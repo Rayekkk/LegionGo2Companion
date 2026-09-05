@@ -24,9 +24,13 @@ import decky
 import module_runtime
 
 from safe_settings import SettingsManager
+from inputplumber_process import ProcessWatch
 
 
 BUSCTL = "/usr/bin/busctl"
+INPUTPLUMBER = "/usr/bin/inputplumber"
+VERSION_CACHE_TTL_S = 300.0
+VERSION_RETRY_S = 10.0
 SERVICE = "org.shadowblip.InputPlumber"
 INTERFACE = "org.shadowblip.Input.CompositeDevice"
 DEVICE_PATH_RE = re.compile(
@@ -97,6 +101,9 @@ _operation_lock = threading.RLock()
 _watch_task: asyncio.Task | None = None
 _last_error = ""
 _last_suspend_offset: float | None = None
+_service_watch = ProcessWatch()
+_version_lock = threading.Lock()
+_version_cache: tuple[tuple[int, ...], float, str] | None = None
 
 
 class RemapError(RuntimeError):
@@ -526,6 +533,53 @@ def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
     return True
 
 
+def _inputplumber_signature() -> tuple[int, ...]:
+    info = os.stat(INPUTPLUMBER)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _inputplumber_version() -> str:
+    """Cache only the binary's label, never live profiles or hardware state."""
+    global _version_cache
+    with _version_lock:
+        try:
+            signature = _inputplumber_signature()
+        except OSError:
+            _version_cache = None
+            return ""
+        if (_version_cache is not None and _version_cache[0] == signature
+                and time.monotonic() < _version_cache[1]):
+            return _version_cache[2]
+        _version_cache = None
+        value = ""
+        try:
+            result = subprocess.run(
+                [INPUTPLUMBER, "--version"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3.0,
+                check=False,
+            )
+            if result.returncode == 0:
+                value = result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            if signature != _inputplumber_signature():
+                return ""
+        except OSError:
+            return ""
+        # A failed metadata probe must not hide a working D-Bus controller, nor
+        # launch another process for every simultaneous status request.
+        ttl = VERSION_CACHE_TTL_S if value else VERSION_RETRY_S
+        _version_cache = (signature, time.monotonic() + ttl, value)
+        return value
+
+
 def _status_sync() -> dict[str, Any]:
     state = _load_state()
     response: dict[str, Any] = {
@@ -543,19 +597,7 @@ def _status_sync() -> dict[str, Any]:
         "error": _last_error,
     }
     try:
-        version = subprocess.run(
-            ["/usr/bin/inputplumber", "--version"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3.0,
-            check=False,
-        )
-        if version.returncode == 0:
-            response["inputplumber_version"] = version.stdout.strip()
+        response["inputplumber_version"] = _inputplumber_version()
         path, _ = _find_device()
         current = _get_profile(path)
         response["supported"] = True
@@ -595,6 +637,7 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
             _save_state(desired)
             try:
                 desired, _ = _apply_state(desired, adopt_external=False)
+                _service_watch.capture(_json_value)
                 _last_error = ""
             except Exception as exc:
                 # The durable desired state remains enabled so startup/watchdog
@@ -608,6 +651,7 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
                 desired["baseline_profile"] = None
                 desired["previous_actions"] = None
                 _save_state(desired)
+                _service_watch.clear()
                 _last_error = ""
             except Exception as exc:
                 _last_error = str(exc)
@@ -615,18 +659,22 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
     return _status_sync()
 
 
-def _repair_sync() -> None:
+def _repair_sync() -> bool:
     global _last_error
     with _operation_lock:
         state = _load_state()
         if not state["enabled"]:
-            return
+            _service_watch.clear()
+            return True
         try:
             state, _ = _apply_state(state, adopt_external=True)
+            _service_watch.capture(_json_value)
             _last_error = ""
+            return True
         except Exception as exc:
             _last_error = str(exc)
             decky.logger.warning(f"[legiongo2companion-remap] reapply failed: {exc}")
+            return False
 
 
 def _suspend_offset() -> float | None:
@@ -652,6 +700,8 @@ def _resume_detected() -> bool:
 async def _watch_loop() -> None:
     last_check = time.monotonic()
     settle_until = last_check + 30.0
+    retry_at = None
+    retry_delay = RESUME_CHECK_S
     while True:
         try:
             await asyncio.sleep(RESUME_CHECK_S)
@@ -659,10 +709,24 @@ async def _watch_loop() -> None:
             now = time.monotonic()
             if resumed:
                 settle_until = now + 30.0
+                retry_at = None
+                retry_delay = RESUME_CHECK_S
                 decky.logger.info("[legiongo2companion-remap] resume detected")
-            if now < settle_until or now - last_check >= CHECK_INTERVAL_S:
-                await module_runtime.offload('remap', _repair_sync)
+            if _service_watch.consume_exit():
+                retry_at = now
+                retry_delay = RESUME_CHECK_S
+            due = now < settle_until or now - last_check >= CHECK_INTERVAL_S
+            if retry_at is not None:
+                due = now >= retry_at
+            if due:
+                repaired = await module_runtime.offload('remap', _repair_sync)
                 last_check = now
+                if repaired is False:
+                    retry_at = now + retry_delay
+                    retry_delay = min(CHECK_INTERVAL_S, retry_delay * 2)
+                else:
+                    retry_at = None
+                    retry_delay = RESUME_CHECK_S
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -673,6 +737,7 @@ class Plugin:
     async def _main(self):
         global _watch_task, _last_suspend_offset
         _last_suspend_offset = _suspend_offset()
+        _service_watch.clear()
         await module_runtime.offload('remap', _repair_sync)
         if _watch_task is None or _watch_task.done():
             _watch_task = asyncio.create_task(_watch_loop())
@@ -690,12 +755,16 @@ class Plugin:
             await module_runtime.offload('remap', _restore_if_owned, _load_state())
         except Exception as exc:
             decky.logger.warning(f"[legiongo2companion-remap] unload restore failed: {exc}")
+        finally:
+            _service_watch.clear()
 
     async def _uninstall(self):
         try:
             await module_runtime.offload('remap', _restore_if_owned, _load_state())
         except Exception as exc:
             decky.logger.warning(f"[legiongo2companion-remap] uninstall restore failed: {exc}")
+        finally:
+            _service_watch.clear()
 
     async def get_status(self):
         return await module_runtime.offload('remap', _status_sync)

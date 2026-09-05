@@ -33,6 +33,7 @@ from typing import Any
 import decky
 from safe_settings import SettingsManager
 from remap_backend import SERVICE, INTERFACE, DEVICE_PATH_RE, _json_value, _run_busctl
+from inputplumber_process import ProcessWatch
 import controller_imu
 
 
@@ -252,6 +253,7 @@ def _discover(physical: dict, *, require_exclusive: bool = True) -> dict:
     if not isinstance(owner, list) or len(owner) != 1 or not isinstance(owner[0], str):
         raise ControllerError("InputPlumber service identity could not be verified.")
     found[0]["generation"] += "|" + owner[0]
+    found[0]["service_owner"] = owner[0]
     return found[0]
 
 
@@ -357,6 +359,7 @@ class Plugin:
         self._error = ""
         self._conflict = False
         self._generation: str | None = None
+        self._service_watch = ProcessWatch()
         self._status_cache: tuple[float, dict] | None = None
 
     def _status(self, fresh: bool = False) -> dict:
@@ -453,6 +456,7 @@ class Plugin:
             if (owner and current == desired and imu_actual == imu_desired
                     and old["gyro_source"] == source and not owner.get("pending")):
                 self._generation = device["generation"]
+                self._service_watch.capture(_json_value, device.get("service_owner", ""))
                 self._conflict = False
                 self._error = ""
                 return
@@ -493,6 +497,7 @@ class Plugin:
                     raise ControllerError(self._error) from exc
                 raise
             self._generation = device["generation"]
+            self._service_watch.capture(_json_value, device.get("service_owner", ""))
             self._conflict = False
             self._error = ""
             self._status_cache = None
@@ -524,6 +529,7 @@ class Plugin:
             old = _state()
             owner = old["ownership"]
             if owner is None:
+                self._service_watch.clear()
                 self._conflict = False
                 self._error = ""
                 self._status_cache = None
@@ -584,6 +590,7 @@ class Plugin:
                 raise
             # Release is successful even when externally modified fields were
             # preserved. Do not leave a sticky conflict that prevents re-entry.
+            self._service_watch.clear()
             self._conflict = False
             self._error = ""
             self._status_cache = None
@@ -752,11 +759,16 @@ class Plugin:
             now, new_offset = time.monotonic(), _suspend_offset()
             resumed = new_offset - offset > 1
             offset = new_offset
+            service_exited = self._service_watch.consume_exit()
+            if service_exited:
+                # Only advance the schedule. _select still verifies the actual
+                # HID/D-Bus generation and exact ownership before changing it.
+                retry_delay = RECOVERY_RETRY_SECONDS
             if resumed:
                 await asyncio.to_thread(self._stop_capture)
                 self._generation = None
                 retry_delay = RECOVERY_RETRY_SECONDS
-            if not resumed and now < next_check:
+            if not resumed and not service_exited and now < next_check:
                 continue
             next_check = now + CHECK_SECONDS
             try:
@@ -781,6 +793,7 @@ class Plugin:
             raise
         self._closed = False
         self._generation = None
+        self._service_watch.clear()
         self._error = ""
         self._status_cache = None
         try:
@@ -805,6 +818,8 @@ class Plugin:
         except Exception as exc:
             self._error = str(exc)
             decky.logger.warning(f"Controller restoration remains pending: {exc}")
+        finally:
+            self._service_watch.clear()
 
     async def _uninstall(self) -> None:
         await self._unload()

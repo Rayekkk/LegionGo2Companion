@@ -53,11 +53,14 @@ interface DisplayState {
   setup_done?: boolean;
   active?: boolean;
   edid_patched?: boolean;
+  settings_error?: string;
+  setup_error?: string;
 }
 
 interface Overview {
   version: string;
   standalonePlugins: string[];
+  reads?: Partial<Record<OverviewField, { unavailable: boolean; note?: string }>>;
   tdp?: TdpSettings;
   vibration?: VibeSettingsResponse;
   driver?: DriverStatus;
@@ -124,7 +127,7 @@ const refreshGuard = async () => {
     stopTdpWatcher(); stopVibrationWatcher();
     overviewPaused = true;
     clearOverview();
-    guardListeners.forEach(listener => listener({version: "0.6.1", blocked: true,
+    guardListeners.forEach(listener => listener({version: "0.6.2", blocked: true,
       guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
   } finally { if (guardRead === request) guardRead = null; }
 };
@@ -135,13 +138,17 @@ const getDisplayState = callable<[], DisplayState>("display_get_state");
 
 // Keep confirmed summaries and in-flight reads across QAM remounts. Each source
 // publishes independently, so a slow hardware/network probe cannot hide ready data.
-type OverviewField = Exclude<keyof Overview, "version" | "standalonePlugins">;
+type OverviewField = Exclude<keyof Overview, "version" | "standalonePlugins" | "reads">;
+const OVERVIEW_DELAY_MS = 30000;
 interface OverviewSource {
   key: OverviewField;
   module: ModuleKey;
   read: () => Promise<Partial<Overview>>;
   revision: number;
   pending: Promise<Partial<Overview>> | null;
+  lastReadAt: number | null;
+  failures: number;
+  pendingSince: number | null;
 }
 const overviewSources: OverviewSource[] = [
   { key: "tdp", module: "tdp", read: async () => ({ tdp: await getTdpSettings() }) },
@@ -153,39 +160,82 @@ const overviewSources: OverviewSource[] = [
   { key: "remap", module: "remap", read: async () => ({ remap: await getRemapStatus() }) },
   { key: "battery", module: "battery", read: async () => ({ battery: await getBatteryStatus() }) },
   { key: "controller", module: "controller", read: async () => ({ controller: await getControllerStatus() }) },
-].map(source => ({ ...source, revision: 0, pending: null } as OverviewSource));
-let overviewCache: Overview = { version: "0.6.1", standalonePlugins: [] };
+].map(source => ({ ...source, revision: 0, pending: null,
+  lastReadAt: null, failures: 0, pendingSince: null } as OverviewSource));
+let overviewCache: Overview = { version: "0.6.2", standalonePlugins: [] };
 let overviewModules = EMPTY_MODULES;
 let overviewPaused = true;
 const overviewListeners = new Set<(overview: Overview) => void>();
 const overviewPollers = new Set<(overview: Overview) => void>();
-const publishOverview = () => overviewListeners.forEach(listener => listener(overviewCache));
-const invalidateOverviewReads = () => overviewSources.forEach(source => { source.revision += 1; });
+let overviewVisibleStarted: number | null = null;
+let overviewVisibleSpent = 0;
+const overviewVisibleTime = () => overviewVisibleSpent + (overviewVisibleStarted === null
+  ? 0 : Math.max(0, Date.now() - overviewVisibleStarted));
+const readAge = (milliseconds: number) => {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+};
+const publishOverview = () => {
+  const now = Date.now(), visibleTime = overviewVisibleTime();
+  const reads: Overview["reads"] = {};
+  for (const source of overviewSources) {
+    const delayed = source.pendingSince !== null && visibleTime - source.pendingSince >= OVERVIEW_DELAY_MS;
+    const unavailable = source.lastReadAt === null && (source.failures > 0 || delayed);
+    let note: string | undefined;
+    if (unavailable) note = delayed ? "Still waiting for an update. Check the Decky connection if this continues."
+      : "Retrying while this menu is open.";
+    else if (source.lastReadAt !== null) {
+      const age = readAge(now - source.lastReadAt);
+      if (source.failures >= 2 || delayed) note = `Older data · Last read ${age} ago${delayed ? " · Update delayed" : " · Retrying…"}`;
+      else if (source.pendingSince !== null && now - source.lastReadAt >= OVERVIEW_DELAY_MS)
+        note = `Updating… · Last read ${age} ago`;
+    }
+    reads[source.key] = { unavailable, note };
+  }
+  overviewCache = { ...overviewCache, reads };
+  overviewListeners.forEach(listener => listener(overviewCache));
+};
+const invalidateOverviewReads = () => {
+  overviewSources.forEach(source => { source.revision += 1; source.failures = 0; source.pendingSince = null; });
+  overviewCache = { ...overviewCache, reads: {} };
+};
 const clearOverview = () => {
   invalidateOverviewReads();
-  overviewCache = { version: "0.6.1", standalonePlugins: [] };
+  overviewSources.forEach(source => { source.lastReadAt = null; });
+  overviewCache = { version: "0.6.2", standalonePlugins: [] };
 };
 const configureOverviewModules = (modules: ModuleStates) => {
   for (const source of overviewSources) {
     if (moduleEnabled(overviewModules, source.module) !== moduleEnabled(modules, source.module)) {
       source.revision += 1;
-      overviewCache = { ...overviewCache, [source.key]: undefined };
+      source.lastReadAt = null; source.failures = 0; source.pendingSince = null;
+      overviewCache = { ...overviewCache, [source.key]: undefined,
+        reads: { ...overviewCache.reads, [source.key]: undefined } };
     }
   }
   overviewModules = modules;
 };
 const readOverviewSource = (source: OverviewSource) => {
-  if (!frontendActive || overviewPaused || !overviewPollers.size || source.pending ||
+  if (!frontendActive || overviewPaused || !overviewPollers.size ||
       !moduleEnabled(overviewModules, source.module)) return;
+  if (source.pendingSince === null) source.pendingSince = overviewVisibleTime();
+  if (source.pending) return;
   const revision = source.revision;
   const request = source.read();
   source.pending = request;
   void request.then(value => {
     if (!frontendActive || overviewPaused || revision !== source.revision) return;
+    if (!value[source.key] || typeof value[source.key] !== "object" || Array.isArray(value[source.key]))
+      throw new Error("Status unavailable");
+    source.lastReadAt = Date.now(); source.failures = 0; source.pendingSince = null;
     overviewCache = { ...overviewCache, ...value };
     publishOverview();
   }).catch(() => {
-    // Retain the last confirmed summary on a transient read failure.
+    if (!frontendActive || overviewPaused || revision !== source.revision) return;
+    source.pendingSince = null;
+    // Hidden time and hidden failures are not evidence of a failing module.
+    // Keep its last report, including any hardware warning returned with it.
+    if (overviewPollers.size) { source.failures += 1; publishOverview(); }
   }).finally(() => {
     if (source.pending !== request) return;
     source.pending = null;
@@ -194,7 +244,32 @@ const readOverviewSource = (source: OverviewSource) => {
     if (revision !== source.revision) readOverviewSource(source);
   });
 };
-const refreshOverview = () => overviewSources.forEach(readOverviewSource);
+const refreshOverview = () => {
+  if (!frontendActive || overviewPaused || !overviewPollers.size) return;
+  overviewSources.forEach(readOverviewSource);
+  publishOverview();
+};
+
+const overviewDescription = (overview: Overview, module: ModuleKey, description: string) => {
+  const sources = overviewSources.filter(source => source.module === module);
+  if (module === "display" && (overview.display?.settings_error || overview.display?.setup_error))
+    return overview.display.settings_error || overview.display.setup_error || description;
+  // A returned error/recovery state is a fresh report, not a rejected RPC.
+  // Never replace it with an earlier healthy cache or a generic retry message.
+  for (const source of sources) {
+    const value = overview[source.key] as { error?: string; reason?: string; message?: string;
+      success?: boolean; supported?: boolean; available?: boolean; recovery_pending?: boolean; recovery_required?: boolean } | undefined;
+    if (value?.error) return (module === "wifi" && value.message) || value.error;
+    if (value?.recovery_pending || value?.recovery_required) return value.reason
+      || ((module === "battery" || module === "controller") && description) || "An interrupted change needs recovery";
+    if (value?.success === false || value?.supported === false || value?.available === false)
+      return value.reason || value.message || (value.success !== false && description) || "Status unavailable";
+  }
+  if (module === "vibration" && overview.driver?.found === false) return description;
+  return sources.some(source => overview.reads?.[source.key]?.unavailable) ? "Status unavailable" : description;
+};
+const overviewNote = (overview: Overview, module: ModuleKey) => overviewSources
+  .filter(source => source.module === module).map(source => overview.reads?.[source.key]?.note).filter(Boolean).join(" · ") || undefined;
 
 const PageShell: FC<{ children: ReactNode }> = ({ children }) => (
   <div style={{ width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden", boxSizing: "border-box" }}>
@@ -212,12 +287,13 @@ const Chevron: FC = () => (
 const SectionLink: FC<{
   title: string;
   description: string;
+  statusNote?: string;
   onClick: () => void;
-}> = ({ title, description, onClick }) => (
+}> = ({ title, description, statusNote, onClick }) => (
   <PanelSectionRow>
     <Field
       label={title}
-      description={description}
+      description={statusNote ? <>{description}<div style={{ fontSize: "11px", opacity: 0.7, marginTop: "2px" }}>{statusNote}</div></> : description}
       childrenLayout="inline"
       childrenContainerWidth="min"
       focusable
@@ -326,23 +402,31 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     // polling only; section navigation belongs to the explicit links/back button.
     if (activeSection) { invalidateOverviewReads(); return; }
     if (!visible) return;
+    if (!overviewPollers.size) overviewVisibleStarted = Date.now();
     overviewPollers.add(setOverview);
     setOverview(overviewCache);
     refreshOverview();
     const timer = setInterval(refreshOverview, 10000);
-    return () => { clearInterval(timer); overviewPollers.delete(setOverview); };
+    return () => {
+      clearInterval(timer); overviewPollers.delete(setOverview);
+      if (!overviewPollers.size) { overviewVisibleSpent = overviewVisibleTime(); overviewVisibleStarted = null; }
+    };
   }, [activeSection, enabledModules, visible]);
+
+  const summary = (module: ModuleKey, description: string) => ({
+    description: overviewDescription(overview, module, description), statusNote: overviewNote(overview, module),
+  });
 
   if (!activeSection) return <PageShell>
     <PanelSection title="Hardware Controls">
-      {moduleEnabled(modules, "tdp") && <SectionLink title="TDP" description={tdpSummary(overview.tdp)} onClick={() => setActiveSection("tdp")} />}
-      {moduleEnabled(modules, "vibration") && <SectionLink title="Vibration" description={vibrationSummary(overview)} onClick={() => setActiveSection("vibration")} />}
-      {moduleEnabled(modules, "rgb") && <SectionLink title="RGB Lighting" description={rgbSummary(overview.rgb)} onClick={() => setActiveSection("rgb")} />}
-      {moduleEnabled(modules, "remap") && <SectionLink title="Button Remapper" description={remapSummary(overview.remap)} onClick={() => setActiveSection("remap")} />}
-      {moduleEnabled(modules, "controller") && <SectionLink title="Gyro & Touchpad" description={controllerSummary(overview.controller)} onClick={() => setActiveSection("controller")} />}
-      {moduleEnabled(modules, "battery") && <SectionLink title="Battery" description={batterySummary(overview.battery)} onClick={() => setActiveSection("battery")} />}
-      {moduleEnabled(modules, "display") && <SectionLink title="OLED Display" description={displaySummary(overview.display)} onClick={() => setActiveSection("display")} />}
-      {moduleEnabled(modules, "wifi") && <SectionLink title="WiFi" description={wifiSummary(overview.wifi)} onClick={() => setActiveSection("wifi")} />}
+      {moduleEnabled(modules, "tdp") && <SectionLink title="TDP" {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => setActiveSection("tdp")} />}
+      {moduleEnabled(modules, "vibration") && <SectionLink title="Vibration" {...summary("vibration", vibrationSummary(overview))} onClick={() => setActiveSection("vibration")} />}
+      {moduleEnabled(modules, "rgb") && <SectionLink title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => setActiveSection("rgb")} />}
+      {moduleEnabled(modules, "remap") && <SectionLink title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => setActiveSection("remap")} />}
+      {moduleEnabled(modules, "controller") && <SectionLink title="Gyro & Touchpad" {...summary("controller", controllerSummary(overview.controller))} onClick={() => setActiveSection("controller")} />}
+      {moduleEnabled(modules, "battery") && <SectionLink title="Battery" {...summary("battery", batterySummary(overview.battery))} onClick={() => setActiveSection("battery")} />}
+      {moduleEnabled(modules, "display") && <SectionLink title="OLED Display" {...summary("display", displaySummary(overview.display))} onClick={() => setActiveSection("display")} />}
+      {moduleEnabled(modules, "wifi") && <SectionLink title="WiFi" {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => setActiveSection("wifi")} />}
     </PanelSection>
     <PanelSection title="Device">
       <PanelSectionRow>
@@ -463,6 +547,7 @@ export default definePlugin(() => {
   overviewModules = EMPTY_MODULES;
   overviewListeners.clear();
   overviewPollers.clear();
+  overviewVisibleStarted = null; overviewVisibleSpent = 0;
   overviewSources.forEach(source => { source.pending = null; });
   const listener = addEventListener<[GuardStatus]>("companion_guard", updateGuard);
   void refreshGuard();
@@ -482,6 +567,7 @@ export default definePlugin(() => {
       overviewPaused = true;
       overviewListeners.clear();
       overviewPollers.clear();
+      overviewVisibleStarted = null; overviewVisibleSpent = 0;
       tdpWatcherEnabled = vibeWatcherEnabled = false;
       removeEventListener("companion_guard", listener);
       guardListeners.clear();

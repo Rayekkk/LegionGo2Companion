@@ -74,6 +74,16 @@ class MemorySettings:
 
 
 class RemapBackendTests(unittest.TestCase):
+    def setUp(self):
+        watcher = patch.object(remap_backend, "_service_watch", remap_backend.ProcessWatch())
+        watcher.start()
+        self.addCleanup(watcher.stop)
+        # Existing profile tests fake InputPlumber. Optional process metadata
+        # must not query a developer's real system bus during those tests.
+        capture = patch.object(remap_backend._service_watch, "capture")
+        self.capture = capture.start()
+        self.addCleanup(capture.stop)
+
     def test_retry_reads_a_repaired_file_after_unrecoverable_storage_error(self):
         from safe_settings import SettingsManager, atomic_write_json
         with tempfile.TemporaryDirectory(prefix="lego-remap-recovery-") as raw:
@@ -324,6 +334,61 @@ mapping:
             self.assertTrue(remap_backend._resume_detected())
         with patch.object(remap_backend, "_suspend_offset", return_value=4.3):
             self.assertFalse(remap_backend._resume_detected())
+
+    def test_successful_repair_captures_process_but_status_and_failed_repair_do_not(self):
+        state = remap_backend._sanitize_state({"enabled": True, "baseline_profile": BASE_PROFILE})
+        with patch.object(remap_backend, "settings", MemorySettings(state)), \
+                patch.object(remap_backend, "_apply_state", return_value=(state, BASE_PROFILE)):
+            self.assertTrue(remap_backend._repair_sync())
+        self.capture.assert_called_once()
+        with patch.object(remap_backend, "settings", MemorySettings(state)), \
+                patch.object(remap_backend, "_inputplumber_version", return_value="test"), \
+                patch.object(remap_backend, "_find_device", return_value=("device", "Go2")), \
+                patch.object(remap_backend, "_get_profile", return_value=BASE_PROFILE):
+            remap_backend._status_sync()
+        self.capture.assert_called_once()
+        with patch.object(remap_backend, "settings", MemorySettings(state)), \
+                patch.object(remap_backend, "_apply_state", side_effect=remap_backend.RemapError("unavailable")):
+            self.assertFalse(remap_backend._repair_sync())
+        self.capture.assert_called_once()
+
+    def test_disabled_remapper_clears_process_tracking_without_service_lookups(self):
+        with patch.object(remap_backend, "settings", MemorySettings()), \
+                patch.object(remap_backend, "_json_value") as query, \
+                patch.object(remap_backend._service_watch, "clear") as clear:
+            self.assertTrue(remap_backend._repair_sync())
+        clear.assert_called_once()
+        self.capture.assert_not_called()
+        query.assert_not_called()
+
+    def test_restart_hint_advances_repair_once_and_preserves_failure_backoff(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                clock, calls = [0.0], []
+
+                async def sleep(_seconds):
+                    clock[0] += 5
+                    if clock[0] > 180:
+                        raise asyncio.CancelledError
+
+                async def repair(_module, _function):
+                    calls.append(clock[0])
+                    return not failure or clock[0] < 40
+
+                async def watch():
+                    with self.assertRaises(asyncio.CancelledError):
+                        await remap_backend._watch_loop()
+
+                with patch.object(remap_backend, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                        patch.object(remap_backend.asyncio, "sleep", side_effect=sleep), \
+                        patch.object(remap_backend, "_resume_detected", return_value=False), \
+                        patch.object(remap_backend._service_watch, "consume_exit", side_effect=lambda: clock[0] == 40), \
+                        patch.object(remap_backend.module_runtime, "offload", side_effect=repair), \
+                        patch.object(remap_backend, "_json_value") as query:
+                    asyncio.run(watch())
+                expected = [5, 10, 15, 20, 25] + ([40, 45, 55, 75, 115, 175] if failure else [40, 100, 160])
+                self.assertEqual(calls, expected)
+                query.assert_not_called()
 
 
 if __name__ == "__main__":

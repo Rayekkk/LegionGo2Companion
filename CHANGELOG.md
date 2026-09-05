@@ -1,3 +1,10 @@
+# 0.6.2 — status freshness and controller recovery
+
+- Mark older overview values after repeated read failures or a delayed response, showing the age of the last report. Keep immediate cached summaries when reopening the menu, clear warnings on recovery and preserve the backend's hardware/setup errors.
+- Cache the InputPlumber version label, invalidate it when the executable changes and retry failed metadata probes with a short delay. Continue reading live profiles and hardware state on each status request.
+- Detect the disappearance of a previously verified InputPlumber process in the existing monitor tick and reconcile gyro and button mappings sooner. Keep device ownership checks, PID-reuse protection and bounded recovery retries; no additional background daemon is needed.
+- Add deterministic tests that forcibly terminate a child process during real settings writes and reopen storage in a fresh process, including partial temporary files, primary/backup replacement and interrupted recovery journals.
+
 # 0.6.1 — reliability audit
 
 - Preserve evidence when both settings copies are damaged and pause affected controls instead of treating lost preferences or ownership as a first installation. Bound JSON size and nesting, recover valid backups, and keep memory consistent with a file already replaced if directory synchronization fails.
