@@ -47,11 +47,11 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 
 ## Installation
 
-**1.** Install [Decky Loader](https://decky.xyz) if it is not already installed.
-**2.** Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases), when available, or build it using the instructions below.
-**3.** Remove the overlapping standalone plugins listed below, retaining their settings.
-**4.** In Gaming Mode, open the **Quick Access Menu → Decky → Settings → Developer**.
-**5.** Choose **Install Plugin from ZIP** and select the archive.
+1. Install [Decky Loader](https://decky.xyz) if it is not already installed.
+2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases), when available, or build it using the instructions below.
+3. Remove the overlapping standalone plugins listed below, retaining their settings.
+4. In Gaming Mode, open the **Quick Access Menu → Decky → Settings → Developer**.
+5. Choose **Install Plugin from ZIP** and select the archive.
 
 The archive contains one `LegionGo2Companion` folder. Decky installs it with the privileges
 needed by the hardware controls; normal use requires no terminal commands.
