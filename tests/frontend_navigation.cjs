@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 const ts = require(path.join(root, 'node_modules/typescript'));
 const slots = [], effects = new Map(), pending = [], timers = new Set();
-let cursor = 0, visible = true, dirty = false, nextTimer = 0;
+const rpcCalls = [];
+let cursor = 0, visible = true, dirty = false, nextTimer = 0, modules = {};
 const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);
 const hooks = {
   useState(initial) {
@@ -44,11 +45,11 @@ vm.runInNewContext(code, {
     if (name === 'react/jsx-runtime') return jsx;
     if (name === '@decky/api') return {
       useQuickAccessVisible: () => visible, definePlugin: fn => fn, addEventListener: () => {}, removeEventListener: () => {},
-      callable: () => async () => ({ version: 'test', blocked: false }),
+      callable: name => async () => { rpcCalls.push(name); return { version: 'test', blocked: false }; },
     };
     if (name === '@decky/ui') return new Proxy({ staticClasses: {} }, { get: (o, k) => o[k] || k });
     if (name.startsWith('./')) return new Proxy({}, { get: (_, k) =>
-      k.startsWith('get') ? async () => ({}) : /^(start|stop)/.test(k) ? () => {} : k.endsWith('Summary') ? () => '' : k });
+      k.startsWith('get') ? async () => { rpcCalls.push(k); return {}; } : /^(start|stop)/.test(k) ? () => {} : k.endsWith('Summary') ? () => '' : k });
     throw Error(name);
   },
 });
@@ -64,7 +65,7 @@ function render() {
   let tree, passes = 0;
   do {
     assert.ok(++passes < 10, 'render loop'); dirty = false; cursor = 0;
-    tree = mod.exports.TestedContent(); pending.splice(0).forEach(fn => fn());
+    tree = mod.exports.TestedContent({modules}); pending.splice(0).forEach(fn => fn());
   } while (dirty);
   return tree;
 }
@@ -75,7 +76,7 @@ function find(node, predicate) {
     const result = find(child, predicate); if (result) return result;
   }
 }
-for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'OLED Display', 'WiFi', 'About']) {
+for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyro & Touchpad', 'Battery', 'OLED Display', 'WiFi', 'About', 'Manage Modules']) {
   const link = find(render(), n => n.props?.title === title && n.props?.onClick);
   assert.ok(link, `section link: ${title}`); link.props.onClick();
   for (let cycle = 0; cycle < 3; cycle++) {
@@ -89,5 +90,19 @@ for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'OLE
   assert.ok(find(render(), n => n.props?.title === title && n.props?.onClick), 'explicit back works');
   assert.equal(timers.size, 1, 'one overview poller after returning');
 }
+find(render(), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
+assert.match(find(render(), n => n.props?.label === 'Author').props.description, /^Rayek/);
+assert.doesNotMatch(find(render(), n => n.props?.label === 'Included modules').props.description, /\d+\.\d+/);
+find(render(), n => n.props?.onBack).props.onBack();
+find(render(), n => n.props?.title === 'Battery' && n.props?.onClick).props.onClick();
+modules = Object.fromEntries(['tdp','vibration','rgb','remap','controller','battery','display','wifi'].map(k=>[k,{enabled:false}]));
+rpcCalls.length = 0;
+const disabled = render();
+assert.deepEqual(rpcCalls, ['get_version'], 'disabled modules are not polled');
+assert.ok(!find(disabled, n => n.props?.onBack), 'disabling an open module returns to the overview');
+for (const title of ['TDP','Vibration','RGB Lighting','Button Remapper','Gyro & Touchpad','Battery','OLED Display','WiFi']) {
+  assert.ok(!find(disabled, n => n.props?.title === title && n.props?.onClick), `${title} hidden when disabled`);
+}
+for (const title of ['About','Manage Modules']) assert.ok(find(disabled, n => n.props?.title === title && n.props?.onClick));
 visible = false; render(); assert.equal(timers.size, 0, 'hidden overview stops polling');
-console.log('All seven sections survive repeated visibility changes; explicit back and polling remain correct.');
+console.log('Ten sections retain navigation; disabled modules are hidden; About has author and unversioned modules.');

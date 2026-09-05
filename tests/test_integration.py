@@ -84,6 +84,8 @@ for unix_only in ("fcntl", "pwd"):
 sys.path.insert(0, str(ROOT))
 import display_backend  # noqa: E402
 import main  # noqa: E402
+import battery_backend  # noqa: E402
+import controller_backend  # noqa: E402
 import remap_backend  # noqa: E402
 import rgb_backend  # noqa: E402
 import tdp_backend  # noqa: E402
@@ -100,6 +102,8 @@ class IntegrationTests(unittest.TestCase):
             Path(wifi_backend.SETTINGS_FILE).name,
             Path(rgb_backend.settings.path).name,
             Path(remap_backend.settings.path).name,
+            Path(battery_backend.settings.path).name,
+            Path(controller_backend.settings.path).name,
         }
         self.assertEqual(
             paths,
@@ -110,6 +114,8 @@ class IntegrationTests(unittest.TestCase):
                 "wifi_settings.json",
                 "rgb_settings.json",
                 "remap_settings.json",
+                "battery_settings.json",
+                "controller_settings.json",
             },
         )
 

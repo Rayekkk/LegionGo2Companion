@@ -4,6 +4,7 @@
 # https://github.com/Rayekkk/LeGo-Vibe-Control
 
 import decky
+import module_runtime
 import copy
 import os
 import re
@@ -303,7 +304,7 @@ async def _offload(fn, *args):
     def run():
         with _settings_lock:
             return fn(*args)
-    return await asyncio.get_running_loop().run_in_executor(None, run)
+    return await module_runtime.offload('vibration', run)
 
 
 def _apply_settings(values: dict, sys_path: str | None = None,

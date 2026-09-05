@@ -46,7 +46,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
     def make_plugin(self):
         plugin = main.Plugin()
         self.components = []
-        for name in ("tdp", "vibration", "display", "wifi", "rgb", "remap"):
+        for name in ("tdp", "vibration", "display", "wifi", "rgb", "remap", "battery", "controller"):
             component = types.SimpleNamespace(_main=AsyncMock(), _migration=AsyncMock(),
                                               _unload=AsyncMock(), _uninstall=AsyncMock())
             setattr(plugin, "_" + name, component); self.components.append(component)

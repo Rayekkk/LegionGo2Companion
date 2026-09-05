@@ -21,13 +21,25 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
+import battery_backend
+import controller_backend
 import display_backend
 import remap_backend
 import rgb_backend
 import tdp_backend
 import vibration_backend
 import wifi_backend
-from safe_settings import atomic_write_json, load_json_object
+from safe_settings import atomic_write_json, load_json_object, SettingsManager
+from module_control import withdraw, capture_intent, restore_intent
+
+MODULE_NAMES = ('tdp', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
+
+def _rpc_module(name):
+    for prefix, module in (('vibe_', 'vibration'), ('display_', 'display'), ('wifi_', 'wifi'),
+                           ('rgb_', 'rgb'), ('remap_', 'remap'), ('battery_', 'battery'), ('controller_', 'controller')):
+        if name.startswith(prefix):
+            return module
+    return None if name.startswith('modules_') else 'tdp'
 from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 
 LEGACY_SETTINGS = {
@@ -96,7 +108,7 @@ def _reload_component_settings() -> None:
     """Refresh module-level SettingsManager instances after disk migration."""
     for module in (
         tdp_backend, vibration_backend, display_backend, wifi_backend, rgb_backend,
-        remap_backend,
+        remap_backend, battery_backend, controller_backend,
     ):
         manager = getattr(module, "settings", None)
         reader = getattr(manager, "read", None)
@@ -121,6 +133,9 @@ def _guard_component_calls(cls):
                 async with self._guard_lock:
                     if self._guard_blocked or self._closing:
                         raise RuntimeError(self._guard_message())
+                    module = _rpc_module(fn.__name__)
+                    if module and not self._module_enabled(module):
+                        raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
                     # A cancelled RPC must not release the gate while its backend
                     # operation is still running (notably the Wi-Fi worker).
                     task = asyncio.create_task(fn(self, *args, **kwargs))
@@ -147,12 +162,116 @@ class Plugin:
         self._modules_started = False
         self._ever_started = False
         self._closing = False
+        self._module_store = SettingsManager('module_settings', decky.DECKY_PLUGIN_SETTINGS_DIR)
+        self._module_state = self._module_store.getSetting('modules', {})
+        if not isinstance(self._module_state, dict):
+            self._module_state = {name: {'enabled': False, 'pending': True, 'error': 'Invalid module settings.'} for name in MODULE_NAMES}
+        self._module_state = {name: value if isinstance(value, dict)
+            and type(value.get('enabled', True)) is bool and type(value.get('pending', False)) is bool
+            and isinstance(value.get('resume', {}), dict)
+            else {'enabled': False, 'pending': True, 'error': 'Invalid module settings.'}
+            for name, value in self._module_state.items() if name in MODULE_NAMES}
         self._tdp = tdp_backend.Plugin()
         self._vibration = vibration_backend.Plugin()
         self._display = display_backend.Plugin()
         self._wifi = wifi_backend.Plugin()
         self._rgb = rgb_backend.Plugin()
         self._remap = remap_backend.Plugin()
+        self._battery = battery_backend.Plugin()
+        self._controller = controller_backend.Plugin()
+
+    def _module_enabled(self, name):
+        value = self._module_state.get(name, {})
+        return isinstance(value, dict) and value.get('enabled', True) is True and not value.get('pending', False)
+
+    def _save_modules(self):
+        self._module_store.setSetting('modules', self._module_state)
+        self._module_store.commit()
+
+    def _module_status(self):
+        result = {name: {'enabled': self._module_enabled(name),
+                       'pending': bool(self._module_state.get(name, {}).get('pending')),
+                       'error': self._module_state.get(name, {}).get('error', ''),
+                       'note': self._module_state.get(name, {}).get('note', '')}
+                for name in MODULE_NAMES}
+        display = self._module_state.get('display', {})
+        if display.get('session') is not None:
+            current = display_backend._gamescope_start_time()
+            if current is not None and current != display['session']:
+                result['display']['note'] = ''
+        return result
+
+    async def _publish_modules(self):
+        try:
+            await decky.emit('companion_guard', self._guard_status())
+        except Exception as exc:
+            decky.logger.warning(f'Module status notification failed: {exc}')
+
+    async def modules_get_status(self):
+        return self._module_status()
+
+    async def modules_restart_session(self):
+        result = await self._display.restart_session()
+        return {'success': not bool(result.get('restart_error')), 'error': result.get('restart_error', '')}
+
+    async def modules_set_enabled(self, name, enabled):
+        if name not in MODULE_NAMES or type(enabled) is not bool:
+            raise ValueError('Invalid module or enabled value.')
+        previous = dict(self._module_state)
+        component = getattr(self, '_' + name)
+        resume = self._module_state.get(name, {}).get('resume', {})
+        if enabled:
+            if self._module_state.get(name, {}).get('pending'):
+                raise RuntimeError('Retry disabling this module to finish restoration first.')
+            if self._module_enabled(name):
+                return self._module_status()
+            # Startup is gated until the durable intent is written; failure stays visible.
+            self._module_state[name] = {'enabled': True, 'resume': resume}
+            try:
+                self._save_modules()
+            except Exception:
+                self._module_state = previous
+                raise
+            try:
+                await component._main()
+                await restore_intent(name, component, resume)
+                self._module_state[name] = {'enabled': True}
+                self._save_modules()
+            except Exception as exc:
+                self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+                try:
+                    self._save_modules()
+                finally:
+                    try:
+                        await component._unload()
+                    finally:
+                        await self._publish_modules()
+                raise
+        else:
+            if not self._module_enabled(name) and not self._module_state.get(name, {}).get('pending'):
+                return self._module_status()
+            # Persist the gate before cleanup. An interrupted withdrawal never starts
+            # the module on next boot; it retries cleanup with the saved ownership.
+            if not self._module_state.get(name, {}).get('pending'):
+                resume = await asyncio.to_thread(capture_intent, name)
+            self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume}
+            try:
+                self._save_modules()
+            except Exception:
+                self._module_state = previous
+                raise
+            await self._publish_modules()
+            try:
+                note = await withdraw(name, component)
+                self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
+                if name == 'display':
+                    self._module_state[name]['session'] = display_backend._gamescope_start_time()
+                self._save_modules()
+            except Exception as exc:
+                self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+                self._save_modules()
+        await self._publish_modules()
+        return self._module_status()
 
     async def _run_stage(self, stage: str) -> None:
         components = (
@@ -162,11 +281,14 @@ class Plugin:
             ("wifi", self._wifi),
             ("rgb", self._rgb),
             ("remap", self._remap),
+            ("battery", self._battery),
+            ("controller", self._controller),
         )
         runnable = tuple(
             (name, component)
             for name, component in components
-            if callable(getattr(component, stage, None))
+            if (self._module_enabled(name) or (stage == '_unload' and self._module_state.get(name, {}).get('pending')))
+            and callable(getattr(component, stage, None))
         )
         results = await asyncio.gather(
             *(getattr(component, stage)() for _, component in runnable),
@@ -189,6 +311,7 @@ class Plugin:
 
     def _guard_status(self):
         return {"version": _plugin_version(),
+                "modules": self._module_status(),
                 "standalone_plugins": list(self._guard_conflicts),
                 "blocked": self._guard_blocked,
                 "restart_required": self._guard_blocked and not self._guard_conflicts and not self._guard_error,
@@ -262,7 +385,30 @@ class Plugin:
             if self._guard_blocked:
                 return
             self._modules_started = self._ever_started = True
+            for name in MODULE_NAMES:
+                if not self._module_state.get(name, {}).get('pending'):
+                    continue
+                resume = self._module_state[name].get('resume', {})
+                try:
+                    note = await withdraw(name, getattr(self, '_' + name))
+                    self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
+                    if name == 'display':
+                        self._module_state[name]['session'] = display_backend._gamescope_start_time()
+                except Exception as exc:
+                    self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+                self._save_modules()
             await self._run_stage("_main")
+            for name in MODULE_NAMES:
+                entry = self._module_state.get(name, {})
+                if self._module_enabled(name) and entry.get('resume'):
+                    try:
+                        await restore_intent(name, getattr(self, '_' + name), entry['resume'])
+                        self._module_state[name] = {'enabled': True}
+                    except Exception as exc:
+                        await getattr(self, '_' + name)._unload()
+                        self._module_state[name] = {'enabled': False, 'pending': True,
+                                                    'resume': entry['resume'], 'error': str(exc)}
+                    self._save_modules()
         await self._check_guard()
 
     async def _unload(self):
@@ -502,3 +648,34 @@ class Plugin:
 
     async def remap_reapply(self):
         return await self._remap.reapply()
+
+    # Firmware battery protection --------------------------------------------
+
+    async def battery_get_status(self):
+        return await self._battery.get_status()
+
+    async def battery_set_enabled(self, enabled):
+        return await self._battery.set_enabled(enabled)
+
+    async def battery_release_control(self):
+        return await self._battery.release_control()
+
+    # Gyro selection and bounded, passive controller diagnostics --------------
+
+    async def controller_get_status(self):
+        return await self._controller.get_status()
+
+    async def controller_set_gyro_source(self, source):
+        return await self._controller.set_gyro_source(source)
+
+    async def controller_release_control(self):
+        return await self._controller.release_control()
+
+    async def controller_start_diagnostics(self):
+        return await self._controller.start_diagnostics()
+
+    async def controller_get_diagnostics(self, token):
+        return await self._controller.get_diagnostics(token)
+
+    async def controller_stop_diagnostics(self, token):
+        return await self._controller.stop_diagnostics(token)

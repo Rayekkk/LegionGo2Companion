@@ -41,6 +41,12 @@ function reset(){for(const e of effects.values())e.cleanup?.();effects.clear();s
  response={version:'test',blocked:false,standalone_plugins:[]};plugin=mod.exports.default();await settle();
  tree=render();await settle();tree=render();assert.equal(tree.type.name,'Controls');
  assert.deepEqual(watchers,['startTdpWatcher','startVibrationWatcher']);
+ events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:false},vibration:{enabled:false}}});
+ assert.deepEqual(watchers.slice(-2),['stopTdpWatcher','stopVibrationWatcher']);
+ events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:false}}});
+ assert.equal(watchers.at(-1),'startTdpWatcher');
+ events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:true}}});
+ assert.equal(watchers.at(-1),'startVibrationWatcher');
  events.get('companion_guard')({version:'test',blocked:true,standalone_plugins:['LeGo Vibe Control']});
  tree=render();assert.match(text(tree),/LeGo Vibe Control/);assert.notEqual(tree.type.name,'Controls');
  assert.deepEqual(watchers.slice(-2),['stopTdpWatcher','stopVibrationWatcher']);

@@ -33,3 +33,16 @@ The Button Remapper communicates with the InputPlumber D-Bus interface shipped
 by SteamOS. InputPlumber is not bundled or modified by this archive. Its source,
 profile schema and D-Bus documentation are available under GPL-3.0-or-later at
 https://github.com/ShadowBlip/InputPlumber. The live target used version 0.78.0.
+
+The gyro controls use that same external service's FilteredEvents property and Linux's
+hid-lenovo-go IMU bypass attributes. Passive diagnostics independently decode the wire
+fields documented by InputPlumber's Lenovo and Steam Deck HID report definitions; no
+InputPlumber service or Rust source is copied into this archive. Protocol references:
+https://github.com/ShadowBlip/InputPlumber/tree/v0.78.0/src/drivers/lego
+https://github.com/ShadowBlip/InputPlumber/tree/v0.78.0/src/drivers/steam_deck
+
+Battery protection uses the existing Linux power-supply charge_types ABI. The kernel
+driver is external and is not redistributed. The Lenovo Long Life mode is described in:
+https://github.com/torvalds/linux/commit/9ca8fc065b88b327acbfdc33454efea391639716
+The Lenovo controller ABI is documented at:
+https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-driver-hid-lenovo-go

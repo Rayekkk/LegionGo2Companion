@@ -22,6 +22,7 @@ import time
 from typing import Any, Callable
 
 import decky
+import module_runtime
 
 from safe_settings import SettingsManager
 
@@ -792,7 +793,7 @@ def _resume_detected() -> bool:
 
 
 async def _offload(function: Callable, *args, **kwargs):
-    return await asyncio.to_thread(function, *args, **kwargs)
+    return await module_runtime.offload('rgb', function, *args, **kwargs)
 
 
 class Plugin:

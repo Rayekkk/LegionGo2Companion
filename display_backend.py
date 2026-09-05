@@ -62,6 +62,7 @@ except ImportError:  # pragma: no cover - Windows test host
     pwd = None
 
 import decky
+import module_runtime
 from safe_settings import SettingsManager
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -290,7 +291,7 @@ _settings_lock = threading.RLock()
 
 def _offload(fn, *args):
     """Run a blocking call off the event loop."""
-    return asyncio.get_event_loop().run_in_executor(None, fn, *args)
+    return module_runtime.offload('display', fn, *args)
 
 
 # ── EDID parsing ───────────────────────────────────────────────────────────────

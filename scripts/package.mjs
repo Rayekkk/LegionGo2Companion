@@ -22,6 +22,8 @@ const zipPath = join(repoRoot, `${PLUGIN_DIR_NAME}-${version}.zip`);
 
 const CONTENTS = [
   "main.py",
+  "module_control.py",
+  "module_runtime.py",
   "conflict_guard.py",
   "safe_settings.py",
   "tdp_backend.py",
@@ -30,6 +32,9 @@ const CONTENTS = [
   "wifi_backend.py",
   "rgb_backend.py",
   "remap_backend.py",
+  "battery_backend.py",
+  "controller_backend.py",
+  "controller_imu.py",
   "tdp_updater.py",
   "vibration_updater.py",
   "display_updater.py",

@@ -65,3 +65,10 @@ License: GNU General Public License v3 or later
 
 InputPlumber is not redistributed or modified by this archive. The Button
 Remapper invokes its public D-Bus profile API as a separate system service.
+The gyro module uses its public D-Bus event filters. Passive diagnostics use
+independently implemented decoders of the Lenovo/Steam Deck wire fields
+documented by that project. No InputPlumber source is incorporated in the plugin.
+
+Battery and IMU controls use the existing Linux kernel power-supply and
+hid-lenovo-go interfaces. These external kernel drivers are not bundled or
+modified. See SOURCE.md for interface references.

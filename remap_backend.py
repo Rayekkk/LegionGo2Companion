@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 import decky
+import module_runtime
 
 from safe_settings import SettingsManager
 
@@ -606,7 +607,7 @@ async def _watch_loop() -> None:
                 settle_until = now + 30.0
                 decky.logger.info("[legiongo2companion-remap] resume detected")
             if now < settle_until or now - last_check >= CHECK_INTERVAL_S:
-                await asyncio.to_thread(_repair_sync)
+                await module_runtime.offload('remap', _repair_sync)
                 last_check = now
         except asyncio.CancelledError:
             raise
@@ -618,7 +619,7 @@ class Plugin:
     async def _main(self):
         global _watch_task, _last_suspend_offset
         _last_suspend_offset = _suspend_offset()
-        await asyncio.to_thread(_repair_sync)
+        await module_runtime.offload('remap', _repair_sync)
         if _watch_task is None or _watch_task.done():
             _watch_task = asyncio.create_task(_watch_loop())
 
@@ -632,22 +633,22 @@ class Plugin:
             except asyncio.CancelledError:
                 pass
         try:
-            await asyncio.to_thread(_restore_if_owned, _load_state())
+            await module_runtime.offload('remap', _restore_if_owned, _load_state())
         except Exception as exc:
             decky.logger.warning(f"[legiongo2companion-remap] unload restore failed: {exc}")
 
     async def _uninstall(self):
         try:
-            await asyncio.to_thread(_restore_if_owned, _load_state())
+            await module_runtime.offload('remap', _restore_if_owned, _load_state())
         except Exception as exc:
             decky.logger.warning(f"[legiongo2companion-remap] uninstall restore failed: {exc}")
 
     async def get_status(self):
-        return await asyncio.to_thread(_status_sync)
+        return await module_runtime.offload('remap', _status_sync)
 
     async def set_enabled(self, enabled):
         try:
-            status = await asyncio.to_thread(_mutate_sync, {"enabled": enabled})
+            status = await module_runtime.offload('remap', _mutate_sync, {"enabled": enabled})
             return {"success": True, "status": status}
         except Exception as exc:
             return {"success": False, "error": str(exc), "status": await self.get_status()}
@@ -658,14 +659,14 @@ class Plugin:
             return {"success": False, "error": "Unsupported button or action.", "status": await self.get_status()}
         key = f"{button}_action"
         try:
-            status = await asyncio.to_thread(_mutate_sync, {key: action})
+            status = await module_runtime.offload('remap', _mutate_sync, {key: action})
             return {"success": True, "status": status}
         except Exception as exc:
             return {"success": False, "error": str(exc), "status": await self.get_status()}
 
     async def restore_defaults(self):
         try:
-            status = await asyncio.to_thread(_mutate_sync, {
+            status = await module_runtime.offload('remap', _mutate_sync, {
                 "desktop_action": "default",
                 "page_action": "default",
             })
@@ -674,5 +675,5 @@ class Plugin:
             return {"success": False, "error": str(exc), "status": await self.get_status()}
 
     async def reapply(self):
-        await asyncio.to_thread(_repair_sync)
+        await module_runtime.offload('remap', _repair_sync)
         return await self.get_status()

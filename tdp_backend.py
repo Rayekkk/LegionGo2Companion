@@ -3,6 +3,7 @@
 # https://github.com/Rayekkk/LeGoTDP
 
 import decky
+import module_runtime
 import asyncio
 import copy
 import glob
@@ -387,7 +388,7 @@ async def _offload(fn, *args):
     it returns. _apply_lock alone can be held for a profile bounce plus three
     firmware writes.
     """
-    return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    return await module_runtime.offload('tdp', fn, *args)
 
 
 def _read_key(key: str, default: dict) -> dict:

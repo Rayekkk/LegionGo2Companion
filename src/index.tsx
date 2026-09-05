@@ -8,8 +8,9 @@ import {
   PanelSection,
   PanelSectionRow,
   staticClasses,
+  ToggleField,
 } from "@decky/ui";
-import { FC, ReactNode, useCallback, useEffect, useState } from "react";
+import { FC, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
 import {
@@ -20,8 +21,17 @@ import {
 import { getWifiStatus, WifiPage, wifiSummary, type WifiStatus } from "./wifi";
 import { getRgbStatus, RgbPage, rgbSummary, type RgbStatus } from "./rgb";
 import { getRemapStatus, RemapPage, remapSummary, type RemapStatus } from "./remap";
+import { BatteryPage, getBatteryStatus, batterySummary, type BatteryStatus } from "./battery";
+import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 
-type SectionKey = "tdp" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "about";
+type ModuleKey = "tdp" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
+type SectionKey = ModuleKey | "about" | "modules";
+type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; pending?: boolean; error?: string; note?: string}>>;
+const EMPTY_MODULES: ModuleStates = {};
+const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP & CPU", vibration: "Vibration", display: "OLED Display", wifi: "WiFi", rgb: "RGB Lighting", remap: "Button Remapper", battery: "Battery", controller: "Gyro & Touchpad"};
+const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && !modules[key]?.pending;
+const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
+const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
 
 interface TdpSettings {
   active_spl?: number;
@@ -55,9 +65,12 @@ interface Overview {
   wifi?: WifiStatus;
   rgb?: RgbStatus;
   remap?: RemapStatus;
+  battery?: BatteryStatus;
+  controller?: ControllerStatus;
 }
 
 interface GuardStatus {
+  modules?: ModuleStates;
   version: string;
   standalone_plugins?: string[];
   blocked: boolean;
@@ -68,7 +81,8 @@ interface GuardStatus {
 const getVersion = callable<[], GuardStatus>("get_version");
 let guardStatus: GuardStatus | null = null;
 const guardListeners = new Set<(status: GuardStatus) => void>();
-let watchersEnabled = false;
+let tdpWatcherEnabled = false;
+let vibeWatcherEnabled = false;
 let frontendActive = false;
 const updateGuard = (status: GuardStatus) => {
   if (!frontendActive) return;
@@ -78,11 +92,10 @@ const updateGuard = (status: GuardStatus) => {
     guard_error: "The backend has not provided its compatibility status. Restart Decky and try again." };
   guardStatus = status;
   const enabled = status.blocked === false;
-  if (enabled !== watchersEnabled) {
-    watchersEnabled = enabled;
-    if (enabled) { startTdpWatcher(); startVibrationWatcher(); }
-    else { stopTdpWatcher(); stopVibrationWatcher(); }
-  }
+  const tdpEnabled = enabled && moduleEnabled(status.modules ?? {}, "tdp");
+  const vibeEnabled = enabled && moduleEnabled(status.modules ?? {}, "vibration");
+  if (tdpEnabled !== tdpWatcherEnabled) { tdpWatcherEnabled = tdpEnabled; tdpEnabled ? startTdpWatcher() : stopTdpWatcher(); }
+  if (vibeEnabled !== vibeWatcherEnabled) { vibeWatcherEnabled = vibeEnabled; vibeEnabled ? startVibrationWatcher() : stopVibrationWatcher(); }
   guardListeners.forEach(listener => listener(status));
 };
 const refreshGuard = async () => {
@@ -90,9 +103,9 @@ const refreshGuard = async () => {
   catch {
     // A connection failure hides controls and stops reports, but is not a
     // conflict latch: the user can retry once Decky responds again.
-    watchersEnabled = false;
+    tdpWatcherEnabled = vibeWatcherEnabled = false;
     stopTdpWatcher(); stopVibrationWatcher();
-    guardListeners.forEach(listener => listener({version: "0.4.5", blocked: true,
+    guardListeners.forEach(listener => listener({version: "0.6.0", blocked: true,
       guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
   }
 };
@@ -172,21 +185,58 @@ const displaySummary = (state?: DisplayState) => {
   return `${mode} · ${fixes.join(" · ")}`;
 };
 
-const Controls: FC = () => {
+const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
+  const [busy, setBusy] = useState<ModuleKey | null>(null);
+  const [error, setError] = useState("");
+  const writing = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const change = async (name: ModuleKey, enabled: boolean) => {
+    if (writing.current) return;
+    writing.current = true; setBusy(name); setError("");
+    try {
+      const next = await setModuleEnabled(name, enabled);
+      if (guardStatus) updateGuard({...guardStatus, modules: next});
+    } catch (failure) {
+      if (mounted.current) setError(failure instanceof Error ? failure.message : "The module change could not be confirmed.");
+      void refreshGuard();
+    } finally { writing.current = false; if (mounted.current) setBusy(null); }
+  };
+  return <PanelSection title="Manage Modules">
+    <PanelSectionRow><Field label="Choose your modules" description="Disabling stops the module, withdraws its hardware controls and hides its page. Saved preferences return when you enable it again. OLED can require a Gaming Mode restart." /></PanelSectionRow>
+    {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
+      <ToggleField label={moduleLabels[name]} checked={moduleEnabled(modules, name)} disabled={busy !== null || !!modules[name]?.pending}
+        description={busy === name ? "Applying and verifying the change…" : modules[name]?.error || modules[name]?.note || (moduleEnabled(modules, name) ? "Enabled" : "Disabled — hidden from the main menu")}
+        onChange={enabled => void change(name, enabled)} />
+      {modules[name]?.pending && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} Cleanup</ButtonItem>}
+    </PanelSectionRow>)}
+    {error && <PanelSectionRow><Field label="Could not confirm" description={error} /></PanelSectionRow>}
+    {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" disabled={busy !== null} onClick={() => {
+      void restartModulesSession().then(result => { if (!result.success && mounted.current) setError(result.error || result.message || "Gaming Mode restart failed."); }).catch(() => { if (mounted.current) setError("Could not confirm the Gaming Mode restart."); });
+    }}>Restart Gaming Mode (closes games)</ButtonItem></PanelSectionRow>}
+  </PanelSection>;
+};
+
+const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) => {
   const visible = useQuickAccessVisible();
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
-  const [overview, setOverview] = useState<Overview>({ version: "0.4.5", standalonePlugins: [] });
+  const [overview, setOverview] = useState<Overview>({ version: "0.6.0", standalonePlugins: [] });
+  useEffect(() => {
+    if (activeSection && activeSection in moduleLabels && !moduleEnabled(modules, activeSection as ModuleKey)) setActiveSection(null);
+  }, [modules, activeSection]);
 
   const refresh = useCallback(async () => {
-    const [version, tdp, vibration, driver, display, wifi, rgb, remap] = await Promise.all([
-      getVersion().catch(() => ({ version: "0.4.5", standalone_plugins: [] })),
-      getTdpSettings().catch(() => undefined),
-      getVibeSettings().catch(() => undefined),
-      getDriverStatus().catch(() => undefined),
-      getDisplayState().catch(() => undefined),
-      getWifiStatus().catch(() => undefined),
-      getRgbStatus().catch(() => undefined),
-      getRemapStatus().catch(() => undefined),
+    const [version, tdp, vibration, driver, display, wifi, rgb, remap, battery, controller] = await Promise.all([
+      getVersion().catch(() => ({ version: "0.6.0", standalone_plugins: [] })),
+      moduleEnabled(modules, "tdp") ? getTdpSettings().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "vibration") ? getVibeSettings().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "vibration") ? getDriverStatus().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "display") ? getDisplayState().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "wifi") ? getWifiStatus().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "rgb") ? getRgbStatus().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "remap") ? getRemapStatus().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "battery") ? getBatteryStatus().catch(() => undefined) : undefined,
+      moduleEnabled(modules, "controller") ? getControllerStatus().catch(() => undefined) : undefined,
     ]);
     setOverview({
       version: version.version,
@@ -198,8 +248,10 @@ const Controls: FC = () => {
       wifi,
       rgb,
       remap,
+      battery,
+      controller,
     });
-  }, []);
+  }, [modules]);
 
   useEffect(() => {
     // Steam overlays can temporarily hide Quick Access. Visibility controls
@@ -212,12 +264,14 @@ const Controls: FC = () => {
 
   if (!activeSection) return <PageShell>
     <PanelSection title="Hardware Controls">
-      <SectionLink title="TDP" description={tdpSummary(overview.tdp)} onClick={() => setActiveSection("tdp")} />
-      <SectionLink title="Vibration" description={vibrationSummary(overview)} onClick={() => setActiveSection("vibration")} />
-      <SectionLink title="RGB Lighting" description={rgbSummary(overview.rgb)} onClick={() => setActiveSection("rgb")} />
-      <SectionLink title="Button Remapper" description={remapSummary(overview.remap)} onClick={() => setActiveSection("remap")} />
-      <SectionLink title="OLED Display" description={displaySummary(overview.display)} onClick={() => setActiveSection("display")} />
-      <SectionLink title="WiFi" description={wifiSummary(overview.wifi)} onClick={() => setActiveSection("wifi")} />
+      {moduleEnabled(modules, "tdp") && <SectionLink title="TDP" description={tdpSummary(overview.tdp)} onClick={() => setActiveSection("tdp")} />}
+      {moduleEnabled(modules, "vibration") && <SectionLink title="Vibration" description={vibrationSummary(overview)} onClick={() => setActiveSection("vibration")} />}
+      {moduleEnabled(modules, "rgb") && <SectionLink title="RGB Lighting" description={rgbSummary(overview.rgb)} onClick={() => setActiveSection("rgb")} />}
+      {moduleEnabled(modules, "remap") && <SectionLink title="Button Remapper" description={remapSummary(overview.remap)} onClick={() => setActiveSection("remap")} />}
+      {moduleEnabled(modules, "controller") && <SectionLink title="Gyro & Touchpad" description={controllerSummary(overview.controller)} onClick={() => setActiveSection("controller")} />}
+      {moduleEnabled(modules, "battery") && <SectionLink title="Battery" description={batterySummary(overview.battery)} onClick={() => setActiveSection("battery")} />}
+      {moduleEnabled(modules, "display") && <SectionLink title="OLED Display" description={displaySummary(overview.display)} onClick={() => setActiveSection("display")} />}
+      {moduleEnabled(modules, "wifi") && <SectionLink title="WiFi" description={wifiSummary(overview.wifi)} onClick={() => setActiveSection("wifi")} />}
     </PanelSection>
     <PanelSection title="Device">
       <PanelSectionRow>
@@ -225,6 +279,7 @@ const Controls: FC = () => {
       </PanelSectionRow>
     </PanelSection>
     <PanelSection title="Plugin">
+      <SectionLink title="Manage Modules" description="Enable, disable and hide individual hardware modules" onClick={() => setActiveSection("modules")} />
       <SectionLink
         title="About"
         description={`Legion Go 2 Companion · v${overview.version}`}
@@ -245,31 +300,38 @@ const Controls: FC = () => {
         ? "RGB Lighting"
       : activeSection === "remap"
         ? "Button Remapper"
-        : "About";
+      : activeSection === "controller"
+        ? "Gyro & Touchpad"
+      : activeSection === "battery"
+        ? "Battery"
+      : activeSection === "modules" ? "Manage Modules" : "About";
 
   return <PageShell>
     <SectionHeader title={title} onBack={() => setActiveSection(null)} />
+    {activeSection === "modules" && <ModulesPage modules={modules} />}
     {activeSection === "tdp" && <TdpPage />}
     {activeSection === "vibration" && <VibrationPage />}
     {activeSection === "display" && <DisplayPage />}
     {activeSection === "wifi" && <WifiPage />}
     {activeSection === "rgb" && <RgbPage />}
     {activeSection === "remap" && <RemapPage />}
+    {activeSection === "controller" && <ControllerPage visible={visible} />}
+    {activeSection === "battery" && <BatteryPage />}
     {activeSection === "about" && <>
       <PanelSection title="Legion Go 2 Companion">
         <PanelSectionRow>
           <Field label={`Version ${overview.version}`} description="All-in-one hardware controls for Decky Loader." />
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field label="Included modules" description="LeGoTDP 1.7.0 · LeGo Vibe Control 1.5.0 · LeGo2 Brightness Fix 2.0.0 · WiFi Optimizer Go 2 0.13.2 · RGB Lighting 1.0.0 · Button Remapper 1.0.0" />
+          <Field label="Included modules" description="LeGoTDP · LeGo Vibe Control · LeGo2 Brightness Fix · WiFi Optimizer Go 2 · RGB Lighting · Button Remapper · Gyro & Touchpad · Battery" />
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field label="Rayek" description="BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />
+          <Field label="Author" description="Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Updates">
         <PanelSectionRow>
-          <Field label="Development build" description="Automatic updates will be enabled after the combined plugin has its own release repository." />
+          <Field label="Development build" description="Source is available on GitHub. No public release has been published yet." />
         </PanelSectionRow>
       </PanelSection>
     </>}
@@ -296,7 +358,7 @@ const Content: FC = () => {
   if (status.blocked) return <PageShell>
     <PanelSection title="Companion paused">
       <PanelSectionRow><Field label="All modules are paused"
-        description="TDP, CPU controls, vibration, OLED, WiFi, RGB and button remapping are unavailable while a standalone plugin is installed." /></PanelSectionRow>
+        description="All hardware controls, including gyro diagnostics and battery protection, are unavailable while a standalone plugin is installed." /></PanelSectionRow>
       {!!status.standalone_plugins?.length && <PanelSectionRow>
         <Field label="Installed standalone plugins" description={status.standalone_plugins.join(", ")} />
       </PanelSectionRow>}
@@ -308,7 +370,7 @@ const Content: FC = () => {
       <PanelSectionRow><ButtonItem layout="below" onClick={() => void refreshGuard()}>Check again</ButtonItem></PanelSectionRow>
     </PanelSection>
   </PageShell>;
-  return <Controls />;
+  return <Controls modules={status.modules} />;
 };
 
 const Icon: FC = () => (
@@ -335,7 +397,7 @@ export default definePlugin(() => {
     icon: <Icon />,
     onDismount() {
       frontendActive = false;
-      watchersEnabled = false;
+        tdpWatcherEnabled = vibeWatcherEnabled = false;
       removeEventListener("companion_guard", listener);
       guardListeners.clear();
       guardStatus = null;
