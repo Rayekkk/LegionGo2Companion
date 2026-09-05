@@ -40,25 +40,8 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 
 | Requirement | Details |
 |---|---|
-| Device | Lenovo Legion Go 2; the combined plugin is validated on the Ryzen Z2 Extreme model |
-| OS | SteamOS in Gaming Mode, with gamescope |
-| Plugin loader | [Decky Loader](https://decky.xyz) |
-| TDP | Lenovo's `lenovo-wmi-other` firmware interface; Extras also needs the downloaded `ryzenadj` helper |
-| Haptics and RGB | The `hid-lenovo-go` controller driver and its supported sysfs controls |
-| OLED brightness | Samsung `AMS881KB01-0`, identified by EDID manufacturer `SDC` and product `0x4301` |
-| Button remapping | SteamOS' existing InputPlumber service; validated with version 0.78.0 |
-| Gyro and touchpad | `hid-lenovo-go`, its IMU bypass controls and InputPlumber's existing Legion Go 2 controller |
-| Battery protection | A system battery exposing `Standard` and `Long_Life` through Linux's `charge_types` interface |
-| Wi-Fi preference | The supported MediaTek MT7922 / `mt7921e` configuration with NetworkManager and iwd |
-
-Each page checks the interface it needs and reports when a control is unavailable. Support
-in an individual standalone plugin does not make another handheld a supported Companion
-device.
-
-> [!NOTE]
-> The power-button light is limited to the verified **83N0 / RRCN16WW** BIOS and ACPI
-> layout. If the firmware does not match, that control stays unavailable until the new
-> layout has been checked.
+| Device | Lenovo Legion Go 2 |
+| OS | SteamOS; tested on **SteamOS 3.10** with **Linux kernel 7.2** |
 
 ---
 
@@ -248,6 +231,11 @@ controller firmware.
 
 **Power button light** is a separate setting. **Restore lighting state from before
 Companion** returns the captured lighting state and releases Companion's lighting control.
+
+> [!NOTE]
+> The power-button light is limited to the verified **83N0 / RRCN16WW** BIOS and ACPI
+> layout. If the firmware does not match, that control stays unavailable until the new
+> layout has been checked.
 
 ### Button Remapper
 
