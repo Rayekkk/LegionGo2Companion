@@ -496,6 +496,13 @@ def _load_profiles() -> dict:
             p.get("ac_separate") if type(p.get("ac_separate")) is bool else False)
         p["preset"] = _safe_label(p.get("preset"))
         p["ac_preset"] = _safe_label(p.get("ac_preset"))
+        for prefix in ("", "ac_"):
+            boost_key, epp_key = prefix + SETTINGS_FIELD_CPU_BOOST_ENABLED, prefix + SETTINGS_FIELD_EPP
+            if boost_key in p:
+                boost = p[boost_key]
+                p[boost_key] = boost if type(boost) is bool else None
+            if epp_key in p:
+                p[epp_key] = _canonical_epp_syntax(p[epp_key])
         if p.get("spl") is not None:
             p["spl"], p["sppt"], p["fppt"] = _clamp_triplet(
                 p["spl"], p.get("sppt", p["spl"]), p.get("fppt", p["spl"]))
@@ -510,6 +517,96 @@ def _load_profiles() -> dict:
 
 def _save_profiles(profiles: dict) -> None:
     _write_key(SETTINGS_KEY_GAME_PROFILES, profiles)
+
+
+def _effective_cpu_values(
+    state: dict, profile: dict | None = None, ac_profile: bool = False
+) -> dict:
+    """Resolve legacy omissions without altering existing saved profiles."""
+    values = {
+        SETTINGS_FIELD_CPU_BOOST_ENABLED: (
+            state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
+            if type(state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)) is bool else None),
+        SETTINGS_FIELD_EPP: _canonical_epp_syntax(state.get(SETTINGS_FIELD_EPP)),
+    }
+    if profile is not None:
+        for prefix in (("", "ac_") if ac_profile else ("",)):
+            boost = profile.get(prefix + SETTINGS_FIELD_CPU_BOOST_ENABLED)
+            if type(boost) is bool:
+                values[SETTINGS_FIELD_CPU_BOOST_ENABLED] = boost
+            epp = _canonical_epp_syntax(profile.get(prefix + SETTINGS_FIELD_EPP))
+            if epp is not None:
+                values[SETTINGS_FIELD_EPP] = epp
+    return values
+
+
+def _effective_cpu_state(
+    state: dict, profiles: dict | None = None, app_id: str | None = None,
+    ac_online: bool | None = None
+) -> dict:
+    """A transient snapshot; never persist the resolved game values globally."""
+    if state.get("_cpu_power_scope_resolved"):
+        return state
+    profile = None
+    if state.get("enabled", True):
+        app_id = _get_running_appid() if app_id is None else app_id
+        if app_id:
+            profiles = _load_profiles() if profiles is None else profiles
+            profile = profiles.get(app_id)
+    if ac_online is None:
+        ac_online = _get_ac_online() if profile and profile.get("ac_separate") else False
+    ac_profile = bool(profile and profile.get("ac_separate") and ac_online)
+    return {**state, **_effective_cpu_values(state, profile, ac_profile),
+            "_cpu_power_scope_resolved": True}
+
+
+def _prepare_cpu_profile(
+    state: dict, profiles: dict, app_id: str, *, required_field: str | None = None,
+    snapshot_cpu: bool = False
+) -> dict:
+    """Freeze a new game's CPU values before a firmware profile can reset them.
+
+    An unmanaged global control needs a readable baseline before the first game
+    override, otherwise leaving that game could not restore the user's state.
+    Optional controls that cannot be read do not prevent ordinary TDP profiles.
+    """
+    existing = profiles.get(app_id)
+    creating = existing is None
+    if creating and len(profiles) >= MAX_GAME_PROFILES:
+        raise ValueError("maximum number of game profiles reached")
+    for field in (SETTINGS_FIELD_CPU_BOOST_ENABLED, SETTINGS_FIELD_EPP):
+        if state.get(field) is not None or (
+                not creating and not snapshot_cpu and field != required_field):
+            continue
+        # A malformed/manual profile may override an unmanaged global value.
+        # Its current hardware is not evidence of the original global baseline.
+        overrides = existing and any(
+            _effective_cpu_values({}, existing, ac)[field] is not None
+            for ac in (False, True))
+        baseline = None if overrides else _read_cpu_baseline(field)
+        if baseline is not None:
+            state[field] = baseline
+        elif field == required_field:
+            raise ValueError("cannot safely read the global CPU baseline; game setting was not saved")
+    if creating:
+        existing = dict(zip(("spl", "sppt", "fppt"), _global_triplet(state)))
+        existing["preset"] = _safe_label(state.get("active_preset"))
+        existing.update(_effective_cpu_values(state))
+        profiles[app_id] = existing
+    return existing
+
+
+def _read_cpu_baseline(field: str):
+    try:
+        capture = (_capture_cpu_boost() if field == SETTINGS_FIELD_CPU_BOOST_ENABLED
+                   else _capture_epp())
+        value = capture.get("enabled" if field == SETTINGS_FIELD_CPU_BOOST_ENABLED else "value")
+        valid = (type(value) is bool if field == SETTINGS_FIELD_CPU_BOOST_ENABLED
+                 else _canonical_epp_syntax(value) is not None)
+        return value if capture.get("can_set") and valid else None
+    except Exception:
+        # Missing optional CPU controls must not disable normal TDP support.
+        return None
 
 
 def _save_active(s: dict, spl: int, sppt: int, fppt: int) -> None:
@@ -1153,7 +1250,7 @@ def _startup_context_target(s: dict) -> tuple[str, tuple[int, int, int], bool]:
     app_id = _get_running_appid()
     profile = _load_profiles().get(app_id) if app_id else None
     target = (
-        _clamp_for_settings(s, *_pick_profile_values(profile, _current_ac_online))
+        _clamp_for_settings(s, *_pick_profile_values(profile, _get_ac_online()))
         if profile is not None else _global_triplet(s)
     )
     return app_id, target, profile is not None
@@ -1907,7 +2004,9 @@ def _cpu_power_controls_status(
     }
 
 
-def _cpu_power_controls_error_status(error: str) -> dict:
+def _cpu_power_controls_error_status(
+    error: str, app_id: str = "", ac_profile: bool = False
+) -> dict:
     """Preserve the RPC shape even if an unexpected dependency raises."""
     return {
         "success": False,
@@ -1924,11 +2023,38 @@ def _cpu_power_controls_error_status(error: str) -> dict:
             "error": error,
         },
         "error": error,
+        "profile": {"app_id": app_id, "ac_profile": ac_profile, "active": False,
+                    "cpu_boost_enabled": None, "epp": None},
     }
+
+
+def _cpu_editor_profile(state: dict, profiles: dict, app_id: str,
+                        ac_profile: bool) -> dict:
+    selected = profiles.get(app_id) if app_id else None
+    current_app = _get_running_appid()
+    ac_online = _get_ac_online()
+    enabled = state.get("enabled", True)
+    if app_id:
+        separate = bool(selected and selected.get("ac_separate"))
+        active = enabled and current_app == app_id and (
+            (ac_profile and separate and ac_online)
+            or (not ac_profile and not (separate and ac_online)))
+    else:
+        active = not enabled or current_app not in profiles
+    return {"app_id": app_id, "ac_profile": ac_profile, "active": active,
+            **_effective_cpu_values(state, selected, ac_profile)}
+
+
+def _cpu_scoped_status(app_id: str = "", ac_profile: bool = False, **operation) -> dict:
+    result = _cpu_power_controls_status(**operation)
+    result["profile"] = _cpu_editor_profile(
+        _load_settings(), _load_profiles(), app_id, ac_profile)
+    return result
 
 
 def _reapply_saved_cpu_power_controls_locked(state: dict) -> list[str]:
     """Best-effort startup/resume restore. Caller holds _mutation_lock."""
+    state = _effective_cpu_state(state)
     errors: list[str] = []
     boost = state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
     if type(boost) is bool:
@@ -1982,24 +2108,47 @@ from contextlib import contextmanager
 
 @contextmanager
 def _tdp_user_transaction():
-    """Restore the prior effective target when a durable commit fails."""
+    """Restore the prior target after a failed hardware apply or durable commit.
+
+    The yielded callback accepts an RPC result so expected hardware refusals can
+    keep their original error shape while sharing the exception rollback path.
+    """
     with _mutation_lock:
         before = copy.deepcopy(_load_settings())
-        try:
-            yield
-        except Exception as exc:
+        before_cpu = _effective_cpu_state(before)
+        for field in (SETTINGS_FIELD_CPU_BOOST_ENABLED, SETTINGS_FIELD_EPP):
+            if before_cpu.get(field) is None:
+                before_cpu[field] = _read_cpu_baseline(field)
+        def restore_previous() -> bool:
             try:
                 if before.get("enabled", True):
                     old = _clamp_for_settings(before, *(
                         before.get("active_" + key, before.get(key, _defaults()[key]))
                         for key in ("spl", "sppt", "fppt")))
-                    rollback = _apply_limits_with_saved_cpu_power(before, *old)
+                    rollback = _apply_limits_with_saved_cpu_power(before_cpu, *old)
                 else:
                     rollback = _restore_defaults_locked()
-                restored = rollback.get("success", False)
+                    rollback["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(
+                        before_cpu, "after failed TDP operation")
+                return (rollback.get("success", False)
+                        and not rollback.get("cpu_power_errors"))
             except Exception:
-                restored = False
-            detail = "previous target restored" if restored else "hardware rollback failed; check limits"
+                return False
+
+        def failure_detail(restored: bool) -> str:
+            return ("previous target restored" if restored
+                    else "hardware rollback failed; check limits")
+
+        def restore_failed(result: dict) -> dict:
+            if not result.get("success", False):
+                detail = failure_detail(restore_previous())
+                result["stderr"] = f"{result.get('stderr') or 'TDP apply failed'}; {detail}"
+            return result
+
+        try:
+            yield restore_failed
+        except Exception as exc:
+            detail = failure_detail(restore_previous())
             raise RuntimeError(f"TDP operation failed: {exc}; {detail}") from exc
 
 
@@ -2033,98 +2182,109 @@ class Plugin:
                   else "; previous state restored")
         return f"settings persist failed: {exc}{suffix}"
 
-    async def get_cpu_power_controls(self) -> dict:
+    async def get_cpu_power_controls(self, app_id: str = "", ac_profile: bool = False) -> dict:
         def _do() -> dict:
             with _mutation_lock:
                 try:
-                    return _cpu_power_controls_status()
+                    selected = _normalise_app_id(app_id)
+                    if selected is None or type(ac_profile) is not bool or (ac_profile and not selected):
+                        return _cpu_scoped_status(
+                            operation_success=False, operation_error="invalid CPU profile context")
+                    return _cpu_scoped_status(selected, ac_profile)
                 except Exception as exc:
-                    decky.logger.warning(
-                        f"[legotdp] CPU power status failed: {exc}")
+                    decky.logger.warning(f"[legotdp] CPU power status failed: {exc}")
                     return _cpu_power_controls_error_status(
-                        "CPU power controls unavailable")
+                        "CPU power controls unavailable", selected or "",
+                        ac_profile if type(ac_profile) is bool else False)
         return await _offload(_do)
 
-    async def set_cpu_boost(self, enabled: bool) -> dict:
+    async def _set_cpu_control(self, field: str, value, app_id: str,
+                               ac_profile: bool, expected_app_id: str | None) -> dict:
         def _do() -> dict:
             with _mutation_lock:
+                selected = _normalise_app_id(app_id)
+                expected = _normalise_app_id(expected_app_id) if expected_app_id is not None else None
+                def status(success: bool, error: str = "") -> dict:
+                    return _cpu_scoped_status(
+                        selected or "", ac_profile if type(ac_profile) is bool else False,
+                        operation_success=success, operation_error=error)
                 try:
-                    if type(enabled) is not bool:
-                        return _cpu_power_controls_status(
-                            operation_success=False,
-                            operation_error="invalid CPU Boost value",
-                        )
-                    preflight = _capture_cpu_boost()
+                    if (selected is None or type(ac_profile) is not bool
+                            or (ac_profile and not selected)
+                            or (expected_app_id is not None and expected is None)):
+                        return status(False, "invalid CPU profile context")
+                    current = _get_running_appid()
+                    if expected is not None and current != expected:
+                        return status(False, "foreground game changed")
+                    if selected and current != selected:
+                        return status(False, "game is no longer active")
+                    state, profiles = _load_settings(), _load_profiles()
+                    if selected and not state.get("enabled", True):
+                        return status(False, "plugin disabled")
+                    if ac_profile and not profiles.get(selected, {}).get("ac_separate"):
+                        return status(False, "separate AC profile is disabled")
+                    if field == SETTINGS_FIELD_CPU_BOOST_ENABLED:
+                        if type(value) is not bool:
+                            return status(False, "invalid CPU Boost value")
+                        preflight, canonical = _capture_cpu_boost(), value
+                        apply, equivalent = _apply_cpu_boost_hardware, _boost_equivalent
+                    else:
+                        preflight = _capture_epp()
+                        canonical = _validated_epp_request(preflight, value)
+                        apply, equivalent = _apply_epp_hardware, _epp_equivalent
+                        if canonical is None:
+                            return status(False, "invalid or unsupported EPP value")
                     if not preflight["can_set"]:
-                        return _cpu_power_controls_status(
-                            operation_success=False,
-                            operation_error=(preflight["error"]
-                                             or "CPU Boost is unsupported"),
-                        )
-                    state = _load_settings()
-                    transaction = _apply_cpu_boost_hardware(enabled)
-                    if not transaction["success"]:
-                        return _cpu_power_controls_status(
-                            operation_success=False,
-                            operation_error=transaction["error"],
-                        )
-                    state[SETTINGS_FIELD_CPU_BOOST_ENABLED] = enabled
+                        return status(False, preflight["error"] or "CPU control is unsupported")
+                    if selected:
+                        profile = _prepare_cpu_profile(
+                            state, profiles, selected, required_field=field)
+                        # Legacy AC profiles inherited battery CPU values. Keep
+                        # their pre-edit value when the battery branch changes.
+                        if (not ac_profile and profile.get("ac_separate")
+                                and profile.get("ac_" + field) is None):
+                            profile["ac_" + field] = _effective_cpu_values(
+                                state, profile, True)[field]
+                        profile[("ac_" if ac_profile else "") + field] = canonical
+                    else:
+                        state[field] = canonical
+                    active = _cpu_editor_profile(state, profiles, selected, ac_profile)["active"]
+                    transaction = None
+                    if active:
+                        transaction = apply(canonical)
+                        if not transaction["success"]:
+                            return status(False, transaction["error"])
                     try:
-                        _save_settings(state)
+                        values = {SETTINGS_KEY_SETTINGS: state}
+                        if selected:
+                            values[SETTINGS_KEY_GAME_PROFILES] = profiles
+                        _write_keys(values)
                     except Exception as exc:
-                        error = self._cpu_power_persistence_failure(
-                            exc, transaction, _boost_equivalent)
-                        return _cpu_power_controls_status(
-                            operation_success=False, operation_error=error)
+                        error = (self._cpu_power_persistence_failure(exc, transaction, equivalent)
+                                 if transaction is not None else f"settings persist failed: {exc}")
+                        return status(False, error)
                     decky.logger.info(
-                        f"[legotdp] CPU Boost enabled={enabled}")
-                    return _cpu_power_controls_status(operation_success=True)
+                        f"[legotdp] {field}={canonical} app={selected or 'global'} ac={ac_profile} active={active}")
+                    return status(True)
                 except Exception as exc:
-                    decky.logger.warning(
-                        f"[legotdp] CPU Boost RPC failed: {exc}")
-                    return _cpu_power_controls_error_status(
-                        "CPU Boost operation failed")
+                    decky.logger.warning(f"[legotdp] CPU profile RPC failed: {exc}")
+                    try:
+                        return status(False, str(exc))
+                    except Exception:
+                        return _cpu_power_controls_error_status(
+                            "CPU power operation failed", selected or "",
+                            ac_profile if type(ac_profile) is bool else False)
         return await _offload(_do)
 
-    async def set_epp(self, value: str) -> dict:
-        def _do() -> dict:
-            with _mutation_lock:
-                try:
-                    preflight = _capture_epp()
-                    if not preflight["can_set"]:
-                        return _cpu_power_controls_status(
-                            operation_success=False,
-                            operation_error=(preflight["error"]
-                                             or "EPP is unsupported"),
-                        )
-                    canonical = _validated_epp_request(preflight, value)
-                    if canonical is None:
-                        return _cpu_power_controls_status(
-                            operation_success=False,
-                            operation_error="invalid or unsupported EPP value",
-                        )
-                    state = _load_settings()
-                    transaction = _apply_epp_hardware(canonical)
-                    if not transaction["success"]:
-                        return _cpu_power_controls_status(
-                            operation_success=False,
-                            operation_error=transaction["error"],
-                        )
-                    state[SETTINGS_FIELD_EPP] = canonical
-                    try:
-                        _save_settings(state)
-                    except Exception as exc:
-                        error = self._cpu_power_persistence_failure(
-                            exc, transaction, _epp_equivalent)
-                        return _cpu_power_controls_status(
-                            operation_success=False, operation_error=error)
-                    decky.logger.info(f"[legotdp] EPP={canonical}")
-                    return _cpu_power_controls_status(operation_success=True)
-                except Exception as exc:
-                    decky.logger.warning(f"[legotdp] EPP RPC failed: {exc}")
-                    return _cpu_power_controls_error_status(
-                        "EPP operation failed")
-        return await _offload(_do)
+    async def set_cpu_boost(self, enabled: bool, app_id: str = "", ac_profile: bool = False,
+                            expected_app_id: str | None = None) -> dict:
+        return await self._set_cpu_control(
+            SETTINGS_FIELD_CPU_BOOST_ENABLED, enabled, app_id, ac_profile, expected_app_id)
+
+    async def set_epp(self, value: str, app_id: str = "", ac_profile: bool = False,
+                      expected_app_id: str | None = None) -> dict:
+        return await self._set_cpu_control(
+            SETTINGS_FIELD_EPP, value, app_id, ac_profile, expected_app_id)
 
     async def get_power_source(self) -> dict:
         return {"ac": await _offload(_get_ac_online)}
@@ -2159,7 +2319,7 @@ class Plugin:
             return {"success": False, "stdout": "",
                     "stderr": "enabled must be a boolean", "returncode": -1}
         def _do():
-            with _tdp_user_transaction():
+            with _tdp_user_transaction() as restore_failed:
                 if enabled and (_wmi_only() or not _ryzenadj_available):
                     return {"success": False, "stdout": "",
                             "stderr": "Extras is unavailable because ryzenadj is not ready",
@@ -2175,7 +2335,7 @@ class Plugin:
                 if s.get("enabled", True):
                     result = _apply_limits_with_saved_cpu_power(s, *active)
                     if not result["success"]:
-                        return result
+                        return restore_failed(result)
                 s["extras_unlocked"] = False
                 _write_keys({SETTINGS_KEY_SETTINGS: s,
                              SETTINGS_KEY_GAME_PROFILES: profiles})
@@ -2197,14 +2357,17 @@ class Plugin:
             spl  = p.get("spl",  _defaults()["spl"])
             sppt = p.get("sppt", _defaults()["sppt"])
             fppt = p.get("fppt", _defaults()["fppt"])
+            state = _load_settings()
             return {
                 "exists":      True,
                 "profile":     {"spl": spl, "sppt": sppt, "fppt": fppt,
-                                "preset": p.get("preset", "")},
+                                "preset": p.get("preset", ""),
+                                **_effective_cpu_values(state, p)},
                 "ac_separate": p.get("ac_separate", False),
                 "ac_profile":  {"spl": p.get("ac_spl", spl), "sppt": p.get("ac_sppt", sppt),
                                 "fppt": p.get("ac_fppt", fppt),
-                                "ac_preset": p.get("ac_preset", "")},
+                                "ac_preset": p.get("ac_preset", ""),
+                                **_effective_cpu_values(state, p, True)},
             }
         return await _offload(_do)
 
@@ -2216,7 +2379,7 @@ class Plugin:
                     "stdout": "", "returncode": -1}
         preset_name = _safe_label(preset_name)
         def _do() -> dict:
-            with _tdp_user_transaction():
+            with _tdp_user_transaction() as restore_failed:
                 if not app_id or _get_running_appid() != app_id:
                     return {"success": False, "stderr": "game is no longer active",
                             "stdout": "", "returncode": -1}
@@ -2226,8 +2389,14 @@ class Plugin:
                             "stdout": "", "returncode": -1}
                 ac = _clamp_for_settings(state, spl, sppt, fppt)
                 profiles = _load_profiles()
-                existing = profiles.get(app_id, {})
-                p = existing if isinstance(existing, dict) else {}
+                p = _prepare_cpu_profile(
+                    state, profiles, app_id,
+                    snapshot_cpu=ac_separate and not profiles.get(app_id, {}).get("ac_separate"))
+                if ac_separate and not p.get("ac_separate"):
+                    cpu = _effective_cpu_values(state, p)
+                    for field, value in cpu.items():
+                        if p.get("ac_" + field) is None:
+                            p["ac_" + field] = value
                 p.update({"ac_separate": ac_separate,
                           "ac_spl": ac[0], "ac_sppt": ac[1], "ac_fppt": ac[2]})
                 if preset_name:
@@ -2241,9 +2410,10 @@ class Plugin:
                     elif all(p.get(k) is not None for k in ("spl", "sppt", "fppt")):
                         want = _clamp_for_settings(state, p["spl"], p["sppt"], p["fppt"])
                 if want is not None:
-                    result = _apply_limits_with_saved_cpu_power(state, *want)
+                    result = _apply_limits_with_saved_cpu_power(
+                        _effective_cpu_state(state, profiles, app_id), *want)
                     if not result["success"]:
-                        return result
+                        return restore_failed(result)
                     state["active_spl"], state["active_sppt"], state["active_fppt"] = want
                     _cancel_ac_settle()
 
@@ -2260,15 +2430,16 @@ class Plugin:
             return {"success": False, "stderr": "invalid app id",
                     "stdout": "", "returncode": -1}
         def _do() -> dict:
-            with _tdp_user_transaction():
+            with _tdp_user_transaction() as restore_failed:
                 profiles = _load_profiles()
                 profiles.pop(app_id, None)
                 state = _load_settings()
                 if state.get("enabled", True) and _get_running_appid() == app_id:
                     target = _global_triplet(state)
-                    result = _apply_limits_with_saved_cpu_power(state, *target)
+                    result = _apply_limits_with_saved_cpu_power(
+                        _effective_cpu_state(state, profiles, app_id), *target)
                     if not result["success"]:
-                        return result
+                        return restore_failed(result)
                     state["active_spl"], state["active_sppt"], state["active_fppt"] = target
                     _cancel_ac_settle()
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
@@ -2284,12 +2455,13 @@ class Plugin:
             return {"success": False, "stderr": "enabled must be a boolean",
                     "stdout": "", "returncode": -1}
         def _do() -> dict:
-            with _tdp_user_transaction():
+            with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
                 if not enabled:
                     result = _restore_defaults_locked()
                     if not result["success"]:
-                        return result
+                        return restore_failed(result)
+                    state["enabled"] = False
                     try:
                         result["cpu_power_errors"] = (
                             _reapply_saved_cpu_power_controls_locked(state))
@@ -2299,22 +2471,18 @@ class Plugin:
                     state["enabled"] = False
                     _save_settings(state)
                     _cancel_ac_settle()
-                    return result
+                    return restore_failed(result)
 
-                target = _clamp_for_settings(
-                    state,
-                    state.get("active_spl", state.get("spl", _defaults()["spl"])),
-                    state.get("active_sppt", state.get("sppt", _defaults()["sppt"])),
-                    state.get("active_fppt", state.get("fppt", _defaults()["fppt"])),
-                )
+                state["enabled"] = True
+                _, target, _ = _startup_context_target(state)
                 result = _apply_limits_with_saved_cpu_power(state, *target)
                 if not result["success"]:
-                    return result
+                    return restore_failed(result)
                 state["enabled"] = True
                 state["active_spl"], state["active_sppt"], state["active_fppt"] = target
                 _save_settings(state)
                 _cancel_ac_settle()
-                return result
+                return restore_failed(result)
         result = await _offload(_do)
         decky.logger.info(f"[legotdp] Plugin enabled={enabled} success={result['success']}")
         return result
@@ -2341,7 +2509,7 @@ class Plugin:
 
     async def restore_defaults(self) -> dict:
         def _do() -> dict:
-            with _tdp_user_transaction():
+            with _tdp_user_transaction() as restore_failed:
                 result = _restore_defaults_locked()
                 if result["success"]:
                     state = _load_settings()
@@ -2352,7 +2520,7 @@ class Plugin:
                         result["cpu_power_errors"] = [
                             f"CPU power restore failed: {exc}"]
                     _cancel_ac_settle()
-                return result
+                return restore_failed(result)
         return await _offload(_do)
 
     async def set_panel_active(self, active: bool) -> None:
@@ -2386,14 +2554,10 @@ class Plugin:
                             "cpu_power_errors": cpu_power_errors}
                 # Whatever was cached describes the pre-suspend hardware.
                 _invalidate_limits_cache()
-                target = _clamp_for_settings(
-                    s,
-                    s.get("active_spl",  s.get("spl",  _defaults()["spl"])),
-                    s.get("active_sppt", s.get("sppt", _defaults()["sppt"])),
-                    s.get("active_fppt", s.get("fppt", _defaults()["fppt"])),
-                )
+                _, target, _ = _startup_context_target(s)
                 result = _apply_limits_with_saved_cpu_power(s, *target)
                 if result["success"]:
+                    _save_active(s, *target)
                     _cancel_ac_settle()
                 decky.logger.info(
                     f"[legotdp] reapply after resume: success={result['success']}")
@@ -2434,7 +2598,7 @@ class Plugin:
         preset_name = _safe_label(preset_name)
 
         def _do() -> dict:
-            with _tdp_user_transaction():
+            with _tdp_user_transaction() as restore_failed:
                 s = _load_settings()
                 if not s.get("enabled", True):
                     return {"success": False, "stderr": "plugin disabled",
@@ -2454,8 +2618,7 @@ class Plugin:
 
                 if app_id:
                     profiles = _load_profiles()
-                    found = profiles.get(app_id, {})
-                    existing = found if isinstance(found, dict) else {}
+                    existing = _prepare_cpu_profile(s, profiles, app_id)
                     # On AC with a separate AC profile, the sliders describe the
                     # battery values but the hardware should run the AC ones.
                     if (_get_ac_online() and existing.get("ac_separate")
@@ -2467,9 +2630,12 @@ class Plugin:
                             existing.get("ac_fppt", existing.get("fppt", _defaults()["fppt"])),
                         )
 
-                result = _apply_limits_with_saved_cpu_power(s, *want)
+                cpu_state = (
+                    _effective_cpu_state(s, profiles, app_id) if app_id
+                    else _effective_cpu_state(s))
+                result = _apply_limits_with_saved_cpu_power(cpu_state, *want)
                 if not result["success"]:
-                    return result
+                    return restore_failed(result)
 
                 if app_id:
                     existing.update({"spl": requested[0], "sppt": requested[1],
@@ -2487,7 +2653,7 @@ class Plugin:
                     values[SETTINGS_KEY_GAME_PROFILES] = profiles
                 _write_keys(values)
                 _cancel_ac_settle()
-                return result
+                return restore_failed(result)
         return await _offload(_do)
 
     async def _push_info(self) -> bool:

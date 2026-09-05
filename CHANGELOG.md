@@ -1,3 +1,9 @@
+# 0.8.0 — per-game CPU power controls
+
+- Include CPU Boost and EPP in per-game TDP profiles, with separate battery and AC values when enabled. Return to global CPU choices when a game exits or its profile is removed; older profiles inherit their missing CPU values.
+- Save CPU edits to the selected profile and apply them only when that profile is active. Carry the game context through delayed EPP edits so a game switch cannot save a change to the next title.
+- Restore the effective CPU profile after startup, resume, power-source changes, TDP changes and periodic drift checks. Keep transactional writes and restore the previous CPU state if persistence fails.
+
 # 0.7.0 — GitHub release downloads
 
 - Add manual release checks and ZIP downloads in About. Read only published stable releases from Rayekkk/LegionGo2Companion, distinguish an unpublished project from a failed request, and never substitute a source archive or development branch.

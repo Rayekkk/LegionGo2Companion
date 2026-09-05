@@ -185,6 +185,13 @@ interface CpuPowerControls {
   cpu_boost: CpuBoostControl;
   epp: EppControl;
   error: string;
+  profile?: {
+    app_id: string;
+    ac_profile: boolean;
+    active: boolean;
+    cpu_boost_enabled: boolean | null;
+    epp: string | null;
+  };
 }
 
 // ── Backend callables ──────────────────────────────────────────────────────────
@@ -204,9 +211,9 @@ const setGameAcProfile  = callable<[string, number, number, number, boolean, str
 const retryExtras = callable<[], { success: boolean; error?: string }>("retry_extras");
 const getExtrasUnlocked = callable<[], boolean>("get_extras_unlocked");
 const setExtrasUnlockedCall = callable<[boolean], TdpResult>("set_extras_unlocked");
-const getCpuPowerControls = callable<[], CpuPowerControls>("get_cpu_power_controls");
-const setCpuBoost       = callable<[boolean], CpuPowerControls>("set_cpu_boost");
-const setEpp            = callable<[string], CpuPowerControls>("set_epp");
+const getCpuPowerControls = callable<[string, boolean], CpuPowerControls>("get_cpu_power_controls");
+const setCpuBoost       = callable<[boolean, string, boolean, string], CpuPowerControls>("set_cpu_boost");
+const setEpp            = callable<[string, string, boolean, string], CpuPowerControls>("set_epp");
 
 // ── Toasts ─────────────────────────────────────────────────────────────────────
 
@@ -604,6 +611,15 @@ function normaliseCpuPowerControls(value: unknown): CpuPowerControls {
     throw new Error("Backend returned incompatible CPU power controls.");
   }
 
+  const profile = raw.profile;
+  if (profile !== undefined && (!profile || typeof profile !== "object" ||
+      typeof profile.app_id !== "string" || typeof profile.ac_profile !== "boolean" ||
+      typeof profile.active !== "boolean" ||
+      (profile.cpu_boost_enabled !== null && typeof profile.cpu_boost_enabled !== "boolean") ||
+      (profile.epp !== null && typeof profile.epp !== "string"))) {
+    throw new Error("Backend returned incompatible CPU profile controls.");
+  }
+
   return {
     success: raw.success,
     available: raw.available,
@@ -623,6 +639,7 @@ function normaliseCpuPowerControls(value: unknown): CpuPowerControls {
       error: epp.error,
     },
     error: raw.error,
+    profile,
   };
 }
 
@@ -647,7 +664,31 @@ const eppSliderPercent = (epp: EppControl) => {
 
 type CpuPowerAction = "boost" | "epp";
 
-const CpuPowerControlsSection: FC = () => {
+// An inactive editor shows its saved target while retaining live capabilities.
+// Hardware readback remains authoritative for the profile that is active now.
+const cpuControlsForEditor = (controls: CpuPowerControls): CpuPowerControls => {
+  const profile = controls.profile;
+  if (!profile || profile.active) return controls;
+  return {
+    ...controls,
+    cpu_boost: { ...controls.cpu_boost, enabled: profile.cpu_boost_enabled },
+    epp: { ...controls.epp, value: profile.epp, numeric_value: parseNumericEpp(profile.epp) },
+  };
+};
+
+interface CpuPowerControlsSectionProps {
+  appId?: string;
+  acProfile?: boolean;
+  expectedAppId?: string;
+  scopeLabel?: string;
+  powerSource?: boolean;
+  onBusyChange?: (owner: object, busy: boolean) => void;
+}
+
+const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
+  appId = "", acProfile = false, expectedAppId = "", scopeLabel = "Global profile",
+  powerSource = false, onBusyChange,
+}: CpuPowerControlsSectionProps = {}) => {
   const [controls, setControls] = useState<CpuPowerControls | null>(null);
   const [loading, setLoading] = useState(false);
   const [changing, setChanging] = useState<CpuPowerAction | null>(null);
@@ -667,17 +708,21 @@ const CpuPowerControlsSection: FC = () => {
   const eppPendingRef = useRef(false);
   const flushEppRef = useRef<(() => void) | null>(null);
   const eppTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const busyOwnerRef = useRef({});
+  const reportBusy = useCallback((busy: boolean) => {
+    onBusyChange?.(busyOwnerRef.current, busy);
+  }, [onBusyChange]);
   visibleRef.current = visible;
 
   const acceptControls = useCallback((next: CpuPowerControls) => {
     controlsRef.current = next;
     setControls(next);
-    if (!eppPendingRef.current) setEppDraft(eppSliderPercent(next.epp));
+    if (!eppPendingRef.current) setEppDraft(eppSliderPercent(cpuControlsForEditor(next).epp));
   }, []);
 
   const rollbackEppDraft = useCallback(() => {
     const confirmed = controlsRef.current;
-    if (confirmed) setEppDraft(eppSliderPercent(confirmed.epp));
+    if (confirmed) setEppDraft(eppSliderPercent(cpuControlsForEditor(confirmed).epp));
   }, []);
 
   const cancelEppDebounce = useCallback(() => {
@@ -686,8 +731,9 @@ const CpuPowerControlsSection: FC = () => {
     if (!eppPendingRef.current) return;
     eppPendingRef.current = false;
     setEppPending(false);
+    if (!actionRef.current) reportBusy(false);
     rollbackEppDraft();
-  }, [rollbackEppDraft]);
+  }, [rollbackEppDraft, reportBusy]);
 
   const refreshControls = useCallback(async () => {
     if (!mountedRef.current || !visibleRef.current) return;
@@ -701,7 +747,10 @@ const CpuPowerControlsSection: FC = () => {
     const mutationEpoch = mutationEpochRef.current;
     setLoading(true);
     try {
-      const next = normaliseCpuPowerControls(await getCpuPowerControls());
+      const next = normaliseCpuPowerControls(await getCpuPowerControls(appId, acProfile));
+      if (next.profile && (next.profile.app_id !== appId || next.profile.ac_profile !== acProfile)) {
+        throw new Error("Backend returned CPU controls for a different profile.");
+      }
       if (!mountedRef.current || !visibleRef.current ||
           readId !== readSequenceRef.current || mutationEpoch !== mutationEpochRef.current ||
           actionRef.current) {
@@ -724,7 +773,7 @@ const CpuPowerControlsSection: FC = () => {
         setLoading(false);
       }
     }
-  }, [acceptControls]);
+  }, [acceptControls, appId, acProfile]);
 
   useEffect(() => {
     if (!visible) {
@@ -738,7 +787,7 @@ const CpuPowerControlsSection: FC = () => {
       return;
     }
     void refreshControls();
-  }, [visible, cancelEppDebounce, refreshControls]);
+  }, [visible, powerSource, cancelEppDebounce, refreshControls]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -752,6 +801,7 @@ const CpuPowerControlsSection: FC = () => {
       if (eppTimerRef.current) clearTimeout(eppTimerRef.current);
       eppTimerRef.current = null;
       eppPendingRef.current = false;
+      if (!actionRef.current) reportBusy(false);
     };
   }, []);
 
@@ -764,6 +814,7 @@ const CpuPowerControlsSection: FC = () => {
     ++mutationEpochRef.current;
     ++readSequenceRef.current;
     actionRef.current = kind;
+    reportBusy(true);
     setLoading(false);
     setChanging(kind);
     setRequestError("");
@@ -771,6 +822,9 @@ const CpuPowerControlsSection: FC = () => {
 
     try {
       const next = normaliseCpuPowerControls(await request());
+      if (next.profile && (next.profile.app_id !== appId || next.profile.ac_profile !== acProfile)) {
+        throw new Error("Backend returned CPU controls for a different profile.");
+      }
       if (!mountedRef.current) {
         if (!next.success) notify("CPU power change failed", next.error || next.epp.error || next.cpu_boost.error);
         return;
@@ -801,6 +855,7 @@ const CpuPowerControlsSection: FC = () => {
       setRequestError(message);
       notifyFailure(kind === "boost" ? "CPU Boost change failed" : "EPP change failed", error);
     } finally {
+      reportBusy(false);
       const current = actionId === actionSequenceRef.current;
       if (current) {
         actionRef.current = null;
@@ -818,20 +873,20 @@ const CpuPowerControlsSection: FC = () => {
   };
 
   const changeBoost = (enabled: boolean) => {
-    const boost = controlsRef.current?.cpu_boost;
+    const boost = controlsRef.current && cpuControlsForEditor(controlsRef.current).cpu_boost;
     if (!visibleRef.current || !boost?.available || boost.enabled == null ||
         actionRef.current || eppPendingRef.current || enabled === boost.enabled) return;
-    void runAction("boost", () => setCpuBoost(enabled));
+    void runAction("boost", () => setCpuBoost(enabled, appId, acProfile, expectedAppId));
   };
 
   const changeEpp = (value: string) => {
-    const epp = controlsRef.current?.epp;
+    const epp = controlsRef.current && cpuControlsForEditor(controlsRef.current).epp;
     if (!visibleRef.current || !epp?.available || actionRef.current || value === epp.value) return;
-    void runAction("epp", () => setEpp(value));
+    void runAction("epp", () => setEpp(value, appId, acProfile, expectedAppId));
   };
 
   const scheduleNumericEpp = (value: number) => {
-    const epp = controlsRef.current?.epp;
+    const epp = controlsRef.current && cpuControlsForEditor(controlsRef.current).epp;
     if (!mountedRef.current || !visibleRef.current || !epp?.available ||
         !epp.numeric_supported || actionRef.current) return;
     const percent = Math.round(clamp(value, 0, 100) / 10) * 10;
@@ -839,6 +894,7 @@ const CpuPowerControlsSection: FC = () => {
     setEppDraft(percent);
     eppPendingRef.current = true;
     setEppPending(true);
+    reportBusy(true);
     if (eppTimerRef.current) clearTimeout(eppTimerRef.current);
     const flush = () => {
       if (eppTimerRef.current) clearTimeout(eppTimerRef.current);
@@ -846,7 +902,9 @@ const CpuPowerControlsSection: FC = () => {
       flushEppRef.current = null;
       eppPendingRef.current = false;
       setEppPending(false);
-      void runAction("epp", () => setEpp(String(rawValue)));
+      // Keep the scope and foreground game from this gesture, including when
+      // a remount flushes the slider after switching game or battery/AC editor.
+      void runAction("epp", () => setEpp(String(rawValue), appId, acProfile, expectedAppId));
     };
     flushEppRef.current = flush;
     eppTimerRef.current = setTimeout(flush, EPP_DEBOUNCE_MS);
@@ -858,8 +916,9 @@ const CpuPowerControlsSection: FC = () => {
     </PanelSection>
   );
 
-  const boost = controls.cpu_boost;
-  const epp = controls.epp;
+  const editorControls = cpuControlsForEditor(controls);
+  const boost = editorControls.cpu_boost;
+  const epp = editorControls.epp;
   const busy = loading || changing !== null || eppPending;
   const numericCurrent = parseNumericEpp(epp.value);
   const eppLabel = epp.numeric_supported && numericCurrent != null
@@ -881,6 +940,11 @@ const CpuPowerControlsSection: FC = () => {
 
   return (
     <PanelSection title="CPU Power Controls">
+      <PanelSectionRow>
+        <Field label={scopeLabel} description={controls.profile?.active === false
+          ? "Editing saved CPU Boost and EPP. They apply when this profile becomes active."
+          : "CPU Boost and EPP changes are saved automatically to this profile."} />
+      </PanelSectionRow>
       <PanelSectionRow>
         <ToggleField
           label="CPU Boost"
@@ -999,6 +1063,7 @@ export const TdpPage: FC = () => {
 
   const [status,   setStatus]   = useState<string | null>(null);
   const [loading,  setLoading]  = useState(false);
+  const [cpuBusy, setCpuBusy] = useState(false);
 
   const visible = useQuickAccessVisible();
 
@@ -1006,6 +1071,18 @@ export const TdpPage: FC = () => {
   const noGameSyncedRef = useRef(false);
   const profileRequestRef = useRef(0);
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cpuBusyOwnersRef = useRef(new Set<object>());
+  const pageMountedRef = useRef(true);
+  const onCpuBusyChange = useCallback((owner: object, busy: boolean) => {
+    if (busy) cpuBusyOwnersRef.current.add(owner);
+    else cpuBusyOwnersRef.current.delete(owner);
+    if (pageMountedRef.current) setCpuBusy(cpuBusyOwnersRef.current.size > 0);
+  }, []);
+
+  useEffect(() => {
+    pageMountedRef.current = true;
+    return () => { pageMountedRef.current = false; };
+  }, []);
 
   useEffect(() => () => { if (statusTimerRef.current) clearTimeout(statusTimerRef.current); }, []);
 
@@ -1252,6 +1329,7 @@ export const TdpPage: FC = () => {
 
   // ── Per-game toggle ───────────────────────────────────────────────────────────
   const handlePerGameToggle = async (checked: boolean) => {
+    if (cpuBusyOwnersRef.current.size > 0) return;
     setPerGame(checked);
     if (!checked && game) {
       const prevAcSeparate = acSeparate, prevEditingAc = editingAc;
@@ -1301,6 +1379,7 @@ export const TdpPage: FC = () => {
 
   // ── Enable / disable plugin ───────────────────────────────────────────────────
   const handleEnabledToggle = async (checked: boolean) => {
+    if (cpuBusyOwnersRef.current.size > 0) return;
     setEnabled(checked);
     showStatus(null);
     try {
@@ -1315,6 +1394,7 @@ export const TdpPage: FC = () => {
 
   // ── AC separate toggle ────────────────────────────────────────────────────────
   const handleAcSeparateToggle = async (checked: boolean) => {
+    if (cpuBusyOwnersRef.current.size > 0) return;
     if (!game) return;
     const prevSavedAcPreset = savedAcPreset;
     const prevEditingAc = editingAc;
@@ -1443,6 +1523,7 @@ export const TdpPage: FC = () => {
               ) : "Using system defaults"
             }
             checked={enabled}
+            disabled={cpuBusy}
             onChange={handleEnabledToggle}
           />
         </PanelSectionRow>
@@ -1456,7 +1537,17 @@ export const TdpPage: FC = () => {
       </PanelSection>
 
       <LivePanel />
-      <CpuPowerControlsSection />
+      <CpuPowerControlsSection
+        key={`${enabled}:${game?.appId ?? ""}:${perGame}:${acSeparate && editingAc}`}
+        appId={enabled && perGame && game ? game.appId : ""}
+        acProfile={!!(enabled && perGame && game && acSeparate && editingAc)}
+        expectedAppId={game?.appId ?? ""}
+        scopeLabel={enabled && perGame && game
+          ? `${game.name}${acSeparate ? ` - ${editingAc ? "AC" : "Battery"}` : ""} profile`
+          : "Global profile"}
+        powerSource={acOnline}
+        onBusyChange={onCpuBusyChange}
+      />
 
       {enabled && <>
         <PanelSection title="Game Profile">
@@ -1489,7 +1580,7 @@ export const TdpPage: FC = () => {
                 ) : "No game running"
               }
               checked={perGame}
-              disabled={!game}
+              disabled={!game || cpuBusy}
               onChange={handlePerGameToggle}
             />
           </PanelSectionRow>
@@ -1497,8 +1588,11 @@ export const TdpPage: FC = () => {
             <PanelSectionRow>
               <ToggleField
                 label="Separate AC Profile"
-                description={acSeparate ? "AC and battery have independent TDP settings" : "Enable to set a separate TDP when charging"}
+                description={acSeparate
+                  ? "AC and battery have independent TDP, CPU Boost and EPP settings"
+                  : "Enable separate TDP, CPU Boost and EPP settings when charging"}
                 checked={acSeparate}
+                disabled={cpuBusy}
                 onChange={handleAcSeparateToggle}
               />
             </PanelSectionRow>
@@ -1506,12 +1600,16 @@ export const TdpPage: FC = () => {
           {perGame && acSeparate && (
             <>
               <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => setEditingAc(false)} disabled={!editingAc}>
+                <ButtonItem layout="below" onClick={() => {
+                  if (!cpuBusyOwnersRef.current.size) setEditingAc(false);
+                }} disabled={!editingAc || cpuBusy}>
                   {!editingAc ? "> Battery profile" : "Battery profile"}
                 </ButtonItem>
               </PanelSectionRow>
               <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => setEditingAc(true)} disabled={editingAc}>
+                <ButtonItem layout="below" onClick={() => {
+                  if (!cpuBusyOwnersRef.current.size) setEditingAc(true);
+                }} disabled={editingAc || cpuBusy}>
                   {editingAc ? "> AC profile" : "AC profile"}
                 </ButtonItem>
               </PanelSectionRow>

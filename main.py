@@ -518,14 +518,14 @@ class Plugin:
     async def get_settings(self):
         return await self._tdp.get_settings()
 
-    async def get_cpu_power_controls(self):
-        return await self._tdp.get_cpu_power_controls()
+    async def get_cpu_power_controls(self, app_id="", ac_profile=False):
+        return await self._tdp.get_cpu_power_controls(app_id, ac_profile)
 
-    async def set_cpu_boost(self, enabled):
-        return await self._tdp.set_cpu_boost(enabled)
+    async def set_cpu_boost(self, enabled, app_id="", ac_profile=False, expected_app_id=None):
+        return await self._tdp.set_cpu_boost(enabled, app_id, ac_profile, expected_app_id)
 
-    async def set_epp(self, value):
-        return await self._tdp.set_epp(value)
+    async def set_epp(self, value, app_id="", ac_profile=False, expected_app_id=None):
+        return await self._tdp.set_epp(value, app_id, ac_profile, expected_app_id)
 
     async def get_power_source(self):
         return await self._tdp.get_power_source()
