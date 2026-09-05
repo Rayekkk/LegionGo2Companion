@@ -7,7 +7,7 @@
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-424A53?style=for-the-badge&labelColor=141417)](LICENSE)
 
-**Power, battery protection, gyro, haptics, lighting, buttons, OLED and Wi-Fi in one Steam overlay.**
+**Power, battery protection, gyro, haptics, lighting, buttons, screen brightness, HDR and Wi-Fi in one Steam overlay.**
 The Legion Go 2 controls you use every day, with saved profiles and automatic recovery after wake.
 
 [Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
@@ -30,7 +30,7 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 | **Controller gyro** | Enable gyro reporting through the existing Lenovo driver and choose the left, right or combined controller source |
 | **Gyro and touchpad diagnostics** | A short, passive test compares native controller data with the virtual controller output available to Steam |
 | **Battery protection** | The firmware's Long Life charging mode, with the previous normal or fast charging mode preserved |
-| **OLED display modes** | Hybrid, PQ and Gamma 2.2, with brightness-slider forwarding and corrected HDR metadata for games |
+| **OLED brightness fix** | Fixes screen brightness control in SteamOS and additionally offers an HDR metadata fix for affected games |
 | **Wi-Fi band preference** | Prefer 5/6 GHz while keeping 2.4 GHz available, plus a manual rescan/reconnect action |
 | **Settings recovery** | Imports standalone settings, restores saved controls after startup/wake and checks for later drift |
 
@@ -292,6 +292,9 @@ distinguishes the saved choice from the actual charging mode and reports failed 
 The feature does not change the battery on first installation until selected by the user.
 
 ### OLED Display
+
+This module fixes screen brightness control in SteamOS. It also offers an HDR fix
+by correcting the display metadata exposed to games.
 
 Choose a mode on first run, or use **Switch Display Mode** later:
 
