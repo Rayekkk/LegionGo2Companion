@@ -31,7 +31,9 @@ class ImuTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / "sys"
+        # Windows CI may return an 8.3 alias for TEMP. Match the canonical paths
+        # returned by HID discovery without weakening device identity assertions.
+        self.root = Path(self.temp.name).resolve() / "sys"
         self.dmi = self.root / "class/dmi/id"
         self.dmi.mkdir(parents=True)
         self.put(self.dmi / "sys_vendor", "LENOVO")
