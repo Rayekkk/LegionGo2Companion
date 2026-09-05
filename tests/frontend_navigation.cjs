@@ -11,7 +11,7 @@ const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => v ==
 const hooks = {
   useState(initial) {
     const i = cursor++;
-    if (!(i in slots)) slots[i] = initial;
+    if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial;
     return [slots[i], value => {
       const next = typeof value === 'function' ? value(slots[i]) : value;
       if (next !== slots[i]) { slots[i] = next; dirty = true; }
@@ -22,6 +22,11 @@ const hooks = {
     const i = cursor++;
     if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { fn, deps };
     return slots[i].fn;
+  },
+  useMemo(fn, deps) {
+    const i = cursor++;
+    if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { value: fn(), deps };
+    return slots[i].value;
   },
   useEffect(fn, deps) {
     const i = cursor++, previous = effects.get(i);
@@ -53,7 +58,7 @@ vm.runInNewContext(code, {
     throw Error(name);
   },
 });
-const plugin = mod.exports.default();
+let plugin;
 function render() {
   // Decky 3.2.8 PluginView unmounts content on hide unless alwaysRender is set.
   // Merely changing useQuickAccessVisible in a mounted component misses this.
@@ -76,6 +81,10 @@ function find(node, predicate) {
     const result = find(child, predicate); if (result) return result;
   }
 }
+(async () => {
+plugin = mod.exports.default();
+// Controls consume the compatibility snapshot already read by the parent.
+for (let i = 0; i < 16; i++) await Promise.resolve();
 for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyro & Touchpad', 'Battery', 'OLED Display', 'WiFi', 'About', 'Manage Modules']) {
   const link = find(render(), n => n.props?.title === title && n.props?.onClick);
   assert.ok(link, `section link: ${title}`); link.props.onClick();
@@ -95,10 +104,12 @@ assert.match(find(render(), n => n.props?.label === 'Author').props.description,
 assert.doesNotMatch(find(render(), n => n.props?.label === 'Included modules').props.description, /\d+\.\d+/);
 find(render(), n => n.props?.onBack).props.onBack();
 find(render(), n => n.props?.title === 'Battery' && n.props?.onClick).props.onClick();
+// Complete the earlier overview read before testing the next visibility cycle.
+for (let i = 0; i < 12; i++) await Promise.resolve();
 modules = Object.fromEntries(['tdp','vibration','rgb','remap','controller','battery','display','wifi'].map(k=>[k,{enabled:false}]));
 rpcCalls.length = 0;
 const disabled = render();
-assert.deepEqual(rpcCalls, ['get_version'], 'disabled modules are not polled');
+assert.deepEqual(rpcCalls, [], 'disabled modules are not polled and Controls does not duplicate the guard read');
 assert.ok(!find(disabled, n => n.props?.onBack), 'disabling an open module returns to the overview');
 for (const title of ['TDP','Vibration','RGB Lighting','Button Remapper','Gyro & Touchpad','Battery','OLED Display','WiFi']) {
   assert.ok(!find(disabled, n => n.props?.title === title && n.props?.onClick), `${title} hidden when disabled`);
@@ -106,3 +117,4 @@ for (const title of ['TDP','Vibration','RGB Lighting','Button Remapper','Gyro & 
 for (const title of ['About','Manage Modules']) assert.ok(find(disabled, n => n.props?.title === title && n.props?.onClick));
 visible = false; render(); assert.equal(timers.size, 0, 'hidden overview stops polling');
 console.log('Ten sections retain navigation; disabled modules are hidden; About has author and unversioned modules.');
+})().catch(error => { console.error(error); process.exitCode = 1; });

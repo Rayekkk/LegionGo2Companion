@@ -21,6 +21,7 @@ from typing import Any
 
 
 MAX_SETTINGS_BYTES = 1024 * 1024
+MAX_SETTINGS_DEPTH = 64
 
 
 class UnsafeSettingsPath(RuntimeError):
@@ -105,6 +106,27 @@ def _harden_regular_file(path: str) -> None:
         os.close(fd)
 
 
+def _validate_json_depth(payload: dict[str, Any]) -> None:
+    # JSON's decoder can accept structures deep enough to exhaust deepcopy()
+    # later. Bound container nesting without recursively walking untrusted data.
+    containers = [iter((payload,))]
+    while containers:
+        try:
+            value = next(containers[-1])
+        except StopIteration:
+            containers.pop()
+            continue
+        if isinstance(value, dict):
+            children = value.values()
+        elif isinstance(value, list):
+            children = value
+        else:
+            continue
+        if len(containers) > MAX_SETTINGS_DEPTH:
+            raise CorruptSettings(f"settings nesting exceeds {MAX_SETTINGS_DEPTH} containers")
+        containers.append(iter(children))
+
+
 def load_json_object(path: str, *, missing_ok: bool = False) -> dict[str, Any] | None:
     """Read a bounded regular JSON object without following a final symlink."""
     try:
@@ -125,16 +147,20 @@ def load_json_object(path: str, *, missing_ok: bool = False) -> dict[str, Any] |
             raise UnsafeSettingsPath(f"opened settings path is not regular: {path}")
         if opened.st_size > MAX_SETTINGS_BYTES:
             raise CorruptSettings(f"settings file exceeds {MAX_SETTINGS_BYTES} bytes")
-        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        with os.fdopen(fd, "rb") as handle:
             fd = -1
-            payload = json.load(handle)
-    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            encoded = handle.read(MAX_SETTINGS_BYTES + 1)
+            if len(encoded) > MAX_SETTINGS_BYTES:
+                raise CorruptSettings(f"settings file exceeds {MAX_SETTINGS_BYTES} bytes")
+            payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise CorruptSettings(f"invalid JSON settings: {exc}") from exc
     finally:
         if fd >= 0:
             os.close(fd)
     if not isinstance(payload, dict):
         raise CorruptSettings("settings root is not an object")
+    _validate_json_depth(payload)
     return payload
 
 
@@ -205,7 +231,13 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
             src_dir_fd=dir_fd,
             dst_dir_fd=dir_fd,
         )
-        os.fsync(dir_fd)
+        try:
+            os.fsync(dir_fd)
+        except OSError as exc:
+            # The new primary is already visible and its bytes were fsynced.
+            # Raising here would falsely restore the old in-memory settings
+            # and invite callers to roll hardware back against the new file.
+            _log("warning", f"settings replaced but directory durability could not be confirmed: {exc}")
     finally:
         if tmp_fd >= 0:
             os.close(tmp_fd)
@@ -219,6 +251,7 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
 def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
     if not isinstance(payload, dict):
         raise TypeError("settings root must be an object")
+    _validate_json_depth(payload)
     encoded = (json.dumps(payload, indent=4, ensure_ascii=False) + "\n").encode("utf-8")
     if len(encoded) > MAX_SETTINGS_BYTES:
         raise ValueError(f"settings exceed {MAX_SETTINGS_BYTES} bytes")
@@ -238,6 +271,10 @@ class AtomicSettingsManager:
         self._storage_hardened = False
         self._lock = threading.RLock()
         self._blocked_reason = ""
+        # Missing settings are a first install; corrupt settings with no usable
+        # recovery copy are lost user intent. Consumers such as module gating
+        # must be able to distinguish those cases before applying defaults.
+        self._recovery_error = ""
         try:
             self.read()
         except UnsafeSettingsPath as exc:
@@ -249,6 +286,12 @@ class AtomicSettingsManager:
     def _ensure_safe(self) -> None:
         if self._blocked_reason:
             raise UnsafeSettingsPath(self._blocked_reason)
+
+    @property
+    def recovery_error(self) -> str:
+        """Why all saved copies were lost; empty for new or recovered storage."""
+        with self._lock:
+            return self._recovery_error
 
     def _quarantine_corrupt_primary(self) -> None:
         try:
@@ -266,11 +309,13 @@ class AtomicSettingsManager:
     def read(self) -> None:
         with self._lock:
             self._ensure_safe()
+            corrupt_copies = []
             try:
                 payload = load_json_object(self.path, missing_ok=True)
                 if payload is not None:
                     self.settings = payload
                     self._committed_settings = copy.deepcopy(payload)
+                    self._recovery_error = ""
                     if not self._storage_hardened:
                         try:
                             _harden_regular_file(self.path)
@@ -294,6 +339,7 @@ class AtomicSettingsManager:
             except UnsafeSettingsPath:
                 raise
             except CorruptSettings as exc:
+                corrupt_copies.append(f"primary: {exc}")
                 _log("warning", f"primary settings are corrupt: {exc}")
 
             try:
@@ -301,14 +347,20 @@ class AtomicSettingsManager:
             except UnsafeSettingsPath:
                 raise
             except CorruptSettings as exc:
+                corrupt_copies.append(f"backup: {exc}")
                 _log("warning", f"backup settings are corrupt: {exc}")
                 backup = None
 
-            if os.path.lexists(self.path):
+            if backup is None and corrupt_copies:
+                self._recovery_error = "No usable settings copy remains (" + "; ".join(corrupt_copies) + ")."
+            # Retain an unrecoverable primary so a later process still sees
+            # lost intent, rather than interpreting quarantine as first install.
+            if backup is not None and os.path.lexists(self.path):
                 self._quarantine_corrupt_primary()
             self.settings = backup if backup is not None else {}
             if backup is not None:
                 atomic_write_json(self.path, self.settings)
+                self._recovery_error = ""
                 _log("warning", "restored settings from the last good backup")
             self._committed_settings = copy.deepcopy(self.settings)
 
@@ -336,6 +388,7 @@ class AtomicSettingsManager:
                 self.settings = copy.deepcopy(self._committed_settings)
                 raise
             self._committed_settings = copy.deepcopy(snapshot)
+            self._recovery_error = ""
             try:
                 atomic_write_json(self.backup_path, snapshot)
                 self._storage_hardened = True

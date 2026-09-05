@@ -25,9 +25,13 @@ def installed_conflicts(plugin_dir):
     Unknown directories without a manifest do not. Unreadable/malformed manifests
     fail closed: their identity cannot safely be ruled out while Decky is installing.
     """
-    current = os.path.realpath(plugin_dir)
+    installed_path = os.path.abspath(plugin_dir)
+    current = os.path.realpath(installed_path)
     result = set()
-    with os.scandir(os.path.dirname(current)) as entries:
+    # A development install may link Companion to an external checkout. Its
+    # installed siblings are still in Decky's plugin directory, not next to
+    # the resolved checkout. Resolve only identities when excluding ourselves.
+    with os.scandir(os.path.dirname(installed_path)) as entries:
         for entry in entries:
             if os.path.realpath(entry.path) == current:
                 continue

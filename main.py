@@ -29,6 +29,7 @@ import rgb_backend
 import tdp_backend
 import vibration_backend
 import wifi_backend
+import module_runtime
 from safe_settings import atomic_write_json, load_json_object, SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 
@@ -138,12 +139,7 @@ def _guard_component_calls(cls):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
                     # A cancelled RPC must not release the gate while its backend
                     # operation is still running (notably the Wi-Fi worker).
-                    task = asyncio.create_task(fn(self, *args, **kwargs))
-                    try:
-                        return await asyncio.shield(task)
-                    except asyncio.CancelledError:
-                        await task
-                        raise
+                    return await module_runtime.complete(fn(self, *args, **kwargs))
             return guarded
         setattr(cls, name, wrap(method))
     return cls
@@ -164,12 +160,18 @@ class Plugin:
         self._closing = False
         self._module_store = SettingsManager('module_settings', decky.DECKY_PLUGIN_SETTINGS_DIR)
         self._module_state = self._module_store.getSetting('modules', {})
+        if self._module_store.recovery_error:
+            # Unknown choices are not a first install. Never start modules or
+            # guess a hardware rollback while their enabled state is lost.
+            self._module_state = {name: {'enabled': False,
+                'error': 'Saved module choices could not be recovered. Review the module before enabling it again.'}
+                for name in MODULE_NAMES}
         if not isinstance(self._module_state, dict):
-            self._module_state = {name: {'enabled': False, 'pending': True, 'error': 'Invalid module settings.'} for name in MODULE_NAMES}
+            self._module_state = {name: {'enabled': False, 'error': 'Invalid module settings. Review before enabling.'} for name in MODULE_NAMES}
         self._module_state = {name: value if isinstance(value, dict)
-            and type(value.get('enabled', True)) is bool and type(value.get('pending', False)) is bool
+            and type(value.get('enabled')) is bool and type(value.get('pending', False)) is bool
             and isinstance(value.get('resume', {}), dict)
-            else {'enabled': False, 'pending': True, 'error': 'Invalid module settings.'}
+            else {'enabled': False, 'error': 'Invalid module settings. Review before enabling.'}
             for name, value in self._module_state.items() if name in MODULE_NAMES}
         self._tdp = tdp_backend.Plugin()
         self._vibration = vibration_backend.Plugin()
@@ -345,12 +347,14 @@ class Plugin:
                     decky.logger.warning("[legiongo2companion] all module workers stopped by conflict guard")
 
     async def _stop_modules(self):
-        task = asyncio.create_task(self._run_stage("_unload"))
+        async def stop():
+            await self._run_stage("_unload")
+            if self._guard_blocked:
+                # Cancelling a monitor does not stop its thread. A live conflict
+                # must finish those writes before advertising a paused plugin.
+                await asyncio.gather(*(module_runtime.drain(name) for name in MODULE_NAMES))
         try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+            await module_runtime.complete(stop())
         finally:
             self._modules_started = False
 
@@ -358,6 +362,25 @@ class Plugin:
         while True:
             await asyncio.sleep(CHECK_INTERVAL_S)
             await self._check_guard()
+
+    async def _recover_pending_module(self, name):
+        entry = self._module_state.get(name, {})
+        if not entry.get('pending'):
+            return
+        resume = entry.get('resume', {})
+        try:
+            note = await withdraw(name, getattr(self, '_' + name))
+            self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
+            if name == 'display':
+                self._module_state[name]['session'] = display_backend._gamescope_start_time()
+            self._save_modules()
+        except Exception as exc:
+            self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+            decky.logger.error(f'Module {name} recovery failed: {exc}')
+            try:
+                self._save_modules()
+            except Exception as save_error:
+                decky.logger.error(f'Module {name} recovery could not be saved: {save_error}')
 
     async def _migration(self):
         await self._check_guard()
@@ -386,17 +409,7 @@ class Plugin:
                 return
             self._modules_started = self._ever_started = True
             for name in MODULE_NAMES:
-                if not self._module_state.get(name, {}).get('pending'):
-                    continue
-                resume = self._module_state[name].get('resume', {})
-                try:
-                    note = await withdraw(name, getattr(self, '_' + name))
-                    self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
-                    if name == 'display':
-                        self._module_state[name]['session'] = display_backend._gamescope_start_time()
-                except Exception as exc:
-                    self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
-                self._save_modules()
+                await self._recover_pending_module(name)
             await self._run_stage("_main")
             for name in MODULE_NAMES:
                 entry = self._module_state.get(name, {})
@@ -404,11 +417,18 @@ class Plugin:
                     try:
                         await restore_intent(name, getattr(self, '_' + name), entry['resume'])
                         self._module_state[name] = {'enabled': True}
+                        self._save_modules()
                     except Exception as exc:
-                        await getattr(self, '_' + name)._unload()
                         self._module_state[name] = {'enabled': False, 'pending': True,
                                                     'resume': entry['resume'], 'error': str(exc)}
-                    self._save_modules()
+                        try:
+                            self._save_modules()
+                        except Exception as save_error:
+                            decky.logger.error(f'Module {name} recovery could not be saved: {save_error}')
+                        try:
+                            await getattr(self, '_' + name)._unload()
+                        except Exception as stop_error:
+                            decky.logger.error(f'Module {name} recovery could not stop: {stop_error}')
         await self._check_guard()
 
     async def _unload(self):
@@ -428,9 +448,17 @@ class Plugin:
     async def _uninstall(self):
         # A blocked instance that never owned hardware must not run restoration
         # hooks against the standalone plugin's live state.
-        await self._unload()
-        if self._ever_started and not self._guard_blocked:
-            await self._run_stage("_uninstall")
+        async def cleanup():
+            await self._unload()
+            if self._ever_started and not self._guard_blocked:
+                # Start every independent restoration immediately. A pending
+                # device/reconnect must not delay other modules before Decky's
+                # process shutdown deadline.
+                await asyncio.gather(
+                    self._run_stage("_uninstall"),
+                    *(self._recover_pending_module(name) for name in MODULE_NAMES),
+                )
+        await module_runtime.complete(cleanup())
         decky.logger.info("[legiongo2companion] uninstalled")
 
     # TDP / CPU -----------------------------------------------------------------

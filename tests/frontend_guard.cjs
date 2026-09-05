@@ -18,7 +18,7 @@ vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleK
   require:name=>{
     if(name==='react')return hooks;if(name==='react/jsx-runtime')return jsx;
     if(name==='@decky/api')return {definePlugin:fn=>fn,useQuickAccessVisible:()=>true,
-      callable:name=>async()=>{assert.equal(name,'get_version','blocked view only calls the guard');return response;},
+      callable:name=>async()=>{assert.equal(name,'get_version','blocked view only calls the guard');return typeof response === 'function' ? response() : response;},
       addEventListener:(name,fn)=>{events.set(name,fn);return fn;},removeEventListener:name=>events.delete(name)};
     if(name==='@decky/ui')return new Proxy({staticClasses:{}},{get:(o,k)=>o[k]||k});
     if(name.startsWith('./'))return new Proxy({},{get:(_,k)=>/^(start|stop)/.test(k)?()=>watchers.push(k):k});
@@ -51,5 +51,13 @@ function reset(){for(const e of effects.values())e.cleanup?.();effects.clear();s
  tree=render();assert.match(text(tree),/LeGo Vibe Control/);assert.notEqual(tree.type.name,'Controls');
  assert.deepEqual(watchers.slice(-2),['stopTdpWatcher','stopVibrationWatcher']);
  plugin.onDismount();reset();assert.equal(events.size,0);
+ let finishOldRead;
+ response = () => new Promise(resolve => { finishOldRead = resolve; });
+ watchers.length = 0; plugin = mod.exports.default(); render();
+ events.get('companion_guard')({version:'new',blocked:false,modules:{tdp:{enabled:false},vibration:{enabled:false}}});
+ finishOldRead({version:'stale',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:true}}});
+ await settle();tree=render();assert.equal(tree.props.modules.tdp.enabled,false);
+ assert.deepEqual(watchers,[], 'an earlier poll must not re-enable modules disabled by an event');
+ plugin.onDismount();reset();
  console.log('Guard hides every hardware page, stops reports, explains conflicts and requires a fresh start.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

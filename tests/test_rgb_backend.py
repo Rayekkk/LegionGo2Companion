@@ -84,6 +84,30 @@ class RgbBackendTests(unittest.TestCase):
         self.assertEqual(state["hue"], 359)
         self.assertEqual(state["saturation"], 0)
 
+    def test_lost_settings_do_not_report_successful_restoration(self):
+        memory = MemorySettings()
+        memory.recovery_error = "Primary and backup settings are corrupt"
+        with patch.object(rgb_backend, "settings", memory), patch.object(rgb_backend, "_apply_rgb_target") as apply:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(rgb_backend.Plugin().restore_original())
+        apply.assert_not_called()
+
+    def test_missing_primary_with_corrupt_backup_does_not_seed_default_ownership(self):
+        from safe_settings import SettingsManager
+        with tempfile.TemporaryDirectory(prefix="lego-rgb-recovery-") as raw:
+            Path(raw, "rgb_settings.json.bak").write_text('{"state":', encoding="utf-8")
+            store = SettingsManager("rgb_settings", raw)
+            with patch.object(rgb_backend, "settings", store):
+                with self.assertRaises(RuntimeError):
+                    rgb_backend._ensure_settings_file()
+            self.assertFalse(Path(store.path).exists())
+            self.assertTrue(store.recovery_error)
+
+    def test_failed_setup_propagates_so_module_manager_cannot_report_enabled(self):
+        with patch.object(rgb_backend, "_ensure_settings_file", side_effect=OSError("settings disk full")):
+            with self.assertRaisesRegex(OSError, "settings disk full"):
+                asyncio.run(rgb_backend.Plugin()._main())
+
     def test_hardware_target_uses_one_firmware_profile(self):
         with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
             led = Path(raw)

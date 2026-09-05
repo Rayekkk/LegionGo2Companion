@@ -171,6 +171,12 @@ class Plugin:
         return {key: raw[key] for key in DEFAULT_STATE}
 
     def _load(self) -> dict[str, Any]:
+        if getattr(settings, "recovery_error", ""):
+            # Allow a verified file/backup restored elsewhere to recover the
+            # module; healthy reads remain memory-only.
+            settings.read()
+        if getattr(settings, "recovery_error", ""):
+            raise BatteryError("Saved battery ownership could not be recovered. " + settings.recovery_error)
         return self._validated_state(settings.getSetting("state", DEFAULT_STATE))
 
     def _save(self, state: dict[str, Any]) -> None:
@@ -356,6 +362,7 @@ class Plugin:
                 self._recover_pending()
                 state = self._load()
                 if not state["managed"]:
+                    self._error = ""
                     return
                 device = _detect()
                 target = "Long_Life" if state["requested_enabled"] else state["normal_mode"]
@@ -380,6 +387,8 @@ class Plugin:
 
     async def _watch(self):
         last_check = time.monotonic()
+        interval = RESUME_CHECK_S if self._error else CHECK_INTERVAL_S
+        retry_delay = RESUME_CHECK_S
         offset = _suspend_offset()
         while True:
             await asyncio.sleep(RESUME_CHECK_S)
@@ -388,11 +397,23 @@ class Plugin:
             resumed = (offset is not None and current_offset is not None
                        and current_offset - offset >= 1.0)
             offset = current_offset
-            if resumed or now - last_check >= CHECK_INTERVAL_S:
+            if resumed or now - last_check >= interval:
+                if resumed:
+                    retry_delay = RESUME_CHECK_S
                 await self._thread(self._repair)
                 last_check = now
+                # Firmware attributes can be unavailable during the first
+                # wake tick. Retry promptly, then back off if it stays absent;
+                # a healthy battery keeps the normal low-frequency check.
+                if self._error:
+                    interval = retry_delay
+                    retry_delay = min(CHECK_INTERVAL_S, retry_delay * 2)
+                else:
+                    interval = CHECK_INTERVAL_S
+                    retry_delay = RESUME_CHECK_S
 
     async def _main(self):
+        await self._thread(self._load)
         with self._lock:
             self._running = True
         await self._thread(self._repair)

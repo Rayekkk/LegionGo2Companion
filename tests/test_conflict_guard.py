@@ -1,7 +1,9 @@
 import asyncio
 import inspect
 import json
+import os
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -9,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import test_integration  # Install the Decky/settings stubs before importing main.
 import main
+import module_runtime
 from conflict_guard import installed_conflicts
 
 
@@ -33,6 +36,22 @@ class DetectionTests(unittest.TestCase):
             current.mkdir(parents=True)
             (root / "settings" / "LeGoTDP").mkdir(parents=True)
             self.assertEqual(installed_conflicts(current), [])
+
+    def test_linked_companion_scans_installed_siblings_not_source_checkout(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            current = root / "plugins" / "LegionGo2Companion"
+            current.mkdir(parents=True)
+            (current.parent / "LeGoTDP").mkdir()
+            checkout = root / "sources" / "LegionGo2Companion"
+            checkout.mkdir(parents=True)
+            original_realpath = os.path.realpath
+            def resolve_link(path):
+                return str(checkout) if str(path) == str(current) else original_realpath(path)
+            # Windows CI may not permit creating symlinks. Emulate only their
+            # resolution; the installed and source directories remain real.
+            with patch("conflict_guard.os.path.realpath", side_effect=resolve_link):
+                self.assertEqual(installed_conflicts(current), ["LeGoTDP"])
 
     def test_unreadable_or_incomplete_identity_is_not_treated_as_safe(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -146,3 +165,32 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(plugin._guard_blocked); self.assertEqual(order, [])
             finish.set(); await rpc; await checking
             self.assertEqual(order, ["rpc finished", "modules stopped"])
+
+    async def test_conflict_waits_for_cancelled_background_hardware_worker(self):
+        plugin = self.make_plugin()
+        plugin._modules_started = True
+        entered, finish = threading.Event(), threading.Event()
+        unloaded = asyncio.Event()
+        original_stage = plugin._run_stage
+        async def stage(name):
+            await original_stage(name)
+            unloaded.set()
+        plugin._run_stage = stage
+        def worker(): entered.set(); finish.wait(3)
+        background = asyncio.create_task(module_runtime.offload('vibration', worker))
+        while not entered.is_set(): await asyncio.sleep(.001)
+        background.cancel()
+        with self.assertRaises(asyncio.CancelledError): await background
+        checking = None
+        try:
+            with patch.object(main, '_installed_standalone_plugins', return_value=['LeGoTDP']):
+                checking = asyncio.create_task(plugin._check_guard())
+                await asyncio.wait_for(unloaded.wait(), 2)
+                for _ in range(20): await asyncio.sleep(0)
+                self.assertFalse(checking.done(), 'The guard cannot finish while old hardware work is still running')
+                finish.set()
+                await checking
+                self.assertFalse(plugin._modules_started)
+        finally:
+            finish.set()
+            if checking is not None: await checking

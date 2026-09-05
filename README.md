@@ -2,7 +2,7 @@
 
 <h1>Legion Go 2 Companion</h1>
 
-[![Version](https://img.shields.io/badge/version-0.6.0-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.1-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
 [![Device](https://img.shields.io/badge/device-Legion_Go_2-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-424A53?style=for-the-badge&labelColor=141417)](LICENSE)
@@ -116,6 +116,7 @@ directory:
 ```bash
 npm ci
 npm run typecheck
+npm run test:frontend
 npm run build      # compile the frontend into dist/
 npm run package    # create LegionGo2Companion-<version>.zip
 ```
@@ -123,6 +124,11 @@ npm run package    # create LegionGo2Companion-<version>.zip
 Packaging uses the existing frontend build, so run **build before package**. Install the
 result through Decky rather than copying a checkout containing `node_modules` into its
 plugins directory.
+
+Backend tests require Python 3.10+ and run with `npm test`. GitHub Actions checks the
+backend on Linux (Python 3.10) and Windows (Python 3.13), and runs frontend tests, builds
+and package validation on Node.js 24 LTS. Hardware calls are mocked; CI does not publish
+releases.
 
 </details>
 
@@ -151,7 +157,8 @@ owned configuration and can briefly reconnect during the change.
 the session ends, so the page offers **Restart Gaming Mode (closes games)** when needed.
 If hardware restoration fails, the module stays blocked and the page shows the error with
 **Retry Cleanup**. An interrupted cleanup is retried on the next startup before that
-module is allowed to run.
+module is allowed to run, and during uninstall if Companion is not paused by a plugin
+conflict. Failed restoration keeps its recovery record.
 
 ### TDP
 
@@ -322,6 +329,10 @@ display fix changes the EDID copy published by gamescope, not the panel's firmwa
 Settings use atomic replacement with backup/recovery handling. A failed TDP settings save
 attempts to restore the previous effective target, and a delayed vibration edit is rejected
 if its game/profile context has changed.
+
+If neither saved settings copy can be recovered, affected controls report the problem
+and stop applying changes. Missing ownership information is never replaced with guessed
+restoration values. Keep the damaged files until a valid settings copy can be restored.
 
 The backend continues managing saved profiles while Quick Access is closed. TDP checks
 for changed limits and retries failed profile transitions with backoff. RGB and remapping

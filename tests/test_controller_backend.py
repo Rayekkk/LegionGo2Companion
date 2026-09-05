@@ -6,6 +6,8 @@ import struct
 import threading
 import types
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import test_integration  # Install the existing Decky test environment.
@@ -21,6 +23,9 @@ class MemorySettings:
 
     def getSetting(self, key, default=None):
         return copy.deepcopy(self.data.get(key, default))
+
+    def read(self):
+        pass
 
     def setSetting(self, key, value):
         self.data[key] = copy.deepcopy(value)
@@ -129,6 +134,51 @@ class FilterTests(unittest.TestCase):
         inventory.assert_not_called()
         self.assertEqual(self.store.commits, 0)
         self.assertEqual(self.writes, [])
+
+    def test_lost_settings_never_claim_an_unowned_successful_release(self):
+        self.store.recovery_error = "Primary and backup settings are corrupt"
+        with self.assertRaises(module.ControllerError):
+            self.backend._release(persist=True)
+        self.assertEqual(self.store.commits, 0)
+        self.assertEqual(self.writes, [])
+
+    def test_lost_settings_fail_initialization_before_starting_a_monitor(self):
+        self.store.recovery_error = "Primary and backup settings are corrupt"
+        with patch.object(self.backend, "_ensure_watch") as start:
+            with self.assertRaises(module.ControllerError):
+                asyncio.run(self.backend._main())
+        start.assert_not_called()
+        self.assertEqual(self.writes, [])
+
+    def test_valid_restoration_file_can_be_reloaded_without_restarting_decky(self):
+        from safe_settings import SettingsManager, atomic_write_json
+        with tempfile.TemporaryDirectory(prefix="lego-controller-recovery-") as raw:
+            path = Path(raw, "controller_settings.json")
+            path.write_text('{"state":', encoding="utf-8")
+            store = SettingsManager("controller_settings", raw)
+            self.assertTrue(store.recovery_error)
+            path.unlink()
+            with patch.object(module, "settings", store):
+                with self.assertRaises(module.ControllerError):
+                    module._state()
+            atomic_write_json(str(path), {"state": {"gyro_source": "system", "ownership": None}})
+            with patch.object(module, "settings", store):
+                self.assertEqual(module._state()["gyro_source"], "system")
+            self.assertFalse(store.recovery_error)
+
+    def test_temporary_controller_absence_keeps_the_monitor_and_saved_source(self):
+        self.backend._select("left")
+        async def lifecycle():
+            await self.backend._unload()
+            with patch.object(module, "_hid_inventory", return_value=(None, None)):
+                await self.backend._main()
+            self.assertFalse(self.backend._watch_task.done())
+            self.assertEqual(module._state()["gyro_source"], "left")
+            await asyncio.to_thread(self.backend._select, "left", reconcile=True)
+            self.assertEqual(self.imu, {"left": True, "right": False})
+            self.assertFalse(self.backend._error)
+            await self.backend._unload()
+        asyncio.run(lifecycle())
 
     def test_selection_preserves_all_unowned_filters_and_releases_exact_baseline(self):
         baseline = copy.deepcopy(self.current)
@@ -358,6 +408,83 @@ class FilterTests(unittest.TestCase):
             self.backend._select("left", reconcile=True)
         self.assertEqual(module._imu_values(self.current, "hidraw://hidraw9"), module._desired_filters("left"))
         self.assertEqual(self.current["evdev://event7"], ["Keyboard:KeyA"])
+
+    def test_resume_retries_missing_controller_at_next_poll_then_returns_to_normal_interval(self):
+        self.backend._select("left")
+        clock = [0.0]
+        calls = []
+        new_physical = {**PHYSICAL, "sysfs": PHYSICAL["sysfs"] + "new"}
+        select = self.backend._select
+
+        def observed_select(*args, **kwargs):
+            calls.append(clock[0])
+            return select(*args, **kwargs)
+
+        async def sleep(_seconds):
+            clock[0] += 5
+            if clock[0] == 5:
+                self.current[SOURCE] = module._desired_filters("combined") + ["Mouse:Wheel"]
+            if clock[0] > 70:
+                raise asyncio.CancelledError
+
+        async def watch():
+            with self.assertRaises(asyncio.CancelledError):
+                await self.backend._watch()
+
+        with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch.object(module, "_suspend_offset", side_effect=lambda: 2.0 if clock[0] >= 5 else 0.0), \
+                patch.object(module.asyncio, "sleep", side_effect=sleep), \
+                patch.object(module, "_hid_inventory", side_effect=lambda: (None, None) if clock[0] < 10 else (new_physical, None)), \
+                patch.object(self.backend, "_select", side_effect=observed_select):
+            asyncio.run(watch())
+        self.assertEqual(calls, [5, 10, 70])
+        self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("left"))
+        self.assertIn("Mouse:Wheel", self.current[SOURCE])
+        self.assertEqual(self.current["evdev://event7"], ["Keyboard:KeyA"])
+        self.assertEqual(self.imu, {"left": True, "right": False})
+        self.assertEqual(module._state()["gyro_source"], "left")
+        self.assertFalse(self.backend._error)
+
+
+class WatchScheduleTests(unittest.TestCase):
+    def test_recovery_backoff_and_healthy_polling_are_bounded(self):
+        cases = (
+            ("healthy", False, "", 120, [60, 120]),
+            ("persistent_failure", True, "", 145, [5, 10, 20, 40, 80, 140]),
+            ("startup_retry", False, "controller unavailable", 70, [5, 10, 70]),
+            ("external_conflict", True, "", 70, [5, 65]),
+        )
+        for kind, resume, initial_error, end, expected in cases:
+            with self.subTest(kind=kind):
+                backend = module.Plugin()
+                backend._error = initial_error
+                clock, calls = [0.0], []
+
+                async def sleep(_seconds):
+                    clock[0] += 5
+                    if clock[0] > end:
+                        raise asyncio.CancelledError
+
+                def select(*_args, **_kwargs):
+                    calls.append(clock[0])
+                    if kind == "external_conflict":
+                        backend._conflict = True
+                        raise module.ControllerError("An external filter changed")
+                    if kind == "persistent_failure" or (kind == "startup_retry" and clock[0] < 10):
+                        raise module.ControllerError("The controller is unavailable")
+                    backend._error = ""
+
+                async def watch():
+                    with self.assertRaises(asyncio.CancelledError):
+                        await backend._watch()
+
+                with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                        patch.object(module, "_suspend_offset", side_effect=lambda: 2.0 if resume and clock[0] >= 5 else 0.0), \
+                        patch.object(module.asyncio, "sleep", side_effect=sleep), \
+                        patch.object(module, "_state", return_value={"gyro_source": "left"}), \
+                        patch.object(backend, "_select", side_effect=select):
+                    asyncio.run(watch())
+                self.assertEqual(calls, expected)
 
 
 class CaptureTests(unittest.TestCase):

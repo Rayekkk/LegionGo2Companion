@@ -4,6 +4,24 @@ import asyncio
 
 _workers = {}
 
+async def complete(operation):
+    """Keep a hardware transaction alive through repeated caller cancellation."""
+    task = asyncio.ensure_future(operation)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.done():
+                # A task that cancelled itself is not a recoverable caller cancel.
+                result = task.result()
+                break
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
 async def offload(module, function, *args, **kwargs):
     task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
     pending = _workers.setdefault(module, set())

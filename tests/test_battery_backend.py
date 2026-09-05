@@ -90,6 +90,52 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.writes, [])
         self.assertFalse(Path(self.store.path).exists())
 
+    async def test_lost_settings_cannot_report_successful_release_or_adopt_a_new_baseline(self):
+        Path(self.store.path).write_text('{"state":', encoding="utf-8")
+        self.store.read()
+        self.externally_select("Long_Life")
+        released = await self.plugin.release_control()
+        enabled = await self.plugin.set_enabled(False)
+        self.assertFalse(released["success"])
+        self.assertFalse(enabled["success"])
+        self.assertEqual(self.current(), "Long_Life")
+        self.assertEqual(self.writes, [])
+
+    async def test_lost_settings_fail_initialization_without_a_running_monitor(self):
+        Path(self.store.path).write_text('{"state":', encoding="utf-8")
+        self.store.read()
+        with self.assertRaises(battery.BatteryError):
+            await self.plugin._main()
+        self.assertFalse(self.plugin._running)
+        self.assertIsNone(self.plugin._task)
+        self.assertEqual(self.writes, [])
+
+    async def test_retry_loads_a_valid_restoration_file_without_restarting_decky(self):
+        from safe_settings import atomic_write_json
+        Path(self.store.path).write_text('{"state":', encoding="utf-8")
+        self.store.read()
+        self.assertTrue(self.store.recovery_error)
+        self.assertFalse((await self.plugin.release_control())["success"])
+        Path(self.store.path).unlink()
+        with self.assertRaises(battery.BatteryError):
+            self.plugin._load()
+        atomic_write_json(self.store.path, {"state": battery.DEFAULT_STATE})
+        self.assertEqual(self.plugin._load(), battery.DEFAULT_STATE)
+        self.assertFalse(self.store.recovery_error)
+        await self.plugin._main()
+        self.assertTrue((await self.plugin.get_status())["success"])
+
+    async def test_temporary_hardware_absence_keeps_the_valid_saved_preference_retryable(self):
+        await self.plugin.set_enabled(True)
+        self.externally_select("Fast")
+        with patch.object(battery, "_detect", side_effect=battery.BatteryError("battery temporarily unavailable")):
+            await self.plugin._main()
+        self.assertTrue(self.plugin._running)
+        self.assertFalse(self.plugin._task.done())
+        await self.plugin._thread(self.plugin._repair)
+        self.assertEqual(self.current(), "Long_Life")
+        self.assertFalse(self.plugin._error)
+
     async def test_first_disabled_choice_preserves_fast_without_hardware_write(self):
         result = await self.plugin.set_enabled(False)
         self.assertTrue(result["success"])
@@ -247,6 +293,63 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["enabled"])
         self.assertEqual(self.current(), "Standard")  # A status read never enforces.
 
+    async def run_watch_clock(self, duration, *, wake=True):
+        clock = {'now': 0.0}
+        async def tick(delay):
+            clock['now'] += delay
+            if clock['now'] > duration:
+                raise asyncio.CancelledError
+        async def inline(fn):
+            return fn()
+        with patch.object(battery.time, 'monotonic', side_effect=lambda: clock['now']), \
+             patch.object(battery.asyncio, 'sleep', side_effect=tick), \
+             patch.object(battery, '_suspend_offset', side_effect=lambda: 15 if wake and clock['now'] >= 5 else 0), \
+             patch.object(self.plugin, '_thread', side_effect=inline):
+            self.plugin._running = True
+            with self.assertRaises(asyncio.CancelledError):
+                await self.plugin._watch()
+
+    async def test_transient_wake_read_failure_retries_promptly_then_returns_to_idle_interval(self):
+        await self.plugin.set_enabled(True)
+        self.externally_select('Standard')
+        detect = battery._detect
+        checks = []
+        def temporarily_missing():
+            checks.append(battery.time.monotonic())
+            if len(checks) == 1:
+                raise OSError(22, 'Invalid argument')
+            return detect()
+        with patch.object(battery, '_detect', side_effect=temporarily_missing):
+            await self.run_watch_clock(80)
+        self.assertEqual(checks, [5, 10, 70])
+        self.assertEqual(self.current(), 'Long_Life')
+        self.assertEqual(self.plugin._load()['baseline'], 'Fast')
+        self.assertEqual(self.plugin._error, '')
+
+    async def test_failed_startup_read_is_retried_without_waiting_a_full_minute(self):
+        await self.plugin.set_enabled(True)
+        self.externally_select('Standard')
+        self.plugin._error = 'Battery unavailable at startup'
+        with patch.object(self.plugin, '_repair', wraps=self.plugin._repair) as repair:
+            await self.run_watch_clock(15, wake=False)
+        self.assertEqual(repair.call_count, 1)
+        self.assertEqual(self.current(), 'Long_Life')
+        self.assertEqual(self.plugin._error, '')
+
+    async def test_persistent_battery_failure_backs_off_and_retains_the_error(self):
+        await self.plugin.set_enabled(True)
+        checks = []
+        def missing():
+            checks.append(battery.time.monotonic())
+            raise OSError(22, 'Invalid argument')
+        with patch.object(battery, '_detect', side_effect=missing):
+            await self.run_watch_clock(200)
+        self.assertLessEqual(len(checks), 8)
+        self.assertGreater(len(checks), 4)
+        self.assertEqual(checks[1] - checks[0], 5)
+        self.assertEqual(checks[-1] - checks[-2], 60)
+        self.assertIn('Invalid argument', self.plugin._error)
+
     async def test_missing_or_ambiguous_system_battery_disables_controls(self):
         (self.device / "present").write_text("0")
         status = await self.plugin.get_status()
@@ -306,7 +409,8 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_saved_baseline_never_applies(self):
         self.store.replace({"state": {"managed": True, "requested_enabled": True,
                                       "baseline": "Bypass"}})
-        await self.plugin._main()
+        with self.assertRaises(battery.BatteryError):
+            await self.plugin._main()
         status = await self.plugin.get_status()
         self.assertFalse(status["success"])
         self.assertIn("restoration state", status["error"])

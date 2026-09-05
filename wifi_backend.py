@@ -198,6 +198,12 @@ def _get_settings_manager() -> AtomicSettingsManager:
 def _load_settings() -> dict:
     manager = _get_settings_manager()
     manager.read()
+    if manager.recovery_error:
+        raise CorruptSettings(
+            "WiFi settings recovery failed; the original network ownership "
+            "cannot be determined. Existing network settings were left untouched. "
+            + manager.recovery_error
+        )
     original = copy.deepcopy(manager.settings)
     data = copy.deepcopy(original)
 
@@ -4052,6 +4058,12 @@ class Plugin:
 
     async def set_band_preference(self, enabled: bool, band: str = "a") -> dict:
         """Prefer 5/6 GHz while retaining 2.4 GHz as a fallback."""
+        if type(enabled) is not bool:
+            return {
+                "success": False,
+                "error": "invalid_band_preference_state",
+                "message": "Band preference must be a boolean.",
+            }
         return await self.set_band_policy(
             BAND_POLICY_HIGH_ONLY if enabled else BAND_POLICY_OFF
         )

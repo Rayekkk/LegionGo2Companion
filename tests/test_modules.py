@@ -91,6 +91,68 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                 await getattr(self.plugin, method)()
         self.assertEqual(len(await self.plugin.modules_get_status()), 8)
 
+    async def test_uninstall_retries_pending_cleanup_without_starting_module(self):
+        resume = {'source': 'right'}
+        self.plugin._module_state['controller'] = {'enabled': False, 'pending': True, 'resume': resume}
+        self.plugin._save_modules()
+        self.plugin._ever_started = self.plugin._modules_started = True
+        with patch.object(main, 'withdraw', new=AsyncMock(return_value='restored')) as stop:
+            await self.plugin._uninstall()
+        stop.assert_awaited_once_with('controller', self.plugin._controller)
+        self.plugin._controller._main.assert_not_awaited()
+        self.plugin._controller._uninstall.assert_not_awaited()
+        self.plugin._rgb._uninstall.assert_awaited_once()
+        fresh = self.make_plugin()
+        self.assertEqual(fresh._module_state['controller'],
+                         {'enabled': False, 'note': 'restored', 'resume': resume})
+
+    async def test_uninstall_keeps_failed_cleanup_pending_and_finishes_other_modules(self):
+        self.plugin._module_state['rgb'] = {'enabled': False, 'pending': True, 'resume': {'control_enabled': True}}
+        self.plugin._save_modules()
+        self.plugin._ever_started = self.plugin._modules_started = True
+        with patch.object(main, 'withdraw', new=AsyncMock(side_effect=RuntimeError('device missing'))) as stop:
+            await self.plugin._uninstall()
+        stop.assert_awaited_once_with('rgb', self.plugin._rgb)
+        self.plugin._tdp._uninstall.assert_awaited_once()
+        fresh = self.make_plugin()
+        self.assertTrue(fresh._module_status()['rgb']['pending'])
+        self.assertIn('device missing', fresh._module_status()['rgb']['error'])
+        self.assertTrue(fresh._module_state['rgb']['resume']['control_enabled'])
+
+    async def test_conflict_blocked_uninstall_never_retries_hardware_cleanup(self):
+        self.plugin._module_state['rgb'] = {'enabled': False, 'pending': True}
+        self.plugin._ever_started = self.plugin._guard_blocked = True
+        with patch.object(main, 'withdraw', new=AsyncMock()) as stop:
+            await self.plugin._uninstall()
+        stop.assert_not_awaited()
+        self.plugin._rgb._uninstall.assert_not_awaited()
+        self.assertTrue(self.plugin._module_status()['rgb']['pending'])
+
+    async def test_cancelled_uninstall_finishes_pending_restoration(self):
+        entered, finish, other_uninstall = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def stop(*args):
+            entered.set()
+            await finish.wait()
+            return ''
+        self.plugin._module_state['rgb'] = {'enabled': False, 'pending': True}
+        self.plugin._ever_started = self.plugin._modules_started = True
+        self.plugin._tdp._uninstall.side_effect = other_uninstall.set
+        with patch.object(main, 'withdraw', side_effect=stop):
+            task = asyncio.create_task(self.plugin._uninstall())
+            await entered.wait()
+            try:
+                await asyncio.wait_for(other_uninstall.wait(), 1)
+                for _ in range(2):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                self.assertFalse(task.done())
+            finally:
+                finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.plugin._tdp._uninstall.assert_awaited_once()
+        self.assertFalse(self.make_plugin()._module_status()['rgb']['pending'])
+
     async def test_duplicate_disable_and_enable_do_not_repeat_work(self):
         with patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as stop:
             await self.plugin.modules_set_enabled('rgb', False)
@@ -149,7 +211,53 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._save_modules()
         fresh = self.make_plugin()
         self.assertFalse(fresh._module_enabled('battery'))
-        self.assertTrue(fresh._module_status()['battery']['pending'])
+        self.assertTrue(fresh._module_status()['battery']['error'])
+        self.assertFalse(fresh._module_status()['battery']['pending'], 'Unknown settings must not trigger an automatic hardware rollback')
+
+    async def test_lost_module_settings_never_turn_disabled_modules_back_on(self):
+        from pathlib import Path
+        for suffix in ('', '.bak'):
+            Path(self.folder.name, 'module_settings.json' + suffix).write_text('{broken')
+        fresh = self.make_plugin()
+        with patch.object(main, 'withdraw', new=AsyncMock()) as stop, \
+                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+            await fresh._main()
+        for name in main.MODULE_NAMES:
+            self.assertFalse(fresh._module_enabled(name))
+            self.assertTrue(fresh._module_status()[name]['error'])
+            getattr(fresh, '_' + name)._main.assert_not_awaited()
+        stop.assert_not_awaited()
+        await fresh._unload()
+        again = self.make_plugin()
+        self.assertTrue(all(not x['enabled'] for x in again._module_status().values()))
+
+    async def test_cleanup_commit_failure_does_not_prevent_other_modules_starting(self):
+        self.plugin._module_state['wifi'] = {'enabled': False, 'pending': True}
+        self.plugin._save_modules()
+        with patch.object(main, 'withdraw', new=AsyncMock(return_value='')), \
+                patch.object(self.plugin, '_save_modules', side_effect=OSError('disk full')), \
+                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+            await self.plugin._main()
+        self.plugin._tdp._main.assert_awaited_once()
+        self.plugin._wifi._main.assert_not_awaited()
+        self.assertTrue(self.plugin._module_status()['wifi']['pending'])
+        self.assertIn('disk full', self.plugin._module_status()['wifi']['error'])
+
+    async def test_repeated_cancellation_cannot_release_the_hardware_gate_early(self):
+        entered, finish = asyncio.Event(), asyncio.Event()
+        async def stop(*args):
+            entered.set(); await finish.wait(); return ''
+        with patch.object(main, 'withdraw', side_effect=stop):
+            task = asyncio.create_task(self.plugin.modules_set_enabled('rgb', False))
+            await entered.wait()
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertTrue(self.plugin._guard_lock.locked())
+            finish.set()
+            with self.assertRaises(asyncio.CancelledError): await task
+        self.assertFalse(self.plugin._module_status()['rgb']['pending'])
 
 
 class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):

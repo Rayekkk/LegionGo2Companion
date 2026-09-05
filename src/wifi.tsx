@@ -82,37 +82,49 @@ const resultMessage = (result: WifiResult) =>
 
 export const WifiPage: FC = () => {
   const visible = useQuickAccessVisible();
-  const inFlight = useRef(false);
+  const inFlight = useRef<Promise<WifiStatus> | null>(null);
   const operationInFlight = useRef(false);
+  const mounted = useRef(true);
+  const isVisible = useRef(visible);
+  const readRevision = useRef(0);
+  isVisible.current = visible;
+  useEffect(() => { mounted.current = true; return () => {
+    mounted.current = false; readRevision.current += 1;
+  }; }, []);
   const [status, setStatus] = useState<WifiStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    if (inFlight.current || operationInFlight.current) return;
-    inFlight.current = true;
+    if (!mounted.current || !isVisible.current || inFlight.current || operationInFlight.current) return;
+    const revision = readRevision.current;
+    const request = getWifiStatus();
+    inFlight.current = request;
     try {
-      const next = await getWifiStatus();
+      const next = await request;
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
-      if (!next.success) setError(next.message ?? "WiFi status is unavailable.");
+      setError(next.success ? "" : next.message ?? "WiFi status is unavailable.");
     } catch {
-      setError("WiFi status is unavailable. Retrying while this page is open.");
+      if (mounted.current && isVisible.current && revision === readRevision.current)
+        setError("WiFi status is unavailable. Retrying while this page is open.");
     } finally {
-      inFlight.current = false;
+      if (inFlight.current === request) inFlight.current = null;
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
     if (!visible) return;
+    void refresh();
     const timer = setInterval(() => void refresh(), 10000);
-    return () => clearInterval(timer);
+    return () => { clearInterval(timer); readRevision.current += 1; };
   }, [refresh, visible]);
 
   const run = useCallback(
     async (operation: () => Promise<WifiResult>) => {
       if (operationInFlight.current) return;
+      readRevision.current += 1;
       operationInFlight.current = true;
       setBusy(true);
       setError("");
@@ -127,9 +139,10 @@ export const WifiPage: FC = () => {
       } catch {
         setError("The backend call ended before the result could be verified.");
       } finally {
+        await inFlight.current?.catch(() => undefined);
         operationInFlight.current = false;
         await refresh();
-        setBusy(false);
+        if (mounted.current) setBusy(false);
       }
     },
     [refresh],

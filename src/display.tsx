@@ -12,7 +12,7 @@ import {
   staticClasses,
   ToggleField,
 } from "@decky/ui";
-import { FC, Fragment, useCallback, useEffect, useState } from "react";
+import { FC, Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 type PanelMode = "gamma22" | "pq" | "hybrid";
 
@@ -52,6 +52,7 @@ interface State {
   setup_done: boolean;
   setup_note: string;
   setup_error: string;
+  settings_error?: string;
   restart_pending: boolean;
   restart_error: string;
   // Hybrid half
@@ -118,72 +119,102 @@ export const DisplayPage: FC = () => {
   // point, and afterwards the mode is a decision already made.
   const [showOthers, setShowOthers] = useState(false);
   const [showSwitch, setShowSwitch] = useState(false);
+  const mounted = useRef(true);
+  const isVisible = useRef(visible);
+  const writing = useRef(false);
+  const readInFlight = useRef(false);
+  const readRevision = useRef(0);
+  isVisible.current = visible;
+  useEffect(() => { mounted.current = true; return () => {
+    mounted.current = false; readRevision.current += 1;
+  }; }, []);
 
   const refresh = useCallback(async () => {
+    if (!mounted.current || !isVisible.current || writing.current || readInFlight.current) return;
+    readInFlight.current = true;
+    const revision = readRevision.current;
     try {
-      setState(await getState());
+      const next = await getState();
+      if (mounted.current && isVisible.current && revision === readRevision.current) setState(next);
     } catch {
       /* backend not up yet; the next tick will pick it up */
-    }
+    } finally { readInFlight.current = false; }
   }, []);
 
   // Only poll while the panel is actually on screen. The backend keeps working
   // either way - this is just what the user sees.
   useEffect(() => {
-    refresh();
     if (!visible) return;
+    void refresh();
     const id = setInterval(refresh, 1000);
-    return () => clearInterval(id);
+    return () => { clearInterval(id); readRevision.current += 1; };
   }, [visible, refresh]);
+
+  const beginWrite = () => {
+    if (writing.current) return false;
+    writing.current = true; readRevision.current += 1; setBusy(true);
+    return true;
+  };
+  const finishWrite = () => {
+    writing.current = false;
+    if (mounted.current) setBusy(false);
+  };
 
   const toggle = useCallback(
     async (fn: (v: boolean) => Promise<State>, key: keyof State, value: boolean) => {
+      if (!beginWrite()) return;
       setState((s) => (s ? { ...s, [key]: value } : s));
+      let failed = false;
       try {
-        setState(await fn(value));
+        const next = await fn(value);
+        if (mounted.current) setState(next);
       } catch {
-        refresh();
+        failed = true;
+      } finally {
+        finishWrite();
+        if (failed) void refresh();
       }
     },
     [refresh],
   );
 
   const setup = useCallback(async (mode: PanelMode) => {
-    setBusy(true);
+    if (!beginWrite()) return;
     try {
       const next = await runSetup(mode);
-      setState(next);
+      if (mounted.current) setState(next);
       if (next.setup_error) notify("Setup failed", next.setup_error);
     } catch (e) {
       notify("Setup failed", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      finishWrite();
     }
   }, []);
 
   const changeMode = useCallback(async (mode: PanelMode) => {
-    setBusy(true);
+    if (!beginWrite()) return;
     try {
       const next = await setPanelMode(mode);
-      setState(next);
+      if (mounted.current) setState(next);
       if (next.setup_error) notify("Could not change mode", next.setup_error);
     } catch (e) {
       notify("Could not change mode", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      finishWrite();
     }
   }, []);
 
   const restart = useCallback(async () => {
-    setBusy(true);
+    if (!beginWrite()) return;
     try {
       // If this returns at all, the session did not go down - so surface
       // whatever the backend reported instead of leaving a dead button.
-      setState(await restartSession());
+      const next = await restartSession();
+      if (mounted.current) setState(next);
     } catch {
       /* the session going down mid-call is the expected outcome */
     } finally {
-      setBusy(false);
+      finishWrite();
     }
   }, []);
 
@@ -196,6 +227,10 @@ export const DisplayPage: FC = () => {
       </PanelSection>
     );
   }
+
+  if (state.settings_error) return <PanelSection title="Display settings unavailable">
+    <PanelSectionRow><Field label="Display controls are paused" description={state.settings_error} /></PanelSectionRow>
+  </PanelSection>;
 
   // Nothing works until gamescope has the display script: without it the panel
   // is either stock or, far more often on this device, still carrying the
@@ -384,6 +419,7 @@ export const DisplayPage: FC = () => {
                 label="Enabled"
                 description="Forward the Steam brightness slider to gamescope while the panel runs in HDR/PQ."
                 checked={state.enabled}
+                disabled={busy}
                 onChange={(v) => toggle(setEnabled, "enabled", v)}
               />
             </PanelSectionRow>
@@ -421,6 +457,7 @@ export const DisplayPage: FC = () => {
             label="Enabled"
             description="Drop the DisplayID block from the EDID gamescope hands to games, which DXVK cannot parse."
             checked={state.edid_fix}
+            disabled={busy}
             onChange={(v) => toggle(setEdidFix, "edid_fix", v)}
           />
         </PanelSectionRow>

@@ -1,3 +1,18 @@
+# 0.6.1 — reliability audit
+
+- Preserve evidence when both settings copies are damaged and pause affected controls instead of treating lost preferences or ownership as a first installation. Bound JSON size and nesting, recover valid backups, and keep memory consistent with a file already replaced if directory synchronization fails.
+- Retain both possible owned button mappings during an interrupted remapper change, so disabling can restore the original mapping without replacing unrelated edits.
+- Finish transactions through repeated cancellation, drain background hardware writes when a conflicting plugin is detected, and isolate module recovery failures during startup.
+- Prevent overlapping status polls and stale replies from reverting newer UI choices. Stop delayed game reports across module stop/start and keep native dropdown selections working while the overlay hides.
+- Show each main-menu summary as soon as its read completes and retain confirmed summaries when reopening the panel. Compatibility checks with unchanged module state no longer discard pending reads; disabled modules and old plugin instances cannot restore stale data.
+- Retry missing OLED panel/backlight discovery without rescanning a healthy display, and close notification descriptors when setup fails.
+- Check installed-plugin conflicts from the installation directory even when Companion is linked to another checkout, and reject non-boolean Wi-Fi preference requests.
+- Report hard RGB, battery and controller startup failures to module management. Let battery, controller and remapping controls recover after a valid settings file is restored without requiring a Decky restart.
+- Retry pending module withdrawal during uninstall, preserve failed recovery records and finish cleanup through repeated cancellation.
+- Remove unused standalone-plugin update RPCs and download paths. Keep the pinned RyzenAdj download and both archive and binary SHA256 checks.
+- Add GitHub Actions for backend tests on Linux and Windows, frontend checks and package validation, with pinned actions and no release publishing.
+- Retry transient battery and controller discovery failures promptly after startup or wake, with increasing retry intervals for persistent failures and normal low-frequency checks after recovery.
+
 # 0.6.0 — individual module control
 
 - Add Manage Modules for all eight hardware modules. Persist enabled state, hide disabled pages, stop their workers and frontend reports, and reject their control requests.

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import json
+import io
 import os
 import stat
 import tempfile
@@ -85,6 +86,24 @@ class AtomicSettingsTests(unittest.TestCase):
         )
         self.assertEqual(len(list(self.root.glob("module.json.corrupt-*"))), 1)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX directory fsync")
+    def test_directory_fsync_failure_after_replace_keeps_committed_value(self):
+        manager = self.manager()
+        manager.replace({"value": "old"})
+        original_fsync = safe_settings.os.fsync
+        def fail_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("injected directory fsync failure")
+            return original_fsync(fd)
+        with patch.object(safe_settings.os, "fsync", side_effect=fail_directory), \
+             patch.object(safe_settings, "_log") as log:
+            manager.replace({"value": "new"})
+        self.assertEqual(manager.getSetting("value"), "new")
+        self.assertEqual(json.loads(Path(manager.path).read_text(encoding="utf-8")),
+                         {"value": "new"})
+        self.assertTrue(any("durability could not be confirmed" in call.args[1]
+                            for call in log.call_args_list))
+
     def test_existing_primary_gets_a_recovery_backup_on_first_read(self):
         path = self.root / "module.json"
         path.write_text('{"value": 7}', encoding="utf-8")
@@ -103,13 +122,83 @@ class AtomicSettingsTests(unittest.TestCase):
         self.manager()
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
-    def test_corrupt_file_without_backup_starts_clean_and_preserves_evidence(self):
+    def test_corrupt_file_without_backup_preserves_evidence_across_restarts(self):
         path = self.root / "module.json"
         path.write_text("[]", encoding="utf-8")
         manager = self.manager()
         self.assertEqual(manager.settings, {})
-        self.assertFalse(path.exists())
-        self.assertEqual(len(list(self.root.glob("module.json.corrupt-*"))), 1)
+        self.assertEqual(path.read_text(encoding="utf-8"), "[]")
+        self.assertEqual(len(list(self.root.glob("module.json.corrupt-*"))), 0)
+        self.assertIn("primary:", manager.recovery_error)
+        # Neither a component reload nor a new process may treat data loss as
+        # first install before the caller persists its recovery choice.
+        manager.read()
+        self.assertTrue(manager.recovery_error)
+        self.assertTrue(self.manager().recovery_error)
+
+    def test_missing_settings_are_distinct_from_failed_recovery(self):
+        self.assertEqual(self.manager().recovery_error, "")
+
+    def test_both_corrupt_copies_report_lost_intent_until_a_successful_commit(self):
+        (self.root / "module.json").write_text("{broken", encoding="utf-8")
+        (self.root / "module.json.bak").write_text("[]", encoding="utf-8")
+        manager = self.manager()
+        self.assertEqual(manager.settings, {})
+        self.assertIn("primary:", manager.recovery_error)
+        self.assertIn("backup:", manager.recovery_error)
+        manager.setSetting("enabled", False)
+        with patch.object(safe_settings, "atomic_write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                manager.commit()
+        self.assertTrue(manager.recovery_error)
+        manager.setSetting("enabled", False)
+        manager.commit()
+        self.assertEqual(manager.recovery_error, "")
+        self.assertEqual(self.manager().settings, {"enabled": False})
+
+    def test_backup_recovery_does_not_report_lost_intent(self):
+        (self.root / "module.json").write_text("{broken", encoding="utf-8")
+        (self.root / "module.json.bak").write_text('{"enabled": false}', encoding="utf-8")
+        manager = self.manager()
+        self.assertFalse(manager.getSetting("enabled"))
+        self.assertEqual(manager.recovery_error, "")
+
+    def test_corrupt_backup_without_primary_reports_lost_intent(self):
+        (self.root / "module.json.bak").write_text("null", encoding="utf-8")
+        manager = self.manager()
+        self.assertIn("backup:", manager.recovery_error)
+
+    def test_excessively_nested_primary_recovers_valid_backup(self):
+        # 2000 trips JSON's parser; 600 used to parse successfully and fail in
+        # deepcopy instead, bypassing the otherwise valid recovery backup.
+        for depth in (600, 2000):
+            with self.subTest(depth=depth):
+                (self.root / "module.json").write_text(
+                    '{"value":' + '[' * depth + '0' + ']' * depth + '}', encoding="utf-8")
+                (self.root / "module.json.bak").write_text('{"enabled": false}', encoding="utf-8")
+                manager = self.manager()
+                self.assertEqual(manager.settings, {"enabled": False})
+                self.assertEqual(manager.recovery_error, "")
+
+    def test_read_enforces_byte_limit_when_file_grows_after_stat(self):
+        path = self.root / "module.json"
+        path.write_text("{}", encoding="utf-8")
+        original_fdopen = safe_settings.os.fdopen
+        reads = []
+        class GrowingFile(io.BytesIO):
+            def read(self, size=-1):
+                reads.append(size)
+                return super().read(size)
+        def grown_after_stat(fd, *args, **kwargs):
+            # Close the real local descriptor and emulate content appended
+            # after its bounded fstat. No shared or device paths are touched.
+            with original_fdopen(fd, "rb"):
+                pass
+            return GrowingFile(b" " * (safe_settings.MAX_SETTINGS_BYTES + 2))
+        with patch.object(safe_settings.os, "fdopen", side_effect=grown_after_stat):
+            with self.assertRaises(safe_settings.CorruptSettings):
+                safe_settings.load_json_object(str(path))
+        self.assertEqual(reads, [safe_settings.MAX_SETTINGS_BYTES + 1])
 
     def test_symlink_target_is_blocked_without_touching_its_destination(self):
         victim = Path(self.temp.name) / "victim"

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -68,8 +69,130 @@ class MemorySettings:
     def commit(self):
         pass
 
+    def read(self):
+        pass
+
 
 class RemapBackendTests(unittest.TestCase):
+    def test_retry_reads_a_repaired_file_after_unrecoverable_storage_error(self):
+        from safe_settings import SettingsManager, atomic_write_json
+        with tempfile.TemporaryDirectory(prefix="lego-remap-recovery-") as raw:
+            path = Path(raw, "remap_settings.json")
+            path.write_text('{"state":', encoding="utf-8")
+            store = SettingsManager("remap_settings", raw)
+            self.assertTrue(store.recovery_error)
+            path.unlink()
+            with patch.object(remap_backend, "settings", store):
+                with self.assertRaises(remap_backend.RemapError):
+                    remap_backend._load_state()
+            recovered = {**remap_backend.DEFAULT_STATE, "desktop_action": "f4"}
+            atomic_write_json(str(path), {"state": recovered})
+            with patch.object(remap_backend, "settings", store):
+                self.assertEqual(remap_backend._load_state()["desktop_action"], "f4")
+            self.assertFalse(store.recovery_error)
+
+    def test_missing_ownership_after_storage_corruption_is_not_a_successful_release(self):
+        memory = MemorySettings()
+        memory.recovery_error = "Primary and backup settings are corrupt"
+        with patch.object(remap_backend, "settings", memory), patch.object(remap_backend, "_find_device") as discover:
+            with self.assertRaises(remap_backend.RemapError):
+                remap_backend._mutate_sync({"enabled": False})
+        discover.assert_not_called()
+
+    def test_failed_action_change_can_still_restore_the_last_applied_mapping(self):
+        initial = remap_backend._sanitize_state({
+            "enabled": True, "desktop_action": "f1", "page_action": "default",
+            "baseline_profile": BASE_PROFILE,
+        })
+        memory = MemorySettings(initial)
+        hardware = [remap_backend._build_profile(BASE_PROFILE, initial)]
+
+        def load(_path, profile):
+            hardware[0] = profile
+            return profile
+
+        with (
+            patch.object(remap_backend, "settings", memory),
+            patch.object(remap_backend, "_find_device", return_value=("/org/test", "Lenovo Legion Go 2")),
+            patch.object(remap_backend, "_get_profile", side_effect=lambda _: hardware[0]),
+            patch.object(remap_backend, "_status_sync", return_value={}),
+        ):
+            with patch.object(remap_backend, "_load_profile", side_effect=remap_backend.RemapError("D-Bus temporarily unavailable")):
+                for action in ("f2", "f3"):
+                    with self.assertRaises(remap_backend.RemapError):
+                        remap_backend._mutate_sync({"desktop_action": action})
+            self.assertEqual(memory.data["state"]["desktop_action"], "f3")
+            self.assertIn("keyboard: KeyF1", hardware[0])
+            # A new process has only the persisted transition, not local state.
+            memory.data["state"] = remap_backend._sanitize_state(copy.deepcopy(memory.data["state"]))
+            with patch.object(remap_backend, "_load_profile", side_effect=load):
+                remap_backend._mutate_sync({"enabled": False})
+        self.assertEqual(hardware[0], BASE_PROFILE)
+        self.assertFalse(memory.data["state"]["enabled"])
+        self.assertEqual(memory.data["state"]["desktop_action"], "f3")
+
+    def test_unconfirmed_applied_change_restores_our_button_and_preserves_external_mapping(self):
+        initial = remap_backend._sanitize_state({
+            "enabled": True, "desktop_action": "f1", "page_action": "default",
+            "baseline_profile": BASE_PROFILE,
+        })
+        memory = MemorySettings(initial)
+        hardware = [remap_backend._build_profile(BASE_PROFILE, initial)]
+
+        def load(_path, profile):
+            hardware[0] = profile
+            return profile
+
+        def unconfirmed(_path, profile):
+            hardware[0] = profile
+            raise remap_backend.RemapError("The readback reply was lost")
+
+        with (
+            patch.object(remap_backend, "settings", memory),
+            patch.object(remap_backend, "_find_device", return_value=("/org/test", "Lenovo Legion Go 2")),
+            patch.object(remap_backend, "_get_profile", side_effect=lambda _: hardware[0]),
+            patch.object(remap_backend, "_status_sync", return_value={}),
+        ):
+            with patch.object(remap_backend, "_load_profile", side_effect=unconfirmed):
+                with self.assertRaises(remap_backend.RemapError):
+                    remap_backend._mutate_sync({"desktop_action": "f2"})
+            hardware[0] = hardware[0].replace("button: LeftPaddle1", "button: RightPaddle2")
+            hardware[0] = hardware[0].replace(
+                remap_backend._render_mapping("page", "default"),
+                remap_backend._render_mapping("page", "f12"),
+            )
+            with patch.object(remap_backend, "_load_profile", side_effect=load):
+                remap_backend._mutate_sync({"enabled": False})
+        self.assertNotIn("keyboard: KeyF2", hardware[0])
+        self.assertIn("keyboard: KeyF12", hardware[0])
+        self.assertIn("button: RightPaddle2", hardware[0])
+        self.assertIn("- name: Keyboard", hardware[0])
+        self.assertIsNone(memory.data["state"]["previous_actions"])
+
+    def test_retry_commits_saved_intent_and_discards_previous_actions_after_confirmation(self):
+        initial = remap_backend._sanitize_state({
+            "enabled": True, "desktop_action": "f2", "page_action": "default",
+            "baseline_profile": BASE_PROFILE,
+            "previous_actions": {"desktop": "f1", "page": "default"},
+        })
+        memory = MemorySettings(initial)
+        hardware = [remap_backend._build_profile(BASE_PROFILE, {**initial, "desktop_action": "f1"})]
+
+        def load(_path, profile):
+            hardware[0] = profile
+            return profile
+
+        with (
+            patch.object(remap_backend, "settings", memory),
+            patch.object(remap_backend, "_find_device", return_value=("/org/test", "Lenovo Legion Go 2")),
+            patch.object(remap_backend, "_get_profile", side_effect=lambda _: hardware[0]),
+            patch.object(remap_backend, "_load_profile", side_effect=load),
+        ):
+            remap_backend._repair_sync()
+        self.assertIn("keyboard: KeyF2", hardware[0])
+        self.assertTrue(memory.data["state"]["enabled"])
+        self.assertIsNone(memory.data["state"]["previous_actions"])
+
     def test_build_replaces_only_two_dedicated_mappings(self):
         state = remap_backend._sanitize_state({
             "enabled": True,

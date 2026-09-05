@@ -47,6 +47,7 @@ IMU_KEYS = frozenset(f"{kind}:{side}" for kind in ("Gyroscope", "Accelerometer")
 LEASE_SECONDS = 3.0
 CAPTURE_SECONDS = 30.0
 CHECK_SECONDS = 60.0
+RECOVERY_RETRY_SECONDS = 5.0
 
 
 class ControllerError(RuntimeError):
@@ -291,6 +292,10 @@ def _valid_owner(ownership: Any) -> bool:
 
 
 def _state() -> dict:
+    if getattr(settings, "recovery_error", ""):
+        settings.read()
+    if getattr(settings, "recovery_error", ""):
+        raise ControllerError("Saved controller ownership could not be recovered. " + settings.recovery_error)
     raw = settings.getSetting("state", {})
     if not isinstance(raw, dict):
         raw = {}
@@ -736,7 +741,12 @@ class Plugin:
             self._watch_task = asyncio.create_task(self._watch())
 
     async def _watch(self) -> None:
-        last_check, offset = time.monotonic(), _suspend_offset()
+        now, offset = time.monotonic(), _suspend_offset()
+        # A first startup/resume probe can precede HID/InputPlumber discovery.
+        # Retry after 5/10/20/40 seconds, then at the normal minute interval.
+        # Healthy devices and externally changed ownership stay at one minute.
+        retry_delay = RECOVERY_RETRY_SECONDS
+        next_check = now + (retry_delay if self._error and not self._conflict else CHECK_SECONDS)
         while not self._closed:
             await asyncio.sleep(5)
             now, new_offset = time.monotonic(), _suspend_offset()
@@ -745,27 +755,39 @@ class Plugin:
             if resumed:
                 await asyncio.to_thread(self._stop_capture)
                 self._generation = None
-            if not resumed and now - last_check < CHECK_SECONDS:
+                retry_delay = RECOVERY_RETRY_SECONDS
+            if not resumed and now < next_check:
                 continue
-            last_check = now
-            source = _state()["gyro_source"]
-            if source == "system":
-                continue
+            next_check = now + CHECK_SECONDS
             try:
+                source = _state()["gyro_source"]
+                if source == "system":
+                    retry_delay = RECOVERY_RETRY_SECONDS
+                    continue
                 await asyncio.to_thread(self._select, source, reconcile=True)
+                retry_delay = RECOVERY_RETRY_SECONDS
             except Exception as exc:
                 self._error = str(exc)
+                if not self._conflict:
+                    next_check = now + retry_delay
+                    retry_delay = min(CHECK_SECONDS, retry_delay * 2)
             self._status_cache = None
 
     async def _main(self) -> None:
+        try:
+            source = (await asyncio.to_thread(_state))["gyro_source"]
+        except Exception as exc:
+            self._error = str(exc)
+            raise
         self._closed = False
         self._generation = None
-        source = _state()["gyro_source"]
-        if source != "system":
-            try:
+        self._error = ""
+        self._status_cache = None
+        try:
+            if source != "system":
                 await asyncio.to_thread(self._select, source, reconcile=True)
-            except Exception as exc:
-                self._error = str(exc)
+        except Exception as exc:
+            self._error = str(exc)
         self._ensure_watch()
 
     async def _unload(self) -> None:

@@ -93,41 +93,55 @@ export const RemapPage: FC = () => {
   const [error, setError] = useState("");
   const pending = useRef(0);
   const chain = useRef<Promise<void>>(Promise.resolve());
+  const mounted = useRef(true);
+  const isVisible = useRef(visible);
+  const readRevision = useRef(0);
+  const readInFlight = useRef(false);
+  isVisible.current = visible;
+  useEffect(() => { mounted.current = true; return () => {
+    mounted.current = false; readRevision.current += 1;
+  }; }, []);
 
   const refresh = useCallback(async () => {
-    if (pending.current) return;
+    if (!mounted.current || !isVisible.current || pending.current || readInFlight.current) return;
+    readInFlight.current = true;
+    const revision = readRevision.current;
     try {
       const next = await getRemapStatus();
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
-      if (next.error) setError(next.error);
+      setError(next.error || "");
     } catch {
-      setError("Button-remapper status is unavailable. Retrying while this page is open.");
-    }
+      if (mounted.current && isVisible.current && revision === readRevision.current)
+        setError("Button-remapper status is unavailable. Retrying while this page is open.");
+    } finally { readInFlight.current = false; }
   }, []);
 
   useEffect(() => {
-    void refresh();
     if (!visible) return;
+    void refresh();
     const timer = setInterval(() => void refresh(), 10000);
-    return () => clearInterval(timer);
+    return () => { clearInterval(timer); readRevision.current += 1; };
   }, [refresh, visible]);
 
   const enqueue = useCallback((operation: () => Promise<RemapResult>, message: string) => {
+    readRevision.current += 1;
+    pending.current += 1;
     const run = async () => {
-      pending.current += 1;
       setBusy(true);
       setNotice("");
       setError("");
       try {
         const result = await operation();
+        if (!mounted.current) return;
         if (result.status) setStatus(result.status);
         if (result.success) setNotice(message);
         else setError(result.error || "InputPlumber did not confirm the requested mapping.");
       } catch {
-        setError("The backend call ended before InputPlumber confirmed the mapping.");
+        if (mounted.current) setError("The backend call ended before InputPlumber confirmed the mapping.");
       } finally {
         pending.current -= 1;
-        if (!pending.current) setBusy(false);
+        if (mounted.current && !pending.current) setBusy(false);
       }
     };
     const queued = chain.current.then(run, run);

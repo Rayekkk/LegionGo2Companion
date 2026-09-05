@@ -203,6 +203,8 @@ class AppWatcher {
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
+  private static generation = 0;
+  private static delayedChecks = new Set<ReturnType<typeof setTimeout>>();
 
   static activeId(): string {
     try {
@@ -231,6 +233,7 @@ class AppWatcher {
   static start() {
     if (this.started) return;
     this.started = true;
+    const generation = ++this.generation;
     this.currentId = this.activeId();
 
     const steam = (window as any).SteamClient;
@@ -238,7 +241,12 @@ class AppWatcher {
     try {
       const reg = steam?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
         // Router.MainRunningApp lags the notification slightly.
-        setTimeout(() => void this.check(), 300);
+        if (!this.started || generation !== this.generation) return;
+        const timer = setTimeout(() => {
+          this.delayedChecks.delete(timer);
+          if (generation === this.generation) void this.check();
+        }, 300);
+        this.delayedChecks.add(timer);
       });
       if (reg?.unregister) this.unsubs.push(() => reg.unregister());
     } catch (e) {
@@ -248,6 +256,7 @@ class AppWatcher {
     // The controller comes back at its firmware defaults, and the backend's
     // write cache would otherwise skip the rewrite.
     const offResume = onResumeFromSuspend(() => {
+      if (!this.started || generation !== this.generation) return;
       void reapply()
         .then((res) => {
           if (!res.success) console.warn("[lego-vibe] reapply after resume failed");
@@ -261,6 +270,11 @@ class AppWatcher {
   }
 
   static stop() {
+    this.started = false;
+    this.generation += 1;
+    this.busy = false;
+    for (const timer of this.delayedChecks) clearTimeout(timer);
+    this.delayedChecks.clear();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
@@ -280,7 +294,8 @@ class AppWatcher {
   }
 
   private static async check() {
-    if (this.busy) return;
+    if (!this.started || this.busy) return;
+    const generation = this.generation;
     const id = this.activeId();
     const changed = id !== this.currentId;
     const now = Date.now();
@@ -288,6 +303,7 @@ class AppWatcher {
     this.busy = true;
     try {
       const res = await setActiveApp(id);
+      if (!this.started || generation !== this.generation) return;
       // Committed only once the backend has it. Recording the id before the
       // call meant a single failed RPC - the loader restarting, say - left
       // every later tick thinking there was nothing to send, so the hardware
@@ -298,7 +314,7 @@ class AppWatcher {
     } catch (e) {
       console.error("[lego-vibe] setActiveApp failed, will retry", e);
     } finally {
-      this.busy = false;
+      if (generation === this.generation) this.busy = false;
     }
   }
 }

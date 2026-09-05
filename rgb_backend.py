@@ -384,6 +384,8 @@ def _sanitize_state(raw: Any, *, include_pending: bool = True) -> dict[str, Any]
 def _load_state() -> dict[str, Any]:
     with _settings_lock:
         settings.read()
+        if getattr(settings, "recovery_error", ""):
+            raise RuntimeError("Saved lighting ownership could not be recovered. " + settings.recovery_error)
         return _sanitize_state(copy.deepcopy(settings.getSetting("state", {})))
 
 
@@ -395,8 +397,9 @@ def _save_state(state: dict[str, Any]) -> None:
 
 
 def _ensure_settings_file() -> None:
+    state = _load_state()
     if not os.path.exists(settings.path):
-        _save_state(dict(DEFAULT_STATE))
+        _save_state(state)
 
 
 def _seed_from_snapshot(state: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -820,6 +823,7 @@ class Plugin:
 
     async def _main(self) -> None:
         global _drift_task, _last_suspend_offset
+        Plugin._setup_error = ""
         try:
             await _offload(_ensure_settings_file)
             _last_suspend_offset = _suspend_offset()
@@ -833,6 +837,7 @@ class Plugin:
         except Exception as exc:
             Plugin._setup_error = str(exc)
             decky.logger.error(f"[lego-rgb] setup failed: {exc}")
+            raise
 
     async def _unload(self) -> None:
         global _drift_task

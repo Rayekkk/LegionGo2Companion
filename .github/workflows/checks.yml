@@ -1,0 +1,114 @@
+name: Quality checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: '3.10'
+          - os: windows-2022
+            python: '3.13'
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run isolated backend tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  frontend-package:
+    name: Frontend and package (Node.js 24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check frontend types
+        run: npm run typecheck
+      - name: Run frontend regression tests
+        run: npm run test:frontend
+      - name: Build frontend
+        run: npm run build
+      - name: Check package payload and versions
+        run: npm run package -- --check
+      - name: Build package
+        run: npm run package
+      - name: Verify archive integrity and contents
+        shell: python
+        run: |
+          import json
+          import stat
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          root = Path.cwd()
+          manifest = json.loads((root / 'plugin.json').read_text(encoding='utf-8'))
+          archive = root / f"LegionGo2Companion-{manifest['version']}.zip"
+          prefix = 'LegionGo2Companion/'
+          required = {
+              'plugin.json', 'package.json', 'package-lock.json', manifest['main'],
+              manifest['bin'], 'LICENSE', 'LICENSE.MIT', 'LICENSE.HUESYNC', 'NOTICE',
+              'SOURCE.md', 'THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt',
+              'THIRD_PARTY_SOURCES/decky-api-1.1.3/package.json',
+          }
+          forbidden = {
+              '.git', '.github', 'node_modules', '__pycache__', 'tests', 'artifacts',
+              'build', 'bin', '.venv', 'venv',
+          }
+          with zipfile.ZipFile(archive) as payload:
+              assert payload.testzip() is None, 'Corrupt ZIP member'
+              names = payload.namelist()
+              assert len(names) == len(set(names)), 'Duplicate ZIP members'
+              assert {prefix + name for name in required} <= set(names), 'Missing runtime or license file'
+              for member in payload.infolist():
+                  path = PurePosixPath(member.filename)
+                  assert member.filename.startswith(prefix), f'Unexpected archive root: {path}'
+                  assert '..' not in path.parts and '\\' not in member.filename, f'Unsafe path: {path}'
+                  assert not forbidden.intersection(path.parts), f'Private or generated directory: {path}'
+                  assert not stat.S_ISLNK(member.external_attr >> 16), f'Unexpected symlink: {path}'
+                  assert not path.name.startswith('.env'), f'Environment file: {path}'
+                  assert path.suffix.lower() not in {'.pyc', '.pyo', '.pem', '.key', '.log'}, f'Private or generated file: {path}'
+                  assert not path.name.endswith(('settings.json', 'settings.json.bak')), f'Runtime settings: {path}'
+                  if member.is_dir():
+                      continue
+                  relative = path.relative_to('LegionGo2Companion')
+                  if relative.parts[0] == 'THIRD_PARTY_SOURCES':
+                      source = root / 'node_modules/@decky/api' / Path(*relative.parts[2:])
+                  elif relative.parts[0] == 'THIRD_PARTY_LICENSES':
+                      source = root / 'node_modules/@decky/api/LICENSE'
+                  else:
+                      source = root / Path(*relative.parts)
+                  assert source.is_file(), f'Unexpected archive file: {path}'
+                  assert payload.read(member) == source.read_bytes(), f'Stale package file: {path}'
+          print(f'Archive verified: {archive.name}')

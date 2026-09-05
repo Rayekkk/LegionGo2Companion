@@ -84,6 +84,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "desktop_action": "default",
     "page_action": "default",
     "baseline_profile": None,
+    "previous_actions": None,
 }
 
 settings = SettingsManager(
@@ -128,11 +129,22 @@ def _sanitize_state(raw: Any) -> dict[str, Any]:
     # invent a baseline and later overwrite a user's InputPlumber profile.
     if state["enabled"] and state["baseline_profile"] is None:
         state["enabled"] = False
+    previous = source.get("previous_actions")
+    if previous is not None:
+        if (not isinstance(previous, dict) or set(previous) != set(BUTTON_SOURCES)
+                or any(value is not None and (not isinstance(value, str) or value not in ACTION_LABELS)
+                       for value in previous.values())):
+            raise RemapError("The saved button transition is invalid; restoration data must be recovered first.")
+        state["previous_actions"] = copy.deepcopy(previous)
     return state
 
 
 def _load_state() -> dict[str, Any]:
     with _state_lock:
+        if getattr(settings, "recovery_error", ""):
+            settings.read()
+        if getattr(settings, "recovery_error", ""):
+            raise RemapError("Saved button ownership could not be recovered. " + settings.recovery_error)
         return _sanitize_state(settings.getSetting("state", DEFAULT_STATE))
 
 
@@ -401,6 +413,39 @@ def _profile_matches(profile: str, state: dict[str, Any]) -> bool:
     return True
 
 
+def _owned_actions(state: dict[str, Any], button: str) -> list[str]:
+    actions = [state[f"{button}_action"]]
+    previous = state.get("previous_actions") or {}
+    if previous.get(button) is not None and previous[button] not in actions:
+        actions.append(previous[button])
+    return actions
+
+
+def _previous_actions(current: str, state: dict[str, Any]) -> dict[str, str | None]:
+    """Keep one currently observable owned action per button before a change.
+
+    A failed D-Bus call can leave either endpoint of the previous transaction.
+    Resolve that transition from the live profile before preparing another one,
+    so repeated failures never accumulate an unbounded ownership history.
+    """
+    result: dict[str, str | None] = dict.fromkeys(BUTTON_SOURCES)
+    if not state["enabled"] or _profile_name(current) != PROFILE_NAME:
+        return result
+    _, blocks = _mapping_blocks(current)
+    by_source: dict[str, str] = {}
+    for block in blocks:
+        source = _source_for_block(block)
+        if source:
+            if source in by_source:
+                raise RemapError("The active profile contains ambiguous dedicated-button mappings.")
+            by_source[source] = block
+    for button, source in BUTTON_SOURCES.items():
+        events = _events_for_block(by_source[source]) if source in by_source else None
+        result[button] = next((action for action in _owned_actions(state, button)
+                               if events == _action_events(button, action)), None)
+    return result
+
+
 def _load_profile(path: str, profile: str) -> str:
     if not _valid_profile(profile):
         raise RemapError("Refusing to load an invalid InputPlumber profile.")
@@ -424,6 +469,9 @@ def _apply_state(state: dict[str, Any], *, adopt_external: bool) -> tuple[dict[s
     if not _valid_profile(base):
         raise RemapError("The original InputPlumber profile is unavailable.")
     if _profile_matches(current, working):
+        if working.get("previous_actions") is not None:
+            working["previous_actions"] = None
+            _save_state(working)
         return working, current
     # Merge our two mappings into the live profile. Other controls may have
     # changed since the baseline was captured.
@@ -431,6 +479,9 @@ def _apply_state(state: dict[str, Any], *, adopt_external: bool) -> tuple[dict[s
     applied = _load_profile(path, desired)
     if not _profile_matches(applied, working):
         raise RemapError("InputPlumber did not confirm both requested mappings.")
+    if working.get("previous_actions") is not None:
+        working["previous_actions"] = None
+        _save_state(working)
     return working, applied
 
 
@@ -456,7 +507,8 @@ def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
     for block in blocks:
         source = _source_for_block(block)
         button = sources.get(source)
-        if button and _events_for_block(block) == _action_events(button, state[f"{button}_action"]):
+        if button and any(_events_for_block(block) == _action_events(button, action)
+                          for action in _owned_actions(state, button)):
             # Restore only a mapping still equal to our last applied action.
             if source in originals:
                 output.append(originals[source])
@@ -539,6 +591,7 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
             current = _get_profile(path)
             if not before["enabled"] or _profile_name(current) != PROFILE_NAME:
                 desired["baseline_profile"] = current
+            desired["previous_actions"] = _previous_actions(current, before)
             _save_state(desired)
             try:
                 desired, _ = _apply_state(desired, adopt_external=False)
@@ -553,6 +606,7 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
                 if before["enabled"]:
                     _restore_if_owned(before)
                 desired["baseline_profile"] = None
+                desired["previous_actions"] = None
                 _save_state(desired)
                 _last_error = ""
             except Exception as exc:

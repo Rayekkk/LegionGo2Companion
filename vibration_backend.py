@@ -15,7 +15,7 @@ import asyncio
 import struct
 import fcntl
 import threading
-from safe_settings import SettingsManager
+from safe_settings import CorruptSettings, SettingsManager
 
 # ── Optional pyudev - graceful fallback to glob if unavailable ─────────────────
 
@@ -26,8 +26,8 @@ if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
-# name before we are imported, and sys.modules wins over sys.path. See the
-# module docstring in lego_updater.py.
+# name before we are imported, and sys.modules wins over sys.path. Keep this
+# backend-specific helper name for version/TLS compatibility.
 from vibration_updater import Updater  # noqa: E402 - needs the sys.path line above
 
 try:
@@ -47,12 +47,9 @@ except Exception as _e:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-GITHUB_RELEASES_URL = "https://api.github.com/repos/Rayekkk/LeGo-Vibe-Control/releases/latest"
 
-# Update checks, TLS trust store and downloads live in updater.py, which is
-# kept identical in LeGoTDP so a fix lands in both plugins.
+# Retained local version and TLS compatibility helper; no standalone updates.
 updater = Updater(
-    releases_url=GITHUB_RELEASES_URL,
     user_agent="lego-vibe-plugin",
     log_prefix="[lego-vibe]",
     plugin_dir=PLUGIN_DIR,
@@ -310,6 +307,10 @@ async def _offload(fn, *args):
 def _apply_settings(values: dict, sys_path: str | None = None,
                     force: bool = False) -> bool:
     """Write a full profile to the hardware. Every attribute is attempted."""
+    # Explicit withdrawal/uninstall can reach this with driver defaults rather
+    # than a loaded profile. They must also preserve unrecoverable user state.
+    with _settings_lock:
+        _read_valid_settings()
     with _apply_lock:
         p = sys_path or _get_device_path()
         if p is None:
@@ -381,13 +382,20 @@ def _coerce_profile(raw: dict | None) -> dict:
     }
 
 
+def _read_valid_settings() -> None:
+    settings.read()
+    error = getattr(settings, "recovery_error", "")
+    if error:
+        raise CorruptSettings("Vibration settings recovery failed; saved controller controls were left untouched. " + error)
+
+
 def _load_profiles() -> dict:
     """A private copy of the profile store. Callers coerce and mutate what they
     get back, and getSetting hands out a live reference into the manager's own
     dict - so without the copy those edits would land in the store uncommitted,
     and a later read() would silently drop them again."""
     with _settings_lock:
-        settings.read()
+        _read_valid_settings()
         raw_profiles = settings.getSetting(SETTINGS_KEY_GAME_PROFILES, {}) or {}
         raw_profiles = copy.deepcopy(raw_profiles) if isinstance(raw_profiles, dict) else {}
     profiles: dict[str, dict] = {}
@@ -414,6 +422,7 @@ def _load_profiles() -> dict:
 
 def _save_profiles(profiles: dict) -> None:
     with _settings_lock:
+        _read_valid_settings()
         settings.setSetting(SETTINGS_KEY_GAME_PROFILES, profiles)
         settings.commit()
 
@@ -435,7 +444,7 @@ def _active_values(profiles: dict | None = None) -> dict:
 def _migrate() -> None:
     """Fold the old flat settings keys into profile '0' exactly once."""
     with _settings_lock:
-        settings.read()
+        _read_valid_settings()
         # A hand-edited or truncated store can hold anything here, and this runs
         # from _migration() - where a raise kills the plugin before its RPC
         # socket exists. Same guard as LeGoTDP's copy.
@@ -1020,14 +1029,6 @@ class Plugin:
 
     async def get_driver_status(self) -> dict:
         return await _offload(_device_status)
-
-    # ---- Updates ----------------------------------------------------- #
-
-    async def check_for_updates(self) -> dict:
-        return await _offload(updater.check)
-
-    async def perform_update(self, download_url: str, asset_name: str) -> dict:
-        return await _offload(updater.download, download_url, asset_name)
 
     # ---- Test ------------------------------------------------------- #
 

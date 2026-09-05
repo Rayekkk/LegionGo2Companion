@@ -157,25 +157,37 @@ export const RgbPage: FC = () => {
   const pendingWrites = useRef<Record<string, () => void>>({});
   const colorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const brightnessTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const mounted = useRef(true);
+  const isVisible = useRef(visible);
+  const readRevision = useRef(0);
+  const readInFlight = useRef(false);
+  isVisible.current = visible;
+  useEffect(() => { mounted.current = true; return () => {
+    mounted.current = false; readRevision.current += 1;
+  }; }, []);
 
   const timersPending = () => colorTimer.current != null || brightnessTimer.current != null;
 
   const refresh = useCallback(async () => {
-    if (pendingCount.current > 0 || timersPending()) return;
+    if (!mounted.current || !isVisible.current || readInFlight.current || pendingCount.current > 0 || timersPending()) return;
+    readInFlight.current = true;
+    const revision = readRevision.current;
     try {
       const next = await getRgbStatus();
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
-      if (next.error) setError(next.error);
+      setError(next.error || "");
     } catch {
-      setError("Lighting status is unavailable. Retrying while this page is open.");
-    }
+      if (mounted.current && isVisible.current && revision === readRevision.current)
+        setError("Lighting status is unavailable. Retrying while this page is open.");
+    } finally { readInFlight.current = false; }
   }, []);
 
   useEffect(() => {
-    void refresh();
     if (!visible) return;
+    void refresh();
     const timer = setInterval(() => void refresh(), 10000);
-    return () => clearInterval(timer);
+    return () => { clearInterval(timer); readRevision.current += 1; };
   }, [refresh, visible]);
 
   useEffect(() => () => {
@@ -187,6 +199,7 @@ export const RgbPage: FC = () => {
   }, []);
 
   const updateLocal = useCallback((patch: Partial<RgbSettings>) => {
+    readRevision.current += 1;
     setStatus((current) => current?.settings ? {
       ...current,
       settings: { ...current.settings, ...patch },
@@ -194,19 +207,20 @@ export const RgbPage: FC = () => {
   }, []);
 
   const enqueue = useCallback((operation: () => Promise<RgbResult>) => {
+    readRevision.current += 1;
     const pending = Object.values(pendingWrites.current);
     pendingWrites.current = {};
     if (colorTimer.current) clearTimeout(colorTimer.current);
     if (brightnessTimer.current) clearTimeout(brightnessTimer.current);
     for (const flush of pending) flush();
+    pendingCount.current += 1;
     const run = async () => {
-      pendingCount.current += 1;
       setBusy(true);
       setError("");
       setNotice("");
       try {
         const result = await operation();
-        if (result.status) setStatus(result.status);
+        if (result.status && mounted.current) setStatus(result.status);
         if (result.success) setNotice("The lighting state was applied and saved.");
         else {
           setError(result.error || "The hardware did not confirm the change.");
@@ -217,7 +231,7 @@ export const RgbPage: FC = () => {
         toaster.toast({ title: "Lighting change failed", body: "The save could not be confirmed. Reopen Lighting to check the current state." });
       } finally {
         pendingCount.current -= 1;
-        if (pendingCount.current === 0) setBusy(false);
+        if (mounted.current && pendingCount.current === 0) setBusy(false);
       }
     };
     const queued = rgbMutationChain.then(run, run);

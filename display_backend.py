@@ -63,27 +63,22 @@ except ImportError:  # pragma: no cover - Windows test host
 
 import decky
 import module_runtime
-from safe_settings import SettingsManager
+from safe_settings import SettingsManager, CorruptSettings
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
-# name before we are imported, and sys.modules wins over sys.path. See the
-# module docstring in lego_updater.py.
+# name before we are imported, and sys.modules wins over sys.path. Keep this
+# backend-specific helper name for version/TLS compatibility.
 from display_updater import Updater  # noqa: E402 - needs the sys.path line above
 
 LOG = "[lego2brightnessfix]"
 
-GITHUB_RELEASES_URL = (
-    "https://api.github.com/repos/Rayekkk/LeGo2BrightnessFix/releases/latest"
-)
 
-# Update checks, TLS trust store and downloads live in lego_updater.py, which is
-# kept identical across the LeGo plugins so a fix lands in all of them.
+# Retained local version and TLS compatibility helper; no standalone updates.
 updater = Updater(
-    releases_url=GITHUB_RELEASES_URL,
     user_agent="LeGo2BrightnessFix",
     log_prefix=LOG,
     plugin_dir=PLUGIN_DIR,
@@ -163,6 +158,7 @@ GATE_INTERVAL_S = 2.0
 # content stays on a gamma 2.2 output before the panel follows it into PQ. One
 # xprop costs about 2 ms, so twice a second is not worth economising on.
 HYBRID_INTERVAL_S = 0.5
+HARDWARE_RETRY_S = 10.0
 
 # Enter PQ as soon as HDR appears, but do not chase brief SDR frames emitted
 # while a game is rebuilding its swapchain or moving between loading screens.
@@ -424,11 +420,14 @@ def _open_notify(bl_dir: str):
     has to be read once up front to arm it.
     """
     path = os.path.join(bl_dir, NOTIFY_ATTR)
+    fd = None
     try:
         fd = os.open(path, os.O_RDONLY)
         os.read(fd, 64)
         return fd
     except OSError:
+        if fd is not None:
+            os.close(fd)
         return None
 
 
@@ -1207,6 +1206,7 @@ class Plugin:
         "setup_done": False,
         "setup_note": "checking",
         "setup_error": "",
+        "settings_error": "",
         "restart_pending": False,
         "restart_error": "",
         # Hybrid half - idle in the other two modes
@@ -1249,14 +1249,32 @@ class Plugin:
     _mode_lock = asyncio.Lock()
 
     @staticmethod
+    def _require_settings() -> None:
+        error = getattr(settings, "recovery_error", "")
+        if error:
+            message = f"Display settings could not be recovered. Restore a valid settings copy and restart Decky. {error}"
+            Plugin._state["settings_error"] = message
+            Plugin._state["setup_error"] = message
+            raise CorruptSettings(message)
+
+    @staticmethod
+    def _read_settings() -> None:
+        with _settings_lock:
+            settings.read()
+            Plugin._require_settings()
+
+    @staticmethod
     def _store_settings(values: dict) -> None:
         """Persist one logical runtime transaction in a single commit."""
         try:
             with _settings_lock:
                 settings.read()
+                Plugin._require_settings()
                 for name, value in values.items():
                     settings.setSetting(name, value)
                 settings.commit()
+        except CorruptSettings:
+            raise
         except Exception as e:
             decky.logger.warning(
                 f"{LOG} could not save {', '.join(values.keys())}: {e}")
@@ -1363,6 +1381,10 @@ class Plugin:
     # ── exported to the frontend ───────────────────────────────────────────────
 
     async def get_state(self) -> dict:
+        try:
+            Plugin._require_settings()
+        except CorruptSettings:
+            pass
         return dict(Plugin._state)
 
     async def run_setup(self, mode: str = MODE_PQ) -> dict:
@@ -1375,6 +1397,7 @@ class Plugin:
 
     @staticmethod
     async def _apply_mode(mode: str) -> dict:
+        await _offload(Plugin._read_settings)
         # RPC calls can overlap even though the frontend normally disables its
         # buttons. BUNDLED_SCRIPT is process-global, so the whole transaction and
         # its derived runtime state must be serialised, not only the file write.
@@ -1489,27 +1512,13 @@ class Plugin:
     async def get_version(self) -> dict:
         return {"version": updater.plugin_version()}
 
-    async def check_for_updates(self) -> dict:
-        info = await _offload(updater.check)
-        if info.get("update_available"):
-            expected = f"LeGo2BrightnessFix-{info.get('latest_version', '')}.zip"
-            if (info.get("asset_name") != expected
-                    or not info.get("download_url")):
-                info["download_url"] = None
-                info["asset_name"] = None
-                info["error"] = (
-                    f"Release v{info.get('latest_version', '?')} has no "
-                    f"installable {expected} asset yet")
-        return info
-
-    async def perform_update(self, download_url: str, asset_name: str) -> dict:
-        return await _offload(updater.download, download_url, asset_name)
-
     async def set_enabled(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
             raise ValueError("enabled must be a boolean")
         def _do():
             with _settings_lock:
+                settings.read()
+                Plugin._require_settings()
                 settings.setSetting("enabled", bool(enabled))
                 settings.commit()
         await _offload(_do)
@@ -1526,6 +1535,8 @@ class Plugin:
             raise ValueError("enabled must be a boolean")
         def _do():
             with _settings_lock:
+                settings.read()
+                Plugin._require_settings()
                 settings.setSetting("edid_fix", bool(enabled))
                 settings.commit()
         await _offload(_do)
@@ -2287,11 +2298,33 @@ class Plugin:
         gate_ok = False
         gate_ts = 0.0
         hybrid_ts = 0.0
+        hardware_retry_at = 0.0
         try:
             while True:
                 try:
                     now = time.monotonic()
                     if now - gate_ts >= GATE_INTERVAL_S:
+                        # DRM/backlight nodes can appear after Decky starts, or
+                        # move after a driver rebind. Retry discovery only while
+                        # hardware is missing; a healthy panel needs no scans.
+                        missing = not bl_dir or not os.path.exists(bl_path)
+                        if (now >= hardware_retry_at
+                                and (missing or not Plugin._state["panel_ok"])):
+                            hardware_retry_at = now + HARDWARE_RETRY_S
+                            matched, desc = await _offload(_identify_panel)
+                            Plugin._state["panel_ok"] = matched
+                            Plugin._state["panel_desc"] = desc
+                            if missing:
+                                if notify is not None:
+                                    os.close(notify)
+                                    notify = None
+                                bl_dir = await _offload(_find_backlight)
+                                bl_path = os.path.join(bl_dir, "brightness") if bl_dir else ""
+                                notify = await _offload(_open_notify, bl_dir) if bl_dir else None
+                                Plugin._state["backlight"] = os.path.basename(bl_dir) if bl_dir else ""
+                                maximum = _read_int(os.path.join(bl_dir, "max_brightness")) if bl_dir else None
+                                Plugin._state["max_nits"] = round(_millinits_to_nits(maximum), 2) if maximum else 0.0
+                                Plugin._last_written = None
                         await _offload(Plugin._refresh_setup)
                         gate_ok = await _offload(Plugin._refresh_gate)
                         await _offload(Plugin._edid_pass)
@@ -2360,9 +2393,14 @@ class Plugin:
         except Exception as e:
             decky.logger.warning(f"{LOG} update checks unavailable: {e}")
         try:
-            await _offload(settings.read)
-        except Exception:
-            pass
+            await _offload(Plugin._read_settings)
+        except Exception as error:
+            message = f"Display settings are unavailable; the module was not started. {error}"
+            Plugin._state["settings_error"] = message
+            Plugin._state["setup_error"] = message
+            decky.logger.error(f"{LOG} {message}")
+            return
+        Plugin._state["settings_error"] = ""
         Plugin._state["enabled"] = _strict_bool(
             settings.getSetting("enabled", DEFAULT_SETTINGS["enabled"]),
             DEFAULT_SETTINGS["enabled"],
@@ -2445,6 +2483,14 @@ class Plugin:
             Plugin._task.cancel()
             await asyncio.wait([Plugin._task], timeout=1.0)
             Plugin._task = None
+        if getattr(settings, "recovery_error", ""):
+            if Plugin._prop_task:
+                Plugin._prop_task.cancel()
+                await asyncio.wait([Plugin._prop_task], timeout=2.0)
+                Plugin._prop_task = None
+            # The saved hand-back values are unknown. Explicit module cleanup
+            # must stay pending instead of substituting default HDR settings.
+            Plugin._require_settings()
         # Put both things back before we go. The EDID would otherwise stay
         # trimmed with nothing left to maintain it, and the atom would keep
         # whatever level we last forwarded.

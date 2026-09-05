@@ -18,15 +18,15 @@ import tarfile
 import tempfile
 import time
 import threading
-from safe_settings import SettingsManager
+from safe_settings import CorruptSettings, SettingsManager
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
-# name before we are imported, and sys.modules wins over sys.path. See the
-# module docstring in lego_updater.py.
+# name before we are imported, and sys.modules wins over sys.path. Keep this
+# backend-specific helper name for version/TLS compatibility.
 from tdp_updater import Updater  # noqa: E402 - needs the sys.path line above
 
 BIN_DIR       = os.path.join(PLUGIN_DIR, "bin")
@@ -37,17 +37,13 @@ RYZENADJ_URL  = (
 )
 RYZENADJ_SHA256 = "d04547f111c6af3e40d3f210468adb884561618ddade0b640d90e50c88d03444"
 RYZENADJ_BINARY_SHA256 = "18a61170efec95d2366355b9dd5c75a961a9e8008d42e3471f4f414a6faec471"
-GITHUB_RELEASES_URL = "https://api.github.com/repos/Rayekkk/LeGoTDP/releases/latest"
 
-# Update checks, TLS trust store and downloads live in a reusable helper. The
-# host allowlist matters especially here: this plugin executes RyzenAdj, so an
-# unrestricted URL would be a fetch-and-run primitive.
+# The pinned RyzenAdj download uses TLS verification and a host allowlist.
+# Standalone plugin update paths are intentionally not part of Companion.
 updater = Updater(
-    releases_url=GITHUB_RELEASES_URL,
     user_agent="LeGoTDP",
     log_prefix="[legotdp]",
     plugin_dir=PLUGIN_DIR,
-    asset_name_template="LeGoTDP-{version}.zip",
     logger=decky.logger,
 )
 
@@ -391,13 +387,20 @@ async def _offload(fn, *args):
     return await module_runtime.offload('tdp', fn, *args)
 
 
+def _read_valid_settings() -> None:
+    settings.read()
+    error = getattr(settings, "recovery_error", "")
+    if error:
+        raise CorruptSettings("TDP settings recovery failed; saved power controls were left untouched. " + error)
+
+
 def _read_key(key: str, default: dict) -> dict:
     """A private copy of one key. Callers clamp and mutate what they get back,
     and getSetting hands out a live reference into the manager's own dict - so
     without the copy those edits would land in the store uncommitted, and a
     later read() would silently drop them again."""
     with _settings_lock:
-        settings.read()
+        _read_valid_settings()
         value = settings.getSetting(key, None)
         return copy.deepcopy(value) if isinstance(value, dict) else dict(default)
 
@@ -406,7 +409,7 @@ def _write_keys(values: dict[str, dict]) -> None:
     with _settings_lock:
         # Refresh first so a caller cannot commit a stale in-memory copy of an
         # unrelated key. All values in this transaction reach one JSON commit.
-        settings.read()
+        _read_valid_settings()
         for key, value in values.items():
             settings.setSetting(key, value)
         settings.commit()
@@ -534,7 +537,7 @@ def _migrate() -> None:
     finds its settings.
     """
     with _settings_lock:
-        settings.read()
+        _read_valid_settings()
         try:
             schema = int(settings.getSetting(SETTINGS_KEY_SCHEMA, 1))
         except (TypeError, ValueError):
@@ -2487,14 +2490,6 @@ class Plugin:
                 return result
         return await _offload(_do)
 
-    # ---- Updates ----------------------------------------------------- #
-
-    async def check_for_updates(self) -> dict:
-        return await _offload(updater.check)
-
-    async def perform_update(self) -> dict:
-        return await _offload(updater.download_latest)
-
     async def _push_info(self) -> bool:
         """One refresh, pushed to the panel. True when something went out.
 
@@ -2700,6 +2695,7 @@ class Plugin:
             # still be in flight holding this lock. Take it, or that pass could
             # re-assert the limits after we have handed the profile back.
             with _mutation_lock:
+                _load_settings()
                 if not _apply_lock.acquire(timeout=8.0):
                     decky.logger.warning(
                         "[legotdp] uninstall: apply busy, leaving the profile as it is")

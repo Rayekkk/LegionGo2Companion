@@ -351,6 +351,8 @@ class AppWatcher {
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
+  private static generation = 0;
+  private static delayedChecks = new Set<ReturnType<typeof setTimeout>>();
 
   static activeGame(): RunningGame | null {
     try {
@@ -376,6 +378,7 @@ class AppWatcher {
   static start() {
     if (this.started) return;
     this.started = true;
+    const generation = ++this.generation;
     this.current = this.activeGame();
 
     const steam = (window as any).SteamClient;
@@ -383,7 +386,12 @@ class AppWatcher {
     try {
       const reg = steam?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
         // Router.MainRunningApp lags the notification slightly.
-        setTimeout(() => void this.check(), 300);
+        if (!this.started || generation !== this.generation) return;
+        const timer = setTimeout(() => {
+          this.delayedChecks.delete(timer);
+          if (generation === this.generation) void this.check();
+        }, 300);
+        this.delayedChecks.add(timer);
       });
       if (reg?.unregister) this.unsubs.push(() => reg.unregister());
     } catch (e) {
@@ -395,6 +403,7 @@ class AppWatcher {
     // _uninstall - so this notification is the only way to beat the enforce
     // loop's five-second tick to it.
     const offResume = onResumeFromSuspend(() => {
+      if (!this.started || generation !== this.generation) return;
       void reapply()
         .then((res) => {
           if (!res.success) console.warn("[legotdp] reapply after resume failed", res.stderr);
@@ -408,6 +417,11 @@ class AppWatcher {
   }
 
   static stop() {
+    this.started = false;
+    this.generation += 1;
+    this.busy = false;
+    for (const timer of this.delayedChecks) clearTimeout(timer);
+    this.delayedChecks.clear();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
@@ -427,7 +441,8 @@ class AppWatcher {
   }
 
   private static async check() {
-    if (this.busy) return;
+    if (!this.started || this.busy) return;
+    const generation = this.generation;
     const game = this.activeGame();
     const changed = game?.appId !== this.current?.appId;
     this.current = game;
@@ -440,15 +455,16 @@ class AppWatcher {
       this.busy = true;
       try {
         await setActiveApp(game?.appId ?? "");
+        if (!this.started || generation !== this.generation) return;
         this.lastPush = now;
       } catch (e) {
         console.error("[legotdp] setActiveApp failed", e);
       } finally {
-        this.busy = false;
+        if (generation === this.generation) this.busy = false;
       }
     }
 
-    if (changed) this.listeners.forEach((fn) => fn(game));
+    if (this.started && generation === this.generation && changed) this.listeners.forEach((fn) => fn(game));
   }
 }
 
