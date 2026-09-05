@@ -1,6 +1,6 @@
 {
   "name": "legiongo2companion",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "All-in-one Legion Go 2 hardware controls for Decky Loader",
   "license": "BSD-3-Clause",
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "python -m unittest discover -s tests -p test_*.py",
     "package": "node scripts/package.mjs",
-    "test:frontend": "node tests/frontend_regressions.cjs && node tests/frontend_lifecycle.cjs && node tests/frontend_navigation.cjs && node tests/frontend_guard.cjs && node tests/frontend_battery.cjs && node tests/frontend_controller.cjs && node tests/frontend_async_polling.cjs"
+    "test:frontend": "node tests/frontend_regressions.cjs && node tests/frontend_lifecycle.cjs && node tests/frontend_navigation.cjs && node tests/frontend_guard.cjs && node tests/frontend_battery.cjs && node tests/frontend_controller.cjs && node tests/frontend_async_polling.cjs && node tests/frontend_updates.cjs"
   },
   "devDependencies": {
     "@decky/api": "^1.1.3",

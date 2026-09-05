@@ -21,6 +21,7 @@ vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleK
       callable:name=>async()=>{assert.equal(name,'get_version','blocked view only calls the guard');return typeof response === 'function' ? response() : response;},
       addEventListener:(name,fn)=>{events.set(name,fn);return fn;},removeEventListener:name=>events.delete(name)};
     if(name==='@decky/ui')return new Proxy({staticClasses:{}},{get:(o,k)=>o[k]||k});
+    if(name==='./updates')return {startUpdates(){},stopUpdates(){},UpdateSection:'UpdateSection'};
     if(name.startsWith('./'))return new Proxy({},{get:(_,k)=>/^(start|stop)/.test(k)?()=>watchers.push(k):k});
     throw Error(name);
   }

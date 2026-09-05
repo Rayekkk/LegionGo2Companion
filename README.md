@@ -2,7 +2,7 @@
 
 <h1>Legion Go 2 Companion</h1>
 
-[![Version](https://img.shields.io/badge/version-0.6.2-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.7.0-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
 [![Device](https://img.shields.io/badge/device-Legion_Go_2-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-424A53?style=for-the-badge&labelColor=141417)](LICENSE)
@@ -65,13 +65,31 @@ device.
 ## Installation
 
 **1.** Install [Decky Loader](https://decky.xyz) if it is not already installed.
-**2.** Build `LegionGo2Companion-<version>.zip` using the instructions below. No GitHub release has been published yet.
+**2.** Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases), when available, or build it using the instructions below.
 **3.** Remove the overlapping standalone plugins listed below, retaining their settings.
 **4.** In Gaming Mode, open the **Quick Access Menu → Decky → Settings → Developer**.
 **5.** Choose **Install Plugin from ZIP** and select the archive.
 
 The archive contains one `LegionGo2Companion` folder. Decky installs it with the privileges
 needed by the hardware controls; normal use requires no terminal commands.
+
+### Updates
+
+Open **About → Check for Updates** to check the latest stable GitHub release. If a newer
+release has its plugin ZIP attached, **Download** saves it in your Downloads folder and
+shows the path. No public release yet, an incomplete release and a connection failure
+are reported separately. Checking and downloading happen only when requested; opening
+the menu does not contact GitHub.
+
+Companion verifies the archive's version, size, SHA-256 digest and contents before making
+the completed ZIP available. Failed downloads do not replace an existing ZIP. Releases
+without a SHA-256 digest are not offered for download; source archives and development
+branches are never used as a fallback.
+
+Install the downloaded ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
+Review your module choices afterwards: Decky's installation process can reset the gyro
+source, battery protection and Wi-Fi preferences. Downloading alone leaves the running
+plugin and all settings unchanged.
 
 > [!IMPORTANT]
 > Companion pauses **all modules** if **LeGoTDP**, **LeGo Vibe Control** or

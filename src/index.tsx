@@ -23,6 +23,7 @@ import { getRgbStatus, RgbPage, rgbSummary, type RgbStatus } from "./rgb";
 import { getRemapStatus, RemapPage, remapSummary, type RemapStatus } from "./remap";
 import { BatteryPage, getBatteryStatus, batterySummary, type BatteryStatus } from "./battery";
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
+import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 
 type ModuleKey = "tdp" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
@@ -127,7 +128,7 @@ const refreshGuard = async () => {
     stopTdpWatcher(); stopVibrationWatcher();
     overviewPaused = true;
     clearOverview();
-    guardListeners.forEach(listener => listener({version: "0.6.2", blocked: true,
+    guardListeners.forEach(listener => listener({version: "0.7.0", blocked: true,
       guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
   } finally { if (guardRead === request) guardRead = null; }
 };
@@ -162,7 +163,7 @@ const overviewSources: OverviewSource[] = [
   { key: "controller", module: "controller", read: async () => ({ controller: await getControllerStatus() }) },
 ].map(source => ({ ...source, revision: 0, pending: null,
   lastReadAt: null, failures: 0, pendingSince: null } as OverviewSource));
-let overviewCache: Overview = { version: "0.6.2", standalonePlugins: [] };
+let overviewCache: Overview = { version: "0.7.0", standalonePlugins: [] };
 let overviewModules = EMPTY_MODULES;
 let overviewPaused = true;
 const overviewListeners = new Set<(overview: Overview) => void>();
@@ -202,7 +203,7 @@ const invalidateOverviewReads = () => {
 const clearOverview = () => {
   invalidateOverviewReads();
   overviewSources.forEach(source => { source.lastReadAt = null; });
-  overviewCache = { version: "0.6.2", standalonePlugins: [] };
+  overviewCache = { version: "0.7.0", standalonePlugins: [] };
 };
 const configureOverviewModules = (modules: ModuleStates) => {
   for (const source of overviewSources) {
@@ -484,11 +485,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
           <Field label="Author" description="Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />
         </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="Updates">
-        <PanelSectionRow>
-          <Field label="Development build" description="Source is available on GitHub. No public release has been published yet." />
-        </PanelSectionRow>
-      </PanelSection>
+      <UpdateSection currentVersion={overview.version} />
     </>}
   </PageShell>;
 };
@@ -538,6 +535,7 @@ const Icon: FC = () => (
 );
 
 export default definePlugin(() => {
+  startUpdates();
   frontendActive = true;
   guardRevision += 1;
   guardRead = null;
@@ -560,6 +558,7 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <Icon />,
     onDismount() {
+      stopUpdates();
       frontendActive = false;
       guardRevision += 1;
       guardRead = null;

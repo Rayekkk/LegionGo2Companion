@@ -1,3 +1,9 @@
+# 0.7.0 — GitHub release downloads
+
+- Add manual release checks and ZIP downloads in About. Read only published stable releases from Rayekkk/LegionGo2Companion, distinguish an unpublished project from a failed request, and never substitute a source archive or development branch.
+- Verify the exact asset name, version, size, GitHub SHA-256 digest and bounded ZIP contents before saving the completed file in the desktop user's Downloads folder. Reject unsafe redirects and paths; clean up partial downloads.
+- Keep network work outside the hardware RPC gate, preserve pending update status across About remounts, reject stale replies and duplicate clicks, and stop download work during plugin shutdown or a detected conflict. No periodic GitHub polling or automatic installation is added.
+
 # 0.6.2 — status freshness and controller recovery
 
 - Mark older overview values after repeated read failures or a delayed response, showing the age of the last report. Keep immediate cached summaries when reopening the menu, clear warnings on recovery and preserve the backend's hardware/setup errors.

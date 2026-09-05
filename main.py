@@ -30,17 +30,19 @@ import tdp_backend
 import vibration_backend
 import wifi_backend
 import module_runtime
+from companion_updates import CompanionUpdates
 from safe_settings import atomic_write_json, load_json_object, SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 
 MODULE_NAMES = ('tdp', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
+UPDATE_RPCS = frozenset({'updates_check', 'updates_download'})
 
 def _rpc_module(name):
     for prefix, module in (('vibe_', 'vibration'), ('display_', 'display'), ('wifi_', 'wifi'),
                            ('rgb_', 'rgb'), ('remap_', 'remap'), ('battery_', 'battery'), ('controller_', 'controller')):
         if name.startswith(prefix):
             return module
-    return None if name.startswith('modules_') else 'tdp'
+    return None if name.startswith('modules_') or name in UPDATE_RPCS else 'tdp'
 from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 
 LEGACY_SETTINGS = {
@@ -137,9 +139,18 @@ def _guard_component_calls(cls):
                     module = _rpc_module(fn.__name__)
                     if module and not self._module_enabled(module):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
-                    # A cancelled RPC must not release the gate while its backend
-                    # operation is still running (notably the Wi-Fi worker).
-                    return await module_runtime.complete(fn(self, *args, **kwargs))
+                    if fn.__name__ in UPDATE_RPCS:
+                        # Register download work before releasing the admission
+                        # gate, but never hold hardware controls behind networking.
+                        self._ensure_updates()
+                        task = asyncio.create_task(fn(self, *args, **kwargs))
+                        self._update_jobs.add(task)
+                        task.add_done_callback(self._update_jobs.discard)
+                    else:
+                        # A cancelled hardware RPC must not release the gate
+                        # while its backend transaction is still running.
+                        return await module_runtime.complete(fn(self, *args, **kwargs))
+                return await module_runtime.complete(task)
             return guarded
         setattr(cls, name, wrap(method))
     return cls
@@ -158,6 +169,8 @@ class Plugin:
         self._modules_started = False
         self._ever_started = False
         self._closing = False
+        self._updates = None
+        self._update_jobs = set()
         self._module_store = SettingsManager('module_settings', decky.DECKY_PLUGIN_SETTINGS_DIR)
         self._module_state = self._module_store.getSetting('modules', {})
         if self._module_store.recovery_error:
@@ -181,6 +194,20 @@ class Plugin:
         self._remap = remap_backend.Plugin()
         self._battery = battery_backend.Plugin()
         self._controller = controller_backend.Plugin()
+
+    def _ensure_updates(self):
+        if self._updates is not None:
+            return
+        home, uid, gid = '', -1, -1
+        try:
+            import pwd
+            username = getattr(decky, 'DECKY_USER', None) or os.environ.get('DECKY_USER')
+            account = pwd.getpwnam(username) if username else None
+            if account is not None and account.pw_uid > 0:
+                home, uid, gid = account.pw_dir, account.pw_uid, account.pw_gid
+        except (ImportError, KeyError):
+            pass
+        self._updates = CompanionUpdates(PLUGIN_DIR, home, uid, gid)
 
     def _module_enabled(self, name):
         value = self._module_state.get(name, {})
@@ -331,6 +358,8 @@ class Plugin:
             # Latched until a fresh process starts. Reusing partially unloaded
             # module globals would risk duplicate workers or lost restoration state.
             self._guard_blocked = True
+            if self._updates is not None:
+                self._updates.close()
         if before != self._guard_status():
             decky.logger.warning("[legiongo2companion] " + self._guard_message())
             try:
@@ -433,16 +462,24 @@ class Plugin:
 
     async def _unload(self):
         self._closing = True
-        task, self._guard_task = self._guard_task, None
-        if task is not None:
-            task.cancel()
+        if self._updates is not None:
+            self._updates.close()
+        async def cleanup():
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        async with self._guard_lock:
-            if self._modules_started:
-                await self._stop_modules()
+                task, self._guard_task = self._guard_task, None
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                async with self._guard_lock:
+                    if self._modules_started:
+                        await self._stop_modules()
+            finally:
+                if self._update_jobs:
+                    await asyncio.gather(*tuple(self._update_jobs), return_exceptions=True)
+        await module_runtime.complete(cleanup())
         decky.logger.info("[legiongo2companion] unloaded")
 
     async def _uninstall(self):
@@ -460,6 +497,14 @@ class Plugin:
                 )
         await module_runtime.complete(cleanup())
         decky.logger.info("[legiongo2companion] uninstalled")
+
+    # Updates are explicit user actions, independent of hardware module toggles.
+
+    async def updates_check(self):
+        return await asyncio.to_thread(self._updates.check)
+
+    async def updates_download(self, expected_version: str):
+        return await asyncio.to_thread(self._updates.download, expected_version)
 
     # TDP / CPU -----------------------------------------------------------------
 
