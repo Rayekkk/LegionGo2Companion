@@ -2,12 +2,12 @@
 
 <h1>Legion Go 2 Companion</h1>
 
-[![Version](https://img.shields.io/badge/version-0.4.5-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.0-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
 [![Device](https://img.shields.io/badge/device-Legion_Go_2-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-424A53?style=for-the-badge&labelColor=141417)](LICENSE)
 
-**Power, haptics, lighting, buttons, OLED and Wi-Fi in one Steam overlay.**
+**Power, battery protection, gyro, haptics, lighting, buttons, OLED and Wi-Fi in one Steam overlay.**
 The Legion Go 2 controls you use every day, with saved profiles and automatic recovery after wake.
 
 [Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
@@ -27,6 +27,9 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 | **Joystick lighting** | Solid, Breathing, Color cycle and Rainbow effects, with colour, brightness and supported speed controls |
 | **Power-button light** | A separate saved toggle on the verified Legion Go 2 firmware |
 | **Extra-button remapping** | Independent actions for the left controller's Desktop and Page buttons, including F1-F12 and Disabled |
+| **Controller gyro** | Enable gyro reporting through the existing Lenovo driver and choose the left, right or combined controller source |
+| **Gyro and touchpad diagnostics** | A short, passive test compares native controller data with the virtual controller output available to Steam |
+| **Battery protection** | The firmware's Long Life charging mode, with the previous normal or fast charging mode preserved |
 | **OLED display modes** | Hybrid, PQ and Gamma 2.2, with brightness-slider forwarding and corrected HDR metadata for games |
 | **Wi-Fi band preference** | Prefer 5/6 GHz while keeping 2.4 GHz available, plus a manual rescan/reconnect action |
 | **Settings recovery** | Imports standalone settings, restores saved controls after startup/wake and checks for later drift |
@@ -44,6 +47,8 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 | Haptics and RGB | The `hid-lenovo-go` controller driver and its supported sysfs controls |
 | OLED brightness | Samsung `AMS881KB01-0`, identified by EDID manufacturer `SDC` and product `0x4301` |
 | Button remapping | SteamOS' existing InputPlumber service; validated with version 0.78.0 |
+| Gyro and touchpad | `hid-lenovo-go`, its IMU bypass controls and InputPlumber's existing Legion Go 2 controller |
+| Battery protection | A system battery exposing `Standard` and `Long_Life` through Linux's `charge_types` interface |
 | Wi-Fi preference | The supported MediaTek MT7922 / `mt7921e` configuration with NetworkManager and iwd |
 
 Each page checks the interface it needs and reports when a control is unavailable. Support
@@ -129,6 +134,25 @@ Open **Legion Go 2 Companion** from the Decky menu. The main page shows a short 
 each hardware area; selecting one opens its controls. **All Controls** returns to that
 overview. Choosing an item from a dropdown keeps the current page open.
 
+### Manage Modules
+
+Open **Manage Modules** to turn each hardware module on or off. All modules are available
+by default. Disabling one stops its workers and game reports, releases its hardware
+controls and hides its page from the main menu. The choice survives Decky restarts and
+console reboots. Saved profiles and preferences return when the module is enabled again.
+
+Lighting, remapping, battery and gyro controls restore the state they captured before
+taking control. Vibration returns to driver defaults. TDP returns to the balanced firmware
+profile; managed CPU Boost and EPP return to standard boost and `balance_performance`
+because earlier versions did not retain the original CPU policy. Wi-Fi restores its
+owned configuration and can briefly reconnect during the change.
+
+**OLED Display** also removes its installed script. Gamescope keeps a loaded script until
+the session ends, so the page offers **Restart Gaming Mode (closes games)** when needed.
+If hardware restoration fails, the module stays blocked and the page shows the error with
+**Retry Cleanup**. An interrupted cleanup is retried on the next startup before that
+module is allowed to run.
+
 ### TDP
 
 **Enable** gives Companion control of the TDP limits. Turning it off releases that control;
@@ -202,6 +226,38 @@ switching, navigation keys and F1-F12. **Disabled** makes that button produce no
 restores the mappings Companion still owns, while preserving unrelated profile entries
 and changes made elsewhere.
 
+### Gyro & Touchpad
+
+Choose a gyro source to let Companion enable reporting from the corresponding removable
+controller and route its motion through the existing InputPlumber service. **Both
+controllers (average)** combines the two handles; it is not the sensor inside the console
+body. **System default** releases the controls and restores the values Companion still
+owns. Button assignments, Steam controller identity and unrelated input filters are kept.
+
+**Start 30-second test** shows native left/right gyro and touchpad readings alongside the
+existing virtual controller output. Rotate the device and move a finger on the touchpad
+while testing. Raw gyro values are diagnostic readings, not degrees per second. A stream
+with no packets is shown separately from a stream carrying zero values.
+
+The test stops when the page is hidden or closed, after 30 seconds, or when the frontend
+stops renewing its short lease. It does not grab the controller. Reports reaching the
+virtual controller confirm that stage of the input path; a game's Steam Input layout must
+still assign gyro and touchpad actions. Body-sensor integration and firmware calibration
+are not enabled by this page.
+
+### Battery
+
+**Battery protection** enables Lenovo's firmware-controlled Long Life mode, intended to
+limit charging to around 80%. This is a fixed firmware mode, with no adjustable percentage
+or forced discharge. Enabling it while the battery is above the limit does not immediately
+lower the charge level.
+
+Turning protection off returns to the normal charging mode captured before enabling it,
+including **Fast** when it was active. **Release battery control** restores the captured
+state while it is still owned by Companion and stops automatic reapplication. The page
+distinguishes the saved choice from the actual charging mode and reports failed changes.
+The feature does not change the battery on first installation until selected by the user.
+
 ### OLED Display
 
 Choose a mode on first run, or use **Switch Display Mode** later:
@@ -242,7 +298,7 @@ for a completed switch.
 ### One interface, separate hardware controls
 
 Companion brings together the TDP, vibration, display and Wi-Fi implementations with RGB
-and button-remapping pages. Each backend owns its hardware interface and settings; the
+and button-remapping, gyro, diagnostic and battery pages. Each backend owns its hardware interface and settings; the
 Decky entry point coordinates startup, shutdown and calls from the frontend.
 
 | Area | System interface |
@@ -252,6 +308,9 @@ Decky entry point coordinates startup, shutdown and calls from the frontend.
 | Live package power | RAPL energy counters |
 | Haptics / joystick RGB | `hid-lenovo-go` sysfs controls |
 | Button mappings | InputPlumber's D-Bus profile API |
+| Controller gyro | Lenovo's IMU bypass controls and InputPlumber's D-Bus event filters |
+| Passive diagnostics | Read-only HID report copies during an explicit bounded test |
+| Battery protection | The system battery's kernel `charge_types` attribute |
 | OLED | A gamescope display script, X properties and gamescope's EDID copy |
 | Wi-Fi | NetworkManager and iwd configuration |
 
@@ -269,6 +328,11 @@ for changed limits and retries failed profile transitions with backoff. RGB and 
 normally verify state once per minute; for the first 30 seconds after startup or wake they
 check every five seconds to catch a controller or service that appears late. Matching
 lighting and mappings do not need another hardware write or profile reload.
+
+Battery and gyro choices also restore on startup and wake and check for drift once per
+minute. Battery changes keep a durable recovery record before writing to the kernel, so
+an interrupted first change retains the original charging mode. Diagnostic readers are
+closed outside a test; merely installing Companion does not start sampling HID reports.
 
 Wi-Fi recovery journals are stored persistently so a reboot cannot erase an unfinished
 transaction. Recovery stops on a conflicting external change instead of overwriting it.

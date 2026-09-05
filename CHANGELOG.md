@@ -1,3 +1,18 @@
+# 0.6.0 — individual module control
+
+- Add Manage Modules for all eight hardware modules. Persist enabled state, hide disabled pages, stop their workers and frontend reports, and reject their control requests.
+- Withdraw owned hardware settings without deleting user profiles. Remember preferences separately from ownership snapshots and restore them when a module is enabled again.
+- Journal incomplete module transitions, finish hardware workers before withdrawal and report failed cleanup with a retry action. Explain the Gaming Mode restart needed to unload an OLED script.
+- Rename the About author panel to Author and remove component versions from Included modules.
+
+# 0.5.0 — battery protection and controller motion
+
+- Add firmware battery protection using the kernel's Standard/Fast/Long_Life modes. Preserve the original charging mode, verify writes and retain a durable recovery record across interrupted transactions.
+- Add gyro reporting through Lenovo's existing IMU bypass controls and source selection through InputPlumber, preserving unrelated filters and button assignments.
+- Add a bounded passive gyro/touchpad test for native and existing virtual controller reports. Stop sampling on page hide, timeout, lease expiry and plugin shutdown.
+- Restore saved controls after startup/wake and check for later drift without a continuously running diagnostic reader.
+- Extend the standalone-plugin guard, packaging and regression checks to both new modules. Keep pages mounted across native dropdowns.
+
 # 0.4.5 — block overlapping standalone plugins
 
 - Pause all Companion modules when LeGoTDP, LeGo Vibe Control or LeGo2 Brightness Fix is installed, including renamed installations identified by their manifest. WiFi Optimizer and HueSync are not part of this gate.
