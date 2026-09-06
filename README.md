@@ -2,10 +2,11 @@
 
 <h1>Legion Go 2 Companion</h1>
 
-[![Version](https://img.shields.io/badge/version-0.8.0-C2410C?style=for-the-badge&labelColor=141417)](CHANGELOG.md)
+[![Release](https://img.shields.io/github/v/release/Rayekkk/LegionGo2Companion?style=for-the-badge&label=release&color=C2410C&labelColor=141417)](https://github.com/Rayekkk/LegionGo2Companion/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Rayekkk/LegionGo2Companion/total?style=for-the-badge&label=downloads&color=15803D&labelColor=141417)](https://github.com/Rayekkk/LegionGo2Companion/releases)
 [![Device](https://img.shields.io/badge/device-Legion_Go_2-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-424A53?style=for-the-badge&labelColor=141417)](LICENSE)
+[![License](https://img.shields.io/github/license/Rayekkk/LegionGo2Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
 **Power, battery protection, gyro, haptics, lighting, buttons, screen brightness, HDR and Wi-Fi in one Steam overlay.**
 The Legion Go 2 controls you use every day, with saved profiles and automatic recovery after wake.
