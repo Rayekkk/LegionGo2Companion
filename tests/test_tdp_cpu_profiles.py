@@ -291,6 +291,8 @@ class CpuProfileTests(unittest.TestCase):
         self.assertEqual(self.payload(), before)
 
     def test_resume_periodic_drift_and_ac_settle_keep_the_active_cpu_profile(self):
+        # A freshly booted CI runner may be younger than the drift interval.
+        self.stack.enter_context(patch.object(tdp.time, 'monotonic', return_value=1.0))
         self.seed({'111': self.game(ac_separate=True, ac_spl=25000, ac_sppt=28000,
                                    ac_fppt=35000, ac_cpu_boost_enabled=False, ac_epp='26')})
         self.app = '111'; self.ac = True
@@ -298,7 +300,8 @@ class CpuProfileTests(unittest.TestCase):
         for trigger in ('resume', 'periodic', 'reapply', 'settle'):
             self.hardware(True, '128')
             self.resumed = trigger == 'resume'
-            if trigger == 'periodic': tdp._last_cpu_power_check = 0
+            if trigger == 'periodic':
+                tdp._last_cpu_power_check = tdp.time.monotonic() - tdp.CPU_POWER_DRIFT_CHECK_S - 1
             if trigger in ('resume', 'periodic'):
                 tdp._check_and_enforce()
             elif trigger == 'reapply':
