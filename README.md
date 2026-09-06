@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>Legion Go 2 Companion</h1>
+<img src="docs/logo.png" alt="Legion Go 2 Companion" width="760">
 
 [![Release](https://img.shields.io/github/v/release/Rayekkk/LegionGo2Companion?style=for-the-badge&label=release&color=C2410C&labelColor=141417)](https://github.com/Rayekkk/LegionGo2Companion/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/Rayekkk/LegionGo2Companion/total?style=for-the-badge&label=downloads&color=15803D&labelColor=141417)](https://github.com/Rayekkk/LegionGo2Companion/releases)
