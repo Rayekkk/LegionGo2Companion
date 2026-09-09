@@ -57,6 +57,7 @@ def make_led(root: Path, *, enabled="false") -> None:
         "brightness": "20",
         "max_brightness": "100",
         "multi_intensity": "0 100 100",
+        "multi_index": "red green blue",
         "multi_max_intensity": "100 100 100",
         "speed": "50",
         "speed_range": "0-100",
@@ -69,6 +70,42 @@ class RgbBackendTests(unittest.TestCase):
     def setUp(self):
         rgb_backend._power_capability_cache = None
         rgb_backend._last_error = ""
+
+    def test_legacy_led_abi_uses_u8_color_and_preserves_modern_snapshot_on_restore(self):
+        with tempfile.TemporaryDirectory() as raw:
+            led = Path(raw)
+            make_led(led)
+            original = rgb_backend._read_rgb_snapshot(raw)
+            (led / 'multi_max_intensity').unlink()
+            self.assertEqual(rgb_backend._rgb_channel_maxima(raw), (255, 255, 255))
+            state = copy.deepcopy(rgb_backend.DEFAULT_STATE)
+            state.update(hue=0, saturation=100, brightness=25)
+            self.assertEqual(rgb_backend._target_for_state(state, raw)['rgb'], [255, 0, 0])
+            self.assertTrue(rgb_backend._apply_rgb_snapshot(raw, original))
+            restored = rgb_backend._read_rgb_snapshot(raw)
+            self.assertEqual(restored['rgb'], [0, 255, 255])
+            self.assertEqual(restored['brightness'], 20)
+            self.assertEqual(original['rgb'], [0, 100, 100])
+            (led / 'multi_max_intensity').write_text('100 100 100')
+            self.assertTrue(rgb_backend._apply_rgb_snapshot(raw, restored))
+            self.assertEqual(rgb_backend._read_rgb_snapshot(raw), original)
+
+    def test_unknown_legacy_layout_or_invalid_modern_limits_fail_closed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            led = Path(raw)
+            make_led(led)
+            for value in ('', '0 100 100', '256 255 255', 'invalid', '100 100'):
+                (led / 'multi_max_intensity').write_text(value)
+                with self.assertRaises(ValueError):
+                    rgb_backend._rgb_channel_maxima(raw)
+            (led / 'multi_max_intensity').unlink()
+            (led / 'multi_index').write_text('blue green red')
+            with self.assertRaises(ValueError):
+                rgb_backend._rgb_channel_maxima(raw)
+            (led / 'multi_index').write_text('red green blue')
+            (led / 'max_brightness').write_text('255')
+            with self.assertRaises(ValueError):
+                rgb_backend._rgb_channel_maxima(raw)
 
     def test_state_sanitizer_fails_closed_without_restore_data(self):
         state = rgb_backend._sanitize_state({

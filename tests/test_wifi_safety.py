@@ -13,6 +13,24 @@ from safe_settings import CorruptSettings
 
 
 class WifiSafetyTests(unittest.TestCase):
+    def test_os_rollback_baseline_can_be_recovered_only_by_explicit_transition(self):
+        plugin = wifi.Plugin()
+        baseline = {'modifier_present': False, 'modifier_value': ''}
+        settings = {'band_policy': wifi.BAND_POLICY_HIGH_ONLY, 'band_policy_state': {
+            'mode': wifi.BAND_POLICY_HIGH_ONLY, 'owns_iwd': True,
+            'original': {'iwd': baseline},
+            'applied': {'iwd_modifier_present': True, 'iwd_modifier_value': '0.01'}}}
+        with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=baseline):
+            self.assertTrue(plugin._band_policy_ownership_error(settings))
+            self.assertEqual(plugin._band_policy_ownership_error(settings, allow_restored_iwd=True), '')
+        for external in ({'modifier_present': True, 'modifier_value': '0.5'},
+                         {'modifier_present': False, 'ambiguous': True}):
+            with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=external):
+                self.assertTrue(plugin._band_policy_ownership_error(settings, allow_restored_iwd=True))
+        settings['band_policy_state']['original'] = {}
+        with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=baseline):
+            self.assertTrue(plugin._band_policy_ownership_error(settings, allow_restored_iwd=True))
+
     def test_invalid_preference_never_starts_a_network_transaction(self):
         plugin = wifi.Plugin()
         with patch.object(plugin, "set_band_policy", new_callable=AsyncMock) as change:

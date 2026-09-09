@@ -3,6 +3,7 @@
 # https://github.com/Rayekkk/LeGoTDP
 
 import decky
+from system_process import system_env
 import module_runtime
 import asyncio
 import copy
@@ -739,7 +740,8 @@ def _run_ryzenadj(args: list, timeout: float = 5.0) -> tuple[int, str, str]:
     if not _ryzenadj_available or not os.path.isfile(BIN_PATH):
         return -1, "", "verified ryzenadj is unavailable"
     proc = subprocess.Popen([BIN_PATH] + args,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=system_env(LC_ALL="C"))
     try:
         out, err = proc.communicate(timeout=timeout)
         return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
@@ -1956,6 +1958,19 @@ def _validated_epp_request(capture: dict, value) -> str | None:
     return canonical if canonical in capture["profiles"] else None
 
 
+def _compatible_saved_epp(capture: dict, value) -> str | None:
+    canonical = _validated_epp_request(capture, value)
+    if canonical is not None:
+        return canonical
+    canonical = _canonical_epp_syntax(value)
+    if canonical is None or not _EPP_DECIMAL_RE.fullmatch(canonical):
+        return None
+    # Older amd-pstate accepts names only. Quantize the applied value, never
+    # the saved intent, so switching back to a custom-capable kernel is lossless.
+    choices = [name for name in capture["profiles"] if name in _EPP_NAMED_VALUES]
+    return min(choices, key=lambda name: abs(_EPP_NAMED_VALUES[name] - int(canonical))) if choices else None
+
+
 def _apply_epp_hardware(value: str) -> dict:
     capture = _capture_epp()
     if not capture["can_set"]:
@@ -1963,7 +1978,7 @@ def _apply_epp_hardware(value: str) -> dict:
             "success": False,
             "error": capture["error"] or "EPP is unsupported",
         }
-    canonical = _validated_epp_request(capture, value)
+    canonical = _compatible_saved_epp(capture, value)
     if canonical is None:
         return {"success": False, "error": "invalid or unsupported EPP value"}
     requested = {path: canonical for path in capture["targets"]}
@@ -2049,6 +2064,13 @@ def _cpu_scoped_status(app_id: str = "", ac_profile: bool = False, **operation) 
     result = _cpu_power_controls_status(**operation)
     result["profile"] = _cpu_editor_profile(
         _load_settings(), _load_profiles(), app_id, ac_profile)
+    saved = result["profile"]["epp"]
+    effective = _compatible_saved_epp(result["epp"], saved)
+    if saved is not None and effective is not None and effective != saved:
+        result["epp"]["compatibility_note"] = (
+            f"This kernel supports EPP presets only. Saved EPP {saved} uses "
+            f"{effective.replace('_', ' ')} when this profile is active. "
+            "The exact saved value is retained for newer kernels.")
     return result
 
 

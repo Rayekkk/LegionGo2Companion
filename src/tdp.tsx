@@ -168,6 +168,7 @@ interface CpuBoostControl {
 }
 
 interface EppControl {
+  compatibility_note?: string;
   available: boolean;
   value: string | null;
   profiles: string[];
@@ -632,6 +633,7 @@ function normaliseCpuPowerControls(value: unknown): CpuPowerControls {
       available: epp.available,
       value: typeof epp.value === "string" && epp.value.trim() ? epp.value.trim() : null,
       profiles: Array.from(new Set(epp.profiles.map((profile) => profile.trim()).filter(Boolean))),
+      compatibility_note: typeof epp.compatibility_note === "string" ? epp.compatibility_note : "",
       numeric_supported: epp.numeric_supported,
       numeric_value: epp.numeric_value ?? null,
       min: 0,
@@ -1005,6 +1007,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
           />
         )}
       </PanelSectionRow>
+      {epp.compatibility_note && (
+        <PanelSectionRow>
+          <Field label="EPP compatibility" description={epp.compatibility_note} />
+        </PanelSectionRow>
+      )}
       {!epp.numeric_supported && specialProfiles.map((profile) => (
         <PanelSectionRow key={`epp-${profile}`}>
           <ButtonItem

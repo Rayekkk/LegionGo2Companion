@@ -70,6 +70,15 @@ function findComponent(node,name){
  assert.ok(slider,JSON.stringify(labels));slider.props.onChange(3);vibe.unmount();await settle();
  const save=vibe.calls.find(c=>c.name==='vibe_set_intensity');assert.ok(save);assert.deepEqual(Array.from(save.args),[3,'111','111']);
  assert.equal(vibe.timers.size,0);
+ const compatibilityNote='This kernel supports EPP presets only. Saved EPP 77 uses balance performance.';
+ const legacy=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:'',
+   cpu_boost:{available:true,enabled:false,error:''},
+   epp:{available:true,error:'',min:0,max:255,value:'balance_performance',numeric_value:128,numeric_supported:false,
+        profiles:['default','performance','balance_performance','balance_power','power'],compatibility_note:compatibilityNote}}});
+ legacy.render();await settle();const legacyTree=legacy.render();
+ assert.equal(find(legacyTree,'EPP compatibility').props.description,compatibilityNote);
+ assert.equal(legacy.calls.filter(c=>c.name==='set_epp').length,0);
+ legacy.unmount();
  for(const leave of ['unmount','hide']){
    const epp=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:"",
       cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'128',numeric_value:128,numeric_supported:true,profiles:[]}},

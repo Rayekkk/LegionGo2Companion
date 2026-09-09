@@ -42,7 +42,9 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 | Requirement | Details |
 |---|---|
 | Device | Lenovo Legion Go 2 |
-| OS | SteamOS; tested on **SteamOS 3.10** with **Linux kernel 7.2** |
+| OS | SteamOS; tested on **SteamOS 3.8.16 Stable (kernel 6.16.12)** and **SteamOS 3.10 (kernel 7.2)** |
+
+Controls follow the interfaces exposed by the active kernel. Older kernels offer named EPP presets; Companion applies the closest supported preset while preserving the exact saved value for newer kernels.
 
 ---
 

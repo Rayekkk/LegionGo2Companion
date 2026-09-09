@@ -1,6 +1,6 @@
 {
   "name": "legiongo2companion",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "All-in-one Legion Go 2 hardware controls for Decky Loader",
   "license": "BSD-3-Clause",
   "type": "module",

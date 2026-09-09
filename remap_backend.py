@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 import decky
+from system_process import system_env
 import module_runtime
 
 from safe_settings import SettingsManager
@@ -176,7 +177,7 @@ def _run_busctl(args: list[str], *, timeout: float = 5.0) -> str:
             errors="replace",
             timeout=timeout,
             check=False,
-            env={**os.environ, "LC_ALL": "C"},
+            env=system_env(LC_ALL="C"),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RemapError(f"InputPlumber did not respond: {exc}") from exc
@@ -555,6 +556,7 @@ def _inputplumber_version() -> str:
         try:
             result = subprocess.run(
                 [INPUTPLUMBER, "--version"],
+                env=system_env(LC_ALL="C"),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,

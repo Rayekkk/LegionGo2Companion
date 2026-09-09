@@ -47,6 +47,7 @@ import asyncio
 import glob
 import hashlib
 import os
+from system_process import system_env as _system_env
 import select
 import signal
 import stat
@@ -462,14 +463,6 @@ def _wait_for_change(fd, timeout_s: float) -> None:
 # of libreadline/libc and dies. Observed exactly once, as
 # `bash: undefined symbol: rl_trim_arg_from_keyseq` from the restart button.
 # Everything this plugin spawns is a system tool, so the loader variables go.
-_LOADER_VARS = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
-
-
-def _system_env(**extra) -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _LOADER_VARS}
-    env.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    env.update(extra)
-    return env
 
 
 def _display_owner(display=None):

@@ -160,7 +160,7 @@ def _rgb_capability() -> tuple[str | None, str]:
     )
     required_ro = (
         "enabled_index", "profile_range", "mode_index", "effect_index",
-        "max_brightness", "multi_max_intensity", "speed_range",
+        "max_brightness", "multi_index", "speed_range",
     )
     for attr in required_rw + required_ro:
         path = os.path.join(real, attr)
@@ -180,9 +180,7 @@ def _rgb_capability() -> tuple[str | None, str]:
         modes = set(_read_small(os.path.join(real, "mode_index")).split())
         effects = set(_read_small(os.path.join(real, "effect_index")).split())
         speed_range = _read_small(os.path.join(real, "speed_range"))
-        maxima = [int(v) for v in _read_small(
-            os.path.join(real, "multi_max_intensity")
-        ).split()]
+        maxima = _rgb_channel_maxima(real)
         max_brightness = int(_read_small(os.path.join(real, "max_brightness")))
     except (OSError, UnicodeError, ValueError):
         return None, "The joystick-ring capability data could not be read."
@@ -238,13 +236,30 @@ def _parse_triplet(value: str) -> tuple[int, int, int]:
     return parts
 
 
+def _rgb_channel_maxima(path: str) -> tuple[int, int, int]:
+    if _read_small(os.path.join(path, "multi_index")).split() != ["red", "green", "blue"]:
+        raise ValueError("unexpected RGB channel order")
+    try:
+        maxima = _parse_triplet(_read_small(os.path.join(path, "multi_max_intensity")))
+    except FileNotFoundError:
+        # The older LED class omits this attribute. The audited hid-lenovo-go
+        # ABI sends three u8 intensities separately from 0..100 brightness.
+        # Production callers first validate the device, driver and full ABI.
+        if int(_read_small(os.path.join(path, "max_brightness"))) != 100:
+            raise ValueError("unexpected legacy brightness range")
+        maxima = (255, 255, 255)
+    if any(value <= 0 or value > 255 for value in maxima):
+        raise ValueError("invalid RGB channel limits")
+    return maxima
+
+
 def _read_rgb_snapshot(path: str | None = None) -> dict[str, Any] | None:
     if path is None:
         path, _ = _rgb_capability()
     if path is None:
         return None
     try:
-        maxima = _parse_triplet(_read_small(os.path.join(path, "multi_max_intensity")))
+        maxima = _rgb_channel_maxima(path)
         rgb = _parse_triplet(_read_small(os.path.join(path, "multi_intensity")))
         brightness_max = int(_read_small(os.path.join(path, "max_brightness")))
         brightness = int(_read_small(os.path.join(path, "brightness")))
@@ -420,7 +435,7 @@ def _seed_from_snapshot(state: dict[str, Any], snapshot: dict[str, Any]) -> None
 
 
 def _target_for_state(state: dict[str, Any], path: str) -> dict[str, Any]:
-    maxima = _parse_triplet(_read_small(os.path.join(path, "multi_max_intensity")))
+    maxima = _rgb_channel_maxima(path)
     brightness_max = int(_read_small(os.path.join(path, "max_brightness")))
     hue = state["hue"] / 360.0
     saturation = state["saturation"] / 100.0
@@ -444,6 +459,22 @@ def _target_for_state(state: dict[str, Any], path: str) -> dict[str, Any]:
 def _apply_rgb_snapshot(path: str, snapshot: dict[str, Any], *, force: bool = False) -> bool:
     snapshot = _sanitize_snapshot(snapshot)
     if snapshot is None:
+        return False
+    try:
+        maxima = _rgb_channel_maxima(path)
+        brightness_max = int(_read_small(os.path.join(path, "max_brightness")))
+        if not 0 < brightness_max <= 255:
+            return False
+        # Baselines survive OS updates/rollbacks; preserve color and luminance
+        # when restoring a snapshot captured with a different LED class scale.
+        snapshot["rgb"] = [round(value * maximum / original_max)
+                           for value, maximum, original_max in
+                           zip(snapshot["rgb"], maxima, snapshot["rgb_max"])]
+        snapshot["brightness"] = round(
+            snapshot["brightness"] * brightness_max / snapshot["brightness_max"])
+        snapshot["rgb_max"] = list(maxima)
+        snapshot["brightness_max"] = brightness_max
+    except (OSError, UnicodeError, ValueError):
         return False
     current = _read_rgb_snapshot(path)
     if snapshot["profile"] is None and current is not None and all(

@@ -12,6 +12,7 @@ import os
 import json
 import time
 import asyncio
+from system_process import system_env
 import subprocess
 import re
 import sys
@@ -269,15 +270,11 @@ class Plugin:
     def _run_cmd(self, cmd: list[str], timeout: int = 5, clean_env: bool = False) -> dict:
         """Run a subprocess and return a result dict.
 
-        clean_env strips LD_LIBRARY_PATH so children use system libraries
-        instead of Decky's PyInstaller-bundled ones. Required for curl
-        (OpenSSL mismatch) and bash (readline symbol mismatch); without it,
-        those binaries fail with cryptic symbol-lookup errors.
+        All commands use system libraries, independent of the legacy clean_env
+        argument. Decky's bundled libraries can break busctl, systemctl and curl.
         """
         try:
-            env = None
-            if clean_env:
-                env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+            env = system_env(LC_ALL="C")
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout, env=env
             )
@@ -2220,7 +2217,7 @@ class Plugin:
         self._remove_band_policy_journal()
         return {"success": True, "recovered": True}
 
-    def _band_policy_ownership_error(self, settings: dict) -> str:
+    def _band_policy_ownership_error(self, settings: dict, *, allow_restored_iwd: bool = False) -> str:
         mode = settings.get("band_policy", BAND_POLICY_OFF)
         if mode == BAND_POLICY_OFF:
             return ""
@@ -2242,7 +2239,15 @@ class Plugin:
                 "modifier_value": applied.get("iwd_modifier_value", ""),
             }
             if not self._iwd_snapshot_matches(current_iwd, expected_iwd):
-                return "The iwd band setting was changed outside WiFi Optimizer."
+                original = (state.get("original") or {}).get("iwd")
+                # An explicit user transition may recover an OS rollback to
+                # the recorded baseline. Background/status checks remain strict;
+                # a different external value is never silently overwritten.
+                restored = (allow_restored_iwd and isinstance(original, dict)
+                            and type(original.get("modifier_present")) is bool
+                            and self._iwd_snapshot_matches(current_iwd, original))
+                if not restored:
+                    return "The iwd band setting was changed outside WiFi Optimizer."
         return ""
 
     def _band_policy_transition_error(self, settings: dict, target: str) -> str:
@@ -3572,7 +3577,11 @@ class Plugin:
                 )
                 != BAND_PREFERENCE_2_4_MODIFIER
             )
-            if current_mode == mode and not legacy and not preference_needs_upgrade:
+            ownership_error = self._band_policy_ownership_error(settings)
+            transition_ownership_error = self._band_policy_ownership_error(
+                settings, allow_restored_iwd=True)
+            preference_needs_reapply = bool(ownership_error and not transition_ownership_error)
+            if current_mode == mode and not legacy and not preference_needs_upgrade and not preference_needs_reapply:
                 ownership_error = self._band_policy_ownership_error(settings)
                 if ownership_error:
                     return {
@@ -3602,7 +3611,7 @@ class Plugin:
                     "rolled_back": False,
                 }
 
-            ownership_error = self._band_policy_ownership_error(settings)
+            ownership_error = transition_ownership_error
             if ownership_error:
                 return {
                     "success": False,

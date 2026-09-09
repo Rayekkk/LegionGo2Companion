@@ -98,6 +98,52 @@ class CpuProfileTests(unittest.TestCase):
         return {'spl': 15000, 'sppt': 18000, 'fppt': 25000,
                 'cpu_boost_enabled': boost, 'epp': epp, **values}
 
+    def test_kernel_rollback_quantizes_only_hardware_and_upgrade_restores_exact_values(self):
+        self.seed({'111': self.game(ac_separate=True, ac_spl=25000, ac_sppt=28000,
+                                   ac_fppt=35000, ac_cpu_boost_enabled=False, ac_epp='26')})
+        saved = self.payload()
+        for path in self.epp_paths:
+            path.with_name('energy_performance_available_preferences').write_text(
+                'default performance balance_performance balance_power power')
+        self.hardware(False, 'balance_performance')
+        self.assertEqual(tdp._reapply_saved_cpu_power_controls_locked(tdp._load_settings()), [])
+        self.assert_hardware(False, 'balance_performance')
+        self.assertIn('Saved EPP 77', self.rpc('get_cpu_power_controls')['epp']['compatibility_note'])
+        self.app = '111'
+        tdp._check_and_enforce()
+        self.assert_hardware(True, 'balance_power')
+        self.ac = True
+        tdp._check_and_enforce()
+        self.assert_hardware(False, 'performance')
+        self.assertEqual(self.payload()['game_profiles'], saved['game_profiles'])
+        self.assertEqual({key: self.payload()['settings'][key] for key in saved['settings']}, saved['settings'])
+        for path in self.epp_paths:
+            path.with_name('energy_performance_available_preferences').write_text(
+                'default performance balance_performance balance_power power custom')
+        self.assertEqual(tdp._reapply_saved_cpu_power_controls_locked(tdp._load_settings()), [])
+        self.assert_hardware(False, '26')
+        self.ac = False
+        tdp._check_and_enforce()
+        self.assert_hardware(True, '204')
+        self.app = ''
+        tdp._check_and_enforce()
+        self.assert_hardware(False, '77')
+        self.assertFalse(self.rpc('get_cpu_power_controls')['epp'].get('compatibility_note'))
+        self.assertEqual(self.payload()['game_profiles'], saved['game_profiles'])
+        self.assertEqual({key: self.payload()['settings'][key] for key in saved['settings']}, saved['settings'])
+
+    def test_legacy_epp_does_not_advertise_or_save_unsupported_custom_requests(self):
+        for path in self.epp_paths:
+            path.with_name('energy_performance_available_preferences').write_text('default performance power')
+        self.hardware(False, 'performance')
+        before = self.payload()
+        result = asyncio.run(self.plugin.set_epp('77'))
+        self.assertFalse(result['success'])
+        self.assertEqual(self.payload(), before)
+        self.assert_hardware(False, 'performance')
+        self.assertIsNone(tdp._compatible_saved_epp({'profiles': ['default'], 'numeric_supported': False}, '77'))
+        self.assertIsNone(tdp._compatible_saved_epp({'profiles': ['power'], 'numeric_supported': False}, '256'))
+
     def test_game_cpu_edits_create_profile_without_overwriting_globals(self):
         self.app = '111'
         self.rpc('set_cpu_boost', True, '111', False, '111')
