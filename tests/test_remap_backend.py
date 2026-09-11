@@ -328,6 +328,16 @@ mapping:
                     [("keyboard", f"KeyF{number}")],
                 )
 
+    def test_insert_and_home_use_inputplumber_keyboard_events(self):
+        self.assertEqual(
+            remap_backend._action_events("desktop", "insert"),
+            [("keyboard", "KeyInsert")],
+        )
+        self.assertEqual(
+            remap_backend._action_events("page", "home"),
+            [("keyboard", "KeyHome")],
+        )
+
     def test_resume_detector_uses_boottime_gap(self):
         remap_backend._last_suspend_offset = 3.0
         with patch.object(remap_backend, "_suspend_offset", return_value=4.2):

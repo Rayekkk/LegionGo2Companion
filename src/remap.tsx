@@ -57,6 +57,7 @@ const fallbackLabels: Record<string, string> = {
   enter: "Enter",
   page_up: "Page Up",
   page_down: "Page Down",
+  insert: "Insert",
   home: "Home",
   end: "End",
   f1: "F1",
