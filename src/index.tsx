@@ -362,14 +362,14 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
     } finally { writing.current = false; if (mounted.current) setBusy(null); }
   };
   return <PanelSection title="Manage Modules">
-    <PanelSectionRow><Field label="Choose your modules" description="Disabling stops the module, withdraws its hardware controls and hides its page. Saved preferences return when you enable it again. OLED can require a Gaming Mode restart." /></PanelSectionRow>
+    <PanelSectionRow><Field focusable label="Choose your modules" description="Disabling stops the module, withdraws its hardware controls and hides its page. Saved preferences return when you enable it again. OLED can require a Gaming Mode restart." /></PanelSectionRow>
     {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
       <ToggleField label={moduleLabels[name]} checked={moduleEnabled(modules, name)} disabled={busy !== null || !!modules[name]?.pending}
         description={busy === name ? "Applying and verifying the change…" : modules[name]?.error || modules[name]?.note || (moduleEnabled(modules, name) ? "Enabled" : "Disabled — hidden from the main menu")}
         onChange={enabled => void change(name, enabled)} />
       {modules[name]?.pending && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} Cleanup</ButtonItem>}
     </PanelSectionRow>)}
-    {error && <PanelSectionRow><Field label="Could not confirm" description={error} /></PanelSectionRow>}
+    {error && <PanelSectionRow><Field focusable label="Could not confirm" description={error} /></PanelSectionRow>}
     {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" disabled={busy !== null} onClick={() => {
       void restartModulesSession().then(result => { if (!result.success && mounted.current) setError(result.error || result.message || "Gaming Mode restart failed."); }).catch(() => { if (mounted.current) setError("Could not confirm the Gaming Mode restart."); });
     }}>Restart Gaming Mode (closes games)</ButtonItem></PanelSectionRow>}
@@ -431,7 +431,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     </PanelSection>
     <PanelSection title="Device">
       <PanelSectionRow>
-        <Field label="Lenovo Legion Go 2" description="OLED · SteamOS · Z2 Extreme support" />
+        <Field focusable label="Lenovo Legion Go 2" description="OLED · SteamOS · Z2 Extreme support" />
       </PanelSectionRow>
     </PanelSection>
     <PanelSection title="Plugin">
@@ -476,13 +476,13 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     {activeSection === "about" && <>
       <PanelSection title="Legion Go 2 Companion">
         <PanelSectionRow>
-          <Field label={`Version ${overview.version}`} description="All-in-one hardware controls for Decky Loader." />
+          <Field focusable label={`Version ${overview.version}`} description="All-in-one hardware controls for Decky Loader." />
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field label="Included modules" description="LeGoTDP · LeGo Vibe Control · LeGo2 Brightness Fix · WiFi Optimizer Go 2 · RGB Lighting · Button Remapper · Gyro & Touchpad · Battery" />
+          <Field focusable label="Included modules" description="LeGoTDP · LeGo Vibe Control · LeGo2 Brightness Fix · WiFi Optimizer Go 2 · RGB Lighting · Button Remapper · Gyro & Touchpad · Battery" />
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field label="Author" description="Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />
+          <Field focusable label="Author" description="Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />
         </PanelSectionRow>
       </PanelSection>
       <UpdateSection currentVersion={overview.version} />
@@ -505,20 +505,20 @@ const Content: FC = () => {
   }, [visible]);
 
   if (!status) return <PageShell><PanelSection title="Checking installed plugins">
-    <PanelSectionRow><Field label="Checking compatibility" description="Hardware controls will appear after the check completes." /></PanelSectionRow>
+    <PanelSectionRow><Field focusable label="Checking compatibility" description="Hardware controls will appear after the check completes." /></PanelSectionRow>
   </PanelSection></PageShell>;
   if (status.blocked) return <PageShell>
     <PanelSection title="Companion paused">
-      <PanelSectionRow><Field label="All modules are paused"
+      <PanelSectionRow><Field focusable label="All modules are paused"
         description="All hardware controls, including gyro diagnostics and battery protection, are unavailable while a standalone plugin is installed." /></PanelSectionRow>
       {!!status.standalone_plugins?.length && <PanelSectionRow>
-        <Field label="Installed standalone plugins" description={status.standalone_plugins.join(", ")} />
+        <Field focusable label="Installed standalone plugins" description={status.standalone_plugins.join(", ")} />
       </PanelSectionRow>}
-      <PanelSectionRow><Field label={status.restart_required ? "Ready for a restart" : "How to resume"}
+      <PanelSectionRow><Field focusable label={status.restart_required ? "Ready for a restart" : "How to resume"}
         description={status.guard_error || (status.restart_required
           ? "The conflicting plugins are gone. Restart Decky or the console to start Companion safely."
           : "In Decky Settings, uninstall the plugins listed above and keep their saved settings. Then restart Decky or the console. Disabling a plugin is not enough; it must be uninstalled.")} /></PanelSectionRow>
-      <PanelSectionRow><Field label="Your settings are kept" description="This safeguard does not erase Companion profiles or the standalone settings available for import." /></PanelSectionRow>
+      <PanelSectionRow><Field focusable label="Your settings are kept" description="This safeguard does not erase Companion profiles or the standalone settings available for import." /></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" onClick={() => void refreshGuard()}>Check again</ButtonItem></PanelSectionRow>
     </PanelSection>
   </PageShell>;

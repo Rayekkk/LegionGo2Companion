@@ -172,6 +172,7 @@ export const WifiPage: FC = () => {
         <PanelSection title="Unsupported WiFi configuration">
           <PanelSectionRow>
             <Field
+              focusable
               label={settings.device_label ?? "Unknown device"}
               description={`Driver: ${settings.driver ?? "unknown"}. This module only changes a Legion Go 2 with MT7922/mt7921e.`}
             />
@@ -183,6 +184,7 @@ export const WifiPage: FC = () => {
         <PanelSection title="Recovery required">
           <PanelSectionRow>
             <Field
+              focusable
               label="Network controls are locked"
               description={
                 live.recovery_errors?.join("; ") ||
@@ -214,6 +216,7 @@ export const WifiPage: FC = () => {
         </PanelSectionRow>
         <PanelSectionRow>
           <Field
+            focusable
             label={status.connected ? bandName(frequency) : "WiFi disconnected"}
             description={
               status.connected
@@ -224,12 +227,13 @@ export const WifiPage: FC = () => {
         </PanelSectionRow>
         {live.band_policy_error && (
           <PanelSectionRow>
-            <Field label="Setting mismatch" description={live.band_policy_error} />
+            <Field focusable label="Setting mismatch" description={live.band_policy_error} />
           </PanelSectionRow>
         )}
         {(error || notice) && (
           <PanelSectionRow>
             <Field
+              focusable
               label={error ? "Could not complete" : "Result"}
               description={error || notice}
             />
@@ -240,6 +244,7 @@ export const WifiPage: FC = () => {
       <PanelSection title="Safety">
         <PanelSectionRow>
           <Field
+            focusable
             label="No permanent band or BSSID lock"
             description="After a fresh scan, manual reconnect temporarily selects one confirmed 5/6 GHz access point for a single connection, then clears that selection. Automatic rollback restores the profile if anything fails; 2.4 GHz remains available."
           />

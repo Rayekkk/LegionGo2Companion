@@ -14,6 +14,7 @@ import {
   ButtonItem,
   Field,
   findModuleExport,
+  Focusable,
   PanelSection,
   PanelSectionRow,
   Router,
@@ -532,21 +533,22 @@ const LivePanel: FC = () => {
         <PanelSectionRow><Spinner /></PanelSectionRow>
       ) : !info.success ? (
         <PanelSectionRow>
-          <Field label="Error" description={info.error ?? "Failed to read TDP"} />
+          <Field focusable label="Error" description={info.error ?? "Failed to read TDP"} />
         </PanelSectionRow>
       ) : (
         <>
           <PanelSectionRow>
-            <Field label="SPL  (Sustained)" description={`Limit: ${fmt(v.spl_limit)}`} />
+            <Field focusable label="SPL  (Sustained)" description={`Limit: ${fmt(v.spl_limit)}`} />
           </PanelSectionRow>
           <PanelSectionRow>
-            <Field label="SPPT (Slow)" description={`Limit: ${fmt(v.sppt_limit)}`} />
+            <Field focusable label="SPPT (Slow)" description={`Limit: ${fmt(v.sppt_limit)}`} />
           </PanelSectionRow>
           <PanelSectionRow>
-            <Field label="FPPT (Fast)" description={`Limit: ${fmt(v.fppt_limit)}`} />
+            <Field focusable label="FPPT (Fast)" description={`Limit: ${fmt(v.fppt_limit)}`} />
           </PanelSectionRow>
           <PanelSectionRow>
             <Field
+              focusable
               label="Package draw"
               description={`${fmt(v.package_draw)}${v.source ? `   -   set via ${v.source}` : ""}`}
             />
@@ -943,7 +945,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   return (
     <PanelSection title="CPU Power Controls">
       <PanelSectionRow>
-        <Field label={scopeLabel} description={controls.profile?.active === false
+        <Field focusable label={scopeLabel} description={controls.profile?.active === false
           ? "Editing saved CPU Boost and EPP. They apply when this profile becomes active."
           : "CPU Boost and EPP changes are saved automatically to this profile."} />
       </PanelSectionRow>
@@ -1009,7 +1011,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
       </PanelSectionRow>
       {epp.compatibility_note && (
         <PanelSectionRow>
-          <Field label="EPP compatibility" description={epp.compatibility_note} />
+          <Field focusable label="EPP compatibility" description={epp.compatibility_note} />
         </PanelSectionRow>
       )}
       {!epp.numeric_supported && specialProfiles.map((profile) => (
@@ -1027,11 +1029,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
       ))}
       {!controls.available && !globalError && (
         <PanelSectionRow>
-          <div style={styles.infoBox}>CPU Boost and EPP are not supported on this device.</div>
+          <Focusable><div style={styles.infoBox}>CPU Boost and EPP are not supported on this device.</div></Focusable>
         </PanelSectionRow>
       )}
       {globalError && (
-        <PanelSectionRow><div style={styles.errorBox}>{globalError}</div></PanelSectionRow>
+        <PanelSectionRow><Focusable><div style={styles.errorBox}>{globalError}</div></Focusable></PanelSectionRow>
       )}
     </PanelSection>
   );
@@ -1502,7 +1504,7 @@ export const TdpPage: FC = () => {
   // ── Render ────────────────────────────────────────────────────────────────────
   if (setupErr) return (
     <PanelSection title="Setup Error">
-      <PanelSectionRow><Field label="Error" description={setupErr} /></PanelSectionRow>
+      <PanelSectionRow><Field focusable label="Error" description={setupErr} /></PanelSectionRow>
     </PanelSection>
   );
 
@@ -1536,9 +1538,9 @@ export const TdpPage: FC = () => {
         </PanelSectionRow>
         {status && !enabled && (
           <PanelSectionRow>
-            <div style={statusStyle(status)}>
+            <Focusable><div style={statusStyle(status)}>
               {status}
-            </div>
+            </div></Focusable>
           </PanelSectionRow>
         )}
       </PanelSection>
@@ -1621,9 +1623,9 @@ export const TdpPage: FC = () => {
                 </ButtonItem>
               </PanelSectionRow>
               <PanelSectionRow>
-                <div style={{ fontSize: "11px", fontWeight: "bold", color: acOnline ? OK_COLOR : WARN_COLOR }}>
+                <Focusable><div style={{ fontSize: "11px", fontWeight: "bold", color: acOnline ? OK_COLOR : WARN_COLOR }}>
                   {acOnline ? "Charging (AC)" : "On battery"}
-                </div>
+                </div></Focusable>
               </PanelSectionRow>
             </>
           )}
@@ -1643,9 +1645,9 @@ export const TdpPage: FC = () => {
           ))}
           {status && preset !== "custom" && (
             <PanelSectionRow>
-              <div style={statusStyle(status)}>
+              <Focusable><div style={statusStyle(status)}>
                 {status}
-              </div>
+              </div></Focusable>
             </PanelSectionRow>
           )}
         </PanelSection>
@@ -1696,9 +1698,9 @@ export const TdpPage: FC = () => {
               </PanelSectionRow>
               {status && (
                 <PanelSectionRow>
-                  <div style={statusStyle(status)}>
+                  <Focusable><div style={statusStyle(status)}>
                     {status}
-                  </div>
+                  </div></Focusable>
                 </PanelSectionRow>
               )}
             </PanelSection>
@@ -1710,7 +1712,7 @@ export const TdpPage: FC = () => {
       {!extrasAvailable && extrasUnlocked && (
         <PanelSection title="Extras temporarily unavailable">
           <PanelSectionRow>
-            <Field label="Saved profiles are preserved"
+            <Field focusable label="Saved profiles are preserved"
               description="Firmware limits are active until the verified Extras helper is available again." />
           </PanelSectionRow>
           <PanelSectionRow>
@@ -1731,10 +1733,10 @@ export const TdpPage: FC = () => {
       {extrasAvailable && (
         <PanelSection title="Extras">
           <PanelSectionRow>
-            <div style={styles.infoBox}>
+            <Focusable><div style={styles.infoBox}>
               These settings are for advanced users only and are NOT recommended.
               Changes are made at your own risk — they override the manufacturer's TDP safety limits.
-            </div>
+            </div></Focusable>
           </PanelSectionRow>
           <PanelSectionRow>
             <ToggleField

@@ -229,7 +229,7 @@ export const DisplayPage: FC = () => {
   }
 
   if (state.settings_error) return <PanelSection title="Display settings unavailable">
-    <PanelSectionRow><Field label="Display controls are paused" description={state.settings_error} /></PanelSectionRow>
+    <PanelSectionRow><Field focusable label="Display controls are paused" description={state.settings_error} /></PanelSectionRow>
   </PanelSection>;
 
   // Nothing works until gamescope has the display script: without it the panel
@@ -243,6 +243,7 @@ export const DisplayPage: FC = () => {
       <PanelSection title="Choose a display mode">
         <PanelSectionRow>
           <Field
+            focusable
             description={
               "How should the Legion Go 2 panel be driven? This installs a " +
               "gamescope display script and replaces any script you already " +
@@ -255,7 +256,7 @@ export const DisplayPage: FC = () => {
 
         {state.setup_error && (
           <PanelSectionRow>
-            <Field label="Setup failed" description={state.setup_error} />
+            <Field focusable label="Setup failed" description={state.setup_error} />
           </PanelSectionRow>
         )}
 
@@ -282,6 +283,7 @@ export const DisplayPage: FC = () => {
       <PanelSection title="Setup">
         <PanelSectionRow>
           <Field
+            focusable
             label={`Display script required (${MODE_INFO[state.panel_mode].label})`}
             description={
               "The script for this mode is not in place. Installing it replaces " +
@@ -292,7 +294,7 @@ export const DisplayPage: FC = () => {
         </PanelSectionRow>
         {state.setup_note && (
           <PanelSectionRow>
-            <Field label="Status" description={state.setup_note} />
+            <Field focusable label="Status" description={state.setup_note} />
           </PanelSectionRow>
         )}
         <PanelSectionRow>
@@ -313,6 +315,7 @@ export const DisplayPage: FC = () => {
       <PanelSection title="Restart needed">
         <PanelSectionRow>
           <Field
+            focusable
             label="Display script installed"
             description={
               "gamescope only reads display scripts when it starts, so Game Mode " +
@@ -324,6 +327,7 @@ export const DisplayPage: FC = () => {
         {state.restart_error && (
           <PanelSectionRow>
             <Field
+              focusable
               label="Could not restart"
               description={
                 `${state.restart_error}. Restart Game Mode yourself - Steam menu, ` +
@@ -359,6 +363,7 @@ export const DisplayPage: FC = () => {
       <PanelSection title="Display">
         <PanelSectionRow>
           <Field
+            focusable
             label={state.panel_desc || "unknown"}
             description={
               state.backlight
@@ -441,6 +446,7 @@ export const DisplayPage: FC = () => {
         ) : (
           <PanelSectionRow>
             <Field
+              focusable
               label="Not applicable"
               description={
                 "This half only runs on panels known to ignore the backlight in " +

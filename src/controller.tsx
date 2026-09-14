@@ -271,7 +271,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
   }, []);
 
   if (!status) return <PanelSection title="Controller">
-    <PanelSectionRow>{error ? <Field label="Status unavailable" description={error} /> : <Spinner />}</PanelSectionRow>
+    <PanelSectionRow>{error ? <Field focusable label="Status unavailable" description={error} /> : <Spinner />}</PanelSectionRow>
     {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Check Again</ButtonItem></PanelSectionRow>}
   </PanelSection>;
 
@@ -299,6 +299,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       </PanelSectionRow>
       <PanelSectionRow>
         <Field
+          focusable
           label={`Current motion route: ${actualSource}`}
           description={pending
             ? `Saved choice: ${sourceLabel(status.gyro_source)}. It has not yet been confirmed as applied.`
@@ -307,12 +308,12 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
               : "Companion is not maintaining a gyro-source override."}
         />
       </PanelSectionRow>
-      <PanelSectionRow><Field label={`Gyro reporting: left ${reportingLabel(status.imu?.actual?.left)} · right ${reportingLabel(status.imu?.actual?.right)}`}
+      <PanelSectionRow><Field focusable label={`Gyro reporting: left ${reportingLabel(status.imu?.actual?.left)} · right ${reportingLabel(status.imu?.actual?.right)}`}
         description="Reporting must be enabled for controller motion to reach Steam. Both controllers uses their average; it does not use the sensor inside the console body." /></PanelSectionRow>
       {(!status.available || status.conflict || status.reason) && <PanelSectionRow>
-        <Field label={status.conflict ? "Configuration conflict" : !status.available ? "Controller unavailable" : "Controller status"} description={status.reason} />
+        <Field focusable label={status.conflict ? "Configuration conflict" : !status.available ? "Controller unavailable" : "Controller status"} description={status.reason} />
       </PanelSectionRow>}
-      {status.recovery_pending && <PanelSectionRow><Field label="Recovery pending"
+      {status.recovery_pending && <PanelSectionRow><Field focusable label="Recovery pending"
         description="An earlier change did not finish. The previous controller settings are retained for recovery. Release Companion Control to restore them." /></PanelSectionRow>}
       {(status.controlled || status.gyro_source !== "system" || status.conflict || status.recovery_pending) && <PanelSectionRow>
         <ButtonItem layout="below" disabled={blocked} onClick={() => void apply(releaseControl, "Companion gyro control released.")}>
@@ -324,6 +325,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
     <PanelSection title="Passive controller test">
       <PanelSectionRow>
         <Field
+          focusable
           label="Compare physical and Steam readings"
           description="Move each controller and touch the touchpad during a 30-second test. It observes existing reports without enabling sensors or changing controller mode. It stops when this page is hidden."
         />
@@ -339,6 +341,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       </PanelSectionRow>
       {diagnostics && <PanelSectionRow>
         <Field
+          focusable
           label={diagnostics.active ? `Test running · ${finite(diagnostics.remaining_s) ? Math.ceil(diagnostics.remaining_s) : "unknown"} s remaining` : "Test finished"}
           description={diagnostics.reason || "Raw gyro values are sensor counts, not degrees per second. Physical and virtual readings may use different scales."}
         />
@@ -347,21 +350,21 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
 
     {diagnostics && <>
       <PanelSection title="Physical controllers">
-        <PanelSectionRow><Field label="Controller reports" description={streamText(diagnostics.physical)} /></PanelSectionRow>
-        <PanelSectionRow><Field label="Left gyro · raw counts" description={vectorText(diagnostics.physical.sample?.gyro_left)} /></PanelSectionRow>
-        <PanelSectionRow><Field label="Right gyro · raw counts" description={vectorText(diagnostics.physical.sample?.gyro_right)} /></PanelSectionRow>
-        <PanelSectionRow><Field label="Physical touchpad" description={touchText(diagnostics.physical.sample?.touchpad)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Controller reports" description={streamText(diagnostics.physical)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Left gyro · raw counts" description={vectorText(diagnostics.physical.sample?.gyro_left)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Right gyro · raw counts" description={vectorText(diagnostics.physical.sample?.gyro_right)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Physical touchpad" description={touchText(diagnostics.physical.sample?.touchpad)} /></PanelSectionRow>
       </PanelSection>
       <PanelSection title="Existing Steam controller">
-        <PanelSectionRow><Field label="Virtual controller reports" description={streamText(diagnostics.virtual)} /></PanelSectionRow>
-        <PanelSectionRow><Field label="Steam gyro · raw counts" description={vectorText(diagnostics.virtual.sample?.gyro)} /></PanelSectionRow>
-        <PanelSectionRow><Field label="Steam touchpad" description={touchText(diagnostics.virtual.sample?.touchpad)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Virtual controller reports" description={streamText(diagnostics.virtual)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Steam gyro · raw counts" description={vectorText(diagnostics.virtual.sample?.gyro)} /></PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Steam touchpad" description={touchText(diagnostics.virtual.sample?.touchpad)} /></PanelSectionRow>
       </PanelSection>
     </>}
 
     {(error || status.error || notice || busy) && <PanelSection title={busy ? "Applying" : error || status.error ? "Needs attention" : "Saved"}>
       <PanelSectionRow>
-        <Field label={busy ? "Updating the gyro source" : error || status.error ? "Controller status" : "Preference confirmed"} description={busy ? "Waiting for the controller to confirm the change." : error || status.error || notice} />
+        <Field focusable label={busy ? "Updating the gyro source" : error || status.error ? "Controller status" : "Preference confirmed"} description={busy ? "Waiting for the controller to confirm the change." : error || status.error || notice} />
       </PanelSectionRow>
     </PanelSection>}
   </>;

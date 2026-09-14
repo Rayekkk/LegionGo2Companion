@@ -6,6 +6,7 @@
 import {
   ButtonItem,
   findModuleExport,
+  Focusable,
   PanelSection,
   PanelSectionRow,
   Router,
@@ -636,7 +637,7 @@ const LGoVibeControl = () => {
     return (
       <PanelSection title="Setup Error">
         <PanelSectionRow>
-          <div style={styles.errorBox}>{setupErr}</div>
+          <Focusable><div style={styles.errorBox}>{setupErr}</div></Focusable>
         </PanelSectionRow>
       </PanelSection>
     );
@@ -660,7 +661,7 @@ const LGoVibeControl = () => {
     <div style={styles.container}>
       <PanelSection title="Driver Status">
         <PanelSectionRow>
-          <div style={styles.statusRow}>
+          <Focusable><div style={styles.statusRow}>
             <div style={styles.dot(driverFound)} />
             <div>
               <span style={styles.statusText(driverFound)}>
@@ -675,14 +676,14 @@ const LGoVibeControl = () => {
                 </div>
               )}
             </div>
-          </div>
+          </div></Focusable>
         </PanelSectionRow>
         {!driverFound && (
           <PanelSectionRow>
-            <div style={styles.infoBox}>
+            <Focusable><div style={styles.infoBox}>
               The hid-lenovo-go sysfs endpoint was not detected. Requires SteamOS 3.8+ / Kernel
               6.18+ with the hid-lenovo-go module loaded on Legion Go hardware.
-            </div>
+            </div></Focusable>
           </PanelSectionRow>
         )}
       </PanelSection>
@@ -803,12 +804,12 @@ const LGoVibeControl = () => {
 
       <PanelSection title="Notes">
         <PanelSectionRow>
-          <div style={styles.infoBox}>
+          <Focusable><div style={styles.infoBox}>
             Intensity levels: Off, Low, Medium, High. Mode selects the vibration pattern, applied to
             both handles. Settings persist across reboots and are re-applied after sleep or a
             controller reconnect. Per-game profiles auto-apply when a game with a saved profile
             starts.
-          </div>
+          </div></Focusable>
         </PanelSectionRow>
       </PanelSection>
     </div>

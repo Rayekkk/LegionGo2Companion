@@ -200,12 +200,13 @@ export const RemapPage: FC = () => {
       </PanelSectionRow>
       {!status.supported && (
         <PanelSectionRow>
-          <Field label="Remapping unavailable" description={status.reason || "A compatible InputPlumber controller was not detected."} />
+          <Field focusable label="Remapping unavailable" description={status.reason || "A compatible InputPlumber controller was not detected."} />
         </PanelSectionRow>
       )}
       {status.supported && (
         <PanelSectionRow>
           <Field
+            focusable
             label={status.active ? "Active" : status.enabled ? "Waiting to reapply" : "System defaults"}
             description={status.reason}
           />
@@ -244,13 +245,13 @@ export const RemapPage: FC = () => {
 
     {(notice || error) && <PanelSection title={error ? "Could not apply mapping" : "Saved"}>
       <PanelSectionRow>
-        <Field label={error ? "InputPlumber kept the last safe profile" : "Mapping confirmed"} description={error || notice} />
+        <Field focusable label={error ? "InputPlumber kept the last safe profile" : "Mapping confirmed"} description={error || notice} />
       </PanelSectionRow>
     </PanelSection>}
 
     {status.inputplumber_version && <PanelSection title="System interface">
       <PanelSectionRow>
-        <Field label={status.inputplumber_version} description="Companion uses the existing SteamOS remapping service; no additional input daemon is installed." />
+        <Field focusable label={status.inputplumber_version} description="Companion uses the existing SteamOS remapping service; no additional input daemon is installed." />
       </PanelSectionRow>
     </PanelSection>}
   </>;

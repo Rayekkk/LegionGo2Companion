@@ -291,6 +291,7 @@ export const RgbPage: FC = () => {
         <PanelSection title="Recovery required">
           <PanelSectionRow>
             <Field
+              focusable
               label="Lighting controls are temporarily locked"
               description="Companion is restoring the last complete hardware state after an interrupted change."
             />
@@ -310,7 +311,7 @@ export const RgbPage: FC = () => {
         </PanelSectionRow>
         {rgb?.supported !== true && (
           <PanelSectionRow>
-            <Field label="Joystick-ring control unavailable" description={rgb?.reason ?? "The controller interface was not detected."} />
+            <Field focusable label="Joystick-ring control unavailable" description={rgb?.reason ?? "The controller interface was not detected."} />
           </PanelSectionRow>
         )}
         {settings.control_enabled && (
@@ -345,7 +346,7 @@ export const RgbPage: FC = () => {
       {settings.control_enabled && settings.rings_enabled && (
         <PanelSection title="Primary Zone">
           <PanelSectionRow>
-            <Field label="Selected color" description={usesColor ? "Used by Solid and Breathing effects." : "This hardware effect cycles its own colors."}>
+            <Field focusable label="Selected color" description={usesColor ? "Used by Solid and Breathing effects." : "This hardware effect cycles its own colors."}>
               <span style={{
                 display: "block",
                 width: "2.4em",
@@ -446,7 +447,7 @@ export const RgbPage: FC = () => {
         </PanelSectionRow>
         {power?.drift && (
           <PanelSectionRow>
-            <Field label="Power light setting drifted" description="Companion will restore the saved state automatically." />
+            <Field focusable label="Power light setting drifted" description="Companion will restore the saved state automatically." />
           </PanelSectionRow>
         )}
       </PanelSection>
@@ -454,6 +455,7 @@ export const RgbPage: FC = () => {
       <PanelSection title="Safety">
         <PanelSectionRow>
           <Field
+            focusable
             label="Hardware effects only"
             description="Animations run in controller firmware. Companion performs no frame-by-frame RGB work and only checks for drift once per minute."
           />
@@ -470,6 +472,7 @@ export const RgbPage: FC = () => {
         {(error || notice || rgb?.drift) && (
           <PanelSectionRow>
             <Field
+              focusable
               label={error ? "Could not complete" : rgb?.drift ? "Restoring saved RGB state" : "Result"}
               description={error || (rgb?.drift ? "A different component changed the joystick rings; Companion will reconcile them." : notice)}
             />

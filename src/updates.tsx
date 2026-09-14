@@ -126,15 +126,15 @@ export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }
   const [label, description] = statusText(view.check, installed);
   const canDownload = view.check?.update_available && view.check.download_available && view.check.latest_version;
   return <PanelSection title="Updates">
-    <PanelSectionRow><Field label={label} description={description} /></PanelSectionRow>
+    <PanelSectionRow><Field focusable label={label} description={description} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={view.busy !== null} onClick={() => void run("check")}>
       {view.busy === "check" ? "Checking GitHub…" : "Check for Updates"}
     </ButtonItem></PanelSectionRow>
     {canDownload && <PanelSectionRow><ButtonItem layout="below" disabled={view.busy !== null} onClick={() => void run("download", view.check!.latest_version)}>
       {view.busy === "download" ? "Downloading ZIP…" : `Download ${view.check!.latest_version}`}
     </ButtonItem></PanelSectionRow>}
-    {view.error && <PanelSectionRow><Field label="Could not complete" description={view.error} /></PanelSectionRow>}
-    {view.download?.path && <PanelSectionRow><Field label={`Version ${view.download.version} downloaded`}
+    {view.error && <PanelSectionRow><Field focusable label="Could not complete" description={view.error} /></PanelSectionRow>}
+    {view.download?.path && <PanelSectionRow><Field focusable label={`Version ${view.download.version} downloaded`}
       description={<><div style={{ overflowWrap: "anywhere" }}>{view.download.path}</div><div style={{ marginTop: 6 }}>
         ZIP saved. Install it through Decky Settings → Developer. Review your module settings after installation.
       </div></>} /></PanelSectionRow>}
