@@ -36,6 +36,7 @@ PENDING["state"] = {
         "imu_applied": {"left": True, "right": False},
     },
 }
+PROCESS_EXIT_TIMEOUT = 15 if os.name == "nt" else 5
 
 
 def _storage_child(connection, directory, operation, checkpoint, payload):
@@ -123,19 +124,19 @@ class SettingsProcessCrashTests(unittest.TestCase):
                 self.assertEqual(message, {"checkpoint": checkpoint})
                 self.assertTrue(process.is_alive(), "writer must be alive at the requested checkpoint")
                 process.kill()
-                process.join(5)
+                process.join(PROCESS_EXIT_TIMEOUT)
                 self.assertFalse(process.is_alive(), "killed writer did not exit")
                 self.assertNotEqual(process.exitcode, 0)
                 if os.name == "posix":
                     self.assertEqual(process.exitcode, -signal.SIGKILL)
             else:
-                process.join(5)
+                process.join(PROCESS_EXIT_TIMEOUT)
                 self.assertEqual(process.exitcode, 0)
             return message
         finally:
             if process.is_alive():
                 process.kill()
-                process.join(5)
+                process.join(PROCESS_EXIT_TIMEOUT)
             parent.close()
             process.close()
 
