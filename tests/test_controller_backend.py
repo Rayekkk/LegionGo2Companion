@@ -608,6 +608,36 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(capture["active"])
         self.assertEqual(capture["virtual"]["error"], "missing")
 
+    def test_battery_read_uses_one_native_report_closes_and_caches(self):
+        report = bytearray(b"\x04\x3c\x74" + bytes(61))
+        report[5], report[7] = 84, 61
+        report[12], report[13] = 2, 3
+        with patch.object(module, "_hid_inventory", return_value=(PHYSICAL, None)), \
+                patch.object(module, "_open_reader", return_value=7) as opener, \
+                patch.object(module.select, "select", return_value=([7], [], [])), \
+                patch.object(module.os, "read", return_value=bytes(report)) as reader, \
+                patch.object(module.os, "close") as close:
+            first = self.backend._controller_batteries()
+            second = self.backend._controller_batteries()
+        self.assertEqual(first, {"available": True, "left": 84, "right": 61,
+                                 "connection_left": "attached", "connection_right": "detached",
+                                 "reason": ""})
+        self.assertEqual(second, first)
+        opener.assert_called_once_with(PHYSICAL)
+        reader.assert_called_once_with(7, 256)
+        close.assert_called_once_with(7)
+
+    def test_battery_read_timeout_is_nonfatal_and_closes(self):
+        with patch.object(module, "_hid_inventory", return_value=(PHYSICAL, None)), \
+                patch.object(module, "_open_reader", return_value=7), \
+                patch.object(module.select, "select", return_value=([], [], [])), \
+                patch.object(module.os, "close") as close:
+            result = self.backend._controller_batteries()
+        self.assertFalse(result["available"])
+        self.assertIsNone(result["left"])
+        self.assertIn("No controller battery report", result["reason"])
+        close.assert_called_once_with(7)
+
 
 if __name__ == "__main__":
     unittest.main()

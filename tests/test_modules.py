@@ -86,7 +86,8 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         for name in main.MODULE_NAMES:
             self.plugin._module_state[name] = {'enabled': False}
         for method in ['get_settings', 'vibe_get_settings', 'display_get_state', 'wifi_get_status',
-                       'rgb_get_status', 'remap_get_status', 'battery_get_status', 'controller_get_status']:
+                       'rgb_get_status', 'remap_get_status', 'battery_get_status',
+                       'battery_get_controller_levels', 'controller_get_status']:
             with self.subTest(method=method), self.assertRaisesRegex(RuntimeError, 'disabled'):
                 await getattr(self.plugin, method)()
         self.assertEqual(len(await self.plugin.modules_get_status()), 8)

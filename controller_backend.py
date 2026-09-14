@@ -49,6 +49,8 @@ LEASE_SECONDS = 3.0
 CAPTURE_SECONDS = 30.0
 CHECK_SECONDS = 60.0
 RECOVERY_RETRY_SECONDS = 5.0
+BATTERY_SAMPLE_TIMEOUT_SECONDS = 0.25
+BATTERY_CACHE_SECONDS = 15.0
 
 
 class ControllerError(RuntimeError):
@@ -361,6 +363,82 @@ class Plugin:
         self._generation: str | None = None
         self._service_watch = ProcessWatch()
         self._status_cache: tuple[float, dict] | None = None
+        self._battery_cache: tuple[float, dict] | None = None
+        self._battery_lock = threading.Lock()
+
+    @staticmethod
+    def _battery_result(sample: dict | None = None, reason: str = "") -> dict:
+        if sample is None:
+            return {"available": False, "left": None, "right": None,
+                    "connection_left": None, "connection_right": None,
+                    "reason": reason or "Controller battery levels are unavailable."}
+        left, right = sample.get("battery_left"), sample.get("battery_right")
+        return {"available": left is not None or right is not None,
+                "left": left, "right": right,
+                "connection_left": sample.get("connection_left"),
+                "connection_right": sample.get("connection_right"),
+                "reason": "" if left is not None or right is not None
+                else "The controller report did not include battery levels."}
+
+    def _controller_batteries(self) -> dict:
+        """Read one verified native report without keeping the HID device open."""
+        with self._battery_lock:
+            now = _capture_time()
+            if self._battery_cache and now - self._battery_cache[0] < BATTERY_CACHE_SECONDS:
+                return copy.deepcopy(self._battery_cache[1])
+
+            # Reuse a recent diagnostics sample when one already exists instead
+            # of opening a second descriptor for the same physical controller.
+            with self._capture_lock:
+                stream = self._capture.get("physical") if self._capture else None
+                sample = copy.deepcopy(stream.get("sample")) if stream else None
+                last = stream.get("last") if stream else None
+            if sample is not None and isinstance(last, (int, float)) and now - last < BATTERY_CACHE_SECONDS:
+                result = self._battery_result(sample)
+                self._battery_cache = (now, copy.deepcopy(result))
+                return result
+
+            physical, _virtual = _hid_inventory()
+            if physical is None:
+                result = self._battery_result(reason="The supported Legion Go 2 controller is unavailable.")
+                self._battery_cache = (now, copy.deepcopy(result))
+                return result
+
+            fd = None
+            try:
+                fd = _open_reader(physical)
+                deadline = time.monotonic() + BATTERY_SAMPLE_TIMEOUT_SECONDS
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        result = self._battery_result(reason="No controller battery report was received.")
+                        break
+                    ready, _, _ = select.select([fd], [], [], remaining)
+                    if not ready:
+                        result = self._battery_result(reason="No controller battery report was received.")
+                        break
+                    try:
+                        packet = os.read(fd, 256)
+                    except BlockingIOError:
+                        continue
+                    if not packet:
+                        result = self._battery_result(reason="The controller disconnected during the battery read.")
+                        break
+                    sample = parse_physical_report(packet)
+                    if sample is not None:
+                        result = self._battery_result(sample)
+                        break
+            except Exception as exc:
+                result = self._battery_result(reason=str(exc))
+            finally:
+                if fd is not None:
+                    os.close(fd)
+
+            self._battery_cache = (now, copy.deepcopy(result))
+            return result
+
+    async def get_battery_levels(self) -> dict:
+        return await asyncio.to_thread(self._controller_batteries)
 
     def _status(self, fresh: bool = False) -> dict:
         with self._operation:

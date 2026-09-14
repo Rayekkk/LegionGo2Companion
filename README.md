@@ -30,7 +30,7 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 | **Extra-button remapping** | Independent actions for the left controller's Desktop and Page buttons, including F1-F12 and Disabled |
 | **Controller gyro** | Enable gyro reporting through the existing Lenovo driver and choose the left, right or combined controller source |
 | **Gyro and touchpad diagnostics** | A short, passive test compares native controller data with the virtual controller output available to Steam |
-| **Battery protection** | The firmware's Long Life charging mode, with the previous normal or fast charging mode preserved |
+| **Battery protection and status** | The firmware's Long Life charging mode, preserved normal/fast mode, and separate charge levels for both controllers |
 | **OLED brightness fix** | Fixes screen brightness control in SteamOS and additionally offers an HDR metadata fix for affected games |
 | **Wi-Fi band preference** | Prefer 5/6 GHz while keeping 2.4 GHz available, plus a manual rescan/reconnect action |
 | **Settings recovery** | Imports standalone settings, restores saved controls after startup/wake and checks for later drift |
@@ -280,7 +280,9 @@ Turning protection off returns to the normal charging mode captured before enabl
 including **Fast** when it was active. **Release battery control** restores the captured
 state while it is still owned by Companion and stops automatic reapplication. The page
 distinguishes the saved choice from the actual charging mode and reports failed changes.
-The feature does not change the battery on first installation until selected by the user.
+It also shows the left and right controller battery levels and whether each controller is
+attached. These values are read passively from a verified native controller report. The
+feature does not change the battery on first installation until selected by the user.
 
 ### OLED Display
 
@@ -363,7 +365,9 @@ lighting and mappings do not need another hardware write or profile reload.
 Battery and gyro choices also restore on startup and wake and check for drift once per
 minute. Battery changes keep a durable recovery record before writing to the kernel, so
 an interrupted first change retains the original charging mode. Diagnostic readers are
-closed outside a test; merely installing Companion does not start sampling HID reports.
+closed outside a test. When Battery is viewed, Companion opens a verified read-only
+controller descriptor only long enough to receive one report, closes it immediately and
+caches the result for 15 seconds; merely installing Companion does not sample HID reports.
 
 If the verified InputPlumber process exits, the existing monitor tick schedules an earlier
 check of gyro and button mappings. Recovery still verifies the controller and ownership

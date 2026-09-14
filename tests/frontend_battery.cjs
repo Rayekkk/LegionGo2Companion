@@ -8,13 +8,15 @@ const base = (changes = {}) => ({ success: true, supported: true, managed: false
   enabled: false, requested_enabled: null, capacity: 98, charging_status: 'Not charging',
   backend: 'charge_types', current_mode: 'Fast', baseline: null, options: ['Fast', 'Standard', 'Long_Life'],
   error: '', reason: '', recovery_pending: false, ...changes });
+const controllerBase = (changes = {}) => ({available: true, left: 87, right: 64,
+  connection_left: 'attached', connection_right: 'attached', reason: '', ...changes});
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve=yes; reject=no; });
   return { promise, resolve, reject }; };
 const settle = async () => { for (let i=0; i<30; i++) await Promise.resolve(); };
-function harness(initial=base()) {
+function harness(initial=base(), initialControllers=controllerBase()) {
   const slots=[], effects=new Map(), scheduled=[], timers=new Map(), calls=[];
-  let cursor=0, visible=true, timerId=0, response=initial, tree;
-  const methods={battery_get_status:()=>response};
+  let cursor=0, visible=true, timerId=0, response=initial, controllerResponse=initialControllers, tree;
+  const methods={battery_get_status:()=>response,battery_get_controller_levels:()=>controllerResponse};
   const same=(a,b)=>a && a.length===b.length && b.every((v,i)=>Object.is(v,a[i]));
   const hooks={
     useState(value) { const i=cursor++; if(!(i in slots))slots[i]=typeof value==='function'?value():value;
@@ -59,7 +61,23 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
   assert.equal(toggle(h).props.checked,false);assert.equal(toggle(h).props.disabled,false);
   assert.match(content(h.tree),/Companion control: released/);
   assert.match(content(h.tree),/Battery: 98%/);
-  assert.equal(h.calls.length,1);assert.equal(h.calls[0].name,'battery_get_status');h.unmount();
+  assert.match(content(h.tree),/Left controller: 87%/);
+  assert.match(content(h.tree),/Right controller: 64%/);
+  assert.match(content(h.tree),/Attached to the console/);
+  assert.equal(count(h,'battery_get_status'),1);assert.equal(count(h,'battery_get_controller_levels'),1);h.unmount();
+
+  // A valid controller-reported level remains visible after physical detachment.
+  h=harness(base(),controllerBase({left:55,right:0,connection_right:'detached'}));await h.ready();
+  assert.match(content(h.tree),/Left controller: 55%/);
+  assert.match(content(h.tree),/Right controller: 0%/);
+  assert.match(content(h.tree),/Detached · controller-reported level/);h.unmount();
+  h=harness(base(),controllerBase({left:null,connection_left:'detached'}));await h.ready();
+  assert.match(content(h.tree),/Left controller: Not connected/);h.unmount();
+  h=harness(base(),controllerBase({available:false,left:null,right:null,
+    connection_left:null,connection_right:null,reason:'No controller battery report was received.'}));await h.ready();
+  assert.match(content(h.tree),/Left controller: Unknown/);
+  assert.match(content(h.tree),/Right controller: Unknown/);
+  assert.match(content(h.tree),/No controller battery report was received/);h.unmount();
 
   // A commit failure must retain the restored state, without a Saved confirmation.
   h=harness();await h.ready();

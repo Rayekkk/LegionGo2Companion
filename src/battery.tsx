@@ -29,6 +29,15 @@ export interface BatteryStatus {
   recovery_pending?: boolean;
 }
 
+interface ControllerBatteryStatus {
+  available: boolean;
+  left: number | null;
+  right: number | null;
+  connection_left: "connecting" | "attached" | "detached" | null;
+  connection_right: "connecting" | "attached" | "detached" | null;
+  reason?: string;
+}
+
 interface BatteryResult {
   success: boolean;
   error?: string;
@@ -36,11 +45,42 @@ interface BatteryResult {
 }
 
 export const getBatteryStatus = callable<[], BatteryStatus>("battery_get_status");
+const getControllerBatteryLevels = callable<[], ControllerBatteryStatus>("battery_get_controller_levels");
 const setBatteryEnabled = callable<[boolean], BatteryResult>("battery_set_enabled");
 const releaseBatteryControl = callable<[], BatteryResult>("battery_release_control");
 
+const unavailableControllerBatteries = (): ControllerBatteryStatus => ({
+  available: false,
+  left: null,
+  right: null,
+  connection_left: null,
+  connection_right: null,
+  reason: "Controller battery levels are unavailable.",
+});
+
 const protectionLabel = (enabled: boolean | null) =>
   enabled === true ? "On" : enabled === false ? "Off" : "Unknown";
+
+const validControllerLevel = (value: number | null | undefined): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
+
+const controllerLevel = (value: number | null | undefined, connection: string | null | undefined) =>
+  validControllerLevel(value)
+    ? `${Math.round(value)}%`
+    : connection === "detached" ? "Not connected" : "Unknown";
+
+const controllerDescription = (
+  connection: string | null | undefined,
+  value: number | null | undefined,
+  reason?: string,
+) => {
+  if (connection === "attached") return "Attached to the console";
+  if (connection === "connecting") return "Connecting";
+  if (connection === "detached") return validControllerLevel(value)
+    ? "Detached · controller-reported level"
+    : "Detached from the console";
+  return reason || "Connection state unavailable";
+};
 
 export const batterySummary = (status?: BatteryStatus) => {
   if (!status) return "Battery protection and charging state";
@@ -56,6 +96,7 @@ export const batterySummary = (status?: BatteryStatus) => {
 export const BatteryPage: FC = () => {
   const visible = useQuickAccessVisible();
   const [status, setStatus] = useState<BatteryStatus | null>(null);
+  const [controllers, setControllers] = useState<ControllerBatteryStatus>(unavailableControllerBatteries);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -64,7 +105,7 @@ export const BatteryPage: FC = () => {
   const saving = useRef(false);
   const generation = useRef(0);
   const readRevision = useRef(0);
-  const readInFlight = useRef<Promise<BatteryStatus> | null>(null);
+  const readInFlight = useRef<Promise<[BatteryStatus, ControllerBatteryStatus]> | null>(null);
   isVisible.current = visible;
 
   useEffect(() => {
@@ -79,12 +120,16 @@ export const BatteryPage: FC = () => {
   const refresh = useCallback(async () => {
     if (!mounted.current || !isVisible.current || saving.current || readInFlight.current) return;
     const revision = ++readRevision.current;
-    const request = getBatteryStatus();
+    const request = Promise.all([
+      getBatteryStatus(),
+      getControllerBatteryLevels().catch(unavailableControllerBatteries),
+    ]);
     readInFlight.current = request;
     try {
-      const next = await request;
+      const [next, controllerLevels] = await request;
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
+      setControllers(controllerLevels);
       setError(next.error || (!next.success ? "Battery status could not be read." : ""));
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current) {
@@ -137,7 +182,7 @@ export const BatteryPage: FC = () => {
 
   if (!status) return <PanelSection title="Battery protection">
     <PanelSectionRow>
-      {error ? <Field label="Status unavailable" description={error} /> : <Spinner />}
+      {error ? <Field focusable label="Status unavailable" description={error} /> : <Spinner />}
     </PanelSectionRow>
     {error && <PanelSectionRow>
       <ButtonItem layout="below" onClick={() => void refresh()}>Check Again</ButtonItem>
@@ -159,6 +204,7 @@ export const BatteryPage: FC = () => {
     <PanelSection title="Battery protection">
       {status.recovery_pending && <PanelSectionRow>
         <Field
+          focusable
           label="Recovery pending"
           description="A previous charging change did not finish. The original setting has been kept for recovery. Recover and release control before making another change."
         />
@@ -177,12 +223,14 @@ export const BatteryPage: FC = () => {
       </PanelSectionRow>}
       {!status.supported && <PanelSectionRow>
         <Field
+          focusable
           label="Battery protection unavailable"
           description={status.reason || "A compatible battery charging interface was not detected."}
         />
       </PanelSectionRow>}
       <PanelSectionRow>
         <Field
+          focusable
           label={`Current protection: ${protectionLabel(status.enabled)}`}
           description={actualKnown
             ? status.enabled
@@ -193,6 +241,7 @@ export const BatteryPage: FC = () => {
       </PanelSectionRow>
       <PanelSectionRow>
         <Field
+          focusable
           label={status.managed
             ? `Saved preference: ${protectionLabel(status.requested_enabled)}`
             : "Companion control: released"}
@@ -223,16 +272,34 @@ export const BatteryPage: FC = () => {
 
     <PanelSection title="Charging state">
       <PanelSectionRow>
-        <Field label={`Battery: ${capacity}`} description={status.charging_status || "Charging status unavailable"} />
+        <Field focusable label={`Battery: ${capacity}`} description={status.charging_status || "Charging status unavailable"} />
       </PanelSectionRow>
       {status.supported && status.reason && <PanelSectionRow>
-        <Field label="Battery status" description={status.reason} />
+        <Field focusable label="Battery status" description={status.reason} />
       </PanelSectionRow>}
+    </PanelSection>
+
+    <PanelSection title="Controller batteries">
+      <PanelSectionRow>
+        <Field
+          focusable
+          label={`Left controller: ${controllerLevel(controllers.left, controllers.connection_left)}`}
+          description={controllerDescription(controllers.connection_left, controllers.left, controllers.reason)}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <Field
+          focusable
+          label={`Right controller: ${controllerLevel(controllers.right, controllers.connection_right)}`}
+          description={controllerDescription(controllers.connection_right, controllers.right, controllers.reason)}
+        />
+      </PanelSectionRow>
     </PanelSection>
 
     {(notice || error || busy) && <PanelSection title={busy ? "Applying" : error ? "Could not confirm" : "Saved"}>
       <PanelSectionRow>
         <Field
+          focusable
           label={busy ? "Updating battery protection" : error ? "Check the battery state" : "Preference confirmed"}
           description={busy ? "Waiting for the battery to confirm the change." : error || notice}
         />

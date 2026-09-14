@@ -727,6 +727,9 @@ class Plugin:
     async def battery_get_status(self):
         return await self._battery.get_status()
 
+    async def battery_get_controller_levels(self):
+        return await self._controller.get_battery_levels()
+
     async def battery_set_enabled(self, enabled):
         return await self._battery.set_enabled(enabled)
 
