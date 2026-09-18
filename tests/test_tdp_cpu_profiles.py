@@ -98,6 +98,83 @@ class CpuProfileTests(unittest.TestCase):
         return {'spl': 15000, 'sppt': 18000, 'fppt': 25000,
                 'cpu_boost_enabled': boost, 'epp': epp, **values}
 
+    def test_default_epp_resolves_readback_but_preserves_saved_default(self):
+        for custom, readback in ((False, 'balance_performance'), (True, '128')):
+            with self.subTest(custom=custom):
+                self.seed({}, epp='performance')
+                self.hardware(False, 'performance')
+                for path in self.epp_paths:
+                    path.with_name('energy_performance_available_preferences').write_text(
+                        'default performance balance_performance balance_power power' +
+                        (' custom' if custom else ''))
+                writer = tdp._write_cpu_power_text
+                def kernel_write(path, value):
+                    writer(path, readback if value == 'default' else value)
+                with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write):
+                    status = self.rpc('set_epp', 'default')
+                    self.assertEqual(status['epp']['value'], readback)
+                    self.assertEqual(status['profile']['epp'], 'default')
+                    self.assertEqual(self.payload()['settings']['epp'], 'default')
+                    self.assert_hardware(False, readback)
+                    self.hardware(False, 'performance')
+                    self.assertEqual(tdp._reapply_saved_cpu_power_controls_locked(
+                        self.payload()['settings']), [])
+                    self.assert_hardware(False, readback)
+                    self.rpc('set_epp', 'performance')
+                    self.assert_hardware(False, 'performance')
+
+    def test_default_epp_partial_write_failure_restores_concrete_readback(self):
+        self.seed({}, epp='performance')
+        self.hardware(False, 'performance')
+        writer = tdp._write_cpu_power_text
+        def kernel_write(path, value):
+            if Path(path) == self.epp_paths[1] and value == 'default':
+                raise OSError('isolated write failure')
+            writer(path, 'balance_performance' if value == 'default' else value)
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write):
+            result = asyncio.run(self.plugin.set_epp('default'))
+        self.assertFalse(result['success'])
+        self.assertIn('previous state restored', result['error'])
+        self.assert_hardware(False, 'performance')
+        self.assertEqual(self.payload()['settings']['epp'], 'performance')
+
+    def test_default_epp_persistence_failure_restores_concrete_readback(self):
+        self.seed({}, epp='performance')
+        self.hardware(False, 'performance')
+        writer = tdp._write_cpu_power_text
+        def kernel_write(path, value):
+            writer(path, 'balance_performance' if value == 'default' else value)
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write), \
+                patch.object(tdp, '_write_keys', side_effect=OSError('isolated persistence failure')):
+            result = asyncio.run(self.plugin.set_epp('default'))
+        self.assertFalse(result['success'])
+        self.assertIn('previous state restored', result['error'])
+        self.assert_hardware(False, 'performance')
+        self.assertEqual(self.payload()['settings']['epp'], 'performance')
+
+    def test_default_epp_rollback_preserves_external_writer(self):
+        self.seed({}, epp='performance')
+        self.hardware(False, 'performance')
+        writer = tdp._write_cpu_power_text
+        def kernel_write(path, value):
+            writer(path, 'balance_performance' if value == 'default' else value)
+            if Path(path) == self.epp_paths[1] and value == 'default':
+                writer(str(self.epp_paths[0]), 'power')
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write):
+            result = asyncio.run(self.plugin.set_epp('default'))
+        self.assertFalse(result['success'])
+        self.assertIn('changed externally', result['error'])
+        self.assertEqual([p.read_text() for p in self.epp_paths], ['power', 'performance'])
+        self.assertEqual(self.payload()['settings']['epp'], 'performance')
+
+    def test_named_epp_repairs_previous_default_readback_inconsistency(self):
+        self.seed({}, epp='performance')
+        self.hardware(False, 'performance')
+        self.epp_paths[0].write_text('balance_performance')
+        self.assertFalse(asyncio.run(self.plugin.get_cpu_power_controls())['success'])
+        self.rpc('set_epp', 'balance_power')
+        self.assert_hardware(False, 'balance_power')
+
     def test_kernel_rollback_quantizes_only_hardware_and_upgrade_restores_exact_values(self):
         self.seed({'111': self.game(ac_separate=True, ac_spl=25000, ac_sppt=28000,
                                    ac_fppt=35000, ac_cpu_boost_enabled=False, ac_epp='26')})

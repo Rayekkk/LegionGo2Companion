@@ -649,6 +649,14 @@ function normaliseCpuPowerControls(value: unknown): CpuPowerControls {
 
 const readableEppProfile = (profile: string | null) => {
   if (!profile) return "Unknown";
+  const labels: Record<string, string> = {
+    default: "System default",
+    performance: "Prefer CPU",
+    balance_performance: "Balanced · Prefer CPU",
+    balance_power: "Balanced · Prefer GPU",
+    power: "Prefer GPU",
+  };
+  if (labels[profile]) return labels[profile];
   const readable = profile.replace(/[-_]+/g, " ").trim();
   return readable.charAt(0).toUpperCase() + readable.slice(1);
 };
@@ -884,8 +892,10 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   };
 
   const changeEpp = (value: string) => {
-    const epp = controlsRef.current && cpuControlsForEditor(controlsRef.current).epp;
-    if (!visibleRef.current || !epp?.available || actionRef.current || value === epp.value) return;
+    const current = controlsRef.current && cpuControlsForEditor(controlsRef.current);
+    const epp = current?.epp;
+    if (!visibleRef.current || !epp?.available || actionRef.current ||
+        (value === epp.value && (current?.profile?.epp == null || value === current.profile.epp))) return;
     void runAction("epp", () => setEpp(value, appId, acProfile, expectedAppId));
   };
 
@@ -981,8 +991,8 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
               : changing === "epp" ? "Applying and verifying on every CPU policy..."
               : eppPending ? "Waiting for the slider to settle before applying..."
               : driverManagedNumeric
-                ? "Current profile is driver-managed. Move the slider to select an explicit value; 0% = Performance, 100% = Power saving."
-              : "0% = Performance; 100% = Power saving. Applied in 10% steps."
+                ? "Current profile is driver-managed. Move the slider to select an explicit value: 0% = Prefer CPU; 100% = Prefer GPU."
+              : "0% = Prefer CPU; 100% = Prefer GPU. Adjusts CPU energy preference; a lower CPU demand can leave more of the shared power budget for graphics. Applied in 10% steps."
             }
           />
         ) : (
@@ -1003,8 +1013,8 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
               : changing === "epp" ? "Applying and verifying on every CPU policy..."
               : noDiscreteChoice ? "The CPU driver exposes no alternative linear EPP profile."
               : profileIndex < 0
-                ? `Choose a performance/efficiency profile: ${biasProfiles.map(readableEppProfile).join(" / ")}`
-              : `Bias profiles: ${biasProfiles.map(readableEppProfile).join(" / ")}`
+                ? `Choose a CPU energy preference: ${biasProfiles.map(readableEppProfile).join(" / ")}`
+              : "Prefer CPU favors CPU performance. Prefer GPU reduces CPU energy demand and can leave more of the shared power budget for graphics."
             }
           />
         )}
@@ -1018,10 +1028,10 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
         <PanelSectionRow key={`epp-${profile}`}>
           <ButtonItem
             layout="below"
-            disabled={busy || !epp.available || epp.value === profile}
+            disabled={busy || !epp.available || (controls.profile?.epp ?? epp.value) === profile}
             onClick={() => changeEpp(profile)}
           >
-            {epp.value === profile
+            {(controls.profile?.epp ?? epp.value) === profile
               ? `> ${readableEppProfile(profile)} EPP`
               : `Use ${readableEppProfile(profile)} EPP`}
           </ButtonItem>

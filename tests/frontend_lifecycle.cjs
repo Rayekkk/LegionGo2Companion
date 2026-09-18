@@ -57,6 +57,11 @@ function findComponent(node,name){
   if(typeof node.type==='function'&&node.type.name===name)return node;
   for(const child of Array.isArray(node)?node:[node.props?.children]){const match=findComponent(child,name);if(match)return match;}
 }
+function findButton(node,text){
+  if(!node||typeof node!=='object')return;
+  if(node.type==='ButtonItem'&&node.props?.children===text)return node;
+  for(const child of Array.isArray(node)?node:[node.props?.children]){const match=findButton(child,text);if(match)return match;}
+}
 (async()=>{
  const values={level:2,mode:1,touchpadIntensity:2,touchpadEnabled:true};
  const vibe=mount('vibration.tsx','LGoVibeControl',{
@@ -79,6 +84,30 @@ function findComponent(node,name){
  assert.equal(find(legacyTree,'EPP compatibility').props.description,compatibilityNote);
  assert.equal(legacy.calls.filter(c=>c.name==='set_epp').length,0);
  legacy.unmount();
+ const presetState=(requested='performance')=>({success:true,available:true,error:'',
+   profile:{app_id:'',ac_profile:false,active:true,cpu_boost_enabled:null,epp:requested},
+   cpu_boost:{available:true,enabled:true,error:''},
+   epp:{available:true,error:'',min:0,max:255,value:requested==='default'?'balance_performance':requested,
+     numeric_value:requested==='default'?128:null,numeric_supported:false,
+     profiles:['default','performance','balance_performance','balance_power','power']}});
+ const presets=mount('tdp.tsx','CpuPowerControlsSection',{
+   get_cpu_power_controls:presetState(),set_epp:(value)=>presetState(value),
+ });
+ presets.render();await settle();tree=presets.render();
+ assert.match(find(tree,'EPP - Prefer CPU').props.description,/CPU energy demand/);
+ findButton(tree,'Use System default EPP').props.onClick();await settle();tree=presets.render();
+ assert.equal(presets.calls.find(c=>c.name==='set_epp').args[0],'default');
+ assert.equal(findButton(tree,'> System default EPP').props.disabled,true);
+ const defaultSlider=find(tree,'EPP - Balanced · Prefer CPU');assert.equal(defaultSlider.props.value,1);
+ // The explicit preset must save even when it matches default's live readback.
+ defaultSlider.props.onChange(1);await settle();tree=presets.render();
+ assert.equal(presets.calls.filter(c=>c.name==='set_epp').length,2);
+ assert.equal(presets.calls.filter(c=>c.name==='set_epp')[1].args[0],'balance_performance');
+ assert.equal(findButton(tree,'Use System default EPP').props.disabled,false);
+ find(tree,'EPP - Balanced · Prefer CPU').props.onChange(3);await settle();tree=presets.render();
+ assert.equal(presets.calls.filter(c=>c.name==='set_epp')[2].args[0],'power');
+ assert.ok(find(tree,'EPP - Prefer GPU'));
+ presets.unmount();
  for(const leave of ['unmount','hide']){
    const epp=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:"",
       cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'128',numeric_value:128,numeric_supported:true,profiles:[]}},

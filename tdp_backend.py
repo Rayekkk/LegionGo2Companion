@@ -1877,6 +1877,7 @@ def _transactional_cpu_power_write(
     requested: dict[str, str],
     equivalent,
     label: str,
+    resolve_readback=None,
 ) -> dict:
     changed: list[str] = []
     try:
@@ -1888,6 +1889,11 @@ def _transactional_cpu_power_write(
             changed.append(path)
             _write_cpu_power_text(path, wanted)
             actual = _read_cpu_power_text(path)
+            if resolve_readback is not None:
+                # Keep the concrete value returned by the kernel for final
+                # verification and rollback ownership, not an input alias.
+                wanted = resolve_readback(wanted, actual)
+                requested[path] = wanted
             if not equivalent(actual, wanted):
                 raise OSError(
                     f"{_sysfs_short_name(path)} readback mismatch")
@@ -1982,8 +1988,18 @@ def _apply_epp_hardware(value: str) -> dict:
     if canonical is None:
         return {"success": False, "error": "invalid or unsupported EPP value"}
     requested = {path: canonical for path in capture["targets"]}
+    def resolve_readback(wanted: str, actual: str) -> str:
+        if wanted != "default":
+            return wanted
+        # amd-pstate resolves "default" to the boot EPP and reports its name
+        # (or a raw value on custom-capable kernels). Only this documented
+        # alias may adopt the immediate, capability-validated readback.
+        resolved = _validated_epp_request(capture, actual)
+        if resolved is None:
+            raise ValueError("invalid default EPP readback")
+        return resolved
     return _transactional_cpu_power_write(
-        capture["originals"], requested, _epp_equivalent, "EPP")
+        capture["originals"], requested, _epp_equivalent, "EPP", resolve_readback)
 
 
 def _cpu_power_controls_status(
