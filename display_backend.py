@@ -277,6 +277,8 @@ DEFAULT_SETTINGS = {
     "brightness_baseline_session": None,
     "hdr_baseline": None,
     "hdr_baseline_session": None,
+    "reset_in_progress": False,
+    "reset_session": None,
 }
 
 settings = SettingsManager(
@@ -1202,6 +1204,10 @@ class Plugin:
         "settings_error": "",
         "restart_pending": False,
         "restart_error": "",
+        "reset_in_progress": False,
+        "reset_restart_pending": False,
+        "reset_error": "",
+        "reset_note": "",
         # Hybrid half - idle in the other two modes
         "hybrid_reason": "",
         "hdr_now": False,         # is the panel in PQ right now
@@ -1388,6 +1394,99 @@ class Plugin:
         """Change the mode after setup. Same path, so the two cannot diverge."""
         return await Plugin._apply_mode(mode)
 
+    async def reset_settings(self) -> dict:
+        await _offload(Plugin._read_settings)
+        async with Plugin._mode_lock:
+            return await module_runtime.complete(_offload(Plugin._reset_settings_locked))
+
+    @staticmethod
+    def _reset_settings_locked() -> dict:
+        """Withdraw display ownership before discarding its recovery snapshots."""
+        with Plugin._runtime_lock, Plugin._edid_lock:
+            Plugin._state["reset_error"] = ""
+            try:
+                Plugin._sync_loaded_script()
+                session = _gamescope_start_time()
+                with _settings_lock:
+                    settings.read()
+                    Plugin._require_settings()
+                    previous_session = settings.getSetting("reset_session", None)
+                    needs_restart = (Plugin._loaded_script_variant in (MODE_PQ, MODE_G22)
+                                     or (Plugin._same_session(previous_session, session)
+                                         if previous_session is not None else
+                                         Plugin._state.get("panel_mode") in MODES))
+                    reset_session = session if needs_restart else None
+                    settings.setSetting("reset_in_progress", True)
+                    settings.setSetting("reset_session", reset_session)
+                    settings.commit()
+                # The durable marker also suppresses all hardware passes after
+                # a Decky reload or an interrupted reset.
+                Plugin._state["reset_in_progress"] = True
+                Plugin._state["setup_done"] = False
+                if session is None:
+                    raise RuntimeError("Could not identify the Gaming Mode session. Retry reset in Gaming Mode.")
+                props = Plugin._session_props([ATOM_IS_EXTERNAL])
+                external = _as_int(props.get(ATOM_IS_EXTERNAL))
+                if external not in (0, 1):
+                    raise RuntimeError("Could not verify the active display. Retry reset in Gaming Mode.")
+                if external == 0:
+                    if Plugin._baseline is not None:
+                        if not _write_nits(Plugin._baseline):
+                            raise RuntimeError("Could not restore the previous brightness setting.")
+                    elif not Plugin._release_locked():
+                        raise RuntimeError("Could not release brightness control.")
+                # An external display owns its brightness and output mode.
+                Plugin._last_written = None
+                Plugin._state["active"] = False
+                if not _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
+                    raise RuntimeError("Could not release HDR support control.")
+                if external == 0:
+                    hdr = Plugin._hdr_baseline if Plugin._hdr_baseline is not None else False
+                    if not _write_atom_int(ATOM_HDR_ENABLED, int(hdr)):
+                        raise RuntimeError("Could not restore the previous HDR setting.")
+                    Plugin._state["hdr_now"] = bool(hdr)
+                if not Plugin._edid_restore_locked():
+                    raise RuntimeError("Could not restore the original display EDID.")
+                note = _uninstall_script()
+                if note.startswith("could not"):
+                    raise RuntimeError(note)
+                # A disappeared/replaced connector does not need restoring,
+                # but its old recovery bytes must not survive a full reset.
+                try:
+                    os.unlink(EDID_BACKUP)
+                except FileNotFoundError:
+                    pass
+                with _settings_lock:
+                    settings.replace({**DEFAULT_SETTINGS, "reset_session": reset_session})
+                Plugin._baseline = None
+                Plugin._hdr_baseline = None
+                Plugin._edid_original = None
+                Plugin._edid_recheck_until = 0.0
+                Plugin._hybrid_suspended_external = False
+                Plugin._reset_hybrid_timing()
+                Plugin._hdr_mode_settled()
+                Plugin._state.update(panel_mode=None, active_mode=None, setup_done=False,
+                    setup_note="", setup_error="", restart_pending=False, restart_error="",
+                    enabled=DEFAULT_SETTINGS["enabled"], edid_fix=DEFAULT_SETTINGS["edid_fix"],
+                    active=False, edid_patched=False, edid_game_nits=0.0,
+                    reason="waiting for display setup", hybrid_reason="",
+                    edid_reason="waiting for display setup", reset_in_progress=False,
+                    reset_restart_pending=reset_session is not None,
+                    reset_note=note)
+                decky.logger.info(f"{LOG} reset: {note}")
+            except Exception as error:
+                # Preserve the journal/baselines and keep the module passive.
+                # A retry can finish even if the script has already been removed.
+                with _settings_lock:
+                    settings.read()
+                    pending = settings.getSetting("reset_in_progress", False) is True
+                Plugin._state["reset_in_progress"] = pending
+                Plugin._state["reset_error"] = str(error)
+                if pending:
+                    Plugin._state["setup_done"] = False
+                decky.logger.warning(f"{LOG} reset incomplete: {error}")
+            return dict(Plugin._state)
+
     @staticmethod
     async def _apply_mode(mode: str) -> dict:
         await _offload(Plugin._read_settings)
@@ -1407,6 +1506,9 @@ class Plugin:
 
     @staticmethod
     async def _apply_mode_locked(mode: str) -> dict:
+        if Plugin._state.get("reset_in_progress") or Plugin._state.get("reset_restart_pending"):
+            Plugin._state["setup_error"] = "Finish the display reset and restart Gaming Mode before choosing a new mode."
+            return dict(Plugin._state)
         previous = Plugin._state["panel_mode"]
         mode = _normalise_mode(mode)
 
@@ -1577,6 +1679,10 @@ class Plugin:
     def _forward_nits(nits: float):
         """Write only while the gate that authorised this value is still open."""
         with Plugin._runtime_lock:
+            if Plugin._state.get("reset_in_progress") or (
+                    Plugin._state.get("panel_mode") is None and Plugin._last_written is None):
+                Plugin._state["active"] = False
+                return None
             if (not Plugin._state["active"]
                     or Plugin._state.get("active_mode") != MODE_PQ
                     or not Plugin._state.get("setup_done")
@@ -1595,13 +1701,29 @@ class Plugin:
     @staticmethod
     def _refresh_setup() -> None:
         """Re-check the display script; someone may have replaced it behind us."""
+        with Plugin._runtime_lock:
+            Plugin._refresh_setup_locked()
+
+    @staticmethod
+    def _refresh_setup_locked() -> None:
         Plugin._sync_loaded_script()
+        if Plugin._state.get("reset_in_progress"):
+            Plugin._state["setup_done"] = False
+            Plugin._state["restart_pending"] = False
+            return
         if Plugin._state["panel_mode"] is None:
             # Nothing is installed on the user's behalf before they have said
             # which trade-off they want.
             Plugin._state["setup_done"] = False
             Plugin._state["restart_pending"] = False
             Plugin._state["setup_note"] = ""
+            reset_session = settings.getSetting("reset_session", None)
+            current = _gamescope_start_time()
+            Plugin._state["reset_restart_pending"] = (
+                reset_session is not None and (current is None or Plugin._same_session(reset_session, current)))
+            if reset_session is not None and current is not None and not Plugin._same_session(reset_session, current):
+                Plugin._store_setting("reset_session", None)
+            Plugin._state["active_mode"] = None
             return
         installed, note = _script_status()
         Plugin._state["setup_done"] = installed
@@ -1670,6 +1792,8 @@ class Plugin:
     @staticmethod
     def _refresh_gate_locked() -> bool:
         """Decide whether we should be forwarding right now. Costs one xprop."""
+        if Plugin._state.get("reset_in_progress"):
+            return False
         if not Plugin._state["setup_done"]:
             # The panel shows only the setup button in this state, so quietly
             # doing the work anyway would leave no way to turn it off.
@@ -1875,7 +1999,7 @@ class Plugin:
     @staticmethod
     def _hybrid_pass_locked() -> None:
         """Move the panel between gamma 2.2 and PQ from what the game asks for."""
-        if Plugin._state.get("active_mode") != MODE_HYBRID:
+        if Plugin._state.get("reset_in_progress") or Plugin._state.get("active_mode") != MODE_HYBRID:
             return
         if not Plugin._state["setup_done"]:
             Plugin._reset_hybrid_timing()
@@ -2193,6 +2317,8 @@ class Plugin:
         this file whenever the connector changes, so a dock or an undock would
         otherwise silently undo the fix.
         """
+        if Plugin._state.get("reset_in_progress"):
+            return
         if not Plugin._state["setup_done"]:
             if Plugin._edid_restore_locked():
                 Plugin._state["edid_reason"] = "waiting for the display script"
@@ -2394,6 +2520,8 @@ class Plugin:
             decky.logger.error(f"{LOG} {message}")
             return
         Plugin._state["settings_error"] = ""
+        Plugin._state["reset_in_progress"] = settings.getSetting("reset_in_progress", False) is True
+        Plugin._state["reset_error"] = ""
         Plugin._state["enabled"] = _strict_bool(
             settings.getSetting("enabled", DEFAULT_SETTINGS["enabled"]),
             DEFAULT_SETTINGS["enabled"],
@@ -2428,6 +2556,9 @@ class Plugin:
                 f"{LOG} recovered the original EDID from a previous run")
 
         await _offload(Plugin._refresh_setup)
+
+        if Plugin._state["reset_in_progress"]:
+            await self.reset_settings()
 
         # As early as the gate allows, and before the slower startup work. The
         # Vulkan layer reads GAMESCOPE_HDR_OUTPUT_FEEDBACK once, when a game

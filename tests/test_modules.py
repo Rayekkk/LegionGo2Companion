@@ -85,7 +85,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_module_rpcs_are_gated_but_management_remains_available(self):
         for name in main.MODULE_NAMES:
             self.plugin._module_state[name] = {'enabled': False}
-        for method in ['get_settings', 'vibe_get_settings', 'display_get_state', 'wifi_get_status',
+        for method in ['get_settings', 'vibe_get_settings', 'display_get_state', 'display_reset_settings', 'wifi_get_status',
                        'rgb_get_status', 'remap_get_status', 'battery_get_status',
                        'battery_get_controller_levels', 'controller_get_status']:
             with self.subTest(method=method), self.assertRaisesRegex(RuntimeError, 'disabled'):

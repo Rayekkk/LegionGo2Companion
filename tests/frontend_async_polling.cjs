@@ -66,6 +66,13 @@ function find(node, label) {
   if (node.props?.label === label) return node;
   for (const child of Array.isArray(node) ? node : [node.props?.children]) { const result = find(child, label); if (result) return result; }
 }
+function findButton(node, text) {
+  if (!node || typeof node !== 'object') return;
+  if (node.type === 'ButtonItem' && node.props?.children === text) return node;
+  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
+    const result = findButton(child, text); if (result) return result;
+  }
+}
 function findSection(node, title, action = 'onClick') {
   if (!node || typeof node !== 'object') return;
   if (node.props?.title === title && node.props?.[action]) return node;
@@ -94,6 +101,42 @@ const cases = [
     h.respond(read, value); await settle(); assert.equal(h.writes, before, `${component} ignores hidden reads`);
     h.visible(true); assert.equal(h.calls.length, 2); h.unmount(); const after = h.writes;
     h.respond(read, value); await settle(); assert.equal(h.writes, after, `${component} ignores unmounted reads`);
+  }
+  {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', display); await settle();
+    findButton(h.render(), 'Reset Display Fix').props.onClick();
+    h.fire(); // Keep an older status read unresolved across the reset.
+    const confirm = findButton(h.render(), 'Confirm Display Reset');
+    confirm.props.onClick(); confirm.props.onClick(); await settle();
+    assert.equal(h.calls.filter(c => c.name === 'display_reset_settings').length, 1);
+    const initial = { ...display, panel_mode: null, active_mode: null, setup_done: false,
+      reset_in_progress: false, reset_restart_pending: true, reset_error: '' };
+    h.respond('display_reset_settings', initial); await settle();
+    assert.ok(findButton(h.render(), 'Restart Game Mode'));
+    assert.equal(findButton(h.render(), 'Other options').props.disabled, true);
+    h.respond('display_get_state', display); await settle();
+    assert.ok(findButton(h.render(), 'Restart Game Mode'), 'stale read cannot undo the reset');
+    h.fire(); h.respond('display_get_state', { ...initial, reset_restart_pending: false }); await settle();
+    assert.equal(findButton(h.render(), 'Other options').props.disabled, false);
+    assert.equal(findButton(h.render(), 'Reset Display Fix'), undefined, 'reset returns to the initial chooser');
+    h.unmount();
+  }
+  {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', { ...display, reset_in_progress: true, reset_error: 'Restore failed' }); await settle();
+    assert.equal(find(h.render(), 'Display controls are paused').props.description, 'Restore failed');
+    assert.equal(find(h.render(), 'Enabled'), undefined);
+    findButton(h.render(), 'Retry Display Reset').props.onClick(); await settle();
+    h.respond('display_reset_settings', { ...display, panel_mode: null, setup_done: false,
+      reset_in_progress: false, reset_restart_pending: true, reset_error: '' }); await settle();
+    assert.ok(findButton(h.render(), 'Restart Game Mode')); h.unmount();
+  }
+  for (const gate of [{ setup_done: false }, { restart_pending: true }]) {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', { ...display, ...gate }); await settle();
+    assert.ok(findButton(h.render(), 'Reset Display Fix'), 'reset remains accessible behind setup/restart gates');
+    h.unmount();
   }
   for (const spec of [
     { file: 'display.tsx', component: 'DisplayPage', read: 'display_get_state', initial: display, next: { ...display, enabled: false },

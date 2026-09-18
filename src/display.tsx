@@ -55,6 +55,10 @@ interface State {
   settings_error?: string;
   restart_pending: boolean;
   restart_error: string;
+  reset_in_progress?: boolean;
+  reset_restart_pending?: boolean;
+  reset_error?: string;
+  reset_note?: string;
   // Hybrid half
   hybrid_reason: string;
   hdr_now: boolean;
@@ -81,6 +85,7 @@ const setEdidFix = callable<[boolean], State>("display_set_edid_fix");
 const runSetup = callable<[string], State>("display_run_setup");
 const setPanelMode = callable<[string], State>("display_set_panel_mode");
 const restartSession = callable<[], State>("display_restart_session");
+const resetDisplaySettings = callable<[], State>("display_reset_settings");
 const notify = (title: string, body: string) =>
   toaster.toast({ title, body, duration: 5000 });
 
@@ -119,6 +124,7 @@ export const DisplayPage: FC = () => {
   // point, and afterwards the mode is a decision already made.
   const [showOthers, setShowOthers] = useState(false);
   const [showSwitch, setShowSwitch] = useState(false);
+  const [showReset, setShowReset] = useState(false);
   const mounted = useRef(true);
   const isVisible = useRef(visible);
   const writing = useRef(false);
@@ -218,6 +224,24 @@ export const DisplayPage: FC = () => {
     }
   }, []);
 
+  const reset = useCallback(async () => {
+    if (!beginWrite()) return;
+    let failed = false;
+    try {
+      const next = await resetDisplaySettings();
+      if (mounted.current) {
+        setState(next);
+        if (!next.reset_error) {
+          setShowOthers(false); setShowSwitch(false); setShowReset(false);
+        }
+      }
+      if (next.reset_error) notify("Reset incomplete", next.reset_error);
+    } catch (error) {
+      failed = true;
+      notify("Reset incomplete", error instanceof Error ? error.message : String(error));
+    } finally { finishWrite(); if (failed) void refresh(); }
+  }, [refresh]);
+
   if (!state) {
     return (
       <PanelSection>
@@ -232,6 +256,22 @@ export const DisplayPage: FC = () => {
     <PanelSectionRow><Field focusable label="Display controls are paused" description={state.settings_error} /></PanelSectionRow>
   </PanelSection>;
 
+  if (state.reset_in_progress) return <PanelSection title="Finish display reset">
+    <PanelSectionRow><Field focusable label="Display controls are paused"
+      description={state.reset_error || "An earlier reset did not finish. Retry to restore the display and remove the Companion script."} /></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Retry Display Reset</ButtonItem></PanelSectionRow>
+  </PanelSection>;
+
+  const resetPanel = <PanelSection title="Reset display fix">
+    <PanelSectionRow><Field focusable label="Restore previous display handling"
+      description="Withdraws brightness, HDR and EDID adjustments, removes the Companion display script and clears this module's settings. A previous third-party script is restored from its backup. Gaming Mode may need a restart." /></PanelSectionRow>
+    {state.reset_error && <PanelSectionRow><Field focusable label="Reset incomplete" description={state.reset_error} /></PanelSectionRow>}
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setShowReset(value => !value)}>
+      {showReset ? "Cancel Reset" : "Reset Display Fix"}
+    </ButtonItem></PanelSectionRow>
+    {showReset && <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Confirm Display Reset</ButtonItem></PanelSectionRow>}
+  </PanelSection>;
+
   // Nothing works until gamescope has the display script: without it the panel
   // is either stock or, far more often on this device, still carrying the
   // gamma 2.2 workaround that takes it out of PQ entirely. Showing the normal
@@ -241,6 +281,12 @@ export const DisplayPage: FC = () => {
   if (!state.panel_mode) {
     return (
       <PanelSection title="Choose a display mode">
+        {state.reset_restart_pending && <>
+          <PanelSectionRow><Field focusable label="Display fix reset"
+            description="Companion controls have been withdrawn. Restart Gaming Mode to unload the display script before choosing a new mode." /></PanelSectionRow>
+          {state.restart_error && <PanelSectionRow><Field focusable label="Could not restart" description={state.restart_error} /></PanelSectionRow>}
+          <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={restart}>Restart Game Mode</ButtonItem></PanelSectionRow>
+        </>}
         <PanelSectionRow>
           <Field
             focusable
@@ -252,7 +298,7 @@ export const DisplayPage: FC = () => {
             }
           />
         </PanelSectionRow>
-        <ModeChoice mode={RECOMMENDED} busy={busy} onPick={setup} />
+        <ModeChoice mode={RECOMMENDED} busy={busy || !!state.reset_restart_pending} onPick={setup} />
 
         {state.setup_error && (
           <PanelSectionRow>
@@ -264,7 +310,7 @@ export const DisplayPage: FC = () => {
           <ButtonItem
             layout="below"
             onClick={() => setShowOthers((v) => !v)}
-            disabled={busy}
+            disabled={busy || !!state.reset_restart_pending}
           >
             {showOthers ? "Hide other options" : "Other options"}
           </ButtonItem>
@@ -272,7 +318,7 @@ export const DisplayPage: FC = () => {
 
         {showOthers &&
           MODE_ORDER.filter((m) => m !== RECOMMENDED).map((m) => (
-            <ModeChoice key={m} mode={m} busy={busy} onPick={setup} />
+            <ModeChoice key={m} mode={m} busy={busy || !!state.reset_restart_pending} onPick={setup} />
           ))}
       </PanelSection>
     );
@@ -280,6 +326,7 @@ export const DisplayPage: FC = () => {
 
   if (!state.setup_done) {
     return (
+      <>
       <PanelSection title="Setup">
         <PanelSectionRow>
           <Field
@@ -307,11 +354,14 @@ export const DisplayPage: FC = () => {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+      {resetPanel}
+      </>
     );
   }
 
   if (state.restart_pending) {
     return (
+      <>
       <PanelSection title="Restart needed">
         <PanelSectionRow>
           <Field
@@ -355,6 +405,8 @@ export const DisplayPage: FC = () => {
             <ModeChoice key={m} mode={m} busy={busy} onPick={changeMode} />
           ))}
       </PanelSection>
+      {resetPanel}
+      </>
     );
   }
 
@@ -487,6 +539,7 @@ export const DisplayPage: FC = () => {
         )}
       </PanelSection>
 
+      {resetPanel}
     </>
   );
 };

@@ -189,8 +189,10 @@ all three controls. The editing buttons select which profile you are changing;
 connecting the charger selects which one the backend applies. Editing an inactive
 profile saves its choices without changing the active profile on the hardware.
 
-**CPU Boost** controls the kernel's boost setting. **EPP** runs from 0% towards performance
-to 100% towards power saving, in 10% steps. The CPU section identifies whether changes
+**CPU Boost** controls the kernel's boost setting. **EPP** uses **Prefer CPU** and
+**Prefer GPU** labels: these change the CPU's energy preference, and lower CPU demand can
+leave more of the shared power budget for graphics. Newer kernels offer 0–100% in 10% steps;
+older kernels offer supported presets and **System default**. The CPU section identifies whether changes
 belong to the global profile, the game's battery profile or its AC profile. Choices are
 restored after startup, resume and power-source changes, and checked for drift.
 
@@ -303,6 +305,12 @@ content. When Steam is already controlling HDR brightness, this part stands asid
 **EDID for games** corrects gamescope's published display metadata so affected games can
 read the panel's luminance values. Restart an already running game to let it read the
 updated metadata.
+
+**Reset Display Fix** withdraws the module's brightness, HDR and EDID changes, removes its
+installed display script (or restores the previous third-party script from backup), clears
+its saved settings and returns to the initial mode chooser. Confirm the reset, then use
+**Restart Game Mode** if requested to unload the script already held by gamescope.
+An interrupted reset keeps the module paused and offers a retry instead of losing recovery data.
 
 > [!NOTE]
 > Hybrid and PQ share a display script and can switch immediately. Moving to or from

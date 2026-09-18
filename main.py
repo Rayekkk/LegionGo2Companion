@@ -647,6 +647,9 @@ class Plugin:
     async def display_set_panel_mode(self, mode):
         return await self._display.set_panel_mode(mode)
 
+    async def display_reset_settings(self):
+        return await self._display.reset_settings()
+
     async def display_restart_session(self):
         return await self._display.restart_session()
 
