@@ -170,6 +170,87 @@ class RgbBackendTests(unittest.TestCase):
             self.assertEqual((led / "speed").read_text().strip(), "100")
             self.assertEqual((led / "enabled").read_text().strip(), "true")
 
+    def test_boot_retry_continues_past_settling_window_then_returns_to_slow_polling(self):
+        now = [0.0]
+        attempts = []
+        plugin = rgb_backend.Plugin()
+        plugin._settle_until = 30.0
+
+        async def advance(seconds):
+            now[0] += seconds
+            if now[0] >= 105.0:
+                raise asyncio.CancelledError
+
+        async def reconcile(_function):
+            attempts.append(now[0])
+            return now[0] >= 40.0
+
+        fake_time = types.SimpleNamespace(monotonic=lambda: now[0])
+        with (
+            patch.object(rgb_backend, "time", fake_time),
+            patch.object(rgb_backend.asyncio, "sleep", side_effect=advance),
+            patch.object(rgb_backend, "_offload", side_effect=reconcile),
+            patch.object(rgb_backend, "_resume_detected", return_value=False),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(plugin._drift_loop())
+        self.assertEqual(attempts, [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 100.0])
+
+    def test_transient_rgb_failure_keeps_settings_and_recovers_on_both_led_abis(self):
+        for legacy in (True, False):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as raw:
+                led = Path(raw)
+                make_led(led, enabled="false")
+                if legacy:
+                    (led / "multi_max_intensity").unlink()
+                state = copy.deepcopy(rgb_backend.DEFAULT_STATE)
+                state.update(
+                    configured=True,
+                    control_enabled=True,
+                    rings_enabled=True,
+                    hue=0,
+                    saturation=100,
+                    brightness=25,
+                    original_rgb=rgb_backend._read_rgb_snapshot(raw),
+                )
+                memory = MemorySettings(state)
+                before = copy.deepcopy(memory.data)
+                write = rgb_backend._write_attr
+                calls = []
+                failed = [False]
+
+                def fail_once(*args, **kwargs):
+                    calls.append(args[1])
+                    if not failed[0]:
+                        failed[0] = True
+                        return False
+                    return write(*args, **kwargs)
+
+                with (
+                    patch.object(rgb_backend, "settings", memory),
+                    patch.object(rgb_backend, "_rgb_capability", return_value=(raw, "")),
+                    patch.object(rgb_backend, "_write_attr", side_effect=fail_once),
+                ):
+                    self.assertFalse(rgb_backend._reconcile())
+                    self.assertEqual(calls, ["profile"])
+                    self.assertIn("could not be applied", rgb_backend._last_error)
+                    self.assertEqual(memory.data, before)
+                    self.assertTrue(rgb_backend._reconcile())
+                    self.assertTrue(rgb_backend._rgb_matches(
+                        state, rgb_backend._read_rgb_snapshot(raw), raw
+                    ))
+                    self.assertEqual(memory.data, before)
+                    calls.clear()
+                    self.assertTrue(rgb_backend._reconcile())
+                    self.assertEqual(calls, [])
+                    (led / "enabled").write_text("false\n", encoding="ascii")
+                    self.assertTrue(rgb_backend._reconcile())
+                    self.assertEqual(calls, [
+                        "profile", "speed", "multi_intensity", "brightness",
+                        "effect", "mode", "enabled",
+                    ])
+                    self.assertEqual((led / "enabled").read_text().strip(), "true")
+
     def test_enabling_control_captures_a_reversible_snapshot(self):
         with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
             led = Path(raw)

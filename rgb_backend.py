@@ -484,25 +484,24 @@ def _apply_rgb_snapshot(path: str, snapshot: dict[str, Any], *, force: bool = Fa
         # Some firmware reports no selected built-in profile while the rings are
         # disabled.  If nothing observable changed, keep that state untouched.
         return True
-    results: list[bool] = []
     if not snapshot["enabled"]:
         # Darken first so restoration cannot flash an intermediate effect.
-        results.append(_write_attr(path, "enabled", "false", force=force))
+        if not _write_attr(path, "enabled", "false", force=force):
+            return False
     profile = snapshot["profile"] if snapshot["profile"] is not None else RGB_PROFILE
-    results.append(_write_attr(path, "profile", str(profile), force=force))
-    results.extend((
-        _write_attr(path, "speed", str(snapshot["speed"]), force=force),
-        _write_attr(path, "multi_intensity", " ".join(
-            str(value) for value in snapshot["rgb"]
-        ), force=force),
-        _write_attr(path, "brightness", str(snapshot["brightness"]), force=force),
-        _write_attr(path, "effect", snapshot["effect"], force=force),
-        _write_attr(path, "mode", snapshot["mode"], force=force),
-        _write_attr(
-            path, "enabled", "true" if snapshot["enabled"] else "false", force=force
-        ),
-    ))
-    return all(results)
+    writes = (
+        ("profile", str(profile)),
+        ("speed", str(snapshot["speed"])),
+        ("multi_intensity", " ".join(str(value) for value in snapshot["rgb"])),
+        ("brightness", str(snapshot["brightness"])),
+        ("effect", snapshot["effect"]),
+        ("mode", snapshot["mode"]),
+        ("enabled", "true" if snapshot["enabled"] else "false"),
+    )
+    for name, value in writes:
+        if not _write_attr(path, name, value, force=force):
+            return False
+    return True
 
 
 def _apply_rgb_target(state: dict[str, Any], *, force: bool = False) -> bool:
@@ -793,7 +792,9 @@ def _reconcile(*, force: bool = False) -> bool:
                 except (OSError, ValueError):
                     drifted = True
                 if force or drifted:
-                    ok = _apply_rgb_target(state, force=force) and ok
+                    if not _apply_rgb_target(state, force=force):
+                        ok = False
+                        _last_error = "The joystick-ring settings could not be applied."
         if state["power_led_managed"]:
             current_power = _read_power_led()
             if current_power is None:
@@ -835,17 +836,28 @@ class Plugin:
 
     async def _drift_loop(self) -> None:
         last_check = time.monotonic()
+        retry_pending = False
+        retry_delay = RESUME_CHECK_S
         while True:
             await asyncio.sleep(RESUME_CHECK_S)
             try:
                 if _resume_detected():
                     decky.logger.info("[lego-rgb] backend detected resume from suspend")
-                    await self.reapply()
+                    result = await self.reapply()
+                    retry_pending = not result["success"]
+                    retry_delay = RESUME_CHECK_S
                     last_check = time.monotonic()
                     continue
                 now = time.monotonic()
-                if now < getattr(self, "_settle_until", 0.0) or now - last_check >= DRIFT_INTERVAL_S:
-                    await _offload(_reconcile)
+                settling = now < getattr(self, "_settle_until", 0.0)
+                interval = retry_delay if retry_pending else DRIFT_INTERVAL_S
+                if settling or now - last_check >= interval:
+                    confirmed = await _offload(_reconcile)
+                    retry_pending = not confirmed
+                    if confirmed or settling:
+                        retry_delay = RESUME_CHECK_S
+                    else:
+                        retry_delay = min(DRIFT_INTERVAL_S, retry_delay * 2)
                     last_check = now
             except asyncio.CancelledError:
                 raise
