@@ -47,7 +47,7 @@ function harness(file, component, initiallyVisible = true) {
     },
   });
   const render = (nextProps = props) => { props = nextProps; cursor = 0; const result = mod.exports.Tested(props); pending.splice(0).forEach(fn => fn()); return result; };
-  return { calls, timers, callbacks, render, exported: mod.exports.Tested,
+  return { calls, timers, callbacks, render, exported: mod.exports.Tested, moduleExports: mod.exports,
     initialize: () => mod.exports.default(),
     get writes() { return writes; },
     advance(milliseconds) { now += milliseconds; },
@@ -84,7 +84,7 @@ const rgb = { success: true, settings: { configured: true, control_enabled: true
   hue: 255, saturation: 100, brightness: 50, speed: 50 }, rgb: { supported: true, effects: [] }, power_led: { supported: false } };
 const remap = { supported: true, enabled: true, desktop_action: 'f1', page_action: 'f2', actions: [{ id: 'f1', label: 'F1' }, { id: 'f3', label: 'F3' }] };
 const display = { panel_mode: 'pq', active_mode: 'pq', setup_done: true, panel_ok: true, enabled: true, edid_fix: true };
-const wifi = { success: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_preference_enabled: true }, live: {} };
+const wifi = { success: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_policy: 'five_six_no_24', band_preference_enabled: true }, live: {} };
 const cases = [
   ['display.tsx', 'DisplayPage', 'display_get_state', display],
   ['rgb.tsx', 'RgbPage', 'rgb_get_status', rgb],
@@ -162,14 +162,59 @@ const cases = [
   hidden.respond('remap_set_action', { success: true, status: { ...remap, desktop_action: 'f3' } }); await settle(); hidden.unmount();
 
   const network = harness('wifi.tsx', 'WifiPage'); network.render(); network.respond('wifi_get_status', wifi); await settle();
-  const preference = find(network.render(), 'Prefer 5/6 GHz'); network.fire(); preference.props.onChange(false); await settle();
-  network.respond('wifi_set_band_preference', { success: true, message: 'Saved' }); await settle();
+  network.fire(); findButton(network.render(), 'Use Automatic WiFi').props.onClick(); await settle();
+  assert.deepEqual(network.calls.find(c => c.name === 'wifi_set_band_policy').args, ['off']);
+  network.respond('wifi_set_band_policy', { success: true, message: 'Saved' }); await settle();
   const beforeOldRead = network.writes;
   network.respond('wifi_get_status', wifi); await settle();
   assert.equal(network.writes, beforeOldRead, 'old WiFi status cannot overwrite the mutation');
   assert.equal(network.calls.filter(c => c.name === 'wifi_get_status').length, 3, 'WiFi confirms status after the earlier read finishes');
-  network.respond('wifi_get_status', { ...wifi, settings: { ...wifi.settings, band_preference_enabled: false } }); await settle();
-  assert.equal(find(network.render(), 'Prefer 5/6 GHz').props.checked, false); network.unmount();
+  network.respond('wifi_get_status', { ...wifi, settings: { ...wifi.settings, band_policy: 'off', band_preference_enabled: false } }); await settle();
+  assert.ok(findButton(network.render(), '> Automatic WiFi')); network.unmount();
+
+  const strictWifi = harness('wifi.tsx', 'WifiPage'); strictWifi.render();
+  strictWifi.respond('wifi_get_status', wifi); await settle();
+  findButton(strictWifi.render(), 'Use Only 5/6 GHz').props.onClick();
+  assert.ok(find(strictWifi.render(), 'Connection attempt'));
+  findButton(strictWifi.render(), 'Confirm Only 5/6 GHz').props.onClick(); await settle();
+  assert.deepEqual(strictWifi.calls.find(c => c.name === 'wifi_set_band_policy').args, ['five_six_only', true]);
+  strictWifi.respond('wifi_set_band_policy', { success: true, message: 'Saved' }); await settle();
+  strictWifi.respond('wifi_get_status', { ...wifi, connected: false,
+    settings: { ...wifi.settings, band_policy: 'five_six_only', band_preference_enabled: false } }); await settle();
+  assert.ok(findButton(strictWifi.render(), 'Use Automatic WiFi'), 'strict mode can be disabled when disconnected');
+  strictWifi.unmount();
+
+  const oldPolicy = harness('wifi.tsx', 'WifiPage'); oldPolicy.render();
+  const six = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'six_ghz_only', band_preference_enabled: false },
+    live: { frequency: 5975 } };
+  oldPolicy.respond('wifi_get_status', six); await settle();
+  assert.ok(find(oldPolicy.render(), 'Existing 6 GHz only policy'));
+  assert.match(oldPolicy.moduleExports.wifiSummary(six), /^6 GHz only/);
+  assert.ok(findButton(oldPolicy.render(), 'Use Automatic WiFi'));
+  oldPolicy.unmount();
+
+  const legacyWifi = harness('wifi.tsx', 'WifiPage'); legacyWifi.render();
+  const legacy = { ...wifi, settings: { ...wifi.settings, band_policy: 'off',
+    band_preference_enabled: false, band_policy_legacy_detected: true } };
+  legacyWifi.respond('wifi_get_status', legacy); await settle();
+  assert.match(legacyWifi.moduleExports.wifiSummary(legacy), /^Legacy 5 GHz setting/);
+  assert.equal(findButton(legacyWifi.render(), 'Prefer 5/6 GHz (2.4 GHz fallback)').props.disabled, true);
+  findButton(legacyWifi.render(), 'Restore legacy band setting').props.onClick(); await settle();
+  assert.deepEqual(legacyWifi.calls.find(c => c.name === 'wifi_set_band_policy').args, ['off']);
+  legacyWifi.respond('wifi_set_band_policy', { success: true, message: 'Restored' }); await settle();
+  legacyWifi.respond('wifi_get_status', { ...legacy, settings: { ...legacy.settings, band_policy_legacy_detected: false } }); await settle();
+  assert.ok(findButton(legacyWifi.render(), '> Automatic WiFi')); legacyWifi.unmount();
+
+  const preflightWifi = harness('wifi.tsx', 'WifiPage'); preflightWifi.render();
+  preflightWifi.respond('wifi_get_status', wifi); await settle();
+  findButton(preflightWifi.render(), 'Use Only 5/6 GHz').props.onClick();
+  findButton(preflightWifi.render(), 'Confirm Only 5/6 GHz').props.onClick(); await settle();
+  preflightWifi.respond('wifi_set_band_policy', { success: false, error: 'preflight_failed',
+    message: 'No fresh 5 or 6 GHz scan result was verified.' }); await settle();
+  preflightWifi.respond('wifi_get_status', wifi); await settle();
+  assert.ok(find(preflightWifi.render(), 'Could not complete'));
+  assert.ok(findButton(preflightWifi.render(), '> Prefer 5/6 GHz (2.4 GHz fallback)'));
+  preflightWifi.unmount();
 
   for (const file of ['tdp.tsx', 'vibration.tsx']) {
     const h = harness(file, 'AppWatcher'), watcher = h.exported;

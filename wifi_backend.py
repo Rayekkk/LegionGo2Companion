@@ -62,14 +62,19 @@ IWD_MAIN_CONF = "/etc/iwd/main.conf"
 
 BAND_POLICY_OFF = "off"
 BAND_POLICY_SIX_ONLY = "six_ghz_only"
+# Keep this persisted legacy value for the existing fallback preference.
 BAND_POLICY_HIGH_ONLY = "five_six_no_24"
+BAND_POLICY_STRICT_HIGH = "five_six_only"
+IWD_BAND_POLICIES = (BAND_POLICY_HIGH_ONLY, BAND_POLICY_STRICT_HIGH)
 # Non-zero keeps 2.4 GHz available as a fallback, while making any usable
 # 5/6 GHz BSS overwhelmingly preferable in iwd's ranking calculation.
 BAND_PREFERENCE_2_4_MODIFIER = "0.01"
+BAND_STRICT_2_4_MODIFIER = "0.0"
 BAND_POLICIES = {
     BAND_POLICY_OFF,
     BAND_POLICY_SIX_ONLY,
     BAND_POLICY_HIGH_ONLY,
+    BAND_POLICY_STRICT_HIGH,
 }
 # Long enough for iwd restart (15s), NetworkManager activation (25s), and
 # verification (24s), with margin for slower handheld boots.
@@ -224,8 +229,8 @@ def _load_settings() -> dict:
             or data.get("bssid_lock_connection_uuid")
             or ""
         )
-    # The public control is a single preference switch. Keep its boolean
-    # representation synchronized with the internal transactional state.
+    # Retain the old boolean as a compatibility view of the preference mode.
+    # The exact policy field distinguishes preference from strict 5/6 GHz.
     data["band_preference"] = "5_6"
     data["band_preference_enabled"] = (
         data.get("band_policy") == BAND_POLICY_HIGH_ONLY
@@ -1279,7 +1284,7 @@ class Plugin:
             and iwd_snapshot.get("modifier_present")
         )
         external_band_during_high = (
-            current_policy == BAND_POLICY_HIGH_ONLY
+            current_policy in IWD_BAND_POLICIES
             and bool(band)
         )
         expected_six_iwd = {
@@ -1356,13 +1361,25 @@ class Plugin:
             external_iwd_while_off or external_iwd_during_six
         ):
             reason_high = "An external iwd band policy is already configured."
-        elif not reason_high and not high_visible:
+        reason_high_hard = reason_high
+        if not reason_high and not high_visible:
             reason_high = "No 5 or 6 GHz BSS for the active SSID is currently visible."
+
+        # The preference may tolerate a short scan cache because 2.4 GHz
+        # remains a fallback. The strict policy must use a fresh observation;
+        # a cached BSS could be out of range by the time 2.4 GHz is disabled.
+        reason_strict_high = reason_high
+        if not reason_strict_high and not visible["fresh_high_band"]:
+            reason_strict_high = (
+                "No fresh 5 or 6 GHz scan result for the active SSID was verified."
+            )
 
         return {
             "success": True,
             "six_ghz_only_available": not bool(reason_six),
             "five_six_no_24_available": not bool(reason_high),
+            "five_six_only_available": not bool(reason_strict_high),
+            "five_six_only_try_available": not bool(reason_high_hard),
             "two_ghz_bss_visible": visible["two_ghz"] > 0,
             "five_ghz_bss_visible": visible["five_ghz"] > 0,
             "six_ghz_bss_visible": six_visible,
@@ -1375,6 +1392,8 @@ class Plugin:
             "has_6ghz": has_6ghz,
             "reason_six_ghz_only": reason_six,
             "reason_five_six_no_24": reason_high,
+            "reason_five_six_only": reason_strict_high,
+            "reason_five_six_only_try": reason_high_hard,
             "current_backend": backend,
             "nm_version": ".".join(str(part) for part in nm_version),
             "iwd_version": iwd_version_text,
@@ -1574,7 +1593,10 @@ class Plugin:
 
         started = time.monotonic()
         deadline = started + 15.0
-        manual_activation_after = started if cycle else started + 3.0
+        # After an iwd restart, a DFS BSS can appear several seconds after the
+        # device becomes available. Let iwd finish its own autoconnect before
+        # asking NetworkManager to activate the profile manually.
+        next_manual_activation = started if cycle else started + 8.0
         saw_inactive = not cycle
         last_result = None
 
@@ -1594,7 +1616,7 @@ class Plugin:
             else:
                 saw_inactive = True
 
-            if time.monotonic() < manual_activation_after:
+            if time.monotonic() < next_manual_activation:
                 time.sleep(0.25)
                 continue
 
@@ -1631,6 +1653,10 @@ class Plugin:
                         ],
                         timeout=25,
                     )
+                    # A fast failure does not mean iwd has finished discovering
+                    # the target AP (notably on passive/DFS channels). Repeated
+                    # activations every 250 ms can race its background scan.
+                    next_manual_activation = time.monotonic() + 3.0
                     if last_result.get("success"):
                         last_result["reconnected"] = True
                         return last_result
@@ -2255,7 +2281,7 @@ class Plugin:
         mode = settings.get("band_policy", BAND_POLICY_OFF)
         state = settings.get("band_policy_state") or {}
         applied = state.get("applied") or {}
-        if mode == BAND_POLICY_SIX_ONLY and target == BAND_POLICY_HIGH_ONLY:
+        if mode == BAND_POLICY_SIX_ONLY and target in IWD_BAND_POLICIES:
             current_iwd = self._get_iwd_rank_modifier_snapshot()
             observed_iwd = {
                 "modifier_present": applied.get("iwd_modifier_present", False),
@@ -2278,6 +2304,9 @@ class Plugin:
                 last_frequency = self._get_link_frequency()
                 if mode == BAND_POLICY_SIX_ONLY and last_frequency is not None:
                     if 5925 <= last_frequency < 7125:
+                        return {"success": True, "frequency": last_frequency}
+                elif mode == BAND_POLICY_STRICT_HIGH and last_frequency is not None:
+                    if 4900 <= last_frequency < 7125:
                         return {"success": True, "frequency": last_frequency}
                 elif mode == BAND_POLICY_HIGH_ONLY:
                     # This mode is a ranking preference, not a band lock. A
@@ -2831,6 +2860,15 @@ class Plugin:
                 "band_policy", BAND_POLICY_OFF
             )
 
+            # A strict policy can leave WiFi disconnected. Ownership and drift
+            # must still be visible so the user can safely turn the policy off.
+            ownership_error = self._band_policy_ownership_error(settings)
+            if ownership_error:
+                status["drift"]["band_policy"] = True
+                status["live"]["band_policy_error"] = ownership_error
+            if settings.get("band_policy_legacy_detected"):
+                status["drift"]["legacy_band_preference"] = True
+
             if not connected:
                 status["live"]["dispatcher_installed"] = os.path.isfile(
                     DISPATCHER_PATH
@@ -2857,6 +2895,18 @@ class Plugin:
                     if len(parts) >= 3:
                         status["live"]["connected_bssid"] = parts[2]
 
+            if settings.get("band_policy") == BAND_POLICY_STRICT_HIGH:
+                try:
+                    linked_frequency = float(status["live"].get("frequency", ""))
+                except (TypeError, ValueError):
+                    linked_frequency = None
+                if (linked_frequency is not None
+                        and 2400 <= linked_frequency < 2500):
+                    status["drift"]["band_policy"] = True
+                    status["live"].setdefault("band_policy_error", (
+                        "Only 5/6 GHz is selected, but the live WiFi link uses 2.4 GHz."
+                    ))
+
             # Channel info - parse to "36 (80 MHz)" format
             info_result = self._run_cmd(
                 ["/usr/bin/iw", "dev", iface, "info"], timeout=T
@@ -2882,15 +2932,6 @@ class Plugin:
                         status["live"]["channel"] = chan_num
                     else:
                         status["live"]["channel"] = line
-
-            # Band policy. Status is deliberately read-only: drift is reported
-            # and never repaired from this code path.
-            ownership_error = self._band_policy_ownership_error(settings)
-            if ownership_error:
-                status["drift"]["band_policy"] = True
-                status["live"]["band_policy_error"] = ownership_error
-            if settings.get("band_policy_legacy_detected"):
-                status["drift"]["legacy_band_preference"] = True
 
             return status
         except Exception as e:
@@ -3452,6 +3493,8 @@ class Plugin:
                 "success": False,
                 "six_ghz_only_available": False,
                 "five_six_no_24_available": False,
+                "five_six_only_available": False,
+                "five_six_only_try_available": False,
                 "two_ghz_bss_visible": False,
                 "five_ghz_bss_visible": False,
                 "six_ghz_bss_visible": False,
@@ -3461,9 +3504,13 @@ class Plugin:
                 "has_6ghz": False,
                 "reason_six_ghz_only": str(e),
                 "reason_five_six_no_24": str(e),
+                "reason_five_six_only": str(e),
+                "reason_five_six_only_try": str(e),
             }
 
-    async def set_band_policy(self, mode: str) -> dict:
+    async def set_band_policy(
+        self, mode: str, allow_unverified_scan: bool = False
+    ) -> dict:
         """Run one band transaction while fenced from the rollback service."""
         async with self._get_band_policy_file_gate():
             try:
@@ -3487,7 +3534,11 @@ class Plugin:
                 async with self._get_network_mutation_lock():
                     return await self._worker_complete(
                         lambda: asyncio.run(
-                            self._set_band_policy_impl(mode, lock_already_held=True)
+                            self._set_band_policy_impl(
+                                mode,
+                                lock_already_held=True,
+                                allow_unverified_scan=allow_unverified_scan,
+                            )
                         )
                     )
             finally:
@@ -3497,7 +3548,8 @@ class Plugin:
                 self._release_band_policy_file_lock(file_lock)
 
     async def _set_band_policy_impl(
-        self, mode: str, lock_already_held: bool = False
+        self, mode: str, lock_already_held: bool = False,
+        allow_unverified_scan: bool = False,
     ) -> dict:
         """Atomically select one Go 2 band policy, or restore the prior state.
 
@@ -3505,14 +3557,24 @@ class Plugin:
         a systemd rollback timer.  The timer reads the on-disk journal and
         restores only values that still equal the values written by us.
         """
-        if mode not in BAND_POLICIES:
+        if not isinstance(mode, str) or mode not in BAND_POLICIES:
             return {
                 "success": False,
                 "error": "invalid_band_policy",
                 "message": (
-                    "Band policy must be off, six_ghz_only, or "
-                    "five_six_no_24."
+                    "Band policy must be off, six_ghz_only, "
+                    "five_six_no_24, or five_six_only."
                 ),
+                "band_policy": BAND_POLICY_OFF,
+                "rolled_back": False,
+            }
+        if type(allow_unverified_scan) is not bool or (
+            allow_unverified_scan and mode != BAND_POLICY_STRICT_HIGH
+        ):
+            return {
+                "success": False,
+                "error": "invalid_scan_override",
+                "message": "Unverified scan attempts apply only to Only 5/6 GHz.",
                 "band_policy": BAND_POLICY_OFF,
                 "rolled_back": False,
             }
@@ -3645,7 +3707,7 @@ class Plugin:
                         "rolled_back": False,
                         "capabilities": capabilities,
                     }
-            elif mode == BAND_POLICY_HIGH_ONLY:
+            elif mode in IWD_BAND_POLICIES:
                 _, device_family, _ = self._detect_device_family()
                 driver = self._detect_wifi_driver()
                 if device_family != "legion_go_2" or driver != "mt7921e":
@@ -3678,14 +3740,41 @@ class Plugin:
                         "band_policy": current_mode,
                         "rolled_back": False,
                     }
+                if mode == BAND_POLICY_STRICT_HIGH:
+                    # DFS/6 GHz BSS entries can be omitted from a scan even
+                    # when iwd can connect. A confirmed user attempt may skip
+                    # that unreliable observation, but never the hardware,
+                    # backend, ownership, watchdog, or live-link checks.
+                    capabilities = await asyncio.to_thread(
+                        self._get_band_policy_capabilities_sync,
+                        not allow_unverified_scan,
+                    )
+                    available_key = (
+                        "five_six_only_try_available" if allow_unverified_scan
+                        else "five_six_only_available"
+                    )
+                    reason_key = (
+                        "reason_five_six_only_try" if allow_unverified_scan
+                        else "reason_five_six_only"
+                    )
+                    if not capabilities.get(available_key):
+                        return {
+                            "success": False,
+                            "error": "preflight_failed",
+                            "message": capabilities.get(reason_key)
+                            or "No usable 5/6 GHz access point was verified.",
+                            "band_policy": current_mode,
+                            "rolled_back": False,
+                            "capabilities": capabilities,
+                        }
 
             active_uuid = self._get_active_connection_uuid()
             state = settings.get("band_policy_state") or {}
             profileless_iwd_transition = (
                 not active_uuid
                 and not legacy
-                and mode in (BAND_POLICY_OFF, BAND_POLICY_HIGH_ONLY)
-                and current_mode in (BAND_POLICY_OFF, BAND_POLICY_HIGH_ONLY)
+                and mode in (BAND_POLICY_OFF, *IWD_BAND_POLICIES)
+                and current_mode in (BAND_POLICY_OFF, *IWD_BAND_POLICIES)
             )
             if mode != BAND_POLICY_OFF:
                 profile_uuid = active_uuid
@@ -3710,7 +3799,7 @@ class Plugin:
                 )
             elif current_mode == BAND_POLICY_SIX_ONLY:
                 profile_uuid = str(state.get("connection_uuid") or "")
-            elif current_mode == BAND_POLICY_HIGH_ONLY:
+            elif current_mode in IWD_BAND_POLICIES:
                 # The 5/6 GHz policy owns only the global iwd Rank key.  Its
                 # original profile may have been forgotten since activation;
                 # removing that global key must not depend on the old UUID.
@@ -3766,7 +3855,7 @@ class Plugin:
                     }
 
             iwd_before = self._get_iwd_rank_modifier_snapshot()
-            if mode == BAND_POLICY_HIGH_ONLY:
+            if mode in IWD_BAND_POLICIES:
                 modifier_error = self._iwd_five_ghz_modifier_error(iwd_before)
                 if not modifier_error:
                     modifier_error = self._iwd_six_ghz_modifier_error(iwd_before)
@@ -3789,22 +3878,25 @@ class Plugin:
                 neutral_band = ""
             elif current_mode == BAND_POLICY_SIX_ONLY:
                 neutral_band = str((state.get("original") or {}).get("nm_band") or "")
-            elif current_mode == BAND_POLICY_HIGH_ONLY:
+            elif current_mode in IWD_BAND_POLICIES:
                 neutral_iwd = (state.get("original") or {}).get("iwd") or {}
 
             final_band = neutral_band
             final_iwd = neutral_iwd
             if mode == BAND_POLICY_SIX_ONLY:
                 final_band = "6GHz"
-            elif mode == BAND_POLICY_HIGH_ONLY:
+            elif mode in IWD_BAND_POLICIES:
                 final_iwd = {
                     "file_exists": True,
                     "rank_section_present": True,
                     "modifier_present": True,
-                    "modifier_value": BAND_PREFERENCE_2_4_MODIFIER,
+                    "modifier_value": (
+                        BAND_STRICT_2_4_MODIFIER if mode == BAND_POLICY_STRICT_HIGH
+                        else BAND_PREFERENCE_2_4_MODIFIER
+                    ),
                 }
 
-            if mode in (BAND_POLICY_SIX_ONLY, BAND_POLICY_HIGH_ONLY) and neutral_band:
+            if mode in (BAND_POLICY_SIX_ONLY, *IWD_BAND_POLICIES) and neutral_band:
                 return {
                     "success": False,
                     "error": "external_band_configuration",
@@ -3911,15 +4003,17 @@ class Plugin:
                         )
                     iwd_changed = True
 
-                # Remove the old owned policy before applying the new one.
-                if current_mode == BAND_POLICY_HIGH_ONLY:
+                # An iwd-to-iwd transition must make one journaled file write.
+                # Restoring the baseline first would overwrite the journal's
+                # expected state and make interruption recovery ambiguous.
+                if current_mode in IWD_BAND_POLICIES and mode not in IWD_BAND_POLICIES:
                     apply_iwd(neutral_iwd)
                 if current_mode == BAND_POLICY_SIX_ONLY or legacy:
                     apply_nm_band(neutral_band)
 
                 if mode == BAND_POLICY_SIX_ONLY:
                     apply_nm_band(final_band)
-                elif mode == BAND_POLICY_HIGH_ONLY:
+                elif mode in IWD_BAND_POLICIES:
                     apply_iwd(final_iwd)
 
                 if iwd_changed:
@@ -3993,7 +4087,7 @@ class Plugin:
                             "iwd": neutral_iwd,
                         },
                         "owns_nm_band": mode == BAND_POLICY_SIX_ONLY,
-                        "owns_iwd": mode == BAND_POLICY_HIGH_ONLY,
+                        "owns_iwd": mode in IWD_BAND_POLICIES,
                         "applied": {
                             "nm_band": final_band,
                             "iwd_modifier_present": bool(

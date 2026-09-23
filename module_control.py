@@ -23,7 +23,8 @@ def capture_intent(name):
     if name == 'wifi':
         import wifi_backend as b
         s = b._load_settings()
-        return {'enabled': s.get('band_preference_enabled') is True,
+        return {'band_policy': s.get('band_policy', b.BAND_POLICY_OFF),
+                'enabled': s.get('band_preference_enabled') is True,
                 'power_save_disabled': s.get('power_save_disabled') is True}
     if name == 'display':
         import display_backend as b
@@ -44,7 +45,13 @@ async def restore_intent(name, component, intent):
     elif name == 'controller' and intent.get('source') in ('left', 'right', 'combined'):
         await component.set_gyro_source(intent['source'])
     elif name == 'wifi':
-        if intent.get('enabled') is True:
+        import wifi_backend as backend
+        policy = intent.get('band_policy')
+        if isinstance(policy, str) and policy in backend.BAND_POLICIES - {backend.BAND_POLICY_OFF}:
+            check(await component.set_band_policy(policy))
+        elif policy is None and intent.get('enabled') is True:
+            # Resume records written by older Companion versions contain only
+            # the preference boolean, never the exact band policy.
             check(await component.set_band_preference(True))
         if intent.get('power_save_disabled') is True:
             check(await component.set_power_save(True))

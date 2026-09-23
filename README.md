@@ -321,12 +321,19 @@ An interrupted reset keeps the module paused and offers a retry instead of losin
 
 **Prefer 5/6 GHz** changes iwd's band preference system-wide. It keeps 2.4 GHz available
 when that is the connection the device can use; it does not pin the adapter to one band
-or access point.
+or access point. **Only 5/6 GHz** disables 2.4 GHz in iwd, leaving both 5 and 6 GHz
+available. An explicitly confirmed attempt may proceed even when a scan misses the
+higher-band access point; DFS and 6 GHz discovery are not always consistent. Companion
+checks the actual connected frequency and automatically restores the prior policy if
+it cannot connect on 5/6 GHz. Automatic module restoration still requires a confirmed
+higher-band scan result.
+Outside 5/6 GHz coverage, Wi-Fi can remain disconnected until you switch back to
+**Prefer 5/6 GHz** or **Automatic WiFi**.
 
 **Rescan and reconnect to 5/6 GHz** makes a bounded attempt to move the current connection
 to a suitable higher-band access point. It briefly interrupts the connection. The page
-shows the actual connected band and the result, so enabling the preference is not mistaken
-for a completed switch.
+shows the actual connected band and selected policy separately, so enabling the preference
+is not mistaken for a completed switch.
 
 ---
 

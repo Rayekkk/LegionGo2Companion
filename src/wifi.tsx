@@ -7,7 +7,6 @@ import {
   PanelSection,
   PanelSectionRow,
   Spinner,
-  ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 
@@ -16,8 +15,9 @@ interface WifiSettings {
   device_label?: string;
   driver?: string;
   chip_label?: string;
-  band_policy?: "off" | "five_six_no_24" | "six_ghz_only";
+  band_policy?: "off" | "five_six_no_24" | "five_six_only" | "six_ghz_only";
   band_preference_enabled?: boolean;
+  band_policy_legacy_detected?: boolean;
 }
 
 interface WifiLiveStatus {
@@ -51,9 +51,10 @@ interface WifiResult {
 }
 
 export const getWifiStatus = callable<[], WifiStatus>("wifi_get_status");
-const setBandPreference = callable<[enabled: boolean], WifiResult>(
-  "wifi_set_band_preference",
-);
+const setBandPolicy = callable<[
+  mode: "off" | "five_six_no_24" | "five_six_only",
+  allowUnverifiedScan?: boolean,
+], WifiResult>("wifi_set_band_policy");
 const rescanAndReconnect = callable<[], WifiResult>(
   "wifi_rescan_and_reconnect",
 );
@@ -69,11 +70,13 @@ const bandName = (frequency?: string | number | null) => {
 
 export const wifiSummary = (status?: WifiStatus) => {
   if (!status?.success || !status.settings) return "5/6 GHz preference";
-  const enabled = status.settings.band_preference_enabled === true;
-  if (!status.connected) return enabled ? "Preference on · disconnected" : "Preference off";
-  return `${enabled ? "Preference on" : "Preference off"} · ${bandName(
-    status.live?.frequency,
-  )}`;
+  const policy = status.settings.band_policy ??
+    (status.settings.band_preference_enabled ? "five_six_no_24" : "off");
+  const label = status.settings.band_policy_legacy_detected ? "Legacy 5 GHz setting"
+    : policy === "six_ghz_only" ? "6 GHz only"
+    : policy === "five_six_only" ? "5/6 GHz only"
+    : policy === "five_six_no_24" ? "5/6 GHz preferred" : "Automatic WiFi";
+  return `${label} · ${status.connected ? bandName(status.live?.frequency) : "disconnected"}`;
 };
 
 const resultMessage = (result: WifiResult) =>
@@ -95,6 +98,8 @@ export const WifiPage: FC = () => {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [statusError, setStatusError] = useState("");
+  const [confirmStrict, setConfirmStrict] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!mounted.current || !isVisible.current || inFlight.current || operationInFlight.current) return;
@@ -105,10 +110,10 @@ export const WifiPage: FC = () => {
       const next = await request;
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
-      setError(next.success ? "" : next.message ?? "WiFi status is unavailable.");
+      setStatusError(next.success ? "" : next.message ?? "WiFi status is unavailable.");
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current)
-        setError("WiFi status is unavailable. Retrying while this page is open.");
+        setStatusError("WiFi status is unavailable. Retrying while this page is open.");
     } finally {
       if (inFlight.current === request) inFlight.current = null;
     }
@@ -160,7 +165,11 @@ export const WifiPage: FC = () => {
 
   const settings = status.settings ?? {};
   const live = status.live ?? {};
-  const enabled = settings.band_preference_enabled === true;
+  const policy = settings.band_policy ??
+    (settings.band_preference_enabled ? "five_six_no_24" : "off");
+  const preferred = policy === "five_six_no_24";
+  const strict = policy === "five_six_only";
+  const legacy = settings.band_policy_legacy_detected === true;
   const supported =
     settings.device_family === "legion_go_2" && settings.driver === "mt7921e";
   const blocked = busy || live.recovery_required === true;
@@ -196,19 +205,41 @@ export const WifiPage: FC = () => {
       )}
 
       <PanelSection title="Band preference">
-        <PanelSectionRow>
-          <ToggleField
-            label="Prefer 5/6 GHz"
-            description="Strongly prefers 5 or 6 GHz while retaining 2.4 GHz as a fallback. The setting is system-wide and survives restart and wake."
-            checked={enabled}
-            disabled={blocked || !supported}
-            onChange={(value) => void run(() => setBandPreference(value))}
-          />
-        </PanelSectionRow>
+        <PanelSectionRow><Field focusable label="Choose WiFi band behavior"
+          description="These choices apply system-wide and survive restart and wake. Only 5/6 GHz can leave WiFi disconnected when neither band is available." /></PanelSectionRow>
+        {policy === "six_ghz_only" && <PanelSectionRow><Field focusable label="Existing 6 GHz only policy"
+          description="The saved profile is limited to 6 GHz. Choose another behavior below to replace this policy." /></PanelSectionRow>}
+        {legacy && <PanelSectionRow><Field focusable label="Legacy band setting detected"
+          description="Restore the legacy setting first; then select a new WiFi behavior." /></PanelSectionRow>}
+        <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || (policy === "off" && !legacy)}
+          onClick={() => { setConfirmStrict(false); void run(() => setBandPolicy("off")); }}>
+          {legacy ? "Restore legacy band setting" : policy === "off" ? "> Automatic WiFi" : "Use Automatic WiFi"}
+        </ButtonItem></PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy || preferred}
+          onClick={() => { setConfirmStrict(false); void run(() => setBandPolicy("five_six_no_24")); }}>
+          {preferred ? "> Prefer 5/6 GHz (2.4 GHz fallback)" : "Prefer 5/6 GHz (2.4 GHz fallback)"}
+        </ButtonItem></PanelSectionRow>
+        <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy || strict}
+          onClick={() => setConfirmStrict(value => !value)}>
+          {strict ? "> Only 5/6 GHz" : confirmStrict ? "Cancel Only 5/6 GHz" : "Use Only 5/6 GHz"}
+        </ButtonItem></PanelSectionRow>
+        {confirmStrict && !strict && <>
+          <PanelSectionRow><Field focusable label="Connection attempt"
+            description="A scan can miss a 5/6 GHz access point. This briefly restarts WiFi and tries to connect even without a scan result. If no 5/6 GHz link is verified, Companion restores the previous setting automatically." /></PanelSectionRow>
+          <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy}
+            onClick={() => { setConfirmStrict(false); void run(() => setBandPolicy("five_six_only", true)); }}>
+            Confirm Only 5/6 GHz
+          </ButtonItem></PanelSectionRow>
+        </>}
+        {strict && !status.connected && <PanelSectionRow><Field focusable label="No 5/6 GHz connection"
+          description="Only 5/6 GHz is active. Choose Automatic WiFi or Prefer 5/6 GHz to allow 2.4 GHz again." /></PanelSectionRow>}
+        {strict && status.connected && bandName(frequency) === "2.4 GHz" &&
+          <PanelSectionRow><Field focusable label="Unexpected 2.4 GHz connection"
+            description="The live connection does not match Only 5/6 GHz. Check the result and restore WiFi settings if needed." /></PanelSectionRow>}
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            disabled={blocked || !supported || !enabled || !status.connected}
+            disabled={blocked || !supported || !preferred || !status.connected}
             onClick={() => void run(rescanAndReconnect)}
           >
             {busy ? "Working..." : "Rescan and reconnect to 5/6 GHz"}
@@ -230,12 +261,12 @@ export const WifiPage: FC = () => {
             <Field focusable label="Setting mismatch" description={live.band_policy_error} />
           </PanelSectionRow>
         )}
-        {(error || notice) && (
+        {(error || statusError || notice) && (
           <PanelSectionRow>
             <Field
               focusable
-              label={error ? "Could not complete" : "Result"}
-              description={error || notice}
+              label={error || statusError ? "Could not complete" : "Result"}
+              description={error || statusError || notice}
             />
           </PanelSectionRow>
         )}
@@ -245,8 +276,8 @@ export const WifiPage: FC = () => {
         <PanelSectionRow>
           <Field
             focusable
-            label="No permanent band or BSSID lock"
-            description="After a fresh scan, manual reconnect temporarily selects one confirmed 5/6 GHz access point for a single connection, then clears that selection. Automatic rollback restores the profile if anything fails; 2.4 GHz remains available."
+            label="Band choice and rollback"
+            description="The preference keeps 2.4 GHz available. Manual reconnect temporarily selects one confirmed 5/6 GHz access point and clears that selection after connecting. Only 5/6 GHz disables 2.4 GHz in iwd; a failed change is rolled back."
           />
         </PanelSectionRow>
         <PanelSectionRow>

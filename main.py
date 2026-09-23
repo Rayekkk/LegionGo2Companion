@@ -670,6 +670,9 @@ class Plugin:
     async def wifi_set_band_preference(self, enabled):
         return await self._wifi.set_band_preference(enabled)
 
+    async def wifi_set_band_policy(self, mode, allow_unverified_scan=False):
+        return await self._wifi.set_band_policy(mode, allow_unverified_scan)
+
     async def wifi_rescan_and_reconnect(self):
         return await self._wifi.rescan_and_reconnect()
 
