@@ -1,3 +1,18 @@
+# 1.0.4
+
+### Added
+
+- Added an Only 5/6 GHz Wi-Fi policy that disables 2.4 GHz while leaving both higher bands available, with a confirmed connection attempt when an access point is missing from the scan.
+
+### Fixed
+
+- Fixed delayed RGB restoration after transient controller write failures during startup on SteamOS beta with Linux 6.18.
+
+### Improved
+
+- Improved Wi-Fi reconnection pacing, live band verification, and rollback when the selected 5/6 GHz policy cannot connect.
+- Stopped additional RGB writes after a failed controller command and report the failure in module status.
+
 # 1.0.3
 
 ### Added
