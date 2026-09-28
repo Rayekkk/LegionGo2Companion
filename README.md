@@ -11,7 +11,7 @@
 **Power, battery protection, gyro, haptics, lighting, buttons, screen brightness, HDR and Wi-Fi in one Steam overlay.**
 The Legion Go 2 controls you use every day, with saved profiles and automatic recovery after wake.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
+[Features](#features) Â· [Requirements](#requirements) Â· [Installation](#installation) Â· [Usage](#usage) Â· [How it works](#how-it-works) Â· [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -53,7 +53,7 @@ Controls follow the interfaces exposed by the active kernel. Older kernels offer
 1. Install [Decky Loader](https://decky.xyz) if it is not already installed.
 2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases), when available, or build it using the instructions below.
 3. Remove the overlapping standalone plugins listed below, retaining their settings.
-4. In Gaming Mode, open the **Quick Access Menu → Decky → Settings → Developer**.
+4. In Gaming Mode, open the **Quick Access Menu â†’ Decky â†’ Settings â†’ Developer**.
 5. Choose **Install Plugin from ZIP** and select the archive.
 
 The archive contains one `LegionGo2Companion` folder. Decky installs it with the privileges
@@ -61,7 +61,7 @@ needed by the hardware controls; normal use requires no terminal commands.
 
 ### Updates
 
-Open **About → Check for Updates** to check the latest stable GitHub release. If a newer
+Open **About â†’ Check for Updates** to check the latest stable GitHub release. If a newer
 release has its plugin ZIP attached, **Download** saves it in your Downloads folder and
 shows the path. No public release yet, an incomplete release and a connection failure
 are reported separately. Checking and downloading happen only when requested; opening
@@ -72,7 +72,7 @@ the completed ZIP available. Failed downloads do not replace an existing ZIP. Re
 without a SHA-256 digest are not offered for download; source archives and development
 branches are never used as a fallback.
 
-Install the downloaded ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
+Install the downloaded ZIP through **Decky Settings â†’ Developer â†’ Install Plugin from ZIP**.
 Review your module choices afterwards: Decky's installation process can reset the gyro
 source, battery protection and Wi-Fi preferences. Downloading alone leaves the running
 plugin and all settings unchanged.
@@ -169,19 +169,20 @@ conflict. Failed restoration keeps its recovery record.
 **Enable** gives Companion control of the TDP limits. Turning it off releases that control;
 CPU Boost and EPP are independent controls.
 
-**Presets** apply immediately. The Legion Go 2 ladder is:
+**Presets** apply immediately:
 
 | Preset | SPL | SPPT | FPPT |
 |---|---|---|---|
-| Minimum | 5 W | 5 W | 10 W |
-| Silent | 8 W | 10 W | 15 W |
-| Balanced | 15 W | 18 W | 25 W |
-| Performance | 25 W | 28 W | 35 W |
-| **Max** | **35 W** | **37 W** | **45 W** |
+| Silent | 8 W | 15 W | 20 W |
+| Balanced | 16 W | 25 W | 30 W |
+| Performance | 20 W | 32 W | 35 W |
+| **Full Power** | **35 W** | **37 W** | **45 W** |
 
-The available range is checked against the firmware. In **Custom**, SPL sets sustained
-power; SPPT and FPPT add longer and shorter burst headroom above it. **Apply TDP** commits
-the slider values.
+The available range is checked against the firmware. In **Custom**, **Advanced TDP
+Control** is on by default and exposes separate SPL, SPPT and FPPT sliders. Turning it
+off leaves one **TDP** slider (5–35 W); SPPT follows at TDP +10 W up to 37 W and FPPT
+at TDP +15 W up to 45 W. **Apply TDP** commits the slider values. Unlocking Custom
+TDP to 50 W extends the three limits to 50/50/50 W.
 
 **Per Game Profile** stores TDP limits, CPU Boost and EPP for the running game.
 **Separate AC Profile** gives that game independent battery and charging settings for
@@ -191,7 +192,7 @@ profile saves its choices without changing the active profile on the hardware.
 
 **CPU Boost** controls the kernel's boost setting. **EPP** uses **Prefer CPU** and
 **Prefer GPU** labels: these change the CPU's energy preference, and lower CPU demand can
-leave more of the shared power budget for graphics. Newer kernels offer 0–100% in 10% steps;
+leave more of the shared power budget for graphics. Newer kernels offer 0â€“100% in 10% steps;
 older kernels offer supported presets and **System default**. The CPU section identifies whether changes
 belong to the global profile, the game's battery profile or its AC profile. Choices are
 restored after startup, resume and power-source changes, and checked for drift.
@@ -291,7 +292,18 @@ feature does not change the battery on first installation until selected by the 
 This module fixes screen brightness control in SteamOS. It also offers an HDR fix
 by correcting the display metadata exposed to games.
 
-Choose a mode on first run, or use **Switch Display Mode** later:
+When the system profile
+`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`
+exists, Companion automatically retires its display fix and removes
+its recognised user Lua script. The display controls are locked with an
+explanation; **EDID for games** remains independently available. A requested
+Gaming Mode restart unloads the old script and closes running games. Cleanup
+errors are shown and retried automatically. Detection checks only file presence;
+Lua contents, binary features, and the SteamOS channel are not checked. The first
+handover requests one Gaming Mode restart to reload the display configuration;
+see the [technical review](docs/NATIVE_DISPLAY_SUPPORT.md).
+
+On older systems, choose a mode on first run, or use **Switch Display Mode** later:
 
 | Mode | Behaviour | Trade-off |
 |---|---|---|
@@ -304,7 +316,7 @@ content. When Steam is already controlling HDR brightness, this part stands asid
 
 **EDID for games** corrects gamescope's published display metadata so affected games can
 read the panel's luminance values. Restart an already running game to let it read the
-updated metadata.
+updated metadata. This option also works without installing a display-mode script.
 
 **Reset Display Fix** withdraws the module's brightness, HDR and EDID changes, removes its
 installed display script (or restores the previous third-party script from backup), clears
@@ -522,6 +534,6 @@ in [NOTICE](NOTICE) and [SOURCE.md](SOURCE.md).
 
 <div align="left">
 
-*Vibe coded with AI assistance 🤖*
+*Vibe coded with AI assistance đź¤–*
 
 </div>

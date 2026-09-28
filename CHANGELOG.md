@@ -1,3 +1,23 @@
+# Unreleased
+
+### Added
+
+- Detect gamescope's native Legion Go 2 display profile by the presence of its system Lua file. Automatically retire Companion's legacy display fix, remove its owned Lua file, disable the obsolete display controls, and report cleanup or Gaming Mode restart requirements.
+- Add Advanced TDP Control, enabled by default. When disabled, Custom uses one 5–35 W TDP slider and targets SPPT at TDP +10 W (up to 37 W) and FPPT at TDP +15 W (up to 45 W). The existing 50 W unlock remains available.
+
+### Changed
+
+- Replace the TDP presets with Silent 8/15/20 W, Balanced 16/25/30 W, Performance 20/32/35 W, and Full Power 35/37/45 W; remove Minimum. Existing saved "max" selections continue as Full Power.
+- Reorder the TDP page: Enable, game profile, current limits, presets, Custom controls, CPU Power Controls, then Extras.
+- Show the active TDP mode and all three power limits in the main menu. The Battery summary also shows left and right controller charge levels, and Vibration shows whether touchpad vibration is on.
+
+### Improved
+
+- Keep EDID correction available independently of display-mode setup and the installed Lua script.
+- Keep native-display detection independent of the Lua file's contents, gamescope version, and SteamOS update channel.
+- Remove unreachable updater helpers, legacy backend methods, unused frontend code, and obsolete package entries after a focused dead-code review.
+- Avoid duplicate TDP and vibration startup reads, overlapping CPU-control reads, redundant guard metadata probes and WiFi settings reads, and unnecessary InputPlumber capability queries during remapper discovery.
+
 # 1.0.4
 
 ### Added
