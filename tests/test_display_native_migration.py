@@ -376,16 +376,22 @@ class NativeDisplayMigrationTests(unittest.TestCase):
         self.assertFalse(self.state['native_cleanup_pending'])
 
     def test_native_loop_closes_existing_backlight_watch_and_never_polls_slider(self):
+        real_close = display.os.close
+
+        def close_notify_only(fd):
+            if fd != 77:
+                real_close(fd)
+
         async def run():
             with patch.object(display, '_open_notify', return_value=77), \
-                 patch.object(display.os, 'close') as close, \
+                 patch.object(display.os, 'close', side_effect=close_notify_only) as close, \
                  patch.object(display.Plugin, '_edid_pass') as edid, \
                  patch.object(display, '_read_int') as read, \
                  patch.object(display, '_wait_for_change') as wait, \
                  patch.object(display.asyncio, 'sleep', side_effect=asyncio.CancelledError):
                 with self.assertRaises(asyncio.CancelledError):
                     await self.plugin._loop('fake-backlight')
-                close.assert_called_once_with(77)
+                self.assertEqual(sum(call.args == (77,) for call in close.call_args_list), 1)
                 edid.assert_called()
                 read.assert_not_called()
                 wait.assert_not_called()
