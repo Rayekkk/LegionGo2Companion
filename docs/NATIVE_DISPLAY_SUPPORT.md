@@ -1,4 +1,4 @@
-# Native gamescope display support Ă˘— 2026-09-28
+# Native gamescope display support — 2026-09-28
 
 ## Assessment
 
@@ -17,12 +17,12 @@ arrival in Stable are not inputs to the implementation.
 
 | Commit | Practical effect |
 | --- | --- |
-| [6513879 Ă˘— content-driven HDR](https://github.com/ValveSoftware/gamescope/commit/6513879ba33e5a8e4b89e173252f5604b0c2371d) | Separates HDR capability from active HDR output. With HDR enabled and content-driven behaviour selected, gamescope examines the last completed frame of each candidate application window. Any HDR frame keeps HDR output active, including while Steam UI has focus. HDR capability remains advertised while output is SDR, so a newly launched game can request HDR. Forced HDR output bypasses this policy. |
-| [2dbc84d Ă˘— luminance fallback](https://github.com/ValveSoftware/gamescope/commit/2dbc84d6650abb81d0914f0a772330e6598c23d1) | Missing Lua luminance fields fall back individually to the panel EDID; explicit script values still take precedence. This concerns gamescope's connector metadata, not compatibility of the EDID parser used by games. |
-| [94667ca Ă˘— Legion Go 2 profile](https://github.com/ValveSoftware/gamescope/commit/94667ca19cb3dc5ba4dbac752fbefdd7c2305504) | Adds a profile for SDC / 0x4301, with PQ capability and content-driven HDR. Colourimetry and luminance come from EDID. The 48–144 Hz refresh list and fixed-clock front-porch table match our profile; this is not a new refresh-rate range. |
-| [00f8a85 Ă˘— priority polling](https://github.com/ValveSoftware/gamescope/commit/00f8a859a622d774253a6d211317406c5fd79ebd) | Adds EPOLLPRI dispatch to gamescope's waitable objects, allowing the following change to react to sysfs brightness notifications. |
-| [21c7e25 Ă˘— software backlight](https://github.com/ValveSoftware/gamescope/commit/21c7e259c8203554311b846bbe5645b4467a4fe6) | Watches `actual_brightness`, divides it by `max_brightness`, and applies the resulting gain to the output colour LUTs when the connector requests software backlight, colour management is enabled, and output is PQ. This covers SDR and HDR input. Gain is clamped to at least 0.01. |
-| [9eeb855 Ă˘— enable it for Go 2](https://github.com/ValveSoftware/gamescope/commit/9eeb855516942a75bb0df8935773145d429a8095) | Sets `software_backlight = true` in the Legion Go 2 profile. A profile containing only content-driven HDR is therefore insufficient evidence of the complete replacement. |
+| [6513879 — content-driven HDR](https://github.com/ValveSoftware/gamescope/commit/6513879ba33e5a8e4b89e173252f5604b0c2371d) | Separates HDR capability from active HDR output. With HDR enabled and content-driven behaviour selected, gamescope examines the last completed frame of each candidate application window. Any HDR frame keeps HDR output active, including while Steam UI has focus. HDR capability remains advertised while output is SDR, so a newly launched game can request HDR. Forced HDR output bypasses this policy. |
+| [2dbc84d — luminance fallback](https://github.com/ValveSoftware/gamescope/commit/2dbc84d6650abb81d0914f0a772330e6598c23d1) | Missing Lua luminance fields fall back individually to the panel EDID; explicit script values still take precedence. This concerns gamescope's connector metadata, not compatibility of the EDID parser used by games. |
+| [94667ca — Legion Go 2 profile](https://github.com/ValveSoftware/gamescope/commit/94667ca19cb3dc5ba4dbac752fbefdd7c2305504) | Adds a profile for SDC / 0x4301, with PQ capability and content-driven HDR. Colourimetry and luminance come from EDID. The 48–144 Hz refresh list and fixed-clock front-porch table match our profile; this is not a new refresh-rate range. |
+| [00f8a85 — priority polling](https://github.com/ValveSoftware/gamescope/commit/00f8a859a622d774253a6d211317406c5fd79ebd) | Adds EPOLLPRI dispatch to gamescope's waitable objects, allowing the following change to react to sysfs brightness notifications. |
+| [21c7e25 — software backlight](https://github.com/ValveSoftware/gamescope/commit/21c7e259c8203554311b846bbe5645b4467a4fe6) | Watches `actual_brightness`, divides it by `max_brightness`, and applies the resulting gain to the output colour LUTs when the connector requests software backlight, colour management is enabled, and output is PQ. This covers SDR and HDR input. Gain is clamped to at least 0.01. |
+| [9eeb855 — enable it for Go 2](https://github.com/ValveSoftware/gamescope/commit/9eeb855516942a75bb0df8935773145d429a8095) | Sets `software_backlight = true` in the Legion Go 2 profile. A profile containing only content-driven HDR is therefore insufficient evidence of the complete replacement. |
 
 ## Comparison with our Hybrid mode
 

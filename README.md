@@ -11,7 +11,7 @@
 **Power, battery protection, gyro, haptics, lighting, buttons, screen brightness, HDR and Wi-Fi in one Steam overlay.**
 The Legion Go 2 controls you use every day, with saved profiles and automatic recovery after wake.
 
-[Features](#features) Â· [Requirements](#requirements) Â· [Installation](#installation) Â· [Usage](#usage) Â· [How it works](#how-it-works) Â· [Troubleshooting](#troubleshooting)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -53,7 +53,7 @@ Controls follow the interfaces exposed by the active kernel. Older kernels offer
 1. Install [Decky Loader](https://decky.xyz) if it is not already installed.
 2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases), when available, or build it using the instructions below.
 3. Remove the overlapping standalone plugins listed below, retaining their settings.
-4. In Gaming Mode, open the **Quick Access Menu â†’ Decky â†’ Settings â†’ Developer**.
+4. In Gaming Mode, open the **Quick Access Menu → Decky → Settings → Developer**.
 5. Choose **Install Plugin from ZIP** and select the archive.
 
 The archive contains one `LegionGo2Companion` folder. Decky installs it with the privileges
@@ -61,7 +61,7 @@ needed by the hardware controls; normal use requires no terminal commands.
 
 ### Updates
 
-Open **About â†’ Check for Updates** to check the latest stable GitHub release. If a newer
+Open **About → Check for Updates** to check the latest stable GitHub release. If a newer
 release has its plugin ZIP attached, **Download** saves it in your Downloads folder and
 shows the path. No public release yet, an incomplete release and a connection failure
 are reported separately. Checking and downloading happen only when requested; opening
@@ -72,7 +72,7 @@ the completed ZIP available. Failed downloads do not replace an existing ZIP. Re
 without a SHA-256 digest are not offered for download; source archives and development
 branches are never used as a fallback.
 
-Install the downloaded ZIP through **Decky Settings â†’ Developer â†’ Install Plugin from ZIP**.
+Install the downloaded ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
 Review your module choices afterwards: Decky's installation process can reset the gyro
 source, battery protection and Wi-Fi preferences. Downloading alone leaves the running
 plugin and all settings unchanged.
@@ -192,7 +192,7 @@ profile saves its choices without changing the active profile on the hardware.
 
 **CPU Boost** controls the kernel's boost setting. **EPP** uses **Prefer CPU** and
 **Prefer GPU** labels: these change the CPU's energy preference, and lower CPU demand can
-leave more of the shared power budget for graphics. Newer kernels offer 0â€“100% in 10% steps;
+leave more of the shared power budget for graphics. Newer kernels offer 0–100% in 10% steps;
 older kernels offer supported presets and **System default**. The CPU section identifies whether changes
 belong to the global profile, the game's battery profile or its AC profile. Choices are
 restored after startup, resume and power-source changes, and checked for drift.
@@ -534,6 +534,6 @@ in [NOTICE](NOTICE) and [SOURCE.md](SOURCE.md).
 
 <div align="left">
 
-*Vibe coded with AI assistance đź¤–*
+*Vibe coded with AI assistance 🤖*
 
 </div>
