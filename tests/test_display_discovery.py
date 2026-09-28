@@ -80,7 +80,6 @@ class DisplayDiscoveryTests(unittest.TestCase):
                  patch.object(display.Plugin, "_state", state), \
                  patch.object(display.Plugin, "_task", None), \
                  patch.object(display.Plugin, "_prop_task", None), \
-                 patch.object(display.updater, "ssl_context"), \
                  patch.object(display, "_pick_display") as discover, \
                  patch.object(display.Plugin, "_refresh_setup") as setup, \
                  patch.object(display, "_write_atom_int") as write_atom, \

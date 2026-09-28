@@ -608,6 +608,49 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(capture["active"])
         self.assertEqual(capture["virtual"]["error"], "missing")
 
+    def test_report_buffers_are_reused_and_keep_bounded_rates_without_losing_counts(self):
+        capture = self.capture()
+        stop = threading.Event()
+        clock, polls = [100.0], [0]
+        physical = b"\x04\x3c\x74" + bytes(61)
+        virtual = b"\x01\x00\x09\x40" + bytes(60)
+
+        def ready(*_args):
+            polls[0] += 1
+            clock[0] = 100 + polls[0] / 5000
+            return [7, 8], [], []
+
+        def read(fd, _size):
+            if polls[0] == 4101 and fd == 8:
+                stop.set()
+            if polls[0] == 1:
+                return bytes(64)
+            return physical if fd == 7 else virtual
+
+        with patch.object(module, "_open_reader", side_effect=[7, 8]), \
+                patch.object(module.os, "close"), \
+                patch.object(module.os, "read", side_effect=read) as reader, \
+                patch.object(module.select, "select", side_effect=ready), \
+                patch.object(module, "_capture_time", side_effect=lambda: clock[0]), \
+                patch.object(module, "deque", wraps=module.deque) as allocate:
+            self.backend._worker((PHYSICAL, PHYSICAL), capture, stop)
+            clock[0] = 101.0
+            result = self.backend._snapshot("test-token")
+            for kind in ("physical", "virtual"):
+                self.assertEqual(capture[kind]["times"].maxlen, 4096)
+                self.assertEqual(len(capture[kind]["times"]), 4096)
+                self.assertEqual(result[kind]["reports"], 4100)
+                self.assertEqual(result[kind]["invalid_reports"], 1)
+                self.assertEqual(result[kind]["rate_hz"], 4096.0)
+                self.assertIsNotNone(result[kind]["sample"])
+            clock[0] = 102.0
+            expired = self.backend._snapshot("test-token")
+            for kind in ("physical", "virtual"):
+                self.assertEqual(expired[kind]["rate_hz"], 0.0)
+                self.assertEqual(expired[kind]["reports"], 4100)
+            self.assertEqual(allocate.call_count, 2)
+        self.assertEqual(reader.call_count, 8202)
+
     def test_battery_read_uses_one_native_report_closes_and_caches(self):
         report = bytearray(b"\x04\x3c\x74" + bytes(61))
         report[5], report[7] = 84, 61

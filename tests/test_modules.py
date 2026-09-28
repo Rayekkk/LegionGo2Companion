@@ -262,6 +262,81 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_display_reenable_keeps_edid_module_running_with_native_support(self):
+        for state in ({'native_support_detected': True}, {'native_cleanup_pending': True}):
+            c = types.SimpleNamespace(set_panel_mode=AsyncMock(return_value={
+                **state, 'setup_done': False, 'native_cleanup_error': 'retrying'}))
+            await module_control.restore_intent('display', c, {'panel_mode': 'hybrid'})
+            c.set_panel_mode.assert_awaited_once_with('hybrid')
+
+    async def test_native_display_withdraw_only_restores_edid(self):
+        import display_backend
+        restored = []
+        c = types.SimpleNamespace(
+            _unload=AsyncMock(), native_display_active=lambda: True,
+            cleanup_native_display=AsyncMock(return_value={'native_restart_pending': True}),
+            _edid_restore=lambda: restored.append('edid') or True)
+        with patch.object(display_backend, '_write_atom_int') as write, \
+             patch.object(display_backend, '_uninstall_script') as uninstall:
+            note = await module_control.withdraw('display', c)
+        self.assertEqual(restored, ['edid'])
+        c._unload.assert_awaited_once_with()
+        write.assert_not_called()
+        uninstall.assert_not_called()
+        self.assertIn('Restart', note)
+
+    async def test_native_cleanup_failure_keeps_module_withdrawal_pending(self):
+        c = types.SimpleNamespace(
+            _unload=AsyncMock(), native_display_active=lambda: True,
+            cleanup_native_display=AsyncMock(return_value={
+                'native_cleanup_pending': True, 'native_cleanup_error': 'disk full'}))
+        with self.assertRaisesRegex(RuntimeError, 'disk full'):
+            await module_control.withdraw('display', c)
+
+    async def test_pending_display_withdrawal_probes_native_before_first_unload(self):
+        import display_backend
+        detected = False
+        events = []
+
+        async def probe():
+            nonlocal detected
+            events.append('probe')
+            detected = True
+            return {'native_support_detected': True}
+
+        async def unload():
+            self.assertTrue(detected, 'Legacy unload must not run before native discovery')
+            events.append('unload')
+
+        c = types.SimpleNamespace(
+            cleanup_native_display=probe, _unload=unload,
+            native_display_active=lambda: detected, _edid_restore=lambda: True)
+        with patch.object(display_backend, '_write_atom_int') as write, \
+             patch.object(display_backend, '_uninstall_script') as uninstall:
+            await module_control.withdraw('display', c)
+        self.assertEqual(events[0:2], ['probe', 'unload'])
+        write.assert_not_called()
+        uninstall.assert_not_called()
+
+    async def test_native_detected_during_unload_fences_final_legacy_writes(self):
+        import display_backend
+        detected = False
+
+        async def unload(uninstalling=False):
+            nonlocal detected
+            if uninstalling:
+                detected = True
+
+        c = types.SimpleNamespace(
+            cleanup_native_display=AsyncMock(return_value={}), _unload=unload,
+            native_display_active=lambda: detected, _edid_restore=lambda: True)
+        with patch.object(display_backend, '_write_atom_int') as write, \
+             patch.object(display_backend, '_uninstall_script') as uninstall:
+            await module_control.withdraw('display', c)
+        self.assertTrue(detected)
+        write.assert_not_called()
+        uninstall.assert_not_called()
+
     async def test_display_reenable_reinstalls_saved_mode_and_checks_result(self):
         c = types.SimpleNamespace(set_panel_mode=AsyncMock(return_value={'setup_done': True}))
         await module_control.restore_intent('display', c, {'panel_mode': 'hybrid'})
@@ -284,7 +359,8 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
         c.set_power_led.assert_awaited_once_with(False)
 
     async def test_display_failed_restoration_is_not_reported_as_disabled(self):
-        c = types.SimpleNamespace(_unload=AsyncMock(), _release=lambda: False, _edid_restore=lambda: True)
+        c = types.SimpleNamespace(_unload=AsyncMock(), cleanup_native_display=AsyncMock(return_value={}),
+                                  _release=lambda: False, _edid_restore=lambda: True)
         with self.assertRaisesRegex(RuntimeError, 'restoration'):
             await module_control.withdraw('display', c)
 

@@ -71,6 +71,40 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             setattr(plugin, "_" + name, component); self.components.append(component)
         return plugin
 
+    async def test_unchanged_guard_still_scans_without_reading_display_or_version(self):
+        plugin = self.make_plugin()
+        plugin._module_state = {'display': {'enabled': False, 'session': 1, 'note': 'restart'}}
+        with patch.object(main, '_installed_standalone_plugins', return_value=[]) as scan, \
+             patch.object(main, '_plugin_version') as version, \
+             patch.object(main.display_backend, '_gamescope_start_time') as session, \
+             patch.object(main.decky, 'emit', new=AsyncMock()) as emit:
+            for _ in range(10):
+                await plugin._inspect_guard()
+        self.assertEqual(scan.call_count, 10)
+        version.assert_not_called()
+        session.assert_not_called()
+        emit.assert_not_awaited()
+
+    async def test_guard_changes_publish_fresh_status_once_and_keep_restart_latch(self):
+        plugin = self.make_plugin()
+        with patch.object(main, '_installed_standalone_plugins',
+                          side_effect=[[], ['LeGoTDP'], ['LeGoTDP'], []]) as scan, \
+             patch.object(main, '_plugin_version', return_value='1.0.4') as version, \
+             patch.object(main.decky, 'emit', new=AsyncMock()) as emit:
+            for _ in range(4):
+                await plugin._inspect_guard()
+        self.assertEqual(scan.call_count, 4)
+        self.assertEqual(version.call_count, 2)
+        self.assertEqual(emit.await_count, 2)
+        blocked, cleared = [call.args[1] for call in emit.await_args_list]
+        self.assertEqual(blocked['standalone_plugins'], ['LeGoTDP'])
+        self.assertTrue(blocked['blocked'])
+        self.assertFalse(blocked['restart_required'])
+        self.assertEqual(cleared['standalone_plugins'], [])
+        self.assertTrue(cleared['blocked'])
+        self.assertTrue(cleared['restart_required'])
+        self.assertIn('modules', cleared)
+
     async def test_blocked_start_migration_unload_and_uninstall_never_enter_modules(self):
         plugin = self.make_plugin()
         with patch.object(main, "_installed_standalone_plugins", return_value=["LeGoTDP"]), \

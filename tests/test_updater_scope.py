@@ -16,17 +16,12 @@ import tdp_backend as tdp
 import vibration_backend as vibration
 import display_backend as display
 import tdp_updater
-import vibration_updater
-import display_updater
-
-
-HELPERS = (tdp_updater, vibration_updater, display_updater)
 
 
 class UpdaterScopeTests(unittest.TestCase):
-    def helper(self, module, directory):
-        return module.Updater(user_agent="test", log_prefix="[test]",
-                              plugin_dir=directory, logger=test_integration.decky.logger)
+    def helper(self, directory):
+        return tdp_updater.Updater(user_agent="test", log_prefix="[test]",
+                                   plugin_dir=directory, logger=test_integration.decky.logger)
 
     def test_entrypoint_and_components_have_no_standalone_update_rpc(self):
         for backend in (main, tdp, vibration, display):
@@ -37,39 +32,30 @@ class UpdaterScopeTests(unittest.TestCase):
                     self.assertFalse(hasattr(backend.Plugin, name), name)
 
     def test_no_helper_can_download_a_standalone_plugin_archive(self):
-        for module in HELPERS:
-            with self.subTest(module=module.__name__):
-                for name in ("check", "download", "download_latest", "_download_asset",
-                             "check_version_from_asset"):
-                    self.assertFalse(hasattr(module.Updater, name), name)
-                for name in ("real_user", "xdg_download_dir", "confined_download_dir"):
-                    self.assertFalse(hasattr(module, name), name)
-        for module in (vibration_updater, display_updater):
-            self.assertFalse(hasattr(module.Updater, "open_url"))
-            self.assertFalse(hasattr(module.Updater, "download_to"))
+        for name in ("check", "download", "download_latest", "_download_asset",
+                     "check_version_from_asset"):
+            self.assertFalse(hasattr(tdp_updater.Updater, name), name)
+        for name in ("real_user", "xdg_download_dir", "confined_download_dir"):
+            self.assertFalse(hasattr(tdp_updater, name), name)
 
     def test_version_metadata_still_prefers_loader_and_falls_back_to_manifest(self):
         with tempfile.TemporaryDirectory() as raw:
             (Path(raw) / "plugin.json").write_text(json.dumps({"version": "0.6.0"}), encoding="utf-8")
-            for module in HELPERS:
-                with self.subTest(module=module.__name__):
-                    helper = self.helper(module, raw)
-                    with patch.dict(module.os.environ, {"DECKY_PLUGIN_VERSION": "9.1.2"}):
-                        self.assertEqual(helper.plugin_version(), "9.1.2")
-                    with patch.dict(module.os.environ, {"DECKY_PLUGIN_VERSION": ""}):
-                        self.assertEqual(helper.plugin_version(), "0.6.0")
+            helper = self.helper(raw)
+            with patch.dict(tdp_updater.os.environ, {"DECKY_PLUGIN_VERSION": "9.1.2"}):
+                self.assertEqual(helper.plugin_version(), "9.1.2")
+            with patch.dict(tdp_updater.os.environ, {"DECKY_PLUGIN_VERSION": ""}):
+                self.assertEqual(helper.plugin_version(), "0.6.0")
 
-    def test_retained_tls_contexts_verify_certificates_and_are_cached(self):
-        for module in HELPERS:
-            with self.subTest(module=module.__name__):
-                helper = self.helper(module, ".")
-                context = helper.ssl_context()
-                self.assertTrue(context.check_hostname)
-                self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
-                self.assertIs(helper.ssl_context(), context)
+    def test_retained_tls_context_verifies_certificates_and_is_cached(self):
+        helper = self.helper(".")
+        context = helper.ssl_context()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertIs(helper.ssl_context(), context)
 
     def test_pinned_helper_download_still_enforces_https_and_size_limit(self):
-        helper = self.helper(tdp_updater, ".")
+        helper = self.helper(".")
         for url in ("http://github.com/test", "file:///tmp/test", "https://example.org/test"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 tdp_updater.checked_url(url)

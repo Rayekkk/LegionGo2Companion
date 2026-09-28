@@ -25,11 +25,6 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
-# Not `updater`: the loader aliases its own decky_loader.updater to that bare
-# name before we are imported, and sys.modules wins over sys.path. Keep this
-# backend-specific helper name for version/TLS compatibility.
-from vibration_updater import Updater  # noqa: E402 - needs the sys.path line above
-
 try:
     import pyudev as _pyudev
     _udev_ctx = _pyudev.Context()
@@ -47,14 +42,6 @@ except Exception as _e:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-
-# Retained local version and TLS compatibility helper; no standalone updates.
-updater = Updater(
-    user_agent="lego-vibe-plugin",
-    log_prefix="[lego-vibe]",
-    plugin_dir=PLUGIN_DIR,
-    logger=decky.logger,
-)
 
 # Fallback value lists, used only when the driver does not expose the
 # matching <attr>_index file. The driver on kernel 6.18 does expose them.
@@ -772,7 +759,7 @@ class Plugin:
     async def _main(self):
         global _monitor_task, _drift_task, _last_suspend_offset
         decky.logger.info(
-            f"[lego-vibe] startup  v{updater.plugin_version()}  pyudev={_PYUDEV}")
+            f"[lego-vibe] startup pyudev={_PYUDEV}")
         try:
             def _start() -> None:
                 global _last_suspend_offset
@@ -780,9 +767,6 @@ class Plugin:
                 values = _active_values()
                 decky.logger.info(f"[lego-vibe] applying global profile: {values}")
                 _apply_settings(values, force=True)
-                # Resolve the trust store now so the log shows up front whether
-                # update checks will be able to verify certificates.
-                updater.ssl_context()
             await _offload(_start)
             _monitor_task = asyncio.create_task(_monitor_hotplug())
             _drift_task = asyncio.create_task(self._drift_loop())
@@ -828,9 +812,6 @@ class Plugin:
 
     async def is_ready(self) -> dict:
         return {"ready": Plugin._setup_error is None, "error": Plugin._setup_error or ""}
-
-    async def get_version(self) -> dict:
-        return {"version": updater.plugin_version()}
 
     async def get_capabilities(self) -> dict:
         def _do() -> dict:
@@ -998,32 +979,6 @@ class Plugin:
             decky.logger.info(f"[lego-vibe] deleted profile {app_id}")
             return {"success": ok, "settings": values}
         return await _offload(_do)
-
-    async def set_game_profiles(self, profiles: dict) -> dict:
-        """Bulk replace. Retained for compatibility with older frontends."""
-        if not isinstance(profiles, dict):
-            return {"success": False, "error": "profiles must be an object"}
-        # Round-trip through the same sanitizer as ordinary reads before this
-        # compatibility path is allowed to replace the complete store.
-        normalised: dict[str, dict] = {}
-        for raw_app_id, raw_entry in profiles.items():
-            app_id = _normalise_app_id(raw_app_id)
-            if app_id is None or not isinstance(raw_entry, dict):
-                continue
-            normalised[app_id] = {
-                "overwrite": False if app_id == DEFAULT_APP else
-                    _coerce_bool(raw_entry.get("overwrite"), False),
-                "settings": _coerce_profile(raw_entry.get("settings")),
-            }
-            if isinstance(raw_entry.get("name"), str):
-                normalised[app_id]["name"] = raw_entry["name"][:MAX_NAME_LENGTH]
-            if len(normalised) >= MAX_GAME_PROFILES:
-                break
-        if DEFAULT_APP not in normalised:
-            normalised[DEFAULT_APP] = {
-                "overwrite": False, "settings": dict(DEFAULT_PROFILE)}
-        await _offload(_save_profiles, normalised)
-        return {"success": True}
 
     # ---- Driver status ---------------------------------------------- #
 

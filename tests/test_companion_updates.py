@@ -10,7 +10,6 @@ from pathlib import Path
 import stat
 import struct
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import patch

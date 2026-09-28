@@ -5,7 +5,6 @@
 import {
   addEventListener,
   callable,
-  definePlugin,
   removeEventListener,
   toaster,
   useQuickAccessVisible,
@@ -20,7 +19,6 @@ import {
   Router,
   SliderField,
   Spinner,
-  staticClasses,
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
@@ -37,7 +35,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), h
 interface Tuning { spl: number; spptOff: number; fpptOff: number }
 interface Caps   { spl: number; sppt: number; fppt: number }
 
-const OFFSET_MAX = { sppt: 10, fppt: 15 };
+const OFFSET_MAX = { sppt: 15, fppt: 15 };
 
 // Used until get_caps() answers; the backend reports the firmware's real ceilings
 // and falls back to these same numbers (FALLBACK_STD_W in main.py) if it cannot.
@@ -68,6 +66,21 @@ const fromAbsolute = (spl: number, sppt: number, fppt: number): Tuning => ({
   spl, spptOff: Math.max(0, sppt - spl), fpptOff: Math.max(0, fppt - spl),
 });
 
+/** Standard single-dial Custom mode uses the same caps as the Go 2 firmware. */
+function simpleCaps(caps: Caps, unlocked: boolean): Caps {
+  return unlocked ? caps : {
+    spl: Math.min(caps.spl, FALLBACK_STD.spl),
+    sppt: Math.min(caps.sppt, FALLBACK_STD.sppt),
+    fppt: Math.min(caps.fppt, FALLBACK_STD.fppt),
+  };
+}
+
+function simpleTuning(spl: number, caps: Caps, minW: number): Tuning {
+  const bounded = clamp(spl, minW, caps.spl);
+  return fromAbsolute(bounded, Math.min(bounded + 10, caps.sppt),
+                      Math.min(bounded + 15, caps.fppt));
+}
+
 /** Slider handlers implementing the coupling rules between the three limits. */
 function makeTuningHandlers(t: Tuning, set: (next: Tuning) => void, caps: Caps, minW: number) {
   return {
@@ -87,31 +100,28 @@ function makeTuningHandlers(t: Tuning, set: (next: Tuning) => void, caps: Caps, 
 }
 
 // ── Presets ────────────────────────────────────────────────────────────────────
-type PresetKey = "minimum" | "silent" | "balanced" | "performance" | "max" | "custom";
+type PresetKey = "silent" | "balanced" | "performance" | "max" | "custom";
 
 type PresetTable = Record<Exclude<PresetKey, "custom">,
                           { spl: number; sppt: number; fppt: number }>;
 
-// Used until get_caps() answers with the ladder for this machine. The backend
-// is the source of truth, because it is the side that knows the hardware.
+// Used until get_caps() answers. The backend remains the source of truth.
 const PRESETS: PresetTable = {
-  minimum:     { spl: 5,  sppt: 5,  fppt: 10 },
-  silent:      { spl: 8,  sppt: 10, fppt: 15 },
-  balanced:    { spl: 15, sppt: 18, fppt: 25 },
-  performance: { spl: 25, sppt: 28, fppt: 35 },
+  silent:      { spl: 8,  sppt: 15, fppt: 20 },
+  balanced:    { spl: 16, sppt: 25, fppt: 30 },
+  performance: { spl: 20, sppt: 32, fppt: 35 },
   max:         { spl: 35, sppt: 37, fppt: 45 },
 };
 
 const PRESET_LABELS: Record<PresetKey, string> = {
-  minimum:     "Minimum",
   silent:      "Silent",
   balanced:    "Balanced",
   performance: "Performance",
-  max:         "Max",
+  max:         "Full Power",
   custom:      "Custom",
 };
 
-const PRESET_ORDER: PresetKey[] = ["minimum", "silent", "balanced", "performance", "max", "custom"];
+const PRESET_ORDER: PresetKey[] = ["silent", "balanced", "performance", "max", "custom"];
 
 function detectPreset(spl: number, sppt: number, fppt: number,
                       table: PresetTable = PRESETS): PresetKey {
@@ -123,15 +133,29 @@ function detectPreset(spl: number, sppt: number, fppt: number,
 }
 
 function profileLabel(spl: number, sppt: number, fppt: number, stored?: string,
-                      table: PresetTable = PRESETS): string {
+                       table: PresetTable = PRESETS): string {
   const customLabel = `Custom (${spl} +${sppt - spl}/+${fppt - spl})`;
   if (stored !== undefined) {
     if (stored === "custom" || stored === "") return customLabel;
-    return PRESET_LABELS[stored as PresetKey] ?? stored;
+    const value = table[stored as keyof PresetTable];
+    if (value?.spl === spl && value.sppt === sppt && value.fppt === fppt)
+      return PRESET_LABELS[stored as PresetKey];
+    return customLabel;
   }
   const key = detectPreset(spl, sppt, fppt, table);
   return key === "custom" ? customLabel : PRESET_LABELS[key];
 }
+
+function resolvedPreset(spl: number, sppt: number, fppt: number, stored: string | undefined,
+                        table: PresetTable): PresetKey {
+  if (stored === "custom") return "custom";
+  const value = table[stored as keyof PresetTable];
+  return value?.spl === spl && value.sppt === sppt && value.fppt === fppt
+    ? stored as PresetKey : detectPreset(spl, sppt, fppt, table);
+}
+
+export const tdpModeLabel = (spl: number, sppt: number, fppt: number, stored?: string) =>
+  PRESET_LABELS[resolvedPreset(spl, sppt, fppt, stored, PRESETS)];
 
 const exceedsCaps = (spl: number, sppt: number, fppt: number, caps: Caps) =>
   spl > caps.spl || sppt > caps.sppt || fppt > caps.fppt;
@@ -141,7 +165,8 @@ function statusStyle(msg: string) {
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-interface Settings   { spl: number; sppt: number; fppt: number; enabled: boolean; active_preset?: string }
+interface Settings   { spl: number; sppt: number; fppt: number; enabled: boolean;
+                       active_preset?: string; advanced_tdp_control?: boolean }
 interface TdpResult  { success: boolean; stderr?: string; skipped?: boolean; returncode?: number }
 interface TdpValues  {
   spl_limit?:  number;
@@ -213,6 +238,7 @@ const setGameAcProfile  = callable<[string, number, number, number, boolean, str
 const retryExtras = callable<[], { success: boolean; error?: string }>("retry_extras");
 const getExtrasUnlocked = callable<[], boolean>("get_extras_unlocked");
 const setExtrasUnlockedCall = callable<[boolean], TdpResult>("set_extras_unlocked");
+const setAdvancedTdpControlCall = callable<[boolean], TdpResult>("set_advanced_tdp_control");
 const getCpuPowerControls = callable<[string, boolean], CpuPowerControls>("get_cpu_power_controls");
 const setCpuBoost       = callable<[boolean, string, boolean, string], CpuPowerControls>("set_cpu_boost");
 const setEpp            = callable<[string, string, boolean, string], CpuPowerControls>("set_epp");
@@ -241,15 +267,6 @@ const WARN_COLOR = "var(--gpColor-Yellow, #fbbf24)";
 const DIM_COLOR = "var(--gpColor-TextMuted, rgba(255,255,255,0.5))";
 
 const styles = {
-  valueTag: {
-    fontSize: "13px",
-    fontWeight: "bold",
-    color: "var(--gpColor-White, #fff)",
-    background: "rgba(255,255,255,0.1)",
-    borderRadius: "4px",
-    padding: "1px 6px",
-    fontFamily: "monospace",
-  },
   profileTag: {
     fontSize: "11px",
     fontWeight: "bold",
@@ -476,14 +493,6 @@ class AppWatcher {
     if (this.started && generation === this.generation && changed) this.listeners.forEach((fn) => fn(game));
   }
 }
-
-// ── Icon ───────────────────────────────────────────────────────────────────────
-const ChipIcon: FC = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"
-    style={{ width: "1em", height: "1em" }}>
-    <path d="M9 2v2H7a2 2 0 0 0-2 2v2H3v2h2v2H3v2h2v2H3v2h2v2a2 2 0 0 0 2 2h2v2h2v-2h2v2h2v-2h2a2 2 0 0 0 2-2v-2h2v-2h-2v-2h2v-2h-2V9h2V7h-2V6a2 2 0 0 0-2-2h-2V2h-2v2h-2V2H9zm-1 4h12v12H8V6zm3 3v6h6V9h-6z" />
-  </svg>
-);
 
 // ── Live TDP panel ─────────────────────────────────────────────────────────────
 
@@ -716,6 +725,9 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   const actionSequenceRef = useRef(0);
   const mutationEpochRef = useRef(0);
   const readSequenceRef = useRef(0);
+  const readInFlightRef = useRef(false);
+  const refreshAfterReadRef = useRef(false);
+  const refreshControlsRef = useRef<(() => Promise<void>) | null>(null);
   const refreshAfterActionRef = useRef(false);
   const eppPendingRef = useRef(false);
   const flushEppRef = useRef<(() => void) | null>(null);
@@ -749,13 +761,22 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
 
   const refreshControls = useCallback(async () => {
     if (!mountedRef.current || !visibleRef.current) return;
+    const readId = ++readSequenceRef.current;
     // Visibility changes may request a refresh while a mutation is running.
     // Queue it; a getter must never supersede the authoritative setter reply.
     if (actionRef.current) {
       refreshAfterActionRef.current = true;
       return;
     }
-    const readId = ++readSequenceRef.current;
+    // Reopening or changing scope invalidates the older reply, but needs only
+    // one fresh read after it finishes. Never queue overlapping hardware reads.
+    if (readInFlightRef.current) {
+      refreshAfterReadRef.current = true;
+      setLoading(true);
+      return;
+    }
+    readInFlightRef.current = true;
+    refreshAfterReadRef.current = false;
     const mutationEpoch = mutationEpochRef.current;
     setLoading(true);
     try {
@@ -780,12 +801,18 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
       acceptControls(unavailableCpuPowerControls(message));
       setRequestError(message);
     } finally {
+      readInFlightRef.current = false;
       if (mountedRef.current && readId === readSequenceRef.current &&
           mutationEpoch === mutationEpochRef.current && !actionRef.current) {
         setLoading(false);
       }
+      if (refreshAfterReadRef.current) {
+        refreshAfterReadRef.current = false;
+        if (mountedRef.current && visibleRef.current) void refreshControlsRef.current?.();
+      }
     }
   }, [acceptControls, appId, acProfile]);
+  refreshControlsRef.current = refreshControls;
 
   useEffect(() => {
     if (!visible) {
@@ -1054,15 +1081,15 @@ export const TdpPage: FC = () => {
   const [ready,    setReady]    = useState(false);
   const [setupErr, setSetupErr] = useState<string | null>(null);
 
-  const [tuning,   setTuning]   = useState<Tuning>(fromAbsolute(15, 18, 25));
-  const [acTuning, setAcTuning] = useState<Tuning>(fromAbsolute(15, 18, 25));
+  const [tuning,   setTuning]   = useState<Tuning>(fromAbsolute(16, 25, 30));
+  const [acTuning, setAcTuning] = useState<Tuning>(fromAbsolute(16, 25, 30));
   const [preset,   setPreset]   = useState<PresetKey>("balanced");
 
   const [stdCaps, setStdCaps] = useState<Caps>(FALLBACK_STD);
   const [maxCaps, setMaxCaps] = useState<Caps>(FALLBACK_MAX);
   // Hardware with no ryzenadj path has nothing above the firmware to unlock.
   const [extrasAvailable, setExtrasAvailable] = useState(true);
-  // The ladder is per machine, so it comes from the backend with the ceilings.
+  // Presets come from the backend alongside the hardware ceilings.
   const [presets, setPresets] = useState<PresetTable>(PRESETS);
   const [minW,    setMinW]    = useState(FALLBACK_MIN);
 
@@ -1074,8 +1101,9 @@ export const TdpPage: FC = () => {
   const [acSeparate,    setAcSeparate]    = useState(false);
   const [editingAc,     setEditingAc]     = useState(false);
 
-  const [globalProfile, setGlobalProfile] = useState<{ spl: number; sppt: number; fppt: number; preset: string | undefined }>({ spl: 15, sppt: 18, fppt: 25, preset: undefined });
+  const [globalProfile, setGlobalProfile] = useState<{ spl: number; sppt: number; fppt: number; preset: string | undefined }>({ spl: 16, sppt: 25, fppt: 30, preset: undefined });
   const [extrasUnlocked, setExtrasUnlocked] = useState(false);
+  const [advancedTdpControl, setAdvancedTdpControl] = useState(true);
 
   const [savedPreset,   setSavedPreset]   = useState<string | undefined>(undefined);
   const [savedAcPreset, setSavedAcPreset] = useState<string | undefined>(undefined);
@@ -1088,6 +1116,8 @@ export const TdpPage: FC = () => {
 
   const autoAppliedRef = useRef<string | null>(null);
   const noGameSyncedRef = useRef(false);
+  const initialPowerReadRef = useRef(false);
+  const powerSourceRevisionRef = useRef(0);
   const profileRequestRef = useRef(0);
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cpuBusyOwnersRef = useRef(new Set<object>());
@@ -1106,9 +1136,10 @@ export const TdpPage: FC = () => {
   useEffect(() => () => { if (statusTimerRef.current) clearTimeout(statusTimerRef.current); }, []);
 
   const caps    = extrasUnlocked && extrasAvailable ? maxCaps : stdCaps;
+  const customCaps = advancedTdpControl ? caps : simpleCaps(caps, extrasUnlocked && extrasAvailable);
   const active  = editingAc ? acTuning : tuning;
   const setActive = editingAc ? setAcTuning : setTuning;
-  const handlers = makeTuningHandlers(active, setActive, caps, minW);
+  const handlers = makeTuningHandlers(active, setActive, customCaps, minW);
   const om      = offsetMax(active.spl, caps);
 
   const showStatus = (msg: string | null) => {
@@ -1135,10 +1166,17 @@ export const TdpPage: FC = () => {
       return;
     }
     const p  = gp.profile;
-    const t  = fromAbsolute(toW(p.spl), toW(p.sppt), toW(p.fppt));
     const ac = gp.ac_profile ?? { spl: p.spl, sppt: p.sppt, fppt: p.fppt, ac_preset: "" };
-    const at = fromAbsolute(toW(ac.spl), toW(ac.sppt), toW(ac.fppt));
     const storedPreset = (p.preset as PresetKey | undefined) || undefined;
+    const profilePreset = resolvedPreset(toW(p.spl), toW(p.sppt), toW(p.fppt), storedPreset, presets);
+    const t = !advancedTdpControl && profilePreset === "custom"
+      ? simpleTuning(toW(p.spl), customCaps, minW)
+      : fromAbsolute(toW(p.spl), toW(p.sppt), toW(p.fppt));
+    const acPreset = resolvedPreset(toW(ac.spl), toW(ac.sppt), toW(ac.fppt),
+      ac.ac_preset, presets);
+    const at = !advancedTdpControl && acPreset === "custom"
+      ? simpleTuning(toW(ac.spl), customCaps, minW)
+      : fromAbsolute(toW(ac.spl), toW(ac.sppt), toW(ac.fppt));
     try {
       const result = await applyTdp(p.spl, p.sppt, p.fppt, appId, "", appId);
       if (!result.success) throw new Error(result.stderr || "TDP apply failed");
@@ -1154,7 +1192,7 @@ export const TdpPage: FC = () => {
     setEditingAc(false);
     setSavedPreset(storedPreset);
     setSavedAcPreset(gp.ac_separate ? (ac.ac_preset ?? "") : undefined);
-    setPreset(storedPreset || detectPreset(toW(p.spl), toW(p.sppt), toW(p.fppt), presets));
+    setPreset(profilePreset);
     showStatus(statusMsg);
     return true;
   };
@@ -1162,12 +1200,15 @@ export const TdpPage: FC = () => {
   // ── Init ─────────────────────────────────────────────────────────────────────
   useEffect(() => {
     let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const check = async () => {
+      if (!active) return;
       try {
         const r = await isReady();
         if (!active) return;
         if (r.error) { setSetupErr(r.error); return; }
         if (r.ready) {
+          const powerRevision = powerSourceRevisionRef.current;
           const [s, ps, eu, c] = await Promise.all([
             getSettings(), getPowerSource(), getExtrasUnlocked(), getCaps(),
           ]);
@@ -1179,20 +1220,28 @@ export const TdpPage: FC = () => {
             setPresets(machinePresets);
           }
           const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
-          setTuning(fromAbsolute(w, sw, fw));
-          setGlobalProfile({ spl: w, sppt: sw, fppt: fw, preset: s.active_preset || undefined });
-          setPreset((s.active_preset as PresetKey | undefined) || detectPreset(w, sw, fw, machinePresets));
+          const selected = resolvedPreset(w, sw, fw, s.active_preset, machinePresets);
+          const cap = eu && c.extras !== false ? c.max : c.std;
+          const view = s.advanced_tdp_control === false && selected === "custom"
+            ? simpleTuning(w, simpleCaps(cap, eu && c.extras !== false), c.min)
+            : fromAbsolute(w, sw, fw);
+          setTuning(view);
+          setGlobalProfile({ ...absolute(view), preset: s.active_preset || undefined });
+          setPreset(selected);
           setEnabled(s.enabled !== false);
-          setAcOnline(ps.ac);
+          setAdvancedTdpControl(s.advanced_tdp_control !== false);
+          if (powerRevision === powerSourceRevisionRef.current) setAcOnline(ps.ac);
+          initialPowerReadRef.current = true;
+          noGameSyncedRef.current = AppWatcher.currentGame() === null;
           setExtrasUnlocked(eu);
           setReady(true);
         } else {
-          if (active) setTimeout(check, 1000);
+          if (active) retryTimer = setTimeout(check, 1000);
         }
-      } catch (_) { if (active) setTimeout(check, 1000); }
+      } catch (_) { if (active) retryTimer = setTimeout(check, 1000); }
     };
     check();
-    return () => { active = false; };
+    return () => { active = false; if (retryTimer !== undefined) clearTimeout(retryTimer); };
   }, []);
 
   // ── Game detection ────────────────────────────────────────────────────────────
@@ -1207,19 +1256,31 @@ export const TdpPage: FC = () => {
   // ── AC state ──────────────────────────────────────────────────────────────────
   // The enforce loop already reads the charger every five seconds to decide
   // which profile applies, and now emits when the answer changes - so the panel
-  // subscribes instead of running its own three-second poll. The one read on
-  // open seeds the label, since an event only fires on a change and the last one
-  // may have happened while the panel was shut.
+  // subscribes instead of running its own three-second poll. Keep events during
+  // init and hidden time so a slow initial read cannot replace a newer event.
   useEffect(() => {
-    if (!ready || !visible) return;
-    let active = true;
-    const onPower = (ps: PowerSource) => { if (active) setAcOnline(ps.ac); };
-    addEventListener<[PowerSource]>("power_source", onPower);
-    getPowerSource().then((ps) => { if (active) setAcOnline(ps.ac); }).catch(() => undefined);
-    return () => {
-      active = false;
-      removeEventListener<[PowerSource]>("power_source", onPower);
+    const onPower = (ps: PowerSource) => {
+      powerSourceRevisionRef.current += 1;
+      setAcOnline(ps.ac);
     };
+    addEventListener<[PowerSource]>("power_source", onPower);
+    return () => removeEventListener<[PowerSource]>("power_source", onPower);
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    const initialRead = initialPowerReadRef.current;
+    initialPowerReadRef.current = false;
+    if (!visible) return;
+    let active = true;
+    // Init already supplied this value; later openings still seed from hardware.
+    if (!initialRead) {
+      const revision = powerSourceRevisionRef.current;
+      getPowerSource().then((ps) => {
+        if (active && revision === powerSourceRevisionRef.current) setAcOnline(ps.ac);
+      }).catch(() => undefined);
+    }
+    return () => { active = false; };
   }, [ready, visible]);
 
   // ── Auto-apply game profile when game / ready / enabled changes ──────────────
@@ -1255,9 +1316,12 @@ export const TdpPage: FC = () => {
           const s = await getSettings();
           if (!current("")) return;
           const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
-          setTuning(fromAbsolute(w, sw, fw));
-          setPreset((s.active_preset as PresetKey | undefined) || detectPreset(w, sw, fw, presets));
-          setGlobalProfile({ spl: w, sppt: sw, fppt: fw, preset: s.active_preset || undefined });
+          const selected = resolvedPreset(w, sw, fw, s.active_preset, presets);
+          const view = !advancedTdpControl && selected === "custom"
+            ? simpleTuning(w, customCaps, minW) : fromAbsolute(w, sw, fw);
+          setTuning(view);
+          setPreset(selected);
+          setGlobalProfile({ ...absolute(view), preset: s.active_preset || undefined });
           if (wasInGame) {
             const result = await applyTdp(
               s.spl, s.sppt, s.fppt, "", s.active_preset || "", "");
@@ -1302,7 +1366,10 @@ export const TdpPage: FC = () => {
     const prevPreset = preset;
     const prevTuning = tuning, prevAcTuning = acTuning;
     setPreset(key);
-    if (key === "custom") return;
+    if (key === "custom") {
+      if (!advancedTdpControl) setActive(simpleTuning(active.spl, customCaps, minW));
+      return;
+    }
 
     const vals = presets[key];
     const next = normalise(fromAbsolute(vals.spl, vals.sppt, vals.fppt), caps, minW);
@@ -1365,7 +1432,7 @@ export const TdpPage: FC = () => {
         const s = await getSettings();
         const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
         setTuning(fromAbsolute(w, sw, fw));
-        setPreset((s.active_preset as PresetKey | undefined) || detectPreset(w, sw, fw, presets));
+        setPreset(resolvedPreset(w, sw, fw, s.active_preset, presets));
         setGlobalProfile({ spl: w, sppt: sw, fppt: fw, preset: s.active_preset || undefined });
         showStatus("Switched to global settings.");
       } catch (e: unknown) {
@@ -1458,8 +1525,17 @@ export const TdpPage: FC = () => {
     // The backend clamps every persisted target and the active hardware change
     // in one transaction. Mirror that result locally without issuing a second
     // apply that could race a game or charger transition.
-    const t  = normalise(tuning,   stdCaps, minW);
-    const at = normalise(acTuning, stdCaps, minW);
+    const battery = absolute(tuning), charging = absolute(acTuning);
+    const batteryCustom = resolvedPreset(battery.spl, battery.sppt, battery.fppt,
+      perGame ? savedPreset : globalProfile.preset, presets) === "custom";
+    const acCustom = resolvedPreset(charging.spl, charging.sppt, charging.fppt,
+      savedAcPreset, presets) === "custom";
+    const t = !advancedTdpControl && batteryCustom
+      ? simpleTuning(tuning.spl, simpleCaps(stdCaps, false), minW)
+      : normalise(tuning, stdCaps, minW);
+    const at = !advancedTdpControl && acCustom
+      ? simpleTuning(acTuning.spl, simpleCaps(stdCaps, false), minW)
+      : normalise(acTuning, stdCaps, minW);
     const tChanged = t.spl !== tuning.spl || t.spptOff !== tuning.spptOff ||
       t.fpptOff !== tuning.fpptOff;
     const atChanged = at.spl !== acTuning.spl || at.spptOff !== acTuning.spptOff ||
@@ -1481,22 +1557,78 @@ export const TdpPage: FC = () => {
     if (acSeparate && atChanged) setSavedAcPreset("custom");
   };
 
+  const handleAdvancedTdpControlToggle = async (checked: boolean) => {
+    setLoading(true);
+    setAdvancedTdpControl(checked);
+    try {
+      const result = await setAdvancedTdpControlCall(checked);
+      if (!result.success) throw new Error(result.stderr || "Could not change Advanced TDP Control");
+    } catch (error) {
+      setAdvancedTdpControl(!checked);
+      showError("LeGoTDP", error);
+      setLoading(false);
+      return;
+    }
+    if (!checked) {
+      const limits = simpleCaps(caps, extrasUnlocked && extrasAvailable);
+      const battery = absolute(tuning), charging = absolute(acTuning);
+      if (resolvedPreset(battery.spl, battery.sppt, battery.fppt,
+          perGame ? savedPreset : globalProfile.preset, presets) === "custom")
+        setTuning(simpleTuning(tuning.spl, limits, minW));
+      if (resolvedPreset(charging.spl, charging.sppt, charging.fppt,
+          savedAcPreset, presets) === "custom")
+        setAcTuning(simpleTuning(acTuning.spl, limits, minW));
+      setGlobalProfile((current) => {
+        if (resolvedPreset(current.spl, current.sppt, current.fppt, current.preset, presets) !== "custom")
+          return current;
+        return { ...absolute(simpleTuning(current.spl,
+          simpleCaps(caps, extrasUnlocked && extrasAvailable), minW)), preset: current.preset };
+      });
+    } else {
+      try {
+        const settings = await getSettings();
+        const global = fromAbsolute(toW(settings.spl), toW(settings.sppt), toW(settings.fppt));
+        setGlobalProfile({ ...absolute(global), preset: settings.active_preset });
+        if (perGame && game) {
+          const appId = game.appId;
+          const profile = await getGameProfile(appId);
+          if (AppWatcher.currentGame()?.appId === appId && profile.exists) {
+            const p = profile.profile;
+            const ac = profile.ac_profile;
+            setTuning(fromAbsolute(toW(p.spl), toW(p.sppt), toW(p.fppt)));
+            setAcTuning(fromAbsolute(toW(ac.spl), toW(ac.sppt), toW(ac.fppt)));
+          }
+        } else {
+          setTuning(global);
+        }
+      } catch (error) {
+        showError("Could not refresh TDP sliders", error);
+      }
+    }
+    setLoading(false);
+  };
+
   // ── Apply (Custom mode only) ──────────────────────────────────────────────────
   const apply = async () => {
     setLoading(true);
     showStatus(null);
     const appId = (perGame && game) ? game.appId : "";
-    const a = absolute(active);
+    const target = advancedTdpControl ? active : simpleTuning(active.spl, customCaps, minW);
+    const a = absolute(target);
     try {
       if (editingAc && appId) {
         const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, "custom");
-        if (r.success) setSavedAcPreset("custom");
+        if (r.success) {
+          setAcTuning(target);
+          setSavedAcPreset("custom");
+        }
         showStatus(r.success ? `AC profile saved for ${game!.name}.` : `Error: ${r.stderr || "unknown"}`);
       } else {
         const r = await applyTdp(
           toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, "custom",
           AppWatcher.currentGame()?.appId ?? "");
         if (r.success) {
+          setTuning(target);
           if (!appId) setGlobalProfile({ ...a, preset: "custom" });
           else setSavedPreset("custom");
         }
@@ -1554,19 +1686,6 @@ export const TdpPage: FC = () => {
           </PanelSectionRow>
         )}
       </PanelSection>
-
-      <LivePanel />
-      <CpuPowerControlsSection
-        key={`${enabled}:${game?.appId ?? ""}:${perGame}:${acSeparate && editingAc}`}
-        appId={enabled && perGame && game ? game.appId : ""}
-        acProfile={!!(enabled && perGame && game && acSeparate && editingAc)}
-        expectedAppId={game?.appId ?? ""}
-        scopeLabel={enabled && perGame && game
-          ? `${game.name}${acSeparate ? ` - ${editingAc ? "AC" : "Battery"}` : ""} profile`
-          : "Global profile"}
-        powerSource={acOnline}
-        onBusyChange={onCpuBusyChange}
-      />
 
       {enabled && <>
         <PanelSection title="Game Profile">
@@ -1641,6 +1760,8 @@ export const TdpPage: FC = () => {
           )}
         </PanelSection>
 
+        <LivePanel />
+
         <PanelSection title="Preset">
           {PRESET_ORDER.map(key => (
             <PanelSectionRow key={key}>
@@ -1667,12 +1788,15 @@ export const TdpPage: FC = () => {
             <PanelSection title={editingAc ? "TDP Limits (AC)" : "TDP Limits"}>
               <PanelSectionRow>
                 <SliderField
-                  label={`SPL (TDP) - ${active.spl} W`}
-                  value={active.spl} min={minW} max={caps.spl} step={1}
-                  onChange={handlers.onSpl}
-                  description="Sustained power limit - the main TDP dial"
+                  label={advancedTdpControl ? `SPL (TDP) - ${active.spl} W` : `TDP - ${active.spl} W`}
+                  value={active.spl} min={minW} max={customCaps.spl} step={1}
+                  onChange={advancedTdpControl ? handlers.onSpl
+                    : (value) => setActive(simpleTuning(value, customCaps, minW))}
+                  description={advancedTdpControl ? "Sustained power limit - the main TDP dial"
+                    : `SPPT follows at +10 W (up to ${customCaps.sppt} W); FPPT at +15 W (up to ${customCaps.fppt} W)`}
                 />
               </PanelSectionRow>
+              {advancedTdpControl && <>
               <PanelSectionRow>
                 <SliderField
                   label={`SPPT +${active.spptOff} W  =  ${active.spl + active.spptOff} W`}
@@ -1695,6 +1819,7 @@ export const TdpPage: FC = () => {
                     : `Fast limit headroom above SPL (max +${om.fppt} W here)`}
                 />
               </PanelSectionRow>
+              </>}
             </PanelSection>
 
             <PanelSection title="Action">
@@ -1718,7 +1843,17 @@ export const TdpPage: FC = () => {
         )}
       </>}
 
-
+      <CpuPowerControlsSection
+        key={`${enabled}:${game?.appId ?? ""}:${perGame}:${acSeparate && editingAc}`}
+        appId={enabled && perGame && game ? game.appId : ""}
+        acProfile={!!(enabled && perGame && game && acSeparate && editingAc)}
+        expectedAppId={game?.appId ?? ""}
+        scopeLabel={enabled && perGame && game
+          ? `${game.name}${acSeparate ? ` - ${editingAc ? "AC" : "Battery"}` : ""} profile`
+          : "Global profile"}
+        powerSource={acOnline}
+        onBusyChange={onCpuBusyChange}
+      />
       {!extrasAvailable && extrasUnlocked && (
         <PanelSection title="Extras temporarily unavailable">
           <PanelSectionRow>
@@ -1740,12 +1875,20 @@ export const TdpPage: FC = () => {
           </PanelSectionRow>
         </PanelSection>
       )}
-      {extrasAvailable && (
-        <PanelSection title="Extras">
+      <PanelSection title="Extras">
+        <PanelSectionRow>
+          <ToggleField
+            label="Advanced TDP Control"
+            description="Show separate SPPT and FPPT sliders in Custom mode"
+            checked={advancedTdpControl}
+            disabled={loading}
+            onChange={handleAdvancedTdpControlToggle}
+          />
+        </PanelSectionRow>
+        {extrasAvailable && <>
           <PanelSectionRow>
             <Focusable><div style={styles.infoBox}>
-              These settings are for advanced users only and are NOT recommended.
-              Changes are made at your own risk — they override the manufacturer's TDP safety limits.
+              Unlocking 50 W overrides the manufacturer's TDP safety limits.
             </div></Focusable>
           </PanelSectionRow>
           <PanelSectionRow>
@@ -1755,11 +1898,12 @@ export const TdpPage: FC = () => {
                 ? `Custom sliders extended to ${maxCaps.spl} W - applied via ryzenadj instead of firmware`
                 : `Enable to allow Custom sliders up to ${maxCaps.spl} W`}
               checked={extrasUnlocked}
+              disabled={loading}
               onChange={handleExtrasUnlockedToggle}
             />
           </PanelSectionRow>
-        </PanelSection>
-      )}
+        </>}
+      </PanelSection>
     </>
   );
 };

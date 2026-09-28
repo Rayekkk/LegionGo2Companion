@@ -183,8 +183,7 @@ class DisplayResetTests(unittest.TestCase):
 
     def test_startup_finishes_durable_reset_before_any_display_pass(self):
         self.store.replace({**self.saved, 'reset_in_progress': True, 'reset_session': 100.0})
-        with patch.object(display.updater, 'ssl_context'), \
-                patch.object(display, '_pick_display', return_value=True), \
+        with patch.object(display, '_pick_display', return_value=True), \
                 patch.object(display, '_identify_panel', return_value=(True, 'isolated panel')), \
                 patch.object(display, '_find_backlight', return_value=''), \
                 patch.object(display, '_watch_properties', new=AsyncMock()), \

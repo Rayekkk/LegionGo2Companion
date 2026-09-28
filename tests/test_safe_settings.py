@@ -30,7 +30,10 @@ class AtomicSettingsTests(unittest.TestCase):
         manager.setSetting("second", {"value": 2})
         self.assertFalse(Path(manager.path).exists())
 
-        manager.commit()
+        with patch.object(safe_settings.json, "dumps", wraps=json.dumps) as encode:
+            manager.commit()
+        self.assertEqual(encode.call_count, 1)
+        self.assertEqual(Path(manager.path).read_bytes(), Path(manager.backup_path).read_bytes())
         self.assertEqual(
             json.loads(Path(manager.path).read_text(encoding="utf-8")),
             {"first": {"value": 1}, "second": {"value": 2}},
@@ -85,6 +88,40 @@ class AtomicSettingsTests(unittest.TestCase):
             {"kept": True},
         )
         self.assertEqual(len(list(self.root.glob("module.json.corrupt-*"))), 1)
+
+    def test_invalid_pending_json_restores_an_independent_committed_snapshot(self):
+        manager = self.manager()
+        manager.replace({"nested": {"values": [1, 2]}})
+        before = Path(manager.path).read_bytes()
+        manager.getSetting("nested")["values"].append(3)
+        manager.setSetting("invalid", {1, 2})
+        with self.assertRaises(TypeError):
+            manager.commit()
+        self.assertEqual(manager.settings, {"nested": {"values": [1, 2]}})
+        self.assertEqual(Path(manager.path).read_bytes(), before)
+        self.assertEqual(Path(manager.backup_path).read_bytes(), before)
+        manager.setSetting("other", True)
+        manager.commit()
+        self.assertEqual(self.manager().settings, {"nested": {"values": [1, 2]}, "other": True})
+
+    def test_backup_write_failure_keeps_primary_and_in_memory_commit(self):
+        manager = self.manager()
+        manager.replace({"value": "old"})
+        write_bytes = safe_settings._atomic_write_bytes
+        def fail_backup(path, payload):
+            if path == manager.backup_path:
+                raise OSError("backup unavailable")
+            return write_bytes(path, payload)
+        with patch.object(safe_settings, "_atomic_write_bytes", side_effect=fail_backup), \
+             patch.object(safe_settings, "_log") as log:
+            manager.replace({"value": "new"})
+        self.assertEqual(manager.getSetting("value"), "new")
+        self.assertEqual(self.manager().getSetting("value"), "new")
+        self.assertEqual(json.loads(Path(manager.backup_path).read_text(encoding="utf-8")), {"value": "old"})
+        self.assertTrue(any("could not refresh settings backup" in call.args[1]
+                            for call in log.call_args_list))
+        manager.commit()
+        self.assertEqual(Path(manager.path).read_bytes(), Path(manager.backup_path).read_bytes())
 
     @unittest.skipUnless(os.name == "posix", "POSIX directory fsync")
     def test_directory_fsync_failure_after_replace_keeps_committed_value(self):
@@ -147,7 +184,7 @@ class AtomicSettingsTests(unittest.TestCase):
         self.assertIn("primary:", manager.recovery_error)
         self.assertIn("backup:", manager.recovery_error)
         manager.setSetting("enabled", False)
-        with patch.object(safe_settings, "atomic_write_json", side_effect=OSError("disk full")):
+        with patch.object(safe_settings, "_atomic_write_bytes", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 manager.commit()
         self.assertTrue(manager.recovery_error)

@@ -98,6 +98,75 @@ class CpuProfileTests(unittest.TestCase):
         return {'spl': 15000, 'sppt': 18000, 'fppt': 25000,
                 'cpu_boost_enabled': boost, 'epp': epp, **values}
 
+    def test_new_preset_ladder_and_legacy_profile_values(self):
+        self.assertEqual(tdp.PRESETS_DEFAULT, {
+            'silent': {'spl': 8, 'sppt': 15, 'fppt': 20},
+            'balanced': {'spl': 16, 'sppt': 25, 'fppt': 30},
+            'performance': {'spl': 20, 'sppt': 32, 'fppt': 35},
+            'max': {'spl': 35, 'sppt': 37, 'fppt': 45},
+        })
+        self.assertEqual(tdp.PRESETS_LEGION_GO_S, tdp.PRESETS_DEFAULT)
+        self.seed({'123': self.game(preset='minimum')})
+        self.assertEqual(tdp._load_profiles()['123']['spl'], 15000)
+        simplified = {**self.base, 'advanced_tdp_control': False}
+        self.assertEqual(tdp._profile_target(
+            simplified, self.game(preset='balanced'), False),
+            (15000, 25000, 30000))
+        self.assertEqual(tdp._target_for_preset(
+            simplified, 20000, 32000, 35000, 'performance'),
+            (20000, 32000, 35000))
+
+    def test_simplified_custom_derives_limits_and_persists_preference(self):
+        self.assertTrue(asyncio.run(self.plugin.get_settings())['advanced_tdp_control'])
+        self.rpc('set_advanced_tdp_control', False)
+        self.assertFalse(self.payload()['settings']['advanced_tdp_control'])
+        for spl, expected in ((5000, (5000, 15000, 20000)),
+                              (27000, (27000, 37000, 42000)),
+                              (35000, (35000, 37000, 45000))):
+            with self.subTest(spl=spl):
+                self.rpc('apply_tdp', spl, spl, spl, '', 'custom')
+                self.assertEqual(tuple(self.limits), expected)
+                self.assertEqual(tdp._global_triplet(tdp._load_settings()), expected)
+        self.rpc('set_advanced_tdp_control', True)
+        self.rpc('apply_tdp', 20000, 21000, 22000, '', 'custom')
+        self.assertEqual(tuple(self.limits), (20000, 21000, 22000))
+
+    def test_simplified_custom_game_and_unlocked_ceiling(self):
+        state = {**self.base, 'advanced_tdp_control': False}
+        profile = self.game(spl=30000, sppt=30000, fppt=30000,
+                            preset='custom', ac_separate=True,
+                            ac_spl=35000, ac_sppt=35000, ac_fppt=35000,
+                            ac_preset='custom')
+        self.assertEqual(tdp._profile_target(state, profile, False),
+                         (30000, 37000, 45000))
+        self.assertEqual(tdp._profile_target(state, profile, True),
+                         (35000, 37000, 45000))
+        with patch.object(tdp, '_allowed_ceilings_mw', return_value=(50000, 50000, 50000)):
+            self.assertEqual(tdp._target_for_preset(
+                {**state, 'extras_unlocked': True}, 50000, 50000, 50000, 'custom'),
+                (50000, 50000, 50000))
+
+    def test_switching_custom_control_reapplies_without_losing_advanced_values(self):
+        self.seed({}, spl=20000, sppt=21000, fppt=22000,
+                  active_preset='custom', advanced_tdp_control=True)
+        self.rpc('set_advanced_tdp_control', False)
+        self.assertEqual(tuple(self.limits), (20000, 30000, 35000))
+        self.assertEqual(tuple(self.payload()['settings'][key]
+                               for key in ('spl', 'sppt', 'fppt')),
+                         (20000, 21000, 22000))
+        self.rpc('set_advanced_tdp_control', True)
+        self.assertEqual(tuple(self.limits), (20000, 21000, 22000))
+
+    def test_locking_extras_reapplies_simplified_custom_target(self):
+        self.seed({}, spl=20000, sppt=21000, fppt=22000,
+                  active_preset='custom', advanced_tdp_control=False,
+                  extras_unlocked=True)
+        self.rpc('set_extras_unlocked', False)
+        self.assertEqual(tuple(self.limits), (20000, 30000, 35000))
+        self.assertEqual(tuple(self.payload()['settings'][key]
+                               for key in ('active_spl', 'active_sppt', 'active_fppt')),
+                         (20000, 30000, 35000))
+
     def test_default_epp_resolves_readback_but_preserves_saved_default(self):
         for custom, readback in ((False, 'balance_performance'), (True, '128')):
             with self.subTest(custom=custom):

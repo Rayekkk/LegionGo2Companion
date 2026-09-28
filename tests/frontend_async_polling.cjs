@@ -3,6 +3,17 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_modules/typescript'));
 const settle = async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
+function realExport(file, name) {
+  const mod = { exports: {} };
+  const source = fs.readFileSync(path.join(root, 'src', file), 'utf8');
+  const script = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  vm.runInNewContext(script, { module: mod, exports: mod.exports, console,
+    require: request => request === '@decky/api' ? { callable: () => () => {} } : {} });
+  return mod.exports[name];
+}
+const tdpModeLabel = realExport('tdp.tsx', 'tdpModeLabel');
+const batterySummary = realExport('battery.tsx', 'batterySummary');
 function harness(file, component, initiallyVisible = true) {
   const slots = [], effects = new Map(), pending = [], timers = new Map(), calls = [], callbacks = {};
   let cursor = 0, visible = initiallyVisible, nextTimer = 0, writes = 0, props = {}, now = 100000;
@@ -21,7 +32,8 @@ function harness(file, component, initiallyVisible = true) {
   const mod = { exports: {} }, jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
   const callable = name => (...args) => new Promise((resolve, reject) => calls.push({ name, args, resolve, reject, settled: false }));
   const relativeReads = { getWifiStatus: 'wifi_get_status', getRgbStatus: 'rgb_get_status',
-    getRemapStatus: 'remap_get_status', getBatteryStatus: 'battery_get_status', getControllerStatus: 'controller_get_status' };
+    getRemapStatus: 'remap_get_status', getBatteryStatus: 'battery_get_status',
+    getControllerBatteryLevels: 'battery_get_controller_levels', getControllerStatus: 'controller_get_status' };
   const source = fs.readFileSync(path.join(root, 'src', file), 'utf8') + `\nexport { ${component} as Tested };`;
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
@@ -39,6 +51,8 @@ function harness(file, component, initiallyVisible = true) {
         definePlugin: fn => fn, addEventListener: (name, fn) => { callbacks[name] = fn; return fn; }, removeEventListener() {}, callable };
       if (name.startsWith('./')) return new Proxy({}, { get: (_object, key) => {
         if (key in relativeReads) return callable(relativeReads[key]);
+        if (key === 'tdpModeLabel') return tdpModeLabel;
+        if (key === 'batterySummary') return batterySummary;
         if (/^(start|stop)/.test(key)) return () => {};
         if (key.endsWith('Summary')) return () => '';
         return key;
@@ -78,6 +92,20 @@ function findSection(node, title, action = 'onClick') {
   if (node.props?.title === title && node.props?.[action]) return node;
   for (const child of Array.isArray(node) ? node : [node.props?.children]) {
     const found = findSection(child, title, action); if (found) return found;
+  }
+}
+function findPanel(node, title) {
+  if (!node || typeof node !== 'object') return;
+  if (node.type === 'PanelSection' && node.props?.title === title) return node;
+  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
+    const result = findPanel(child, title); if (result) return result;
+  }
+}
+function findModeChoice(node) {
+  if (!node || typeof node !== 'object') return;
+  if (typeof node.type === 'function' && node.type.name === 'ModeChoice') return node;
+  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
+    const result = findModeChoice(child); if (result) return result;
   }
 }
 const rgb = { success: true, settings: { configured: true, control_enabled: true, rings_enabled: true, effect: 'monocolor',
@@ -137,6 +165,85 @@ const cases = [
     h.respond('display_get_state', { ...display, ...gate }); await settle();
     assert.ok(findButton(h.render(), 'Reset Display Fix'), 'reset remains accessible behind setup/restart gates');
     h.unmount();
+  }
+  const nativeDisplay = { ...display, panel_mode: null, active_mode: null, setup_done: false,
+    native_support_detected: true, native_support_reason: 'Complete upstream display support is present.',
+    native_cleanup_pending: false, native_cleanup_error: '', native_restart_pending: false };
+  for (const state of [
+    { ...display, panel_mode: null, setup_done: false },
+    { ...display, setup_done: false },
+    { ...display, restart_pending: true },
+    { ...display, panel_mode: null, setup_done: false, reset_restart_pending: true },
+    nativeDisplay,
+    { ...nativeDisplay, native_cleanup_pending: true },
+    { ...nativeDisplay, native_cleanup_pending: true, native_cleanup_error: 'Previous script could not be restored.' },
+    { ...nativeDisplay, native_restart_pending: true },
+    { ...nativeDisplay, native_support_detected: false, native_cleanup_pending: true },
+  ]) {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', state); await settle();
+    let tree = h.render();
+    const edid = find(findPanel(tree, 'EDID for games'), 'Enabled');
+    assert.ok(edid, 'EDID is visible independently of mode, setup and cleanup.');
+    assert.equal(edid.props.disabled, false);
+    if (state.native_support_detected || state.native_cleanup_pending) {
+      assert.equal(findPanel(tree, 'Brightness slider'), undefined);
+      assert.equal(findModeChoice(tree), undefined);
+      assert.equal(findButton(tree, 'Setup Display Fix'), undefined);
+      assert.equal(findButton(tree, 'Switch Display Mode'), undefined);
+      assert.equal(findButton(tree, 'Reset Display Fix'), undefined);
+      assert.ok(find(tree, 'Companion display fix disabled'));
+    }
+    if (state.native_support_detected) {
+      assert.equal(find(tree, 'Native display support detected').props.description, state.native_support_reason);
+    }
+    if (state.native_cleanup_error) {
+      assert.match(find(tree, 'Display fix cleanup needs attention').props.description, /Previous script.*retry automatically/);
+    }
+    edid.props.onChange(false); await settle();
+    assert.deepEqual(h.calls.map(call => call.name), ['display_get_state', 'display_set_edid_fix']);
+    assert.deepEqual(Array.from(h.calls[1].args), [false]);
+    h.respond('display_set_edid_fix', { ...state, edid_fix: false }); await settle();
+    tree = h.render();
+    assert.equal(find(findPanel(tree, 'EDID for games'), 'Enabled').props.checked, false);
+    if (state.native_restart_pending) {
+      assert.equal(h.calls.some(call => call.name === 'display_restart_session'), false, 'Native handover never restarts automatically.');
+      findButton(tree, 'Restart Game Mode').props.onClick(); await settle();
+      assert.equal(h.calls.filter(call => call.name === 'display_restart_session').length, 1);
+      h.respond('display_restart_session', { ...state, native_restart_pending: false }); await settle();
+    }
+    h.unmount();
+  }
+  // A retained callback from an older render cannot re-enable the fix after a
+  // newer native-support snapshot has arrived, even before React renders it.
+  for (const state of [nativeDisplay, { ...nativeDisplay, native_support_detected: false, native_cleanup_pending: true }]) {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', display); await settle();
+    const brightness = find(findPanel(h.render(), 'Brightness slider'), 'Enabled');
+    findButton(h.render(), 'Switch Display Mode').props.onClick();
+    const mode = findModeChoice(h.render()); assert.ok(mode);
+    findButton(h.render(), 'Reset Display Fix').props.onClick();
+    const reset = findButton(h.render(), 'Confirm Display Reset'); assert.ok(reset);
+    h.fire(); h.respond('display_get_state', state); await settle();
+    brightness.props.onChange(true); mode.props.onPick('hybrid'); reset.props.onClick(); await settle();
+    assert.equal(h.calls.some(call => ['display_set_enabled', 'display_set_panel_mode', 'display_reset_settings'].includes(call.name)), false);
+    h.unmount();
+    const chooser = harness('display.tsx', 'DisplayPage'); chooser.render();
+    chooser.respond('display_get_state', { ...display, panel_mode: null, setup_done: false }); await settle();
+    const setup = findModeChoice(chooser.render()); assert.ok(setup);
+    chooser.fire(); chooser.respond('display_get_state', state); await settle();
+    setup.props.onPick('hybrid'); await settle();
+    assert.equal(chooser.calls.some(call => call.name === 'display_run_setup'), false); chooser.unmount();
+  }
+  {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', display); await settle();
+    h.fire(); // This old polling response predates the native handover.
+    find(findPanel(h.render(), 'EDID for games'), 'Enabled').props.onChange(false); await settle();
+    h.respond('display_set_edid_fix', { ...nativeDisplay, edid_fix: false }); await settle();
+    h.respond('display_get_state', display); await settle();
+    assert.ok(find(h.render(), 'Companion display fix disabled'), 'Stale polling cannot undo the native gate.');
+    assert.equal(find(findPanel(h.render(), 'EDID for games'), 'Enabled').props.checked, false); h.unmount();
   }
   for (const spec of [
     { file: 'display.tsx', component: 'DisplayPage', read: 'display_get_state', initial: display, next: { ...display, enabled: false },
@@ -233,9 +340,13 @@ const cases = [
   const modules = Object.fromEntries(['tdp', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller']
     .map(name => [name, { enabled: true }]));
   const overviewValues = { get_version: { version: 'test', blocked: false, modules },
-    get_settings: { spl: 23000, sppt: 30000, fppt: 35000 }, vibe_get_settings: { settings: { level: 2, mode: 2 } },
+    get_settings: { spl: 23000, sppt: 30000, fppt: 35000 },
+    vibe_get_settings: { settings: { level: 2, mode: 2, touchpadEnabled: false } },
     vibe_get_driver_status: { found: true }, display_get_state: display, wifi_get_status: wifi,
-    rgb_get_status: rgb, remap_get_status: remap, battery_get_status: {}, controller_get_status: {} };
+    rgb_get_status: rgb, remap_get_status: remap,
+    battery_get_status: { success: true, supported: true, managed: true, enabled: true, requested_enabled: true },
+    battery_get_controller_levels: { available: true, left: 75, right: 82, connection_left: 'attached', connection_right: 'attached' },
+    controller_get_status: {} };
   const answerOverview = (h, except = []) => {
     for (const request of [...h.calls]) if (!request.settled && !except.includes(request.name)) {
       assert.ok(request.name in overviewValues, `known overview read ${request.name}`);
@@ -255,7 +366,15 @@ const cases = [
     try { await check(h); } catch (error) { overviewFailures.push(new Error(`${name}: ${error.message}`)); }
     finally { h.dispose(); }
   };
-  const assertPowerSummary = h => assert.equal(findSection(h.render(), 'TDP').props.description, '23 / 30 / 35 W');
+  const assertPowerSummary = h => assert.equal(findSection(h.render(), 'TDP').props.description, 'Custom · 23 / 30 / 35 W');
+  await testOverview('overview labels include confirmed controller levels and touchpad state', async h => {
+    h.respond('get_settings', { spl: 20000, sppt: 32000, fppt: 35000, enabled: true, active_preset: 'performance' });
+    answerOverview(h); await settle();
+    assert.equal(findSection(h.render(), 'TDP').props.description, 'Performance · 20 / 32 / 35 W');
+    assert.equal(findSection(h.render(), 'Vibration').props.description, 'Medium · Standard · Touchpad Off');
+    assert.equal(findSection(h.render(), 'Battery').props.description,
+      'Protection on · about 80% limit · L 75% · R 82%');
+  });
   await testOverview('equivalent module objects preserve the pending overview read', async h => {
     h.render({ modules: structuredClone(modules) });
     answerOverview(h); await settle();
@@ -277,7 +396,7 @@ const cases = [
     answerOverview(h); await settle(); assertPowerSummary(h);
     h.unmount();
     const remounted = h.remount();
-    assert.equal(findSection(remounted, 'TDP').props.description, '23 / 30 / 35 W');
+    assert.equal(findSection(remounted, 'TDP').props.description, 'Custom · 23 / 30 / 35 W');
   });
   await testOverview('pending overview reads survive actual unmount/remount without duplication', async h => {
     h.unmount(); h.remount();
@@ -289,7 +408,7 @@ const cases = [
   await testOverview('a read completed while hidden is cached for immediate reopening', async h => {
     h.visible(false); answerOverview(h); await settle();
     const reopened = h.visible(true);
-    assert.equal(findSection(reopened, 'TDP').props.description, '23 / 30 / 35 W');
+    assert.equal(findSection(reopened, 'TDP').props.description, 'Custom · 23 / 30 / 35 W');
   });
   await testOverview('repeated and queued ticks never overlap pending reads or restart hidden polling', async h => {
     const queuedTicks = [...h.timers.values()].filter(t => t.kind === 'interval').map(t => t.fn);
@@ -410,6 +529,20 @@ const cases = [
       assert.notEqual(section(h, 'OLED Display').description, 'Display controls need attention');
     });
   }
+  for (const [state, expected] of [
+    [nativeDisplay, 'Native display support · EDID standby'],
+    [{ ...nativeDisplay, edid_patched: true }, 'Native display support · EDID fixed'],
+    [{ ...nativeDisplay, native_cleanup_pending: true }, 'Display fix cleanup pending · EDID standby'],
+    [{ ...nativeDisplay, native_restart_pending: true }, 'Restart required · EDID standby'],
+    [{ ...nativeDisplay, native_cleanup_pending: true, native_cleanup_error: 'Cleanup could not be verified' }, 'Cleanup could not be verified'],
+    [{ ...nativeDisplay, settings_error: 'Display settings unavailable' }, 'Display settings unavailable'],
+  ]) {
+    await testOverview(`native display summary: ${expected}`, async h => {
+      h.respond('display_get_state', { ...state, setup_error: 'Obsolete setup warning' });
+      answerOverview(h); await settle();
+      assert.equal(section(h, 'OLED Display').description, expected);
+    });
+  }
   await testOverview('stale rejected page reads cannot seed the returned overview metadata', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
     findSection(h.render(), 'TDP').props.onClick(); h.render();
@@ -429,7 +562,7 @@ const cases = [
       h.reject('get_settings'); await settle();
       h.callbacks.companion_guard(overviewValues.get_version); h.render({ modules });
       assert.equal(section(h).statusNote, undefined);
-      assert.notEqual(section(h).description, '23 / 30 / 35 W');
+      assert.notEqual(section(h).description, 'Custom · 23 / 30 / 35 W');
       answerOverview(h); await settle(); assertPowerSummary(h);
     });
   }
@@ -453,11 +586,11 @@ const cases = [
     const currentRead = h.calls.find(c => c.name === 'get_settings' && !c.settled && c !== oldRead);
     assert.ok(currentRead, 'the new plugin starts its own read');
     oldRead.settled = true; oldRead.resolve(overviewValues.get_settings); await settle();
-    assert.notEqual(findSection(h.render(), 'TDP').props.description, '23 / 30 / 35 W', 'the disposed plugin cannot seed the new cache');
+    assert.notEqual(findSection(h.render(), 'TDP').props.description, 'Custom · 23 / 30 / 35 W', 'the disposed plugin cannot seed the new cache');
     h.fire();
     assert.equal(h.calls.filter(c => c.name === 'get_settings').length, 2, 'the old reply cannot clear the new single-flight guard');
     currentRead.settled = true; currentRead.resolve({ spl: 28000, sppt: 31000, fppt: 38000 }); await settle();
-    assert.equal(findSection(h.render(), 'TDP').props.description, '28 / 31 / 38 W');
+    assert.equal(findSection(h.render(), 'TDP').props.description, 'Custom · 28 / 31 / 38 W');
   });
   for (const state of [{ enabled: false }, { enabled: true, pending: true }]) {
     await testOverview(`real module gate ${JSON.stringify(state)} rejects stale status and stops its reads`, async h => {
@@ -468,10 +601,10 @@ const cases = [
       assert.equal(h.calls.filter(c => c.name === 'get_settings').length, 1, 'gated modules are not polled');
       h.callbacks.companion_guard({ ...overviewValues.get_version, modules });
       const reopened = h.render({ modules });
-      assert.notEqual(findSection(reopened, 'TDP').props.description, '23 / 30 / 35 W', 'old gated reply never enters the cache');
+      assert.notEqual(findSection(reopened, 'TDP').props.description, 'Custom · 23 / 30 / 35 W', 'old gated reply never enters the cache');
       await settle();
       h.respond('get_settings', { spl: 28000, sppt: 31000, fppt: 38000 }); await settle();
-      assert.equal(findSection(h.render(), 'TDP').props.description, '28 / 31 / 38 W');
+      assert.equal(findSection(h.render(), 'TDP').props.description, 'Custom · 28 / 31 / 38 W');
     });
   }
   await testOverview('entering a module invalidates old overview values without blocking fresh reads on return', async h => {
@@ -479,12 +612,12 @@ const cases = [
     h.respond('get_settings', overviewValues.get_settings); await settle();
     findSection(h.render(), 'TDP', 'onBack').props.onBack();
     const returned = h.render();
-    assert.notEqual(findSection(returned, 'TDP').props.description, '23 / 30 / 35 W', 'a pre-edit read cannot become the returned page summary');
+    assert.notEqual(findSection(returned, 'TDP').props.description, 'Custom · 23 / 30 / 35 W', 'a pre-edit read cannot become the returned page summary');
     await settle();
     h.respond('get_settings', { spl: 28000, sppt: 31000, fppt: 38000 }); await settle();
-    assert.equal(findSection(h.render(), 'TDP').props.description, '28 / 31 / 38 W');
+    assert.equal(findSection(h.render(), 'TDP').props.description, 'Custom · 28 / 31 / 38 W');
     answerOverview(h); await settle();
-    assert.equal(findSection(h.render(), 'TDP').props.description, '28 / 31 / 38 W', 'the remainder of the older overview cannot overwrite newer power state');
+    assert.equal(findSection(h.render(), 'TDP').props.description, 'Custom · 28 / 31 / 38 W', 'the remainder of the older overview cannot overwrite newer power state');
   });
   if (overviewFailures.length) throw new AggregateError(overviewFailures, 'Overview loading regressions');
   console.log('OLED/RGB/remap/WiFi polling is bounded; stale reads and stopped watchers cannot overwrite current state; hidden dropdown choices still save.');

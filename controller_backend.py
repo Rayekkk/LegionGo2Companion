@@ -707,7 +707,9 @@ class Plugin:
                       "remaining_s": round(max(0.0, capture["deadline"] - now), 3) if capture["active"] else 0.0}
             for kind in ("physical", "virtual"):
                 stream = capture[kind]
-                recent = stream.setdefault("times", deque(maxlen=4096))
+                recent = stream.get("times")
+                if recent is None:
+                    recent = stream["times"] = deque(maxlen=4096)
                 while recent and recent[0] < now - 1:
                     recent.popleft()
                 duration = max(0.001, min(1.0, now - capture["started"]))
@@ -759,7 +761,10 @@ class Plugin:
                             stream["sample"] = sample
                             stream["reports"] += 1
                             stream["last"] = _capture_time()
-                            stream.setdefault("times", deque(maxlen=4096)).append(stream["last"])
+                            recent = stream.get("times")
+                            if recent is None:
+                                recent = stream["times"] = deque(maxlen=4096)
+                            recent.append(stream["last"])
             if not readers and not capture["reason"]:
                 capture["reason"] = "unavailable"
         except Exception as exc:

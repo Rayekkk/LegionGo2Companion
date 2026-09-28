@@ -321,10 +321,6 @@ class Plugin:
             self._network_mutation_lock = lock
         return lock
 
-    def _get_band_policy_lock(self) -> asyncio.Lock:
-        """Return the process-local lock serializing all band mutations."""
-        return self._get_network_mutation_lock()
-
     def _get_band_policy_file_gate(self) -> asyncio.Lock:
         """Allow only one local caller to wait for the cross-process flock."""
         lock = getattr(self, "_band_policy_file_gate", None)
@@ -2734,12 +2730,11 @@ class Plugin:
                 "supports_6ghz": False,
             }
 
-    def _get_support_tier(self) -> int:
+    def _get_support_tier(self, settings: dict) -> int:
         """Return 1 (full), 2 (partial), or 3 (generic) based on detection.
         Tier 1: recognized device + recognized driver.
         Tier 2: unknown device + recognized driver.
         Tier 3: unknown device + unknown driver."""
-        settings = _load_settings()
         driver = settings.get("driver", "unknown")
         device_family = settings.get("device_family", "unknown")
         if driver in DRIVER_PROFILES and device_family != "unknown":
@@ -2753,16 +2748,6 @@ class Plugin:
         setter. Callers log the error separately with the setter name."""
         return {"success": False, "error": "unexpected", "message": str(e)}
 
-    @staticmethod
-    def _deprecated_response(feature: str) -> dict:
-        return {
-            "success": False,
-            "error": "deprecated",
-            "message": (
-                f"{feature} is not available in the Go 2 compatibility build."
-            ),
-        }
-
     def _nmcli_modify(self, uuid: str, key: str, value: str, timeout: int = 5) -> dict:
         """Run `nmcli con mod uuid <uuid> <key> <value>`. Returns the
         _run_cmd dict so callers can handle success/failure themselves."""
@@ -2770,53 +2755,6 @@ class Plugin:
             ["/usr/bin/nmcli", "con", "mod", "uuid", uuid, key, value],
             timeout=timeout,
         )
-
-    # ---- Diagnostics ----
-
-    async def get_diagnostic_info(self) -> dict:
-        """Collect system info for remote debugging. Sanitized (no passwords)."""
-        try:
-            info = await self.get_device_info()
-            iface = self._get_wifi_interface() or "none"
-            iw_dev = self._run_cmd(["/usr/bin/iw", "dev"], timeout=3)
-            iw_reg = self._run_cmd(["/usr/bin/iw", "reg", "get"], timeout=3)
-            uname = self._run_cmd(["/usr/bin/uname", "-r"], timeout=3)
-            os_release = ""
-            try:
-                with open("/etc/os-release", "r") as f:
-                    os_release = f.read()
-            except Exception:
-                pass
-            distro = self._detect_distro()
-            return {
-                "success": True,
-                "device_info": info,
-                "wifi_interface": iface,
-                "iw_dev": iw_dev.get("stdout", ""),
-                "iw_reg": iw_reg.get("stdout", ""),
-                "kernel": uname.get("stdout", "").strip(),
-                "os_release": os_release,
-                "distro_id": distro["id"],
-                "distro_name": distro["name"],
-                "support_tier": self._get_support_tier(),
-            }
-        except Exception as e:
-            decky.logger.error(f"get_diagnostic_info error: {e}")
-            return {"success": False, "error": str(e)}
-
-    async def save_diagnostic_info(self) -> dict:
-        """Write diagnostics to a file in the settings directory as a
-        fallback when clipboard is unavailable."""
-        try:
-            info = await self.get_diagnostic_info()
-            diag_path = os.path.join(
-                os.path.dirname(SETTINGS_FILE), "diagnostics.json"
-            )
-            self._atomic_write_json(diag_path, info)
-            return {"success": True, "path": diag_path}
-        except Exception as e:
-            decky.logger.error(f"save_diagnostic_info error: {e}")
-            return {"success": False, "error": str(e)}
 
     # ---- Status ----
 
@@ -2836,7 +2774,7 @@ class Plugin:
             iface = self._get_wifi_interface()
             uuid = self._get_active_connection_uuid()
             connected = iface is not None and uuid is not None
-            support_tier = self._get_support_tier()
+            support_tier = self._get_support_tier(settings)
 
             status = {
                 "success": True,
@@ -3445,68 +3383,6 @@ class Plugin:
                     "rollback_conflicts": rollback.get("conflicts", []),
                     "recovery_state_preserved": not rollback.get("success"),
                 }
-
-    async def set_auto_fix(self, enabled: bool) -> dict:
-        try:
-            async with self._get_network_mutation_lock():
-                if self._load_band_policy_journal() or self._load_power_save_journal():
-                    return {
-                        "success": False,
-                        "error": "network_recovery_required",
-                        "message": (
-                            "A previous network transaction still needs "
-                            "recovery; the dispatcher was not changed."
-                        ),
-                        "recovery_state_preserved": True,
-                    }
-                if enabled:
-                    dispatcher_result = self._install_dispatcher()
-                else:
-                    dispatcher_result = self._remove_dispatcher()
-
-                if not dispatcher_result.get("success"):
-                    return dispatcher_result
-
-                self._write_band_settings_fields(
-                    SETTINGS_FILE, {"auto_fix_on_wake": bool(enabled)}
-                )
-                return {
-                    "success": True,
-                    "dispatcher_installed": os.path.isfile(DISPATCHER_PATH),
-                }
-        except Exception as e:
-            decky.logger.error(f"set_auto_fix error: {e}")
-            return {"success": False, "error": "write_failed", "message": str(e)}
-
-    async def set_bssid_lock(self, enabled: bool) -> dict:
-        return self._deprecated_response("BSSID lock")
-
-    async def get_band_policy_capabilities(self) -> dict:
-        """Return live, non-secret preflight facts used by the policy UI."""
-        try:
-            return await asyncio.to_thread(
-                self._get_band_policy_capabilities_sync, True
-            )
-        except Exception as e:
-            decky.logger.error(f"get_band_policy_capabilities error: {e}")
-            return {
-                "success": False,
-                "six_ghz_only_available": False,
-                "five_six_no_24_available": False,
-                "five_six_only_available": False,
-                "five_six_only_try_available": False,
-                "two_ghz_bss_visible": False,
-                "five_ghz_bss_visible": False,
-                "six_ghz_bss_visible": False,
-                "nm_supports_6ghz": False,
-                "iwd_available": False,
-                "has_5ghz": False,
-                "has_6ghz": False,
-                "reason_six_ghz_only": str(e),
-                "reason_five_six_no_24": str(e),
-                "reason_five_six_only": str(e),
-                "reason_five_six_only_try": str(e),
-            }
 
     async def set_band_policy(
         self, mode: str, allow_unverified_scan: bool = False
@@ -4171,88 +4047,6 @@ class Plugin:
             BAND_POLICY_HIGH_ONLY if enabled else BAND_POLICY_OFF
         )
 
-    async def set_dns(
-        self, enabled: bool, provider: str = "cloudflare", custom_servers: str = ""
-    ) -> dict:
-        return self._deprecated_response("Custom DNS")
-
-    async def set_ipv6(self, disabled: bool) -> dict:
-        return self._deprecated_response("IPv6 override")
-
-    async def set_buffer_tuning(self, enabled: bool) -> dict:
-        return self._deprecated_response("Global buffer tuning")
-
-    async def set_cake(self, enabled: bool) -> dict:
-        """Enable or disable CAKE QoS (unlimited mode: FQ + AQM + ack-filter, no bandwidth shaper)."""
-        return self._deprecated_response("CAKE override")
-
-    async def optimize_safe(self) -> dict:
-        """Removed: the legacy bundle mixed unrelated system mutations."""
-        return self._deprecated_response("One-click Optimize Safe")
-
-    async def reapply_volatile(self) -> dict:
-        """Reapply volatile (non-reconnecting) settings. Safe to call mid-stream."""
-        try:
-            settings = _load_settings()
-            applied = 0
-            total = 0
-
-            if settings.get("power_save_disabled"):
-                total += 1
-                r = await self.set_power_save(True)
-                if r.get("success"):
-                    applied += 1
-
-            if total > 0:
-                decky.logger.info(f"reapply_volatile: {applied}/{total} applied")
-
-            return {"success": True, "applied": applied, "total": total}
-        except Exception as e:
-            decky.logger.error(f"reapply_volatile error: {e}")
-            return self._unexpected_response(e)
-
-    async def reapply_all(self) -> dict:
-        """Force reapply all enabled optimizations."""
-        try:
-
-            settings = _load_settings()
-            results = {}
-            applied = 0
-            total = 0
-            if settings.get("auto_fix_on_wake"):
-                total += 1
-                r = await self.set_auto_fix(True)
-                results["auto_fix"] = r
-                if r.get("success"):
-                    applied += 1
-
-            # Per-profile power save is the only remaining volatile tuning.
-            if settings.get("power_save_disabled"):
-                total += 1
-                r = await self.set_power_save(True)
-                results["power_save"] = r
-                if r.get("success"):
-                    applied += 1
-
-            if total == 0:
-                return {
-                    "success": True,
-                    "total": 0,
-                    "applied": 0,
-                    "results": {},
-                    "message": "No optimizations enabled",
-                }
-
-            return {
-                "success": True,
-                "total": total,
-                "applied": applied,
-                "results": results,
-            }
-        except Exception as e:
-            decky.logger.error(f"reapply_all error: {e}")
-            return self._unexpected_response(e)
-
     async def reset_settings(self) -> dict:
         """Delete settings and revert to defaults."""
         try:
@@ -4329,41 +4123,6 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"reset_settings error: {e}")
             return self._unexpected_response(e)
-
-    # ---- Updates ----
-
-    async def set_update_channel(self, channel: str) -> dict:
-        """Removed until the fork has a verified release pipeline."""
-        return self._deprecated_response("In-plugin updater")
-
-    async def check_for_update(self) -> dict:
-        """Removed until the fork has a verified release pipeline."""
-        return self._deprecated_response("In-plugin updater")
-
-    async def apply_update(self) -> dict:
-        """Removed until the fork has a verified release pipeline."""
-        return self._deprecated_response("In-plugin updater")
-
-    # ---- WiFi backend switch (iwd / wpa_supplicant) ----
-
-    async def start_backend_switch(self, backend: str) -> dict:
-        """Removed because Go 2 band policy requires the existing iwd backend."""
-        return {
-            "accepted": False,
-            "success": False,
-            "reason": "deprecated",
-            "message": "WiFi backend switching is not available in the Go 2 build.",
-        }
-
-    async def get_backend_switch_status(self) -> dict:
-        return {
-            "success": False,
-            "in_progress": False,
-            "phase": "deprecated",
-            "target": None,
-            "started_at": 0,
-            "result": self._deprecated_response("WiFi backend switching"),
-        }
 
 
 def _run_band_policy_rollback_cli(journal_path: str) -> int:

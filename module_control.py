@@ -57,10 +57,18 @@ async def restore_intent(name, component, intent):
             check(await component.set_power_save(True))
     elif name == 'display' and intent.get('panel_mode') in ('gamma22', 'pq', 'hybrid'):
         result = await component.set_panel_mode(intent['panel_mode'])
+        # Native retirement only disables the legacy display controls. Keep
+        # the module running so its independent EDID correction can continue.
+        if result.get('native_support_detected') or result.get('native_cleanup_pending'):
+            return
         if result.get('setup_error') or not result.get('setup_done'):
             raise RuntimeError(result.get('setup_error') or result.get('setup_note') or 'Display script installation failed.')
 
 async def withdraw(name, component):
+    # Recovery of a pending withdrawal runs before component._main(). Probe
+    # first so a system update cannot route that recovery through legacy writes.
+    if name == 'display':
+        await component.cleanup_native_display()
     await component._unload()
     await module_runtime.drain(name)
     check = module_runtime.require_success
@@ -103,22 +111,47 @@ async def withdraw(name, component):
             pass
     elif name == 'display':
         import display_backend as backend
+        native_active = getattr(component, 'native_display_active', lambda: False)
+
+        async def finish_native():
+            result = await component.cleanup_native_display()
+            if result.get('native_cleanup_pending') or result.get('native_cleanup_error'):
+                raise RuntimeError(result.get('native_cleanup_error') or
+                                   'Native display cleanup is still pending. Retry cleanup in Gaming Mode.')
+            if not await asyncio.to_thread(component._edid_restore):
+                raise RuntimeError('Display restoration could not be confirmed. Retry cleanup in Gaming Mode.')
+            return ('Restart Gaming Mode to unload the previous display script.'
+                    if result.get('native_restart_pending') else '')
+
+        if native_active():
+            return await finish_native()
         await component._unload(uninstalling=True)
         await module_runtime.drain(name)
-        # Lifecycle unload logs failures; explicit disabling must surface them.
-        for restore in (component._release, component._edid_restore):
-            if not await asyncio.to_thread(restore):
-                raise RuntimeError('Display restoration could not be confirmed. Retry cleanup in Gaming Mode.')
-        props = await asyncio.to_thread(component._session_props, [backend.ATOM_IS_EXTERNAL])
-        if not await asyncio.to_thread(backend._write_atom_int, backend.ATOM_FORCE_HDR_SUPPORT, 0):
-            raise RuntimeError('Could not release display HDR support. Retry cleanup in Gaming Mode.')
-        if backend._as_int(props.get(backend.ATOM_IS_EXTERNAL)) == 0:
-            if not await asyncio.to_thread(backend._write_atom_int, backend.ATOM_HDR_ENABLED, 0):
-                raise RuntimeError('Could not restore the internal display mode. Retry cleanup in Gaming Mode.')
-        note = await asyncio.to_thread(backend._uninstall_script)
-        if note.startswith('could not'):
-            raise RuntimeError(note)
-        note = 'Restart Gaming Mode to fully unload the display script already loaded by gamescope.'
+
+        def finish_legacy():
+            # A concurrent state read can detect a package update while unload
+            # awaits. Serialize the final ownership check with every mutation.
+            with backend.Plugin._runtime_lock:
+                if native_active():
+                    return None
+                # Lifecycle unload logs failures; explicit disabling surfaces them.
+                for restore in (component._release, component._edid_restore):
+                    if not restore():
+                        raise RuntimeError('Display restoration could not be confirmed. Retry cleanup in Gaming Mode.')
+                props = component._session_props([backend.ATOM_IS_EXTERNAL])
+                if not backend._write_atom_int(backend.ATOM_FORCE_HDR_SUPPORT, 0):
+                    raise RuntimeError('Could not release display HDR support. Retry cleanup in Gaming Mode.')
+                if backend._as_int(props.get(backend.ATOM_IS_EXTERNAL)) == 0:
+                    if not backend._write_atom_int(backend.ATOM_HDR_ENABLED, 0):
+                        raise RuntimeError('Could not restore the internal display mode. Retry cleanup in Gaming Mode.')
+                result = backend._uninstall_script()
+                if result.startswith('could not'):
+                    raise RuntimeError(result)
+                return 'Restart Gaming Mode to fully unload the display script already loaded by gamescope.'
+
+        note = await asyncio.to_thread(finish_legacy)
+        if note is None:
+            return await finish_native()
     else:
         raise ValueError('Unknown module.')
     return note

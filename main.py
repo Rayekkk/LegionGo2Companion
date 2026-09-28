@@ -348,7 +348,9 @@ class Plugin:
                 "message": self._guard_message() if self._guard_blocked else ""}
 
     async def _inspect_guard(self):
-        before = self._guard_status()
+        # Only these fields can change during a conflict scan. Building the
+        # full status also reads version metadata and probes the display session.
+        before = (self._guard_blocked, tuple(self._guard_conflicts), self._guard_error)
         try:
             self._guard_conflicts = await asyncio.to_thread(_installed_standalone_plugins)
             self._guard_error = ""
@@ -360,7 +362,7 @@ class Plugin:
             self._guard_blocked = True
             if self._updates is not None:
                 self._updates.close()
-        if before != self._guard_status():
+        if before != (self._guard_blocked, tuple(self._guard_conflicts), self._guard_error):
             decky.logger.warning("[legiongo2companion] " + self._guard_message())
             try:
                 await decky.emit("companion_guard", self._guard_status())
@@ -538,6 +540,9 @@ class Plugin:
 
     async def set_extras_unlocked(self, enabled):
         return await self._tdp.set_extras_unlocked(enabled)
+
+    async def set_advanced_tdp_control(self, enabled):
+        return await self._tdp.set_advanced_tdp_control(enabled)
 
     async def get_game_profile(self, app_id):
         return await self._tdp.get_game_profile(app_id)

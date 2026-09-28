@@ -68,27 +68,15 @@ HARD_MAX_MW = 50000
 # so a device that is not listed here behaves exactly as it did before.
 WMI_ONLY_FAMILIES = ("legion go s",)
 
-# Preset ladders in watts. They are spaced against what each machine's firmware
-# actually accepts, so the top of the ladder is the top of the hardware rather
-# than a number carried over from a different device. Served to the panel so
-# there is one place to change them.
+# Preset ladder in watts, shared by both supported devices.
 PRESETS_DEFAULT = {
-    "minimum":     {"spl": 5,  "sppt": 5,  "fppt": 10},
-    "silent":      {"spl": 8,  "sppt": 10, "fppt": 15},
-    "balanced":    {"spl": 15, "sppt": 18, "fppt": 25},
-    "performance": {"spl": 25, "sppt": 28, "fppt": 35},
+    "silent":      {"spl": 8,  "sppt": 15, "fppt": 20},
+    "balanced":    {"spl": 16, "sppt": 25, "fppt": 30},
+    "performance": {"spl": 20, "sppt": 32, "fppt": 35},
     "max":         {"spl": 35, "sppt": 37, "fppt": 45},
 }
 
-# Legion Go S: 40 / 43 / 53 W is exactly what its firmware reports as the
-# ceiling, so Max asks for all of it.
-PRESETS_LEGION_GO_S = {
-    "minimum":     {"spl": 5,  "sppt": 8,  "fppt": 10},
-    "silent":      {"spl": 8,  "sppt": 10, "fppt": 15},
-    "balanced":    {"spl": 18, "sppt": 20, "fppt": 25},
-    "performance": {"spl": 33, "sppt": 33, "fppt": 35},
-    "max":         {"spl": 40, "sppt": 43, "fppt": 53},
-}
+PRESETS_LEGION_GO_S = PRESETS_DEFAULT
 
 # Lenovo firmware attributes. Writing these goes through the EC instead of poking the
 # SMU directly, so the firmware stops fighting us and the values survive suspend.
@@ -204,14 +192,7 @@ def _presets() -> dict:
 
 
 def _defaults() -> dict:
-    """Where a fresh install starts, in milliwatts.
-
-    Read from the ladder rather than written out again, because Balanced is not
-    the same everywhere - 15 / 18 / 25 W on a Go 2, 18 / 20 / 25 W on a Go S.
-    Hard-coding one of them meant a fresh install on the other machine opened on
-    numbers belonging to a different device, and disagreed with the preset the
-    panel was highlighting at the same moment.
-    """
+    """Where a fresh install starts, in milliwatts."""
     balanced = _presets()["balanced"]
     return {"spl":  balanced["spl"]  * 1000,
             "sppt": balanced["sppt"] * 1000,
@@ -442,6 +423,41 @@ def _clamp_for_settings(state: dict, spl, sppt, fppt) -> tuple[int, int, int]:
     return _clamp_triplet(spl, sppt, fppt, _allowed_ceilings_mw(state))
 
 
+def _is_custom_preset(spl, sppt, fppt, preset: str) -> bool:
+    if preset == "custom":
+        return True
+    try:
+        values = int(spl), int(sppt), int(fppt)
+    except (TypeError, ValueError):
+        values = ()
+    return not any(
+        values == tuple(entry[key] * 1000 for key in ("spl", "sppt", "fppt"))
+        for entry in PRESETS_DEFAULT.values())
+
+
+def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, int, int]:
+    """In simplified Custom mode, derive burst limits from the single TDP dial."""
+    if state.get("advanced_tdp_control", True) or not _is_custom_preset(
+            spl, sppt, fppt, preset):
+        return _clamp_for_settings(state, spl, sppt, fppt)
+    ceilings = _allowed_ceilings_mw(state)
+    if not state.get("extras_unlocked", False):
+        ceilings = tuple(min(limit, FALLBACK_STD_W[key] * 1000)
+                         for limit, key in zip(ceilings, ("spl", "sppt", "fppt")))
+    try:
+        requested_spl = int(spl)
+    except (TypeError, ValueError):
+        requested_spl = _defaults()["spl"]
+    spl = max(HARD_MIN_MW, min(requested_spl, ceilings[0]))
+    return _clamp_triplet(spl, spl + 10000, spl + 15000, ceilings)
+
+
+def _profile_target(state: dict, profile: dict, ac_online: bool) -> tuple[int, int, int]:
+    preset_key = "ac_preset" if ac_online and profile.get("ac_separate") else "preset"
+    return _target_for_preset(state, *_pick_profile_values(profile, ac_online),
+                              profile.get(preset_key, ""))
+
+
 def _canonical_epp_syntax(value) -> str | None:
     """Validate persisted/RPC syntax before checking live capabilities."""
     if not isinstance(value, str) or value == "custom":
@@ -459,6 +475,9 @@ def _load_settings() -> dict:
     s["extras_unlocked"] = (
         s.get("extras_unlocked")
         if type(s.get("extras_unlocked")) is bool else False)
+    s["advanced_tdp_control"] = (
+        s.get("advanced_tdp_control")
+        if type(s.get("advanced_tdp_control")) is bool else True)
     boost = s.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
     s[SETTINGS_FIELD_CPU_BOOST_ENABLED] = (
         boost if type(boost) is bool else None)
@@ -1239,11 +1258,12 @@ def _scan_proc_for_appid() -> str:
 # ── TDP enforce ────────────────────────────────────────────────────────────────
 
 def _global_triplet(s: dict) -> tuple[int, int, int]:
-    return _clamp_for_settings(
+    return _target_for_preset(
         s,
         s.get("spl",  _defaults()["spl"]),
         s.get("sppt", _defaults()["sppt"]),
         s.get("fppt", _defaults()["fppt"]),
+        s.get("active_preset", ""),
     )
 
 
@@ -1252,7 +1272,7 @@ def _startup_context_target(s: dict) -> tuple[str, tuple[int, int, int], bool]:
     app_id = _get_running_appid()
     profile = _load_profiles().get(app_id) if app_id else None
     target = (
-        _clamp_for_settings(s, *_pick_profile_values(profile, _get_ac_online()))
+        _profile_target(s, profile, _get_ac_online())
         if profile is not None else _global_triplet(s)
     )
     return app_id, target, profile is not None
@@ -1405,7 +1425,7 @@ def _check_and_enforce_locked() -> dict:
         profile = _load_profiles().get(appid) if appid else None
         if profile is not None:
             trigger = "AC state change" if ac_changed else "game launch"
-            target = _clamp_for_settings(s, *_pick_profile_values(profile, ac_now))
+            target = _profile_target(s, profile, ac_now)
             if ac_changed:
                 events["_resettle_generation"] = _arm_ac_settle(target)
             else:
@@ -2200,9 +2220,6 @@ class Plugin:
     async def is_ready(self) -> dict:
         return {"ready": self._ready, "error": self._setup_error or ""}
 
-    async def get_version(self) -> dict:
-        return {"version": updater.plugin_version()}
-
     async def get_settings(self) -> dict:
         return await _offload(_load_settings)
 
@@ -2352,6 +2369,38 @@ class Plugin:
         s = await _offload(_load_settings)
         return s.get("extras_unlocked", False)
 
+    async def set_advanced_tdp_control(self, enabled: bool) -> dict:
+        if type(enabled) is not bool:
+            return {"success": False, "stderr": "enabled must be a boolean"}
+        def _do() -> dict:
+            with _tdp_user_transaction() as restore_failed:
+                state = _load_settings()
+                state["advanced_tdp_control"] = enabled
+                if state.get("enabled", True):
+                    app_id = _get_running_appid()
+                    profiles = _load_profiles()
+                    profile = profiles.get(app_id) if app_id else None
+                    ac_online = _get_ac_online() if profile else False
+                    preset = (profile.get("ac_preset" if ac_online and profile.get("ac_separate")
+                                          else "preset", "") if profile
+                              else state.get("active_preset", ""))
+                    raw = (_pick_profile_values(profile, ac_online) if profile else (
+                        state.get("spl", _defaults()["spl"]),
+                        state.get("sppt", _defaults()["sppt"]),
+                        state.get("fppt", _defaults()["fppt"])))
+                    if _is_custom_preset(*raw, preset):
+                        target = (_profile_target(state, profile, ac_online) if profile
+                                  else _global_triplet(state))
+                        cpu_state = _effective_cpu_state(state, profiles, app_id, ac_online)
+                        result = _apply_limits_with_saved_cpu_power(cpu_state, *target)
+                        if not result["success"]:
+                            return restore_failed(result)
+                        state["active_spl"], state["active_sppt"], state["active_fppt"] = target
+                        _cancel_ac_settle()
+                _save_settings(state)
+                return {"success": True}
+        return await _offload(_do)
+
     async def set_extras_unlocked(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
             return {"success": False, "stdout": "",
@@ -2369,12 +2418,18 @@ class Plugin:
                     _save_settings(s)
                     return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
 
-                active = _lock_extras_state(s, profiles)
+                _lock_extras_state(s, profiles)
+                s["extras_unlocked"] = False
+                app_id = _get_running_appid()
+                profile = profiles.get(app_id) if app_id else None
+                active = (_profile_target(s, profile, _get_ac_online()) if profile
+                          else _global_triplet(s))
                 if s.get("enabled", True):
-                    result = _apply_limits_with_saved_cpu_power(s, *active)
+                    result = _apply_limits_with_saved_cpu_power(
+                        _effective_cpu_state(s, profiles, app_id), *active)
                     if not result["success"]:
                         return restore_failed(result)
-                s["extras_unlocked"] = False
+                s["active_spl"], s["active_sppt"], s["active_fppt"] = active
                 _write_keys({SETTINGS_KEY_SETTINGS: s,
                              SETTINGS_KEY_GAME_PROFILES: profiles})
                 _cancel_ac_settle()
@@ -2425,11 +2480,12 @@ class Plugin:
                 if not state.get("enabled", True):
                     return {"success": False, "stderr": "plugin disabled",
                             "stdout": "", "returncode": -1}
-                ac = _clamp_for_settings(state, spl, sppt, fppt)
                 profiles = _load_profiles()
                 p = _prepare_cpu_profile(
                     state, profiles, app_id,
                     snapshot_cpu=ac_separate and not profiles.get(app_id, {}).get("ac_separate"))
+                ac = _target_for_preset(
+                    state, spl, sppt, fppt, preset_name or p.get("ac_preset", ""))
                 if ac_separate and not p.get("ac_separate"):
                     cpu = _effective_cpu_values(state, p)
                     for field, value in cpu.items():
@@ -2446,7 +2502,8 @@ class Plugin:
                     if ac_separate:
                         want = ac
                     elif all(p.get(k) is not None for k in ("spl", "sppt", "fppt")):
-                        want = _clamp_for_settings(state, p["spl"], p["sppt"], p["fppt"])
+                        want = _target_for_preset(
+                            state, p["spl"], p["sppt"], p["fppt"], p.get("preset", ""))
                 if want is not None:
                     result = _apply_limits_with_saved_cpu_power(
                         _effective_cpu_state(state, profiles, app_id), *want)
@@ -2649,23 +2706,28 @@ class Plugin:
                     return {"success": False, "stderr": "game is no longer active",
                             "stdout": "", "returncode": -1}
 
-                requested = _clamp_for_settings(s, spl, sppt, fppt)
                 profiles: dict = {}
                 existing: dict = {}
-                want = requested
-
                 if app_id:
                     profiles = _load_profiles()
                     existing = _prepare_cpu_profile(s, profiles, app_id)
+                effective_preset = preset_name or (
+                    existing.get("preset", "") if app_id else s.get("active_preset", ""))
+                requested = _target_for_preset(
+                    s, spl, sppt, fppt, effective_preset)
+                want = requested
+
+                if app_id:
                     # On AC with a separate AC profile, the sliders describe the
                     # battery values but the hardware should run the AC ones.
                     if (_get_ac_online() and existing.get("ac_separate")
                             and existing.get("ac_spl") is not None):
-                        want = _clamp_for_settings(
+                        want = _target_for_preset(
                             s,
                             existing["ac_spl"],
                             existing.get("ac_sppt", existing.get("sppt", _defaults()["sppt"])),
                             existing.get("ac_fppt", existing.get("fppt", _defaults()["fppt"])),
+                            existing.get("ac_preset", ""),
                         )
 
                 cpu_state = (
@@ -2684,7 +2746,7 @@ class Plugin:
                     decky.logger.info(f"[legotdp] Saved game profile: app={app_id}")
                 else:
                     s["spl"], s["sppt"], s["fppt"] = requested
-                    s["active_preset"] = preset_name
+                    s["active_preset"] = effective_preset
                 s["active_spl"], s["active_sppt"], s["active_fppt"] = want
                 values = {SETTINGS_KEY_SETTINGS: s}
                 if app_id:

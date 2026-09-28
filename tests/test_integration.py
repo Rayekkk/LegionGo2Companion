@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import sys
 import tempfile
 import types
@@ -41,34 +40,6 @@ decky.emit = emit
 decky.DECKY_PLUGIN_SETTINGS_DIR = str(CURRENT_SETTINGS)
 sys.modules["decky"] = decky
 
-
-class SettingsManager:
-    def __init__(self, name, settings_directory):
-        self.path = os.path.join(settings_directory, f"{name}.json")
-        self.data = {}
-
-    def read(self):
-        try:
-            with open(self.path, encoding="utf-8") as handle:
-                self.data = json.load(handle)
-        except (OSError, ValueError):
-            self.data = {}
-
-    def getSetting(self, key, default=None):
-        return self.data.get(key, default)
-
-    def setSetting(self, key, value):
-        self.data[key] = value
-
-    def commit(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(self.data, handle)
-
-
-settings_module = types.ModuleType("settings")
-settings_module.SettingsManager = SettingsManager
-sys.modules["settings"] = settings_module
 
 for unix_only in ("fcntl", "pwd"):
     try:

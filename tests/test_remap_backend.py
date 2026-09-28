@@ -7,7 +7,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 
 if "decky" not in sys.modules:
@@ -83,6 +83,30 @@ class RemapBackendTests(unittest.TestCase):
         capture = patch.object(remap_backend._service_watch, "capture")
         self.capture = capture.start()
         self.addCleanup(capture.stop)
+
+    def test_discovery_skips_foreign_capabilities_and_continues_after_property_errors(self):
+        paths = [f"/org/shadowblip/InputPlumber/CompositeDevice{number}" for number in range(4)]
+        required = ["Gamepad:Button:Keyboard", "Gamepad:Button:QuickAccess2"]
+
+        def property_value(path, name):
+            if path == paths[1] or (path == paths[2] and name == "Capabilities"):
+                raise remap_backend.RemapError("Controller disconnected")
+            if name == "Name":
+                return "Another controller" if path == paths[0] else "Lenovo Legion Go 2"
+            if path == paths[0]:
+                self.fail("Capabilities must not be requested for an unrelated controller")
+            return required
+
+        identity = [mock_open(read_data=value).return_value for value in ("LENOVO", "83N0")]
+        with patch("builtins.open", side_effect=identity), \
+                patch.object(remap_backend, "_run_busctl", return_value="\n".join(reversed(paths))), \
+                patch.object(remap_backend, "_get_property", side_effect=property_value) as read:
+            self.assertEqual(remap_backend._find_device(), (paths[3], "Lenovo Legion Go 2"))
+        self.assertEqual([item.args for item in read.call_args_list], [
+            (paths[0], "Name"), (paths[1], "Name"),
+            (paths[2], "Name"), (paths[2], "Capabilities"),
+            (paths[3], "Name"), (paths[3], "Capabilities"),
+        ])
 
     def test_retry_reads_a_repaired_file_after_unrecoverable_storage_error(self):
         from safe_settings import SettingsManager, atomic_write_json

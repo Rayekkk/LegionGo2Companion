@@ -12,13 +12,11 @@ import {
   Router,
   SliderField,
   Spinner,
-  staticClasses,
   ToggleField,
 } from "@decky/ui";
 import {
   addEventListener,
   callable,
-  definePlugin,
   removeEventListener,
   toaster,
   useQuickAccessVisible,
@@ -415,6 +413,8 @@ const LGoVibeControl = () => {
   const [testing, setTesting] = useState(false);
 
   const visible = useQuickAccessVisible();
+  const initialDriverReadRef = useRef(false);
+  const driverRevisionRef = useRef(0);
 
   // Coalesces a slider drag into a single backend call. The UI still moves
   // immediately; only the RPC and its disk commit are deferred.
@@ -456,8 +456,10 @@ const LGoVibeControl = () => {
   }, []);
 
   const refreshDriver = useCallback(async () => {
+    const revision = driverRevisionRef.current;
     try {
-      setDriver(await getDriverStatus());
+      const status = await getDriverStatus();
+      if (revision === driverRevisionRef.current) setDriver(status);
     } catch (e) {
       console.error("[lego-vibe] getDriverStatus failed", e);
     }
@@ -467,7 +469,9 @@ const LGoVibeControl = () => {
   // reason instead of sliders that silently do nothing.
   useEffect(() => {
     let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const check = async () => {
+      if (!active) return;
       try {
         const state = await isReady();
         if (!active) return;
@@ -477,9 +481,10 @@ const LGoVibeControl = () => {
           return;
         }
         if (!state.ready) {
-          if (active) setTimeout(check, 1000);
+          if (active) retryTimer = setTimeout(check, 1000);
           return;
         }
+        const driverRevision = driverRevisionRef.current;
         const [current, status, caps] = await Promise.all([
           getSettings(),
           getDriverStatus(),
@@ -487,7 +492,8 @@ const LGoVibeControl = () => {
         ]);
         if (!active) return;
         adoptResponse(current);
-        setDriver(status);
+        if (driverRevision === driverRevisionRef.current) setDriver(status);
+        initialDriverReadRef.current = true;
         setModes(caps?.mode?.length ? caps.mode : FALLBACK_MODES);
         setLoading(false);
       } catch (e) {
@@ -497,7 +503,7 @@ const LGoVibeControl = () => {
       }
     };
     void check();
-    return () => { active = false; };
+    return () => { active = false; if (retryTimer !== undefined) clearTimeout(retryTimer); };
   }, [adoptResponse]);
 
   // Hotplug pushes the driver status from the backend, so the dot is right even
@@ -510,7 +516,10 @@ const LGoVibeControl = () => {
   // adoptResponse bumps editSeq, which would make the panel throw away the
   // reply to an edit the user was making at that moment.
   useEffect(() => {
-    const onDevice = (status: DriverStatus) => setDriver(status);
+    const onDevice = (status: DriverStatus) => {
+      driverRevisionRef.current += 1;
+      setDriver(status);
+    };
     addEventListener<[DriverStatus]>("device", onDevice);
     return () => removeEventListener<[DriverStatus]>("device", onDevice);
   }, []);
@@ -519,7 +528,10 @@ const LGoVibeControl = () => {
   // without pyudev there is no hotplug monitor at all, and a plugin reload
   // starts with whatever the hardware already is.
   useEffect(() => {
-    if (visible && !loading) void refreshDriver();
+    if (loading) return;
+    const initialRead = initialDriverReadRef.current;
+    initialDriverReadRef.current = false;
+    if (visible && !initialRead) void refreshDriver();
   }, [visible, loading, refreshDriver]);
 
   // Game changes are applied by the backend; just adopt what it reports.

@@ -12,7 +12,7 @@ import {
 } from "@decky/ui";
 import { FC, ReactNode, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
-import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
+import { TdpPage, startTdpWatcher, stopTdpWatcher, tdpModeLabel } from "./tdp";
 import {
   VibrationPage,
   startVibrationWatcher,
@@ -21,7 +21,8 @@ import {
 import { getWifiStatus, WifiPage, wifiSummary, type WifiStatus } from "./wifi";
 import { getRgbStatus, RgbPage, rgbSummary, type RgbStatus } from "./rgb";
 import { getRemapStatus, RemapPage, remapSummary, type RemapStatus } from "./remap";
-import { BatteryPage, getBatteryStatus, batterySummary, type BatteryStatus } from "./battery";
+import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySummary,
+  type BatteryStatus, type ControllerBatteryStatus } from "./battery";
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 
@@ -35,6 +36,8 @@ const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_s
 const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
 
 interface TdpSettings {
+  enabled?: boolean;
+  active_preset?: string;
   active_spl?: number;
   active_sppt?: number;
   active_fppt?: number;
@@ -44,12 +47,17 @@ interface TdpSettings {
 }
 
 interface VibeSettingsResponse {
-  settings?: { level?: number; mode?: number };
+  settings?: { level?: number; mode?: number; touchpadEnabled?: boolean };
 }
 
 interface DriverStatus { found?: boolean }
 
 interface DisplayState {
+  native_support_detected?: boolean;
+  native_support_reason?: string;
+  native_cleanup_pending?: boolean;
+  native_cleanup_error?: string;
+  native_restart_pending?: boolean;
   panel_mode?: "gamma22" | "pq" | "hybrid" | null;
   setup_done?: boolean;
   active?: boolean;
@@ -60,7 +68,6 @@ interface DisplayState {
 
 interface Overview {
   version: string;
-  standalonePlugins: string[];
   reads?: Partial<Record<OverviewField, { unavailable: boolean; note?: string }>>;
   tdp?: TdpSettings;
   vibration?: VibeSettingsResponse;
@@ -70,6 +77,7 @@ interface Overview {
   rgb?: RgbStatus;
   remap?: RemapStatus;
   battery?: BatteryStatus;
+  controller_batteries?: ControllerBatteryStatus;
   controller?: ControllerStatus;
 }
 
@@ -101,8 +109,7 @@ const updateGuard = (status: GuardStatus) => {
   overviewPaused = status.blocked;
   if (status.blocked) clearOverview();
   configureOverviewModules(status.modules ?? EMPTY_MODULES);
-  overviewCache = { ...overviewCache, version: status.version,
-    standalonePlugins: status.standalone_plugins ?? [] };
+  overviewCache = { ...overviewCache, version: status.version };
   publishOverview();
   const enabled = status.blocked === false;
   const tdpEnabled = enabled && moduleEnabled(status.modules ?? {}, "tdp");
@@ -139,7 +146,7 @@ const getDisplayState = callable<[], DisplayState>("display_get_state");
 
 // Keep confirmed summaries and in-flight reads across QAM remounts. Each source
 // publishes independently, so a slow hardware/network probe cannot hide ready data.
-type OverviewField = Exclude<keyof Overview, "version" | "standalonePlugins" | "reads">;
+type OverviewField = Exclude<keyof Overview, "version" | "reads">;
 const OVERVIEW_DELAY_MS = 30000;
 interface OverviewSource {
   key: OverviewField;
@@ -160,10 +167,12 @@ const overviewSources: OverviewSource[] = [
   { key: "rgb", module: "rgb", read: async () => ({ rgb: await getRgbStatus() }) },
   { key: "remap", module: "remap", read: async () => ({ remap: await getRemapStatus() }) },
   { key: "battery", module: "battery", read: async () => ({ battery: await getBatteryStatus() }) },
+  { key: "controller_batteries", module: "battery",
+    read: async () => ({ controller_batteries: await getControllerBatteryLevels() }) },
   { key: "controller", module: "controller", read: async () => ({ controller: await getControllerStatus() }) },
 ].map(source => ({ ...source, revision: 0, pending: null,
   lastReadAt: null, failures: 0, pendingSince: null } as OverviewSource));
-let overviewCache: Overview = { version: "1.0.4", standalonePlugins: [] };
+let overviewCache: Overview = { version: "1.0.4" };
 let overviewModules = EMPTY_MODULES;
 let overviewPaused = true;
 const overviewListeners = new Set<(overview: Overview) => void>();
@@ -203,7 +212,7 @@ const invalidateOverviewReads = () => {
 const clearOverview = () => {
   invalidateOverviewReads();
   overviewSources.forEach(source => { source.lastReadAt = null; });
-  overviewCache = { version: "1.0.4", standalonePlugins: [] };
+  overviewCache = { version: "1.0.4" };
 };
 const configureOverviewModules = (modules: ModuleStates) => {
   for (const source of overviewSources) {
@@ -253,11 +262,16 @@ const refreshOverview = () => {
 
 const overviewDescription = (overview: Overview, module: ModuleKey, description: string) => {
   const sources = overviewSources.filter(source => source.module === module);
-  if (module === "display" && (overview.display?.settings_error || overview.display?.setup_error))
-    return overview.display.settings_error || overview.display.setup_error || description;
+  if (module === "display") {
+    const display = overview.display;
+    const native = display?.native_support_detected || display?.native_cleanup_pending;
+    const error = display?.settings_error || (native ? display?.native_cleanup_error : display?.setup_error);
+    if (error) return error;
+  }
   // A returned error/recovery state is a fresh report, not a rejected RPC.
   // Never replace it with an earlier healthy cache or a generic retry message.
   for (const source of sources) {
+    if (source.key === "controller_batteries") continue;
     const value = overview[source.key] as { error?: string; reason?: string; message?: string;
       success?: boolean; supported?: boolean; available?: boolean; recovery_pending?: boolean; recovery_required?: boolean } | undefined;
     if (value?.error) return (module === "wifi" && value.message) || value.error;
@@ -267,7 +281,8 @@ const overviewDescription = (overview: Overview, module: ModuleKey, description:
       return value.reason || value.message || (value.success !== false && description) || "Status unavailable";
   }
   if (module === "vibration" && overview.driver?.found === false) return description;
-  return sources.some(source => overview.reads?.[source.key]?.unavailable) ? "Status unavailable" : description;
+  return sources.some(source => source.key !== "controller_batteries"
+    && overview.reads?.[source.key]?.unavailable) ? "Status unavailable" : description;
 };
 const overviewNote = (overview: Overview, module: ModuleKey) => overviewSources
   .filter(source => source.module === module).map(source => overview.reads?.[source.key]?.note).filter(Boolean).join(" · ") || undefined;
@@ -318,10 +333,14 @@ const watts = (value?: number) => value == null ? "–" : String(Math.round(valu
 
 const tdpSummary = (settings?: TdpSettings) => {
   if (!settings) return "Power limits, profiles and CPU controls";
-  const spl = settings.active_spl ?? settings.spl;
-  const sppt = settings.active_sppt ?? settings.sppt;
-  const fppt = settings.active_fppt ?? settings.fppt;
-  return `${watts(spl)} / ${watts(sppt)} / ${watts(fppt)} W`;
+  const spl = settings.enabled === false ? settings.spl : settings.active_spl ?? settings.spl;
+  const sppt = settings.enabled === false ? settings.sppt : settings.active_sppt ?? settings.sppt;
+  const fppt = settings.enabled === false ? settings.fppt : settings.active_fppt ?? settings.fppt;
+  const global = spl === settings.spl && sppt === settings.sppt && fppt === settings.fppt;
+  const mode = settings.enabled === false ? "Off" : spl != null && sppt != null && fppt != null
+    ? tdpModeLabel(Math.round(spl / 1000), Math.round(sppt / 1000), Math.round(fppt / 1000),
+      global ? settings.active_preset : undefined) : "Custom";
+  return `${mode} · ${watts(spl)} / ${watts(sppt)} / ${watts(fppt)} W`;
 };
 
 const VIBE_LEVELS = ["Off", "Low", "Medium", "High"];
@@ -331,10 +350,19 @@ const vibrationSummary = (overview: Overview) => {
   if (overview.driver && !overview.driver.found) return "Controller driver not detected";
   const settings = overview.vibration?.settings;
   if (!settings) return "Handles, touchpad and per-game profiles";
-  return `${VIBE_LEVELS[settings.level ?? 2] ?? "Custom"} · ${VIBE_MODES[settings.mode ?? 0] ?? "Custom"}`;
+  const touchpad = settings.touchpadEnabled === true ? "On"
+    : settings.touchpadEnabled === false ? "Off" : "Unknown";
+  return `${VIBE_LEVELS[settings.level ?? 2] ?? "Custom"} · ${VIBE_MODES[settings.mode ?? 0] ?? "Custom"} · Touchpad ${touchpad}`;
 };
 
 const displaySummary = (state?: DisplayState) => {
+  if (state?.native_support_detected || state?.native_cleanup_pending) {
+    const status = state.native_cleanup_error ? "Display fix cleanup needs attention"
+      : state.native_cleanup_pending ? "Display fix cleanup pending"
+      : state.native_restart_pending ? "Restart required"
+      : "Native display support";
+    return `${status} · ${state.edid_patched ? "EDID fixed" : "EDID standby"}`;
+  }
   if (!state?.setup_done) return "Choose Hybrid, PQ or Gamma 2.2";
   const mode = state.panel_mode === "gamma22"
     ? "Gamma 2.2"
@@ -425,7 +453,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
       {moduleEnabled(modules, "rgb") && <SectionLink title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => setActiveSection("rgb")} />}
       {moduleEnabled(modules, "remap") && <SectionLink title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => setActiveSection("remap")} />}
       {moduleEnabled(modules, "controller") && <SectionLink title="Gyro & Touchpad" {...summary("controller", controllerSummary(overview.controller))} onClick={() => setActiveSection("controller")} />}
-      {moduleEnabled(modules, "battery") && <SectionLink title="Battery" {...summary("battery", batterySummary(overview.battery))} onClick={() => setActiveSection("battery")} />}
+      {moduleEnabled(modules, "battery") && <SectionLink title="Battery" {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => setActiveSection("battery")} />}
       {moduleEnabled(modules, "display") && <SectionLink title="OLED Display" {...summary("display", displaySummary(overview.display))} onClick={() => setActiveSection("display")} />}
       {moduleEnabled(modules, "wifi") && <SectionLink title="WiFi" {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => setActiveSection("wifi")} />}
     </PanelSection>

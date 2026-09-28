@@ -248,14 +248,18 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
         os.close(dir_fd)
 
 
-def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
+def _encode_json_object(payload: dict[str, Any]) -> bytes:
     if not isinstance(payload, dict):
         raise TypeError("settings root must be an object")
     _validate_json_depth(payload)
     encoded = (json.dumps(payload, indent=4, ensure_ascii=False) + "\n").encode("utf-8")
     if len(encoded) > MAX_SETTINGS_BYTES:
         raise ValueError(f"settings exceed {MAX_SETTINGS_BYTES} bytes")
-    _atomic_write_bytes(path, encoded)
+    return encoded
+
+
+def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
+    _atomic_write_bytes(path, _encode_json_object(payload))
 
 
 class AtomicSettingsManager:
@@ -379,7 +383,8 @@ class AtomicSettingsManager:
             self._ensure_safe()
             snapshot = copy.deepcopy(self.settings)
             try:
-                atomic_write_json(self.path, snapshot)
+                encoded = _encode_json_object(snapshot)
+                _atomic_write_bytes(self.path, encoded)
             except Exception:
                 # A failed user operation must not remain visible through
                 # getSetting() when the durable file still holds the previous
@@ -387,10 +392,11 @@ class AtomicSettingsManager:
                 # to smuggle the rejected values onto disk.
                 self.settings = copy.deepcopy(self._committed_settings)
                 raise
-            self._committed_settings = copy.deepcopy(snapshot)
+            # The snapshot already owns a deep copy, separate from live settings.
+            self._committed_settings = snapshot
             self._recovery_error = ""
             try:
-                atomic_write_json(self.backup_path, snapshot)
+                _atomic_write_bytes(self.backup_path, encoded)
                 self._storage_hardened = True
             except Exception as exc:
                 # The primary transaction is already durable.  Reporting this as

@@ -13,6 +13,20 @@ from safe_settings import CorruptSettings
 
 
 class WifiSafetyTests(unittest.TestCase):
+    def test_status_uses_one_settings_snapshot_for_support_and_ownership(self):
+        plugin = wifi.Plugin()
+        state = dict(wifi.DEFAULT_SETTINGS, driver="mt7921e", device_family="legion_go_2")
+        with patch.object(wifi, "_load_settings", return_value=state) as read, \
+             patch.object(plugin, "_get_wifi_interface", return_value=None), \
+             patch.object(plugin, "_get_active_connection_uuid", return_value=None), \
+             patch.object(plugin, "_get_network_recovery_issues", return_value=[]), \
+             patch.object(plugin, "_get_current_backend", return_value="iwd"):
+            status = plugin._get_status_sync()
+        self.assertTrue(status["success"])
+        self.assertEqual(status["support_tier"], 1)
+        self.assertIs(status["settings"], state)
+        read.assert_called_once_with()
+
     def test_os_rollback_baseline_can_be_recovered_only_by_explicit_transition(self):
         plugin = wifi.Plugin()
         baseline = {'modifier_present': False, 'modifier_value': ''}

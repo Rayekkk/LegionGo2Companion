@@ -225,10 +225,12 @@ def _find_device() -> tuple[str, str]:
     for path in candidates:
         try:
             name = _get_property(path, "Name")
+            if name not in EXPECTED_NAMES:
+                continue
             capabilities = _get_property(path, "Capabilities")
         except RemapError:
             continue
-        if name not in EXPECTED_NAMES or not isinstance(capabilities, list):
+        if not isinstance(capabilities, list):
             continue
         required = {
             "Gamepad:Button:Keyboard",

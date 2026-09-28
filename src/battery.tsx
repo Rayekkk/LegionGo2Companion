@@ -29,7 +29,7 @@ export interface BatteryStatus {
   recovery_pending?: boolean;
 }
 
-interface ControllerBatteryStatus {
+export interface ControllerBatteryStatus {
   available: boolean;
   left: number | null;
   right: number | null;
@@ -45,7 +45,7 @@ interface BatteryResult {
 }
 
 export const getBatteryStatus = callable<[], BatteryStatus>("battery_get_status");
-const getControllerBatteryLevels = callable<[], ControllerBatteryStatus>("battery_get_controller_levels");
+export const getControllerBatteryLevels = callable<[], ControllerBatteryStatus>("battery_get_controller_levels");
 const setBatteryEnabled = callable<[boolean], BatteryResult>("battery_set_enabled");
 const releaseBatteryControl = callable<[], BatteryResult>("battery_release_control");
 
@@ -82,15 +82,17 @@ const controllerDescription = (
   return reason || "Connection state unavailable";
 };
 
-export const batterySummary = (status?: BatteryStatus) => {
-  if (!status) return "Battery protection and charging state";
-  if (status.recovery_pending) return "An interrupted battery change needs recovery";
-  if (!status.supported) return status.reason || "Battery protection unavailable";
-  if (typeof status.enabled !== "boolean") return "Battery protection status unavailable";
+export const batterySummary = (status?: BatteryStatus, controllers?: ControllerBatteryStatus) => {
+  const levels = controllers ? ` · L ${controllerLevel(controllers.left, controllers.connection_left)}`
+    + ` · R ${controllerLevel(controllers.right, controllers.connection_right)}` : "";
+  if (!status) return `Battery protection and charging state${levels}`;
+  if (status.recovery_pending) return `An interrupted battery change needs recovery${levels}`;
+  if (!status.supported) return `${status.reason || "Battery protection unavailable"}${levels}`;
+  if (typeof status.enabled !== "boolean") return `Battery protection status unavailable${levels}`;
   const pending = status.managed
     && typeof status.requested_enabled === "boolean"
     && status.requested_enabled !== status.enabled;
-  return `Protection ${status.enabled ? "on · about 80% limit" : "off"}${pending ? " · saved choice pending" : ""}`;
+  return `Protection ${status.enabled ? "on · about 80% limit" : "off"}${pending ? " · saved choice pending" : ""}${levels}`;
 };
 
 export const BatteryPage: FC = () => {

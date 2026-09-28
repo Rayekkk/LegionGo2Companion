@@ -2,14 +2,13 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/LeGo2BrightnessFix
 
-import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   Field,
   PanelSection,
   PanelSectionRow,
   Spinner,
-  staticClasses,
   ToggleField,
 } from "@decky/ui";
 import { FC, Fragment, useCallback, useEffect, useRef, useState } from "react";
@@ -46,6 +45,11 @@ const modeLabel = (m: PanelMode) =>
   m === RECOMMENDED ? `${MODE_INFO[m].label} (recommended)` : MODE_INFO[m].label;
 
 interface State {
+  native_support_detected?: boolean;
+  native_support_reason?: string;
+  native_cleanup_pending?: boolean;
+  native_cleanup_error?: string;
+  native_restart_pending?: boolean;
   // Setup gate
   panel_mode: PanelMode | null;
   active_mode: PanelMode | null;
@@ -78,6 +82,9 @@ interface State {
   edid_reason: string;
   edid_game_nits: number;
 }
+
+const nativeFixBlocked = (state: State | null) =>
+  state?.native_support_detected === true || state?.native_cleanup_pending === true;
 
 const getState = callable<[], State>("display_get_state");
 const setEnabled = callable<[boolean], State>("display_set_enabled");
@@ -130,6 +137,11 @@ export const DisplayPage: FC = () => {
   const writing = useRef(false);
   const readInFlight = useRef(false);
   const readRevision = useRef(0);
+  const latestState = useRef<State | null>(null);
+  const acceptState = useCallback((next: State) => {
+    latestState.current = next;
+    setState(next);
+  }, []);
   isVisible.current = visible;
   useEffect(() => { mounted.current = true; return () => {
     mounted.current = false; readRevision.current += 1;
@@ -141,11 +153,11 @@ export const DisplayPage: FC = () => {
     const revision = readRevision.current;
     try {
       const next = await getState();
-      if (mounted.current && isVisible.current && revision === readRevision.current) setState(next);
+      if (mounted.current && isVisible.current && revision === readRevision.current) acceptState(next);
     } catch {
       /* backend not up yet; the next tick will pick it up */
     } finally { readInFlight.current = false; }
-  }, []);
+  }, [acceptState]);
 
   // Only poll while the panel is actually on screen. The backend keeps working
   // either way - this is just what the user sees.
@@ -168,12 +180,13 @@ export const DisplayPage: FC = () => {
 
   const toggle = useCallback(
     async (fn: (v: boolean) => Promise<State>, key: keyof State, value: boolean) => {
+      if (key === "enabled" && nativeFixBlocked(latestState.current)) return;
       if (!beginWrite()) return;
-      setState((s) => (s ? { ...s, [key]: value } : s));
+      if (latestState.current) acceptState({ ...latestState.current, [key]: value });
       let failed = false;
       try {
         const next = await fn(value);
-        if (mounted.current) setState(next);
+        if (mounted.current) acceptState(next);
       } catch {
         failed = true;
       } finally {
@@ -181,34 +194,36 @@ export const DisplayPage: FC = () => {
         if (failed) void refresh();
       }
     },
-    [refresh],
+    [acceptState, refresh],
   );
 
   const setup = useCallback(async (mode: PanelMode) => {
+    if (nativeFixBlocked(latestState.current)) return;
     if (!beginWrite()) return;
     try {
       const next = await runSetup(mode);
-      if (mounted.current) setState(next);
+      if (mounted.current) acceptState(next);
       if (next.setup_error) notify("Setup failed", next.setup_error);
     } catch (e) {
       notify("Setup failed", e instanceof Error ? e.message : String(e));
     } finally {
       finishWrite();
     }
-  }, []);
+  }, [acceptState]);
 
   const changeMode = useCallback(async (mode: PanelMode) => {
+    if (nativeFixBlocked(latestState.current)) return;
     if (!beginWrite()) return;
     try {
       const next = await setPanelMode(mode);
-      if (mounted.current) setState(next);
+      if (mounted.current) acceptState(next);
       if (next.setup_error) notify("Could not change mode", next.setup_error);
     } catch (e) {
       notify("Could not change mode", e instanceof Error ? e.message : String(e));
     } finally {
       finishWrite();
     }
-  }, []);
+  }, [acceptState]);
 
   const restart = useCallback(async () => {
     if (!beginWrite()) return;
@@ -216,21 +231,22 @@ export const DisplayPage: FC = () => {
       // If this returns at all, the session did not go down - so surface
       // whatever the backend reported instead of leaving a dead button.
       const next = await restartSession();
-      if (mounted.current) setState(next);
+      if (mounted.current) acceptState(next);
     } catch {
       /* the session going down mid-call is the expected outcome */
     } finally {
       finishWrite();
     }
-  }, []);
+  }, [acceptState]);
 
   const reset = useCallback(async () => {
+    if (nativeFixBlocked(latestState.current)) return;
     if (!beginWrite()) return;
     let failed = false;
     try {
       const next = await resetDisplaySettings();
       if (mounted.current) {
-        setState(next);
+        acceptState(next);
         if (!next.reset_error) {
           setShowOthers(false); setShowSwitch(false); setShowReset(false);
         }
@@ -240,7 +256,7 @@ export const DisplayPage: FC = () => {
       failed = true;
       notify("Reset incomplete", error instanceof Error ? error.message : String(error));
     } finally { finishWrite(); if (failed) void refresh(); }
-  }, [refresh]);
+  }, [acceptState, refresh]);
 
   if (!state) {
     return (
@@ -262,6 +278,57 @@ export const DisplayPage: FC = () => {
     <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Retry Display Reset</ButtonItem></PanelSectionRow>
   </PanelSection>;
 
+  const edidPanel = <PanelSection title="EDID for games">
+    <PanelSectionRow>
+      <ToggleField
+        label="Enabled"
+        description="Drop the DisplayID block from the EDID gamescope hands to games, which DXVK cannot parse."
+        checked={state.edid_fix}
+        disabled={busy}
+        onChange={(v) => toggle(setEdidFix, "edid_fix", v)}
+      />
+    </PanelSectionRow>
+    <PanelSectionRow>
+      <Field label="Status" description={state.edid_reason} focusable>
+        {state.edid_patched ? "Applied" : "Standby"}
+      </Field>
+    </PanelSectionRow>
+    {state.edid_patched && state.edid_game_nits > 0 && <PanelSectionRow>
+      <Field label="Games read" focusable
+        description="Without this they fall back to DXVK's 1499 nit placeholder and generic primaries.">
+        {`${state.edid_game_nits.toFixed(0)} nits`}
+      </Field>
+    </PanelSectionRow>}
+  </PanelSection>;
+
+  if (nativeFixBlocked(state)) return <>
+    <PanelSection title="Display fix">
+      <PanelSectionRow><Field focusable
+        label={state.native_support_detected ? "Native display support detected" : "Display fix cleanup pending"}
+        description={state.native_support_reason || (state.native_support_detected
+          ? "The system provides the display support previously supplied by Companion."
+          : "An earlier handover to native display support still needs cleanup.")} />
+      </PanelSectionRow>
+      <PanelSectionRow><Field focusable label="Companion display fix disabled"
+        description="PQ, Gamma 2.2, Hybrid switching and brightness forwarding are unavailable. EDID correction remains independent below." />
+      </PanelSectionRow>
+      {state.native_cleanup_error ? <PanelSectionRow><Field focusable label="Display fix cleanup needs attention"
+        description={`${state.native_cleanup_error} Companion will retry automatically.`} />
+      </PanelSectionRow> : state.native_cleanup_pending && <PanelSectionRow><Field focusable
+        label="Removing the Companion display fix"
+        description="Cleanup has not finished. Companion will retry automatically; the display fix remains disabled." />
+      </PanelSectionRow>}
+      {state.native_restart_pending && <>
+        <PanelSectionRow><Field focusable label="Restart Gaming Mode to finish cleanup"
+          description="Restart Gaming Mode to finish withdrawing the Companion display script from the current session. This closes Steam and brings it back." />
+        </PanelSectionRow>
+        {state.restart_error && <PanelSectionRow><Field focusable label="Could not restart" description={state.restart_error} /></PanelSectionRow>}
+        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={restart}>Restart Game Mode</ButtonItem></PanelSectionRow>
+      </>}
+    </PanelSection>
+    {edidPanel}
+  </>;
+
   const resetPanel = <PanelSection title="Reset display fix">
     <PanelSectionRow><Field focusable label="Restore previous display handling"
       description="Withdraws brightness, HDR and EDID adjustments, removes the Companion display script and clears this module's settings. A previous third-party script is restored from its backup. Gaming Mode may need a restart." /></PanelSectionRow>
@@ -272,14 +339,11 @@ export const DisplayPage: FC = () => {
     {showReset && <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Confirm Display Reset</ButtonItem></PanelSectionRow>}
   </PanelSection>;
 
-  // Nothing works until gamescope has the display script: without it the panel
-  // is either stock or, far more often on this device, still carrying the
-  // gamma 2.2 workaround that takes it out of PQ entirely. Showing the normal
-  // controls before that point would just look broken.
-  // No mode chosen yet. Nothing is installed on the user's behalf before this,
-  // because every option trades away something they may care about.
+  // The mode and brightness controls need the Companion display script.
+  // EDID correction stays available independently of this setup.
   if (!state.panel_mode) {
     return (
+      <>
       <PanelSection title="Choose a display mode">
         {state.reset_restart_pending && <>
           <PanelSectionRow><Field focusable label="Display fix reset"
@@ -321,6 +385,8 @@ export const DisplayPage: FC = () => {
             <ModeChoice key={m} mode={m} busy={busy || !!state.reset_restart_pending} onPick={setup} />
           ))}
       </PanelSection>
+      {edidPanel}
+      </>
     );
   }
 
@@ -354,6 +420,7 @@ export const DisplayPage: FC = () => {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+      {edidPanel}
       {resetPanel}
       </>
     );
@@ -405,6 +472,7 @@ export const DisplayPage: FC = () => {
             <ModeChoice key={m} mode={m} busy={busy} onPick={changeMode} />
           ))}
       </PanelSection>
+      {edidPanel}
       {resetPanel}
       </>
     );
@@ -509,45 +577,8 @@ export const DisplayPage: FC = () => {
         )}
       </PanelSection>
 
-      <PanelSection title="EDID for games">
-        <PanelSectionRow>
-          <ToggleField
-            label="Enabled"
-            description="Drop the DisplayID block from the EDID gamescope hands to games, which DXVK cannot parse."
-            checked={state.edid_fix}
-            disabled={busy}
-            onChange={(v) => toggle(setEdidFix, "edid_fix", v)}
-          />
-        </PanelSectionRow>
-
-        <PanelSectionRow>
-          <Field label="Status" description={state.edid_reason} focusable>
-            {state.edid_patched ? "Applied" : "Standby"}
-          </Field>
-        </PanelSectionRow>
-
-        {state.edid_patched && state.edid_game_nits > 0 && (
-          <PanelSectionRow>
-            <Field
-              label="Games read"
-              description="Without this they fall back to DXVK's 1499 nit placeholder and generic primaries."
-              focusable
-            >
-              {`${state.edid_game_nits.toFixed(0)} nits`}
-            </Field>
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
+      {edidPanel}
       {resetPanel}
     </>
   );
 };
-
-// ── Icon ───────────────────────────────────────────────────────────────────────
-const BrightnessIcon: FC = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"
-    style={{ width: "1em", height: "1em" }}>
-    <path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm0-6h-1v3h2V1h-1zm0 19h-1v3h2v-3h-1zM1 11v2h3v-2H1zm19 0v2h3v-2h-3zM4.2 4.2 3.5 4.9l2.1 2.1.7-.7-2.1-2.1zm13 13-.7.7 2.1 2.1.7-.7-2.1-2.1zM6.3 17.9l-2.1 2.1.7.7 2.1-2.1-.7-.7zm13-13-2.1 2.1.7.7 2.1-2.1-.7-.7z" />
-  </svg>
-);
