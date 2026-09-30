@@ -2,6 +2,7 @@
 
 ### Added
 
+- Support joystick-ring RGB control on Legion Go 2 8AHP2 / 83N1 through the existing verified controller interface, including saved lighting restoration after wake. Device-tested on SteamOS 3.9.1 Preview (20260914.100); power-button lighting retains its separate hardware and firmware restrictions.
 - Detect gamescope's native Legion Go 2 display profile by the presence of its system Lua file. Automatically retire Companion's legacy display fix, remove its owned Lua file, disable the obsolete display controls, and report cleanup or Gaming Mode restart requirements.
 - Add Advanced TDP Control, enabled by default. When disabled, Custom uses one 5–35 W TDP slider and targets SPPT at TDP +10 W (up to 37 W) and FPPT at TDP +15 W (up to 45 W). The existing 50 W unlock remains available.
 

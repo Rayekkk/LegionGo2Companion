@@ -221,6 +221,11 @@ reapplication when the driver becomes available.
 
 ### RGB Lighting
 
+Joystick-ring control accepts the **8ASP2 / 83N0** and **8AHP2 / 83N1** models
+when the expected Lenovo controller and complete `hid-lenovo-go` lighting interface
+are available. RGB control and sleep/wake recovery were confirmed by an 8AHP2
+owner on SteamOS 3.9.1 Preview (build 20260914.100).
+
 **Enable RGB control** lets Companion manage the rings. **Joystick ring lights** switches
 their output on or off. Select an effect, then adjust the controls relevant to it:
 
@@ -234,6 +239,11 @@ their output on or off. Select an effect, then adjust the controls relevant to i
 Colour uses hue and saturation; the preview shows the current choice. Changes are saved as
 you make them, with slider writes grouped while you move a control. Animations run in the
 controller firmware.
+
+With RGB control enabled, Companion detects resume in the backend and force-reapplies
+the saved ring settings, even when Quick Access is closed. If the controller interface
+is temporarily unavailable, it retries for up to 12 seconds and continues checking
+during the startup/wake settling window. The saved off setting is reapplied too.
 
 **Power button light** is a separate setting. **Restore lighting state from before
 Companion** returns the captured lighting state and releases Companion's lighting control.
