@@ -239,7 +239,12 @@ class Plugin:
 
     async def _drain_rpc_jobs(self):
         while self._rpc_jobs:
-            await asyncio.gather(*tuple(self._rpc_jobs), return_exceptions=True)
+            jobs = tuple(self._rpc_jobs)
+            await asyncio.gather(*jobs, return_exceptions=True)
+            # gather may complete immediately for finished tasks. Their queued
+            # discard callbacks then cannot run until we yield; remove the
+            # drained snapshot explicitly rather than spinning on those jobs.
+            self._rpc_jobs.difference_update(job for job in jobs if job.done())
 
     async def _stop_component(self, name):
         try:

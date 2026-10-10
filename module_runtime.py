@@ -38,7 +38,9 @@ async def drain(module):
     while _workers.get(module):
         # Cancelling gather directly would cancel the Task around to_thread,
         # remove it from the registry and leave its actual thread running.
-        await complete(asyncio.gather(*tuple(_workers[module]), return_exceptions=True))
+        workers = tuple(_workers[module])
+        await complete(asyncio.gather(*workers, return_exceptions=True))
+        _workers[module].difference_update(worker for worker in workers if worker.done())
 
 def require_success(result):
     if not isinstance(result, dict) or result.get('success') is not True:

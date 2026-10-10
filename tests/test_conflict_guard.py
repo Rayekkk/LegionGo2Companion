@@ -255,6 +255,39 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             finish.set(); await rpc; await checking
             self.assertEqual(order, ["rpc finished", "modules stopped"])
 
+    async def test_finished_rpc_snapshot_drains_without_waiting_for_discard_callbacks(self):
+        plugin = self.make_plugin()
+        class BoundedRegistry(set):
+            reads = 0
+            def __iter__(self):
+                self.reads += 1
+                if self.reads > 3:
+                    raise AssertionError("RPC drain spun on an already completed snapshot")
+                return super().__iter__()
+        done = asyncio.create_task(asyncio.sleep(0))
+        await done
+        plugin._rpc_jobs = BoundedRegistry({done})
+        # Exercise the immediate-completion path observed on Python 3.14.
+        with patch.object(main.asyncio, "gather", new=AsyncMock(return_value=[None])):
+            await plugin._drain_rpc_jobs()
+        self.assertFalse(plugin._rpc_jobs)
+
+    async def test_finished_worker_snapshot_drains_without_deferred_registry_cleanup(self):
+        class BoundedRegistry(set):
+            reads = 0
+            def __iter__(self):
+                self.reads += 1
+                if self.reads > 3:
+                    raise AssertionError("Hardware drain spun on completed workers")
+                return super().__iter__()
+        done = asyncio.create_task(asyncio.sleep(0))
+        await done
+        registry = BoundedRegistry({done})
+        with patch.dict(module_runtime._workers, {"wifi": registry}), \
+             patch.object(module_runtime.asyncio, "gather", new=AsyncMock(return_value=[None])):
+            await module_runtime.drain("wifi")
+        self.assertFalse(registry)
+
     async def test_conflict_waits_for_cancelled_background_hardware_worker(self):
         plugin = self.make_plugin()
         plugin._modules_started = True
