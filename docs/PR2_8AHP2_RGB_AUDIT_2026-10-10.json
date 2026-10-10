@@ -1,0 +1,330 @@
+{
+  "report_type": "PR #2 independent review, scoped RGB variant integration and regression validation",
+  "completed_utc": "2026-10-10T20:32:28.575991+00:00",
+  "base_commit": "3b656be486a2fd83dcde4ef02e31d3e572fd9db8",
+  "pull_request": {
+    "number": 2,
+    "url": "https://github.com/Rayekkk/LegionGo2Companion/pull/2",
+    "head_commit": "9ac5bf807db92f529916b4496ebd1789740e5c7e",
+    "author": "Andrii Dmytrenko (Antti)",
+    "merge_base": "61bad19bde08d937c4678ddc73c3367401b0a0ec",
+    "integration": "Non-fast-forward merge preserving the original author commit as a parent, with reviewed documentation and test adaptations.",
+    "integration_merge_commit": "7fa0df552824cd86f6b4ca12b199e21cd3de46d5",
+    "original_author_commit_preserved": true
+  },
+  "scope": {
+    "new_rgb_model_pair": [
+      "Legion Go 8AHP2",
+      "83N1"
+    ],
+    "existing_rgb_model_pair": [
+      "Legion Go 8ASP2",
+      "83N0"
+    ],
+    "required_controller_usb_identity": "17EF:61EB",
+    "required_driver": "hid-lenovo-go",
+    "full_audited_led_abi_validation_unchanged": true,
+    "power_button_mmio_gate_unchanged": "8ASP2/83N0, exact board, RRCN16WW BIOS and allowlisted DSDT SHA256",
+    "other_modules_and_frontend_unchanged": true,
+    "no_added_rpc_calls_dependencies_polling_or_cpu_work": true,
+    "version": "1.0.4",
+    "no_tag_release_or_version_bump": true
+  },
+  "official_model_reference": {
+    "url": "https://pcsupport.lenovo.com/us/en/products/laptops-and-netbooks/legion-series/legion-go-8ahp2/83n1/downloads",
+    "verified_identity": "Legion Go 8AHP2 - Type 83N1",
+    "scope": "Confirms model identity; does not establish Linux RGB behavior."
+  },
+  "owner_reported_new_variant_validation": {
+    "source": "PR #2 body and original author commit",
+    "reported_tests": "RGB control and sleep/wake restoration on an 8AHP2",
+    "reported_os": "SteamOS 3.9.1 Preview, build 20260914.100",
+    "independently_physically_verified_by_maintainer": false,
+    "not_a_claim_of_full_plugin_hardware_validation_on_8ahp2": true
+  },
+  "findings_fixed": [
+    {
+      "id": "PR2-1",
+      "area": "Windows regression fixture",
+      "issue": "PR driver-path mocks required /driver even though os.path.join uses backslashes on Windows.",
+      "resolution": "Normalize mock path separators before detecting driver lookups. Windows and Linux suites pass.",
+      "production_linux_path_handling_unchanged": true
+    },
+    {
+      "id": "PR2-2",
+      "area": "Validation attribution",
+      "issue": "The changelog called the variant device-tested without identifying the owner as the source.",
+      "resolution": "Explicit owner-reported wording and README limitation to controller RGB; no maintainer claim of testing 8AHP2."
+    },
+    {
+      "id": "PR2-3",
+      "area": "ABI regression coverage",
+      "issue": "The PR acceptance fixture did not exercise both LED ABIs or each missing required attribute for both accepted models.",
+      "resolution": "Exercise modern and legacy ABI acceptance, all fourteen required missing attributes, seven incompatible capability values, restored valid fixtures and absence of writes for both exact model pairs."
+    }
+  ],
+  "original_pr_regressions_preserved": [
+    "Both exact model pairs accepted only with matching controller identity and driver.",
+    "Unknown/mismatched model pairs rejected before interface probes.",
+    "8AHP2 denied power-register reads and writes even with the audited board and BIOS.",
+    "Resume retries a temporarily missing controller and forces saved on/off state despite matching readback."
+  ],
+  "fresh_integration_review": {
+    "additional_confirmed_actionable_findings": [],
+    "production_ast_changes_only": [
+      "_rgb_capability"
+    ],
+    "rgb_capability_body_after_model_guard_unchanged": true,
+    "all_other_backend_functions_and_plugin_class_unchanged": true,
+    "reviewed": [
+      "PR history and automatic merge result",
+      "DMI pair allowlist and rejected cross-pairs",
+      "USB/driver/regular-file/writability/channel/ABI checks",
+      "power MMIO identity/firmware restrictions",
+      "restore/pending transaction/resume retry/lifecycle paths",
+      "existing 83N1 gates in other modules",
+      "native RGB capability-driven UI and unchanged callable contracts",
+      "dependency/build/package/archive consistency",
+      "original author attribution and physical validation scope",
+      "device restoration and continuous OLED protection"
+    ]
+  },
+  "validation": {
+    "windows_python_3_10": {
+      "tests": 693,
+      "passed": 675,
+      "platform_skips": 18,
+      "seconds": 39.993
+    },
+    "linux_python_3_14_isolated_non_root": {
+      "tests": 693,
+      "passed": 693,
+      "skips": 0,
+      "seconds": 8.876,
+      "fresh_final_regression_source_included": true,
+      "fixture_tests_not_hardware_validation": true
+    },
+    "frontend_suites_passed": 11,
+    "tdp_recovery_cases_passed": 30,
+    "typecheck": "PASS",
+    "build_and_bundle": "PASS",
+    "package_preflight": "PASS (40 entries)",
+    "archive_integrity_and_checkout_byte_identity": "PASS (85 files)",
+    "npm_audit_vulnerabilities": 0,
+    "git_diff_check": "PASS",
+    "post_push_ci_required_for_exact_final_main": [
+      "Ubuntu 24.04 / Python 3.10",
+      "Windows 2022 / Python 3.13",
+      "Frontend/package / Node 24"
+    ],
+    "post_push_ci_evidence_recorded_separately_after_final_commit": true
+  },
+  "package": {
+    "sha256": "5dba2ec80c35bdef07ae221317366300f7bdd55e341b9ff0dd8817ece4628dd6",
+    "bytes": 514817,
+    "files": 85,
+    "all_payload_bytes_match_checkout": true,
+    "changed_files_since_deployed_ui": [
+      "CHANGELOG.md",
+      "README.md",
+      "rgb_backend.py"
+    ],
+    "file_sha256": {
+      "active_app.py": "5bd5a75f325c9dd8a68bcd58634bb1e162f0d3b3af479a6f5b6bdfdd729a67d4",
+      "battery_backend.py": "8b109d87b587c453965b554e4b58fd88080348aa4827032b75050a15f7d2811b",
+      "CHANGELOG.md": "35dd184bb0037d7dd375dbe2c77391ce1a13b72f7a6f05c177527fe7d79a8446",
+      "companion_updates.py": "7be4ab969bdc87203b400b0e6724c70d7025d391dfb9248aa651697e43e5ba05",
+      "conflict_guard.py": "f6b6bdbe9ef2015d417943bbb2be189859d71f796d811d7132db68e323bfc4d8",
+      "controller_backend.py": "d1ec8d84d36b66d0edcbb6fa4333e4e00dab11019ddb6fa6123d4d8a928cc91f",
+      "controller_imu.py": "d8139914ab0d02c547afd10c4a42c70da867253bf051d97a22fbfc6875e5fb56",
+      "display_backend.py": "28ef3fe3613a6d2589b15fde7a534ccd83e4c8ebe6531ad6ff7549600340cba0",
+      "display_native.py": "c9f28400b2998baf96d67d7522c270d768ebdb9d182cfe11cf91d7d75c0d5d91",
+      "dist/index.js": "1d8b70dda3f1af12374db39a31f3a884fe5d44fea23e1519a121186aac790d97",
+      "dist/index.js.map": "9e915c46ba2463c533cc5d0a2bf64c85c9f9d1f9265e2700e887850e87fb8b25",
+      "gamescope/lenovo.legiongo2.oled.gamma22.lua": "7c6781dfb699c042f654ab876a6e37bd224a0edb3f27f48d3a09b1c71ca29e04",
+      "gamescope/lenovo.legiongo2.oled.pq.lua": "eea882283c9d3b13456aba526750393ad80b4cba96593741dbd3c393e982a13a",
+      "inputplumber_process.py": "fe8620a3033831dbd0178b419e3413ff824b2125d46c1d5512869dec0dbd5ac2",
+      "LICENSE": "a5b8d490bd556da8fe76421c57f0dbce260e51a1bdc258058100c9258fdf6d06",
+      "LICENSE.DECKY-ROLLUP": "74ecbc20692307830a989f3b803b8ce5c94a9490f52014e94b86495317d7de11",
+      "LICENSE.HUESYNC": "64652b7b9cf04a6db179fe2d28f044d83eca118fbcdc6d8ce57680f9c78ef583",
+      "LICENSE.MIT": "102c8c93d219f7024ecf1049704a39c3f2dbc659dd4135d18ce43365c8834e0d",
+      "main.py": "d55e6ea1dd1bb2967e265c61c4629e3db3400adf9d3f8967e519b7968ce571a7",
+      "module_control.py": "79031c2c3193c1df59d31f7a7e843e62a2a518c3ed1c9a52dad8ee260c728faf",
+      "module_runtime.py": "aaeab7e161eb6b4d51adfdeeb28a2b949530a1036acee6aa7718dd0a70ca0323",
+      "NOTICE": "b5ae51c836e1f14aab59fbcbabc8855a2c1274746c0d1bb22a83efce362288a8",
+      "package-lock.json": "edaa7696ccb5fa2468cd7b62714b644e63fd662ab746a32fd71083a1b3987547",
+      "package.json": "6db4549b6db25c123f72e9949fd33db65bcf1099ea78f1731105896d5be9eaf9",
+      "plugin.json": "507cb41fac11020b30968d9b9b21508559e7bf26bddbba480594321c72f1056e",
+      "pyudev/core.py": "186879f6cad53ec3b4ef218097d3b9e4d06103442e73c6e6b0ee9d433d14b5b8",
+      "pyudev/device/_device.py": "e6daa5daf5823764492e0ad9cb5251d0a9b93f8d9bd8659592f45aaba3bc9b64",
+      "pyudev/device/__init__.py": "2e8938be5e464edcfc7f9f6aa3c50e1145d9e9916af8228c2a6e0e55b642f84f",
+      "pyudev/discover.py": "dc3b70fe39befbd6046369297c32cdb5d4f40c60123369d6fb8270cd8fd49221",
+      "pyudev/glib.py": "0b8768343412a9adaa07d63437cb373b53ebdeb343c2979ffe8da8fc969c311d",
+      "pyudev/monitor.py": "1c11ff660af2aedb20e90b27f16e17c02bec4d7333cd00336e92ffb87f85bd4f",
+      "pyudev/pyqt4.py": "15b9b5dd867c5d6994ab76c03a4bde5b0fd679c04863312e3624adb62e733247",
+      "pyudev/pyqt5.py": "98803fa2bea23286fb9eb0d80ed922bdcc60cc8cc9dafe68d67b4143940b2fff",
+      "pyudev/pyside.py": "be6e586d999ba9c7585865667aeab11524f37263825e05644fd7b35c3cbb8cd4",
+      "pyudev/pyside6.py": "1c8283d0f7bc67696718dd6fe11960b67e8a36f200c18ca51461b34a122723e7",
+      "pyudev/version.py": "fea2f681a0e3324a35b5b18fdd5fbe18e0438242a9987b89c78c51d49be220f7",
+      "pyudev/wx.py": "2a43b0e20d05a42bc0fe80215fa53d3f38ad79256e205ba83dd76ff454fd1a57",
+      "pyudev/_ctypeslib/libc.py": "cce09da0d1f1ada98cc9279d8c677b15881858e0b9ce7a25d34da47ed4d24db3",
+      "pyudev/_ctypeslib/libudev.py": "e02dc5d263188747845eacb8d25ed01b8ba305d9c4eda56b4650de892293d499",
+      "pyudev/_ctypeslib/utils.py": "3f512b2de6915324a7bfc681cc45d2ba46eaf1923eab30c51c367aed4232a93e",
+      "pyudev/_ctypeslib/_errorcheckers.py": "18cd4f27193b5e8be16aabf40288acb6a18b2af8c37d57449dd7f34755979efc",
+      "pyudev/_ctypeslib/__init__.py": "dcf4efb2634f52b48803823b70c4e167fc3ccebdf587b2a3531d8c374286f911",
+      "pyudev/_errors.py": "9f9cbcd46aac144348ad4c33ad25209d25374dfd0d0ccc32869c685845aacdf7",
+      "pyudev/_os/pipe.py": "d6917d0f8ef6bd0f89167d28abd48f9d52f59014fa48ff729a45ab0561f5200c",
+      "pyudev/_os/poll.py": "66b90417054c5eea1a4b10c8d4990e70b241e779b31af2ee3a31a25c23bb2314",
+      "pyudev/_os/__init__.py": "5cad25fda778a01c718ef6a0079c35a3fb42a55baa2d38955a61f1ff48d9c6cc",
+      "pyudev/_qt_base.py": "bbaba6257ed2b965e86350debac19c2cfbc2f726a3f013fd4c635d976e83176f",
+      "pyudev/_util.py": "4b005fe3479ff74aab454403c1e2f5c967b9061bf715cf972c6a7fdb4e826821",
+      "pyudev/__init__.py": "f442b48594888a28d096b1cf72e9dee21c23f699092f34ad1241b7677e9def82",
+      "README.md": "cf1a785ce2b68eb8258fcb050df950d63dcf85a3978af61e17867d4eebe0ad1e",
+      "remap_backend.py": "17247d94f357a0883661a64ea2d3a696c1a7f7e2c296afffe632bcf41d09fcc0",
+      "requirements.txt": "26ed84790be3a072b67ed7bcd86776f04f4cc92c62a9cc1e3b1d1afe11040579",
+      "rgb_backend.py": "147a2ac2a57a37286b408bbb5fa4a0f938ab3cee6dba33a7276f54cf3d8ea38e",
+      "rollup.config.js": "c141927b5901439f3fd5c58066aa6aaa3fb78787b7cafdaff038a483924b6a72",
+      "safe_settings.py": "aa3ed4e8d9a2005fdfe7a10829225fd7e1aeb5a5314bb6f858270b98ee2774b2",
+      "scripts/check-build.mjs": "9dd4dba3a5206aa694c8d1f19433615e7c103fe68bbd4a6e6fa025b4b0a7219b",
+      "scripts/package.mjs": "fa41b8eff3507c235f7210799229a85b0cdd66b17556ec239ff4b289f0aed98b",
+      "SOURCE.md": "8bad8224e861ed148526ace682e59745a51c10333f8cf4d907fa6403c9fb3beb",
+      "src/battery.tsx": "0984750882135f7dbb60c12ae7e57929ec0786cc33f09ee0bbd5ecb3b0fc3831",
+      "src/controller.tsx": "3b72c4009e9e31dedc4f4cddf7d43f9d0d36e7ae8da74f7f2a63f677b4ea9789",
+      "src/display.tsx": "6ed340f41699d499d230f18a91c9dc4b769014a6c19347c7f3f957670efb405d",
+      "src/index.tsx": "cdb7b663442a04a7b5edbaf4e6500dce22e6fca1f5e46e6ed6ceff11d2ab4a6c",
+      "src/remap.tsx": "c683333bbdfa7ddeaa793464ffc9c8b88011a0986a31dd34f3e6b81df82e45ee",
+      "src/rgb.tsx": "dfcfe3c39a7da03bde5ebeec1a5986d9b982c96151faf9915470d1128d9d9688",
+      "src/tdp.tsx": "91ac704ccc58c6927009fe14fc34eeeec1cd0ee6a7686e7589bab1edc229ebf1",
+      "src/updates.tsx": "dce4f46d23aeba9ca4f84d371e777eb7a348abd0d64fd3f27115770f0bc22442",
+      "src/vibration.tsx": "e9121801fd38c7ea7cc12bdedfebb87f558a20d016de0f9980f4451c0f2bc9c0",
+      "src/wifi.tsx": "83f1cbb0f9d9e2bf13b638c6e678145603a320e6f779f5544483222ccdc9ea89",
+      "system_process.py": "0aea617565b7ff58fa9568d8e3aa7f2c192f5af3e51c7c31eb58f44b6c0a51a6",
+      "tdp_backend.py": "daf59b6cdc68f93670554949621a9783b4b730662039446711897980c9d47e10",
+      "tdp_updater.py": "60cda9079f609fcae6c310693fd224b0ef80686218f070323eabd1e5b034b1f3",
+      "THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt": "38965778962143b687faff3a5b69ef22dd228e0ca4f5a3752893e016ede87c6a",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/dist/index.d.ts": "96041fe41ee8b5ebcb5ea25cfa24cff66ed71641073f185f6fef5ac1e0975d35",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/dist/index.js": "9fdcc09e2a9596e05a71dd2ac758f1d0d9c69a18ff74a04862eac150312f3f17",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/dist/types.d.ts": "1cb04edfbf9d2a0768f9d219bc9eff6bde3e67c1f9863f29997424afea8447dd",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/dist/types.js": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/LICENSE": "38965778962143b687faff3a5b69ef22dd228e0ca4f5a3752893e016ede87c6a",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/package.json": "8be297dad38eefd6e80b3a6b3f5083e875a7dd1261f866c91efbf4e380867aa1",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/README.md": "3ae1b95aea978b2440dc115848b579d6a607bc40cff16eabfa32e4130f1edce3",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/src/index.ts": "3193df7a9d563e1a7d65c3acd162e3b7357e47eb36862f2c1f3fc57134ed156d",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/src/types.d.ts": "77c2831b47a9b2ba944e4b97466f18dd92c03a9c0c1ead4818129a5153629103",
+      "THIRD_PARTY_SOURCES/decky-api-1.1.3/src/types.ts": "93e5ecece4cde0d92bc2d2e77efcc5d4d9b1091211586aec83ce44d484daa51f",
+      "tsconfig.json": "33b7dae826b904341e0b4263d75ca1a8e7d2519ce070c279d7a85ac32ac8be3f",
+      "vibration_backend.py": "25dad9e149c1a9d7ab56e1ba5f600617e6abcd4df27b8f84a0261f619eb788d4",
+      "wifi_backend.py": "10de110d34ae2071e2f7698352998f69974f84900ccbac5150b8b267cd3bdbe4"
+    }
+  },
+  "own_existing_8asp2_device_regression": {
+    "utc": "2026-10-10T20:27:30.667924+00:00",
+    "dmi": "8ASP2/83N0",
+    "modules_ready": 8,
+    "native_rgb_toggle_off_and_on_confirmed": true,
+    "force_reapply_without_suspend": true,
+    "independent_led_readback_restored": true,
+    "power_capability_supported_before": true,
+    "power_capability_supported_after": true,
+    "power_button_writes_performed": false,
+    "magicblack": {
+      "mode": 1,
+      "opacity": 1
+    }
+  },
+  "deployment": {
+    "utc": "2026-10-10T20:27:20.763391+00:00",
+    "package_sha256": "5dba2ec80c35bdef07ae221317366300f7bdd55e341b9ff0dd8817ece4628dd6",
+    "all_85_files_match": true,
+    "updated_files": [
+      "CHANGELOG.md",
+      "README.md",
+      "rgb_backend.py"
+    ],
+    "magicblack": {
+      "mode": 1,
+      "opacity": 1
+    }
+  },
+  "oled_guard_before_reload": {
+    "before": {
+      "mode": 1,
+      "opacity": 1
+    },
+    "after": {
+      "mode": 1,
+      "opacity": 1
+    },
+    "independent_panel_brightness": 0,
+    "actual_pre_guard_brightness_saved": "14160",
+    "settings": 19,
+    "cpu": 33,
+    "hardware": 7,
+    "stock_magic_files_unchanged": true
+  },
+  "final_restoration_and_cleanup": {
+    "utc": "2026-10-10T20:29:56.543950+00:00",
+    "all_85_payload_files_exact": true,
+    "settings_files_exact": 19,
+    "cpu_values_exact": 33,
+    "hardware_values_exact": 7,
+    "rgb_hardware_exact": true,
+    "wifi_unchanged": true,
+    "all_8_modules_ready": true,
+    "diagnostics_stopped": true,
+    "magicblack_before": {
+      "mode": 1,
+      "opacity": 1
+    },
+    "magicblack_after": {
+      "mode": 1,
+      "opacity": 1
+    },
+    "magic_stock_files_unchanged": true,
+    "boot_unchanged": true,
+    "brightness": "14160",
+    "actual_pre_guard_brightness": "14160",
+    "independent_guard_removed": true
+  },
+  "validation_harness_events": {
+    "initial_isolated_archive_missing_static_fixtures": "First Linux harness archive omitted gamescope and other tracked test inputs; regenerated from all tracked files, then all 693 tests passed.",
+    "initial_post_restoration_rpc_timeout": "One immediate WiFi status read after the second Companion reload timed out at 40 seconds. Loader log showed pending route tasks during reload. After startup, a repeat final read returned promptly and passed every baseline check; no persistent regression attributed to the RGB-only change.",
+    "no_steam_decky_or_os_restart": true
+  },
+  "limitations": [
+    "No maintainer-owned 8AHP2 is available. New variant RGB and physical sleep/wake claims remain attributed to the PR author/owner.",
+    "Own device checks used 8ASP2/83N0 and confirmed native event handling plus independent sysfs/settings readbacks. Physical perceived lighting was not observed because MagicBlack remained 1/1.",
+    "Force reapply and automated missing-controller resume fixtures were tested; no new physical suspend, unplug or controller hotplug test was performed.",
+    "Other 8AHP2 hardware functions and its power-button MMIO were not enabled or physically tested by this integration."
+  ],
+  "private_check_log_sha256": {
+    "lg2-pr2-backend.log": "d23bd46597c3da28909c3f9af5c34f76e92120ab897e7c9e9c184214fe1ec3d7",
+    "lg2-pr2-frontend.log": "fd618369fdba3784d50ebeb3b1f265c79f831b0d6d7dcc2863112e80af675a3f",
+    "lg2-pr2-audit.json": "7a9f5535c984bc7ffdd47179991eb7057cfb844c0aa4ddad30b06c4100fcbccd",
+    "lg2-pr2-linux.log": "d3df568cef90029149e54244effaf1cf6c5a0edc73849807d4111967dba8c7f9",
+    "lg2-pr2-prepare.log": "f44f14b42ecbf5bdc0dd0f10ea32b4ca02f03b7de5424d0924802bcce493b487",
+    "lg2-pr2-deploy.log": "1591d56c337699682313943fc38e03a527566f79c5536e68a1d81b24aed8f7a5",
+    "lg2-pr2-reload.log": "ac40a45f12c136329b11338ca12aab7b0468f28a4eabbdfba264b1600c61c347",
+    "lg2-pr2-device-tests.log": "0d7a77041adc5e0df9488856cd238a50dd8953669f45458f7013c3015ffe7d32",
+    "lg2-pr2-restore.log": "800c3256ca37c3cd0d4bbbc58fda5de5fd8fc9cdb8fe5bf74bd93f2b98731f27",
+    "lg2-pr2-restored-reload.log": "ac40a45f12c136329b11338ca12aab7b0468f28a4eabbdfba264b1600c61c347",
+    "lg2-pr2-cleanup.log": "0fb95bce010d5065413cc2be08154c25378b172eeeb1016d4931c9f20e7ca459",
+    "lg2-pr2-diagnostic.log": "99aea2f758cdeb81639e4ca0222dc1f163b65cb0922f45fd51dff9f8b47dfac7"
+  },
+  "changed_file_working_sha256": {
+    "rgb_backend.py": "147a2ac2a57a37286b408bbb5fa4a0f938ab3cee6dba33a7276f54cf3d8ea38e",
+    "tests/test_rgb_backend.py": "0d4a29b407f01b350b48e7510331982d53c4c0114190d2fe424bbb0065271f08",
+    "README.md": "cf1a785ce2b68eb8258fcb050df950d63dcf85a3978af61e17867d4eebe0ad1e",
+    "CHANGELOG.md": "35dd184bb0037d7dd375dbe2c77391ce1a13b72f7a6f05c177527fe7d79a8446"
+  },
+  "previous_closed_reports_preserved": [
+    "docs/FULL_PLUGIN_AUDIT_2026-10-10.json",
+    "docs/NATIVE_UI_AUDIT_2026-10-10.json"
+  ],
+  "changed_file_git_blob_sha256": {
+    "rgb_backend.py": "147a2ac2a57a37286b408bbb5fa4a0f938ab3cee6dba33a7276f54cf3d8ea38e",
+    "tests/test_rgb_backend.py": "0d4a29b407f01b350b48e7510331982d53c4c0114190d2fe424bbb0065271f08",
+    "README.md": "cf1a785ce2b68eb8258fcb050df950d63dcf85a3978af61e17867d4eebe0ad1e",
+    "CHANGELOG.md": "35dd184bb0037d7dd375dbe2c77391ce1a13b72f7a6f05c177527fe7d79a8446"
+  }
+}
