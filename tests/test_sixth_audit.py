@@ -214,6 +214,8 @@ class WifiResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 for name, value in {
                     'SETTINGS_FILE': str(settings_file), 'BAND_POLICY_STATE_DIR': str(journal_dir),
                     'POWER_SAVE_JOURNAL_FILE': str(journal), 'BAND_POLICY_JOURNAL_FILE': str(journal_dir / 'band.json'),
+                    'BAND_POLICY_RUNTIME_DIR': str(folder / 'runtime'),
+                    'BAND_POLICY_LOCK_FILE': str(folder / 'runtime' / 'band-policy.lock'),
                     '_SETTINGS_MANAGER': None, '_SETTINGS_MANAGER_PATH': '',
                 }.items():
                     stack.enter_context(patch.object(wifi, name, value))

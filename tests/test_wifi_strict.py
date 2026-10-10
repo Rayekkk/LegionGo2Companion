@@ -30,6 +30,8 @@ class StrictWifiTests(unittest.TestCase):
             "BAND_POLICY_STATE_DIR": str(self.journal_dir),
             "BAND_POLICY_RUNTIME_DIR": str(self.runtime_dir),
             "BAND_POLICY_JOURNAL_FILE": str(self.journal_dir / "band-policy-transaction.json"),
+            "POWER_SAVE_JOURNAL_FILE": str(self.journal_dir / "power-save-transaction.json"),
+            "BAND_POLICY_LOCK_FILE": str(self.runtime_dir / "band-policy.lock"),
             "_SETTINGS_MANAGER": None, "_SETTINGS_MANAGER_PATH": "",
         }.items():
             self.stack.enter_context(patch.object(wifi, name, value))

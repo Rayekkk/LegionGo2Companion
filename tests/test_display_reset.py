@@ -32,7 +32,9 @@ class DisplayResetTests(unittest.TestCase):
         self.store.replace(self.saved)
         self.state = dict(display.Plugin._state, panel_mode='hybrid', active_mode='hybrid',
                           setup_done=True, active=True, reset_in_progress=False,
-                          reset_restart_pending=False, reset_error='', settings_error='')
+                          reset_restart_pending=False, reset_error='', settings_error='',
+                          native_support_detected=False, native_cleanup_pending=False,
+                          native_restart_pending=False)
         self.atoms = []
         self.nits = []
         self.session = 100.0
@@ -46,6 +48,9 @@ class DisplayResetTests(unittest.TestCase):
                             '_loaded_script_variant': display.MODE_PQ,
                             '_gamescope_started_at': 100.0, '_mode_lock': asyncio.Lock()}.items():
             self.stack.enter_context(patch.object(display.Plugin, name, value))
+        # These fixtures exercise legacy restoration. Native support has its
+        # own tests; do not probe or select the actual host's Gamescope here.
+        self.stack.enter_context(patch.object(display.Plugin, '_refresh_native_support'))
         self.stack.enter_context(patch.object(display, '_gamescope_start_time', side_effect=lambda: self.session))
         self.stack.enter_context(patch.object(display, '_strip_displayid', return_value=b'patched-edid'))
         self.stack.enter_context(patch.object(display, '_published_edid_is_safe', return_value=True))

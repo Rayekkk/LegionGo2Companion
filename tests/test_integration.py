@@ -55,6 +55,12 @@ for unix_only in ("fcntl", "pwd"):
 sys.path.insert(0, str(ROOT))
 import display_backend  # noqa: E402
 import main  # noqa: E402
+# Keep the real inventory guard, but give it an isolated installation parent.
+# The checkout's siblings can include unrelated, unreadable system directories.
+ISOLATED_INSTALL = SETTINGS_ROOT / "plugins" / "LegionGo2Companion"
+ISOLATED_INSTALL.mkdir(parents=True)
+(ISOLATED_INSTALL / "plugin.json").write_bytes((ROOT / "plugin.json").read_bytes())
+main.PLUGIN_DIR = str(ISOLATED_INSTALL)
 import battery_backend  # noqa: E402
 import controller_backend  # noqa: E402
 import remap_backend  # noqa: E402
