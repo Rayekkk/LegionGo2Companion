@@ -15,6 +15,19 @@ import module_runtime
 from conflict_guard import installed_conflicts
 
 
+def decoder_nesting_failure(manifest):
+    # Python versions have different decoder nesting limits. Inject the actual
+    # failure at the decoder boundary while leaving other JSON reads intact.
+    original_loads = json.loads
+
+    def decode(text, *args, **kwargs):
+        if text == manifest:
+            raise RecursionError("JSON decoder nesting limit exceeded")
+        return original_loads(text, *args, **kwargs)
+
+    return patch("conflict_guard.json.loads", side_effect=decode)
+
+
 class DetectionTests(unittest.TestCase):
     def test_only_three_public_plugins_block_including_renamed_installs(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -64,9 +77,9 @@ class DetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
             other = root / "unrelated-plugin"; other.mkdir()
-            (other / "plugin.json").write_text(
-                '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}')
-            with self.assertRaisesRegex(ValueError, "manifest"):
+            text = '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+            (other / "plugin.json").write_text(text)
+            with decoder_nesting_failure(text), self.assertRaisesRegex(ValueError, "manifest"):
                 installed_conflicts(current)
 
 
@@ -93,15 +106,16 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(main, "_reload_component_settings"):
                 try:
                     await plugin._main()
-                    manifest.write_text(
-                        '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}')
-                    await plugin._check_guard()
+                    text = '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+                    manifest.write_text(text)
+                    with decoder_nesting_failure(text):
+                        await plugin._check_guard()
                     self.assertTrue(plugin._guard_blocked)
                     self.assertIn("manifest", plugin._guard_error)
                     self.assertFalse(plugin._modules_started)
                     for component in self.components:
                         component._unload.assert_awaited_once()
-                    with self.assertRaisesRegex(RuntimeError, "could not be verified"):
+                    with decoder_nesting_failure(text), self.assertRaisesRegex(RuntimeError, "could not be verified"):
                         await plugin.rgb_set_brightness(20)
                     # The watcher uses this same check. Repairing the file must
                     # still produce a snapshot rather than an escaped decoder error.

@@ -1,5 +1,11 @@
 # Audyt jakości Legion Go 2 Companion
 
+## Naprawa testów Windows CI — 2026-10-10
+
+Pierwszy push zmian audytowych ujawnił dwa błędy w testach regresji L1 na **Windows / Python 3.13**. Linux / Python 3.10 oraz frontend, build i pakowanie przeszły. Testy zakładały, że JSON z 2000 poziomami zagnieżdżenia przekracza limit dekodera; Python 3.13 potrafi odczytać taki dokument, więc oczekiwany `RecursionError` nie występował.
+
+Testy w `tests/test_conflict_guard.py` wstrzykują teraz `RecursionError` na granicy dekodera wyłącznie dla badanego dokumentu, zachowując prawdziwe odczyty plików, kontrolę konfliktów, zatrzymanie modułów i odczyt naprawionego manifestu. Usunięcie obsługi tego wyjątku w kontrolowanej próbie powoduje błąd obu regresji. Kod runtime i zainstalowana paczka pozostają bez zmian. Wynik zdalnego CI wymaga nowego przebiegu po pushu poprawki.
+
 ## Instalacja najnowszej lokalnej paczki — 2026-10-10
 
 Po zakończeniu audytów zainstalowano na Legion Go 2 paczkę **1.0.4** o SHA-256 `c9c41c3e35fd5fc1e8e3e373ad7d8503383c63f3712f6ffde93f34d747ff3b71`, zawierającą poprawkę L1. Zweryfikowano zgodność wszystkich **85 plików** instalacji z archiwum. Zewnętrzne ustawienia pozostały identyczne bajtowo; zachowano kopię poprzedniej instalacji i ustawień.
