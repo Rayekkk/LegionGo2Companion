@@ -350,7 +350,6 @@ const styles = {
   statusText: (ok: boolean) => ({
     fontSize: "11px",
     color: ok ? OK_COLOR : BAD_COLOR,
-    fontFamily: "monospace",
     wordBreak: "break-all" as const,
   }),
   valueTag: {
@@ -360,7 +359,6 @@ const styles = {
     background: "rgba(255,255,255,0.1)",
     borderRadius: "4px",
     padding: "1px 6px",
-    fontFamily: "monospace",
   },
   infoBox: {
     background: "rgba(251,191,36,0.15)",
@@ -385,7 +383,6 @@ const styles = {
   methodText: {
     fontSize: "10px",
     color: DIM_COLOR,
-    fontFamily: "monospace",
     marginTop: "2px",
   },
   profileTag: {
@@ -396,7 +393,6 @@ const styles = {
     border: "1px solid rgba(74,222,128,0.5)",
     borderRadius: "3px",
     padding: "0px 5px",
-    fontFamily: "monospace",
   },
 };
 
@@ -427,6 +423,7 @@ const LGoVibeControl = () => {
   const [applying, setApplying] = useState(false);
   const [profileChanging, setProfileChanging] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [showDriverDetails, setShowDriverDetails] = useState(false);
 
   const visible = useQuickAccessVisible();
   const initialDriverReadRef = useRef(false);
@@ -802,33 +799,11 @@ const LGoVibeControl = () => {
 
   return (
     <div style={styles.container}>
-      <PanelSection title="Driver Status">
+      <PanelSection title="Current vibration">
         <PanelSectionRow>
-          <Focusable><div style={styles.statusRow}>
-            <div style={styles.dot(driverFound)} />
-            <div>
-              <span style={styles.statusText(driverFound)}>
-                {driverFound
-                  ? driver?.paths[0] ?? "hid-lenovo-go found"
-                  : "hid-lenovo-go driver not found"}
-              </span>
-              {driverFound && driver?.method && (
-                <div style={styles.methodText}>
-                  via: {driver.method}
-                  {driver.ids ? ` (${driver.ids})` : ""}
-                </div>
-              )}
-            </div>
-          </div></Focusable>
+          <Field focusable label={`${modeLabel(modeName)} · ${LEVEL_LABELS[settings.level] ?? "Unknown"}`}
+            description={`Both controller handles · ${gameRunning && perGameOn ? gameName : "Global profile"}`} />
         </PanelSectionRow>
-        {!driverFound && (
-          <PanelSectionRow>
-            <Focusable><div style={styles.infoBox}>
-              The hid-lenovo-go sysfs endpoint was not detected. Requires SteamOS 3.8+ / Kernel
-              6.18+ with the hid-lenovo-go module loaded on Legion Go hardware.
-            </div></Focusable>
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       <PanelSection title="Per-Game Profile">
@@ -946,6 +921,26 @@ const LGoVibeControl = () => {
             Reset to defaults
           </ButtonItem>
         </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Driver Status">
+        <PanelSectionRow>
+          <Field focusable label={driverFound ? "Controller driver ready" : "Controller driver unavailable"}
+            description={driverFound ? `hid-lenovo-go${driver?.method ? ` · ${driver.method}` : ""}${driver?.ids ? ` · ${driver.ids}` : ""}`
+              : "The hid-lenovo-go sysfs endpoint was not detected. Requires SteamOS 3.8+ / Kernel 6.18+ with the hid-lenovo-go module loaded on Legion Go hardware."} />
+        </PanelSectionRow>
+        {driverFound && <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => setShowDriverDetails(value => !value)}>
+            {showDriverDetails ? "Hide driver details" : "Show driver details"}
+          </ButtonItem>
+        </PanelSectionRow>}
+        {showDriverDetails && driverFound && <PanelSectionRow>
+          <Field focusable label="Controller endpoints" description={
+            <span style={{ display: "block", maxWidth: "100%", overflowWrap: "anywhere" }}>
+              {driver?.paths?.join(" · ") || "No endpoint reported"}
+            </span>
+          } />
+        </PanelSectionRow>}
       </PanelSection>
 
       <PanelSection title="Notes">

@@ -247,6 +247,15 @@ export const BatteryPage: FC = () => {
     : "Unknown";
 
   return <>
+    <PanelSection title="Charging state">
+      <PanelSectionRow>
+        <Field focusable label={`Battery: ${capacity}`} description={status.charging_status || "Charging status unavailable"} />
+      </PanelSectionRow>
+      {status.supported && status.reason && <PanelSectionRow>
+        <Field focusable label="Battery status" description={status.reason} />
+      </PanelSectionRow>}
+    </PanelSection>
+
     <PanelSection title="Battery protection">
       {status.recovery_pending && <PanelSectionRow>
         <Field
@@ -313,15 +322,6 @@ export const BatteryPage: FC = () => {
         >
           {status.recovery_pending ? "Recover and Release Control" : "Release Companion Control"}
         </ButtonItem>
-      </PanelSectionRow>}
-    </PanelSection>
-
-    <PanelSection title="Charging state">
-      <PanelSectionRow>
-        <Field focusable label={`Battery: ${capacity}`} description={status.charging_status || "Charging status unavailable"} />
-      </PanelSectionRow>
-      {status.supported && status.reason && <PanelSectionRow>
-        <Field focusable label="Battery status" description={status.reason} />
       </PanelSectionRow>}
     </PanelSection>
 

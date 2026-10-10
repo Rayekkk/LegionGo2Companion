@@ -1906,6 +1906,18 @@ export const TdpPage: FC = () => {
 
   return (
     <>
+      <PanelSection title="Profile overview">
+        <PanelSectionRow>
+          <Field focusable label={enabled && perGame && game
+            ? `${game.name}${acSeparate ? ` · ${editingAc ? "AC" : "Battery"}` : ""}`
+            : "Global profile"}
+            description={profilePending || profileError
+              ? "Profile settings have not been confirmed. Waiting for a fresh profile read."
+              : enabled
+              ? `Selected limits: ${active.spl} / ${active.spl + active.spptOff} / ${active.spl + active.fpptOff} W · ${acOnline ? "AC connected" : "Battery power"}`
+              : "TDP control off · using system defaults"} />
+        </PanelSectionRow>
+      </PanelSection>
       <PanelSection title="LeGoTDP">
         <PanelSectionRow>
           <ToggleField

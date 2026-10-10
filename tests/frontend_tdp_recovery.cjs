@@ -323,6 +323,20 @@ async function test(name, fn) { await fn(); tests++; console.log(`TDP recovery: 
     assert.equal(cpu(view).props.acProfile, false); assert.equal(count(h, 'apply_tdp'), 0);
     assert.equal(count(h, 'set_game_ac_profile'), 0); h.unmount();
   });
+  await test('profile overview never presents draft limits before profile confirmation', async () => {
+    const h = mount({ game: 111 }); h.defer('get_game_profile'); await ready(h);
+    const overview = () => find(h.render(), n => n.type === 'PanelSection' && n.props?.title === 'Profile overview');
+    const description = () => find(overview(), n => n.type === 'Field').props.description;
+    assert.match(description(), /not been confirmed/);
+    assert.doesNotMatch(description(), /Selected limits/);
+    h.resolve(h.pending('get_game_profile'), profile(13)); await settle();
+    assert.match(description(), /Selected limits: 13 \/ 16 \/ 21 W/);
+    h.defer('get_game_profile'); await h.game(222);
+    assert.match(description(), /not been confirmed/);
+    assert.doesNotMatch(description(), /13 \/ 16 \/ 21/);
+    h.resolve(h.pending('get_game_profile'), profile(22, true)); await settle();
+    assert.match(description(), /Selected limits: 22 \/ 25 \/ 30 W/); h.unmount();
+  });
   await test('late profile metadata cannot revive an earlier visit to the same app or an unmounted page', async () => {
     const h = mount({ game: 111 }); h.defer('get_game_profile'); await ready(h);
     const old = h.pending('get_game_profile'); await h.game(222); await h.game(111);

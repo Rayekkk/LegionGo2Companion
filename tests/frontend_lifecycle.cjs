@@ -113,7 +113,8 @@ function findButton(node,text){
  await simple.setGame(null);simple.startWatcher();simple.render();await settle();
  simple.render();await settle();
  let simplePage=simple.render();
- const sections=simplePage.props.children[1].props.children;
+ const sections=simplePage.props.children.find(child => Array.isArray(child?.props?.children)
+   && child.props.children.some(section => section?.props?.title === 'Game Profile')).props.children;
  assert.equal(sections[0].props.title,'Game Profile');
  assert.equal(sections[1].type.name,'LivePanel');
  assert.equal(sections[2].props.title,'Preset');
@@ -168,6 +169,7 @@ function findButton(node,text){
  driver.render();await settle();driver.callbacks.device({found:true,paths:['new-device']});
  finishModes({mode:['fps']});await settle();seeded=driver.render();await settle();
  assert.equal(count(driver,'vibe_get_driver_status'),1);
+ findButton(seeded,'Show driver details').props.onClick();seeded=driver.render();
  assert.ok(JSON.stringify(seeded).includes('new-device'),'New device event survives slow init.');driver.unmount();
  // Readiness retries cannot outlive either page, even when a cancelled timer
  // callback was already queued by the browser before cleanup ran.

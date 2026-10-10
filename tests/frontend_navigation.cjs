@@ -37,7 +37,8 @@ const hooks = {
 };
 const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
 const mod = { exports: {} };
-const source = fs.readFileSync(path.join(root, 'src/index.tsx'), 'utf8') + '\nexport { Controls as TestedContent };';
+const source = fs.readFileSync(path.join(root, 'src/index.tsx'), 'utf8')
+  + '\nexport { Controls as TestedContent, SectionLink as TestedLink, SectionHeader as TestedHeader };';
 const code = ts.transpileModule(source, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX,
 } }).outputText;
@@ -96,7 +97,9 @@ for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyr
     assert.equal(timers.size, 0, 'overview must not poll while a section is open');
   }
   find(render(), n => n.props?.onBack).props.onBack();
-  assert.ok(find(render(), n => n.props?.title === title && n.props?.onClick), 'explicit back works');
+  const returned = find(render(), n => n.props?.title === title && n.props?.onClick);
+  assert.ok(returned, 'explicit back works');
+  assert.equal(returned.props.restoreFocus, true, 'back restores the selected native module row');
   assert.equal(timers.size, 1, 'one overview poller after returning');
 }
 find(render(), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
@@ -115,6 +118,39 @@ for (const title of ['TDP','Vibration','RGB Lighting','Button Remapper','Gyro & 
   assert.ok(!find(disabled, n => n.props?.title === title && n.props?.onClick), `${title} hidden when disabled`);
 }
 for (const title of ['About','Manage Modules']) assert.ok(find(disabled, n => n.props?.title === title && n.props?.onClick));
+assert.equal(find(disabled, n => n.props?.title === 'Manage Modules' && n.props?.onClick).props.restoreFocus,
+  true, 'a module withdrawn while open restores focus to module management');
 visible = false; render(); assert.equal(timers.size, 0, 'hidden overview stops polling');
+// Exercise native ref focus handoffs separately from the Controls hook instance.
+for (const effect of effects.values()) effect.cleanup?.();
+effects.clear(); slots.length = 0; pending.length = 0;
+visible = true;
+let focusCalls = 0, activations = 0;
+const nativeRender = (component, props, refNode) => {
+  cursor = 0;
+  const tree = component(props);
+  const refElement = find(tree, n => n.props?.ref);
+  refElement.props.ref.current = refNode;
+  pending.splice(0).forEach(fn => fn());
+  return tree;
+};
+const linkProps = {section:'battery',title:'Battery',description:'Protection off · L 87% · R 64%',
+  restoreFocus:true,onClick:()=>activations++};
+const nativeRow = nativeRender(mod.exports.TestedLink, linkProps, {focus:()=>focusCalls++});
+assert.equal(focusCalls, 1);
+const nativeField = find(nativeRow, n => n.type === 'Field');
+nativeField.props.onActivate(); assert.equal(activations, 1, 'native activation keeps the module action');
+nativeRender(mod.exports.TestedLink, {...linkProps,description:'Protection off · L 42% · R 37%'}, {focus:()=>focusCalls++});
+visible = false; nativeRender(mod.exports.TestedLink,linkProps,{focus:()=>focusCalls++});
+visible = true; nativeRender(mod.exports.TestedLink,linkProps,{focus:()=>focusCalls++});
+assert.equal(focusCalls, 1, 'polls and dropdown visibility do not steal native focus');
+effects.clear(); slots.length = 0; pending.length = 0;
+const backHost = {querySelector:()=>({focus:()=>focusCalls++})};
+nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+assert.equal(focusCalls, 2, 'page entry focuses its native Back control');
+nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+visible = false; nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+visible = true; nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+assert.equal(focusCalls, 2, 'reopening QAM does not overwrite a page or dropdown selection');
 console.log('Ten sections retain navigation; disabled modules are hidden; About has author and unversioned modules.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

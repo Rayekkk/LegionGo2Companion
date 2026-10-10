@@ -295,21 +295,57 @@ const PageShell: FC<{ children: ReactNode }> = ({ children }) => (
 );
 
 const Chevron: FC = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"
+  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"
     style={{ display: "block", width: "1em", height: "1em", flexShrink: 0 }}>
     <path d="m9 18 6-6-6-6" />
   </svg>
 );
 
+// Field supplies Steam's label, spacing, focus highlight and activation. The
+// decorative icons inherit that same color, including its focused appearance.
+const sectionIconPaths: Record<SectionKey, ReactNode> = {
+  tdp: <path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z" />,
+  vibration: <><rect x="7" y="5" width="10" height="14" rx="2" /><path d="m3 7-1 3 1 4-1 3m19-10 1 3-1 4 1 3" /></>,
+  rgb: <><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-3.7 2 2 0 0 1 1-3.3h2a4 4 0 0 0 4-4c0-4-4-7-9-7Z" /><circle cx="7" cy="10" r=".8" /><circle cx="10" cy="7" r=".8" /><circle cx="15" cy="7" r=".8" /></>,
+  remap: <><path d="M7 7h10a4 4 0 0 1 4 4l-1 7-5-3H9l-5 3-1-7a4 4 0 0 1 4-4Z" /><path d="M6 11h4m-2-2v4m7-2h.01m3 2h.01" /></>,
+  controller: <><path d="M12 3v18M3 12h18m-9-9-3 3m3-3 3 3m6 6-3-3m3 3-3 3m-6 6-3-3m3 3 3-3M3 12l3-3m-3 3 3 3" /></>,
+  battery: <><rect x="3" y="6" width="17" height="12" rx="2" /><path d="M22 10v4m-9-6-4 5h5l-3 4" /></>,
+  display: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8m-4-4v4" /></>,
+  wifi: <><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0m-11 4a6 6 0 0 1 8 0" /><circle cx="12" cy="20" r=".8" /></>,
+  modules: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+  about: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10h.01" /></>,
+};
+const SectionIcon: FC<{ section: SectionKey }> = ({ section }) => (
+  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
+    style={{ display: "block", width: "1.2em", height: "1.2em", flexShrink: 0 }}>
+    {sectionIconPaths[section]}
+  </svg>
+);
+
 const SectionLink: FC<{
+  section: SectionKey;
   title: string;
   description: string;
   statusNote?: string;
+  restoreFocus?: boolean;
   onClick: () => void;
-}> = ({ title, description, statusNote, onClick }) => (
+}> = ({ section, title, description, statusNote, restoreFocus, onClick }) => {
+  const fieldRef = useRef<HTMLDivElement>(null);
+  const visible = useQuickAccessVisible();
+  useEffect(() => {
+    if (restoreFocus && visible) fieldRef.current?.focus();
+    // Returning to the list restores its selection once. QAM/dropdown visibility
+    // and status polling must not move the user's current Steam focus.
+  }, [restoreFocus]);
+  return (
   <PanelSectionRow>
     <Field
+      ref={fieldRef}
       label={title}
+      icon={<SectionIcon section={section} />}
+      bottomSeparator="standard"
+      verticalAlignment="center"
       description={statusNote ? <>{description}<div style={{ fontSize: "11px", opacity: 0.7, marginTop: "2px" }}>{statusNote}</div></> : description}
       childrenLayout="inline"
       childrenContainerWidth="min"
@@ -320,15 +356,22 @@ const SectionLink: FC<{
       <Chevron />
     </Field>
   </PanelSectionRow>
-);
+  );
+};
 
-const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBack }) => (
-  <PanelSection title={title}>
+const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBack }) => {
+  const backRef = useRef<HTMLDivElement>(null);
+  const visible = useQuickAccessVisible();
+  useEffect(() => {
+    if (visible) backRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    // One focus handoff on page entry, never on a poll or dropdown dismissal.
+  }, []);
+  return <PanelSection title={title}>
     <PanelSectionRow>
-      <ButtonItem layout="below" onClick={onBack}>‹ All Controls</ButtonItem>
+      <div ref={backRef}><ButtonItem layout="below" onClick={onBack}>‹ All Controls</ButtonItem></div>
     </PanelSectionRow>
-  </PanelSection>
-);
+  </PanelSection>;
+};
 
 const watts = (value?: number) => value == null ? "–" : String(Math.round(value / 1000));
 
@@ -419,6 +462,14 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
   const visible = useQuickAccessVisible();
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
   const [overview, setOverview] = useState<Overview>(overviewCache);
+  const lastOpenedSection = useRef<SectionKey | null>(null);
+  const openSection = (section: SectionKey) => {
+    lastOpenedSection.current = section;
+    setActiveSection(section);
+  };
+  const focusSection = lastOpenedSection.current && lastOpenedSection.current in moduleLabels
+    && !moduleEnabled(modules, lastOpenedSection.current as ModuleKey)
+    ? "modules" : lastOpenedSection.current;
   useEffect(() => {
     // An already-running read may finish while QAM is hidden. Keep the mounted
     // view in sync with its cache without starting further hardware reads.
@@ -459,14 +510,14 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
 
   if (!activeSection) return <PageShell>
     <PanelSection title="Hardware Controls">
-      {moduleEnabled(modules, "tdp") && <SectionLink title="TDP" {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => setActiveSection("tdp")} />}
-      {moduleEnabled(modules, "vibration") && <SectionLink title="Vibration" {...summary("vibration", vibrationSummary(overview))} onClick={() => setActiveSection("vibration")} />}
-      {moduleEnabled(modules, "rgb") && <SectionLink title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => setActiveSection("rgb")} />}
-      {moduleEnabled(modules, "remap") && <SectionLink title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => setActiveSection("remap")} />}
-      {moduleEnabled(modules, "controller") && <SectionLink title="Gyro & Touchpad" {...summary("controller", controllerSummary(overview.controller))} onClick={() => setActiveSection("controller")} />}
-      {moduleEnabled(modules, "battery") && <SectionLink title="Battery" {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => setActiveSection("battery")} />}
-      {moduleEnabled(modules, "display") && <SectionLink title="OLED Display" {...summary("display", displaySummary(overview.display))} onClick={() => setActiveSection("display")} />}
-      {moduleEnabled(modules, "wifi") && <SectionLink title="WiFi" {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => setActiveSection("wifi")} />}
+      {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title="TDP" {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}
+      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title="Vibration" {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}
+      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}
+      {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}
+      {moduleEnabled(modules, "controller") && <SectionLink section="controller" restoreFocus={focusSection === "controller"} title="Gyro & Touchpad" {...summary("controller", controllerSummary(overview.controller))} onClick={() => openSection("controller")} />}
+      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title="Battery" {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}
+      {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title="OLED Display" {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}
+      {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title="WiFi" {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}
     </PanelSection>
     <PanelSection title="Device">
       <PanelSectionRow>
@@ -474,11 +525,12 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
       </PanelSectionRow>
     </PanelSection>
     <PanelSection title="Plugin">
-      <SectionLink title="Manage Modules" description="Enable, disable and hide individual hardware modules" onClick={() => setActiveSection("modules")} />
+      <SectionLink section="modules" restoreFocus={focusSection === "modules"} title="Manage Modules" description="Enable, disable and hide individual hardware modules" onClick={() => openSection("modules")} />
       <SectionLink
+        section="about" restoreFocus={focusSection === "about"}
         title="About"
         description={`Legion Go 2 Companion · v${overview.version}`}
-        onClick={() => setActiveSection("about")}
+        onClick={() => openSection("about")}
       />
     </PanelSection>
   </PageShell>;

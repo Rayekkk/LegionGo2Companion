@@ -424,16 +424,13 @@ export const RgbPage: FC = () => {
       {settings.control_enabled && settings.rings_enabled && (
         <PanelSection title="Primary Zone">
           <PanelSectionRow>
-            <Field focusable label="Selected color" description={usesColor ? "Used by Solid and Breathing effects." : "This hardware effect cycles its own colors."}>
-              <span style={{
-                display: "block",
-                width: "2.4em",
-                height: "2.4em",
-                borderRadius: "50%",
-                background: hsvCss(settings.hue, settings.saturation, settings.brightness),
-                border: "2px solid rgba(255,255,255,.65)",
-                boxShadow: `0 0 12px ${hsvCss(settings.hue, settings.saturation, settings.brightness)}`,
-              }} />
+            <Field focusable label="Selected color" description={usesColor ? "Preview for both controller rings. Used by Solid and Breathing effects." : "This hardware effect cycles its own colors."}>
+              <span aria-label="Selected joystick ring color preview" style={{ display: "flex", gap: "12px" }}>
+                {["Left", "Right"].map(side => <span key={side} role="img" aria-label={`${side} joystick ring preview`}
+                  style={{ display: "block", width: "1.8em", height: "1.8em", borderRadius: "50%",
+                    border: `3px solid ${hsvCss(settings.hue, settings.saturation, settings.brightness)}`,
+                    opacity: settings.control_enabled && settings.rings_enabled ? 1 : 0.35 }} />)}
+              </span>
             </Field>
           </PanelSectionRow>
           {usesColor && (

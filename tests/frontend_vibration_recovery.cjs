@@ -341,5 +341,38 @@ async function ready(h) { h.render(); await settle(); return h.render(); }
   unknownSwitch.responses.vibe_get_settings = settings('111', 2, true);
   button(tree, 'Retry settings').props.onClick(); unknownSwitch.render(); await settle(); tree = unknownSwitch.render();
   assert.equal(find(tree, 'Per Game Profile').props.checked, true); unknownSwitch.unmount();
+  // Presentation must retain native stepped controls and real driver details
+  // without issuing hardware mutations when a diagnostic disclosure is opened.
+  const endpointPaths = [
+    '/sys/devices/pci0000:00/0000:00:08.3/0000:c4:00.0/usb3/3-1/3-1:1.2/0003:17EF:61EB.0002',
+    '/sys/devices/pci0000:00/0000:00:08.3/0000:c4:00.0/usb3/3-2/3-2:1.2/0003:17EF:61EB.0003',
+  ];
+  const presentation = mount({ vibe_get_driver_status: { found: true,
+    paths: endpointPaths, method: 'pyudev', ids: '17ef:61eb' } });
+  tree = await ready(presentation);
+  for (const label of ['Intensity', 'Mode', 'Touchpad intensity']) {
+    const slider = find(tree, label);
+    assert.equal(slider.type, 'SliderField'); assert.equal(slider.props.step, 1);
+    assert.ok(slider.props.description, `${label} retains its current value label`);
+  }
+  assert.equal(find(tree, 'Controller endpoints'), undefined);
+  const beforeDetails = presentation.calls.length;
+  button(tree, 'Show driver details').props.onClick(); tree = presentation.render();
+  const endpoints = find(tree, 'Controller endpoints');
+  assert.equal(endpoints.type, 'Field', 'Endpoint details keep native focus and scrolling');
+  const endpointText = endpoints.props.description;
+  assert.equal(typeof endpointText === 'string' ? endpointText : endpointText.props?.children,
+    endpointPaths.join(' · '), 'Both long endpoint paths remain complete');
+  assert.equal(endpointText.props?.style?.overflowWrap, 'anywhere',
+    'Unbroken sysfs segments must wrap within the native description width');
+  assert.equal(endpointText.props.style.display, 'block');
+  assert.equal(endpointText.props.style.maxWidth, '100%');
+  assert.equal(presentation.calls.length, beforeDetails, 'Presentation disclosure never touches hardware');
+  presentation.hide(); presentation.show(); await settle(); tree = presentation.render();
+  assert.ok(find(tree, 'Controller endpoints'), 'QAM visibility does not reset disclosure/navigation');
+  button(tree, 'Hide driver details').props.onClick(); tree = presentation.render();
+  assert.equal(find(tree, 'Controller endpoints'), undefined);
+  assert.ok(find(tree, 'Intensity')); assert.ok(button(tree, 'Test Vibration (0.5s)'));
+  presentation.unmount();
   console.log('Vibration recovery: serialized mutations, scoped late replies, retries, stable drafts, save-on-close and failed profile transitions pass.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
