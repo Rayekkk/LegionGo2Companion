@@ -140,10 +140,21 @@ export const DisplayPage: FC = () => {
   const refreshAfterRead = useRef(false);
   const readRevision = useRef(0);
   const latestState = useRef<State | null>(null);
+  const statusTrusted = useRef(false);
+  const visitRevision = useRef(0);
+  if (isVisible.current !== visible) {
+    statusTrusted.current = false;
+    visitRevision.current += 1;
+  }
   const acceptState = useCallback((next: State) => {
     latestState.current = next;
+    statusTrusted.current = isVisible.current;
+    setStatusError("");
     setState(next);
   }, []);
+  const acceptWriteState = useCallback((next: State, visit: number) => {
+    if (mounted.current && visit === visitRevision.current) acceptState(next);
+  }, [acceptState]);
   isVisible.current = visible;
   useEffect(() => { mounted.current = true; return () => {
     mounted.current = false; readRevision.current += 1;
@@ -160,8 +171,10 @@ export const DisplayPage: FC = () => {
         setStatusError("");
       }
     } catch {
-      if (mounted.current && isVisible.current && revision === readRevision.current)
+      if (mounted.current && isVisible.current && revision === readRevision.current) {
+        statusTrusted.current = false;
         setStatusError("Display status is unavailable. Retrying while this page is open.");
+      }
     } finally {
       readInFlight.current = false;
       if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
@@ -179,96 +192,120 @@ export const DisplayPage: FC = () => {
   }, [visible, refresh]);
 
   const beginWrite = () => {
-    if (!mounted.current || writing.current) return false;
+    if (!mounted.current || !isVisible.current || !statusTrusted.current || writing.current) return false;
     writing.current = true; readRevision.current += 1; setBusy(true);
     return true;
   };
   const finishWrite = () => {
     writing.current = false;
     if (mounted.current) setBusy(false);
+    if (!statusTrusted.current) {
+      if (readInFlight.current) refreshAfterRead.current = true;
+      else void refresh();
+    }
+  };
+  const failedWrite = () => {
+    statusTrusted.current = false;
+    if (mounted.current) setStatusError("Display status is unavailable. Confirming the result of the previous change.");
   };
 
   const toggle = useCallback(
     async (fn: (v: boolean) => Promise<State>, key: keyof State, value: boolean) => {
       if (key === "enabled" && nativeFixBlocked(latestState.current)) return;
       if (!beginWrite()) return;
+      const visit = visitRevision.current;
       if (latestState.current) acceptState({ ...latestState.current, [key]: value });
       let failed = false;
       try {
         const next = await fn(value);
-        if (mounted.current) acceptState(next);
+        acceptWriteState(next, visit);
       } catch {
         failed = true;
+        failedWrite();
       } finally {
         finishWrite();
         if (failed) void refresh();
       }
     },
-    [acceptState, refresh],
+    [acceptState, acceptWriteState, refresh],
   );
 
   const setup = useCallback(async (mode: PanelMode) => {
     if (nativeFixBlocked(latestState.current)) return;
     if (!beginWrite()) return;
+    const visit = visitRevision.current;
+    let failed = false;
     try {
       const next = await runSetup(mode);
-      if (mounted.current) acceptState(next);
+      acceptWriteState(next, visit);
       if (next.setup_error) notify("Setup failed", next.setup_error);
     } catch (e) {
+      failed = true;
+      failedWrite();
       notify("Setup failed", e instanceof Error ? e.message : String(e));
     } finally {
       finishWrite();
+      if (failed) void refresh();
     }
-  }, [acceptState]);
+  }, [acceptWriteState, refresh]);
 
   const changeMode = useCallback(async (mode: PanelMode) => {
     if (nativeFixBlocked(latestState.current)) return;
     if (!beginWrite()) return;
+    const visit = visitRevision.current;
+    let failed = false;
     try {
       const next = await setPanelMode(mode);
-      if (mounted.current) acceptState(next);
+      acceptWriteState(next, visit);
       if (next.setup_error) notify("Could not change mode", next.setup_error);
     } catch (e) {
+      failed = true;
+      failedWrite();
       notify("Could not change mode", e instanceof Error ? e.message : String(e));
     } finally {
       finishWrite();
+      if (failed) void refresh();
     }
-  }, [acceptState]);
+  }, [acceptWriteState, refresh]);
 
   const restart = useCallback(async () => {
     if (!beginWrite()) return;
+    const visit = visitRevision.current;
     try {
       // If this returns at all, the session did not go down - so surface
       // whatever the backend reported instead of leaving a dead button.
       const next = await restartSession();
-      if (mounted.current) acceptState(next);
+      acceptWriteState(next, visit);
     } catch {
+      failedWrite();
       /* the session going down mid-call is the expected outcome */
     } finally {
       finishWrite();
     }
-  }, [acceptState]);
+  }, [acceptWriteState]);
 
   const reset = useCallback(async () => {
     if (nativeFixBlocked(latestState.current)) return;
     if (!beginWrite()) return;
+    const visit = visitRevision.current;
     let failed = false;
     try {
       const next = await resetDisplaySettings();
       if (mounted.current) {
-        acceptState(next);
-        if (!next.reset_error) {
+        acceptWriteState(next, visit);
+        if (!next.reset_error && visit === visitRevision.current) {
           setShowOthers(false); setShowSwitch(false); setShowReset(false);
         }
       }
       if (next.reset_error) notify("Reset incomplete", next.reset_error);
     } catch (error) {
       failed = true;
+      failedWrite();
       notify("Reset incomplete", error instanceof Error ? error.message : String(error));
     } finally { finishWrite(); if (failed) void refresh(); }
-  }, [acceptState, refresh]);
+  }, [acceptWriteState, refresh]);
 
-  if (!state) {
+  if (!state || !statusTrusted.current) {
     return (
       <PanelSection>
         <PanelSectionRow>

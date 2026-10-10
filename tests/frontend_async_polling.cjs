@@ -418,6 +418,45 @@ const cases = [
       'Retry RGB Lighting Start'), undefined);
     h.unmount();
   }
+  {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', display); await settle();
+    const retained = find(findPanel(h.render(), 'EDID for games'), 'Enabled').props.onChange;
+    h.fire(); h.reject('display_get_state'); await settle();
+    const failed = h.render();
+    assert.ok(find(failed, 'Display status unavailable'), 'A failed poll cannot present a saved display snapshot as current.');
+    retained(false); await settle();
+    assert.equal(h.calls.some(c => c.name === 'display_set_edid_fix'), false, 'Retained controls cannot write after a failed read.');
+    findButton(failed, 'Retry status').props.onClick();
+    h.respond('display_get_state', display); await settle();
+    assert.ok(findPanel(h.render(), 'EDID for games'), 'A fresh read restores controls.');
+    h.unmount();
+  }
+  {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', display); await settle();
+    const retained = find(findPanel(h.render(), 'EDID for games'), 'Enabled').props.onChange;
+    h.visible(false); retained(false); await settle();
+    assert.equal(h.calls.some(c => c.name === 'display_set_edid_fix'), false, 'A hidden display page does not accept a stale toggle.');
+    h.visible(true); retained(false); await settle();
+    assert.equal(h.calls.some(c => c.name === 'display_set_edid_fix'), false, 'Reopening must confirm current display ownership first.');
+    h.respond('display_get_state', display); await settle();
+    retained(false); await settle();
+    assert.equal(h.calls.filter(c => c.name === 'display_set_edid_fix').length, 1);
+    h.respond('display_set_edid_fix', { ...display, edid_fix: false }); await settle(); h.unmount();
+  }
+  {
+    const h = harness('display.tsx', 'DisplayPage'); h.render();
+    h.respond('display_get_state', display); await settle();
+    const retained = find(findPanel(h.render(), 'EDID for games'), 'Enabled').props.onChange;
+    retained(false); await settle(); h.visible(false); h.visible(true);
+    h.respond('display_set_edid_fix', { ...display, edid_fix: false }); await settle();
+    assert.equal(findPanel(h.render(), 'EDID for games'), undefined, 'A previous visit write result cannot establish current ownership after reopening.');
+    retained(true); await settle();
+    assert.equal(h.calls.filter(c => c.name === 'display_set_edid_fix').length, 1);
+    h.respond('display_get_state', { ...display, edid_fix: false }); await settle();
+    assert.ok(findPanel(h.render(), 'EDID for games')); h.unmount();
+  }
   for (const [file, component, read, value] of cases) {
     const h = harness(file, component);
     h.render(); h.reject(read); await settle();
