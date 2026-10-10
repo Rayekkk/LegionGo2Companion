@@ -114,7 +114,7 @@ const rgb = { success: true, settings: { configured: true, control_enabled: true
   hue: 255, saturation: 100, brightness: 50, speed: 50 }, rgb: { supported: true, effects: [] }, power_led: { supported: false } };
 const remap = { supported: true, enabled: true, desktop_action: 'f1', page_action: 'f2', actions: [{ id: 'f1', label: 'F1' }, { id: 'f3', label: 'F3' }] };
 const display = { panel_mode: 'pq', active_mode: 'pq', setup_done: true, panel_ok: true, enabled: true, edid_fix: true };
-const wifi = { success: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_policy: 'five_six_no_24', band_preference_enabled: true }, live: {} };
+const wifi = { success: true, connected: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_policy: 'five_six_no_24', band_preference_enabled: true }, live: {wifi_backend:'iwd', connection_state:'connected', connection_uuid:'fixture-profile', ssid:'Target', frequency:'5260'} };
 const cases = [
   ['display.tsx', 'DisplayPage', 'display_get_state', display],
   ['rgb.tsx', 'RgbPage', 'rgb_get_status', rgb],
@@ -594,6 +594,21 @@ const cases = [
   network.respond('wifi_get_status', { ...wifi, settings: { ...wifi.settings, band_policy: 'off', band_preference_enabled: false } }); await settle();
   assert.ok(findButton(network.render(), '> Automatic WiFi')); network.unmount();
 
+  const manualWpa = harness('wifi.tsx', 'WifiPage'); manualWpa.render();
+  const automaticWpa = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'off', band_preference_enabled: false },
+    live: { wifi_backend: 'wpa_supplicant', frequency: '5260' } };
+  manualWpa.respond('wifi_get_status', automaticWpa); await settle();
+  assert.equal(findButton(manualWpa.render(), 'Prefer 5/6 GHz (2.4 GHz fallback)'), undefined);
+  assert.equal(findButton(manualWpa.render(), 'Use Only 5/6 GHz'), undefined);
+  assert.equal(findButton(manualWpa.render(), 'Rescan and reconnect to 5/6 GHz').props.disabled, false);
+  findButton(manualWpa.render(), 'Connect to 6 GHz once').props.onClick(); await settle();
+  assert.deepEqual(manualWpa.calls.find(c => c.name === 'wifi_rescan_and_reconnect').args, ['six']);
+  assert.equal(findButton(manualWpa.render(), 'Connect to 6 GHz once').props.disabled, true);
+  manualWpa.respond('wifi_rescan_and_reconnect', { success: true, frequency: 6295, message: 'Connected; temporary selection cleared' }); await settle();
+  manualWpa.respond('wifi_get_status', { ...automaticWpa, live: { ...automaticWpa.live, frequency: '6295' } }); await settle();
+  assert.ok(findButton(manualWpa.render(), '> Automatic WiFi'), 'one-time connection keeps the automatic policy');
+  manualWpa.unmount();
+
   const strictWifi = harness('wifi.tsx', 'WifiPage'); strictWifi.render();
   strictWifi.respond('wifi_get_status', wifi); await settle();
   findButton(strictWifi.render(), 'Use Only 5/6 GHz').props.onClick();
@@ -608,12 +623,18 @@ const cases = [
 
   const oldPolicy = harness('wifi.tsx', 'WifiPage'); oldPolicy.render();
   const six = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'six_ghz_only', band_preference_enabled: false },
-    live: { frequency: 5975 } };
+    live: { ...wifi.live, wifi_backend: 'wpa_supplicant', frequency: 5975 } };
   oldPolicy.respond('wifi_get_status', six); await settle();
   assert.ok(find(oldPolicy.render(), 'Existing 6 GHz only policy'));
   assert.match(oldPolicy.moduleExports.wifiSummary(six), /^6 GHz only/);
   assert.ok(findButton(oldPolicy.render(), 'Use Automatic WiFi'));
   oldPolicy.unmount();
+  const inactiveSix=harness('wifi.tsx','WifiPage');inactiveSix.render();
+  const sixOnIwd={...six,live:{...six.live,wifi_backend:'iwd'}};
+  inactiveSix.respond('wifi_get_status',sixOnIwd);await settle();
+  assert.match(inactiveSix.moduleExports.wifiSummary(sixOnIwd),/^Automatic WiFi.*6 GHz setting inactive/);
+  assert.match(find(inactiveSix.render(),'Existing 6 GHz only policy').props.description,/inactive with iwd/);
+  inactiveSix.unmount();
 
   const legacyWifi = harness('wifi.tsx', 'WifiPage'); legacyWifi.render();
   const legacy = { ...wifi, settings: { ...wifi.settings, band_policy: 'off',
@@ -637,6 +658,99 @@ const cases = [
   assert.ok(find(preflightWifi.render(), 'Could not complete'));
   assert.ok(findButton(preflightWifi.render(), '> Prefer 5/6 GHz (2.4 GHz fallback)'));
   preflightWifi.unmount();
+
+  // Native SteamOS switches and failed polls invalidate cached action callbacks.
+  const switched = harness('wifi.tsx', 'WifiPage'); switched.render();
+  const automaticIwd = {...wifi,settings:{...wifi.settings,band_policy:'off',band_preference_enabled:false}};
+  switched.respond('wifi_get_status', automaticIwd); await settle();
+  const stalePrefer = findButton(switched.render(), 'Prefer 5/6 GHz (2.4 GHz fallback)');
+  const staleStrict = findButton(switched.render(), 'Use Only 5/6 GHz');
+  switched.fire(); switched.respond('wifi_get_status', automaticWpa); await settle();
+  stalePrefer.props.onClick(); staleStrict.props.onClick(); await settle();
+  assert.equal(switched.calls.filter(c=>c.name==='wifi_set_band_policy').length,0);
+  assert.equal(findButton(switched.render(),'Confirm Only 5/6 GHz'),undefined);
+  assert.equal(findButton(switched.render(),'Prefer 5/6 GHz (2.4 GHz fallback)'),undefined);
+  const retainedReconnect = findButton(switched.render(),'Connect to 6 GHz once');
+  switched.fire(); switched.reject('wifi_get_status'); await settle();
+  retainedReconnect.props.onClick(); await settle();
+  assert.equal(switched.calls.filter(c=>c.name==='wifi_rescan_and_reconnect').length,0);
+  assert.ok(find(switched.render(),'WiFi status unavailable'));
+  assert.equal(find(switched.render(),'Result'),undefined);
+  switched.unmount();
+
+  const reopen=harness('wifi.tsx','WifiPage');reopen.render();
+  reopen.respond('wifi_get_status',automaticIwd);await settle();
+  const beforeHide=findButton(reopen.render(),'Prefer 5/6 GHz (2.4 GHz fallback)');
+  reopen.visible(false);reopen.visible(true);beforeHide.props.onClick();await settle();
+  assert.equal(reopen.calls.filter(c=>c.name==='wifi_set_band_policy').length,0,'reopened QAM waits for a fresh backend');
+  assert.equal(findButton(reopen.render(),'Prefer 5/6 GHz (2.4 GHz fallback)'),undefined);
+  reopen.respond('wifi_get_status',automaticWpa);await settle();
+  assert.ok(findButton(reopen.render(),'Connect to 6 GHz once'));
+  reopen.unmount();
+
+  const hiddenSuccess=harness('wifi.tsx','WifiPage');hiddenSuccess.render();
+  hiddenSuccess.respond('wifi_get_status',wifi);await settle();
+  findButton(hiddenSuccess.render(),'Use Automatic WiFi').props.onClick();await settle();
+  hiddenSuccess.visible(false);hiddenSuccess.respond('wifi_set_band_policy',{success:true,message:'Saved while hidden'});await settle();
+  hiddenSuccess.visible(true);hiddenSuccess.respond('wifi_get_status',automaticWpa);await settle();
+  assert.equal(find(hiddenSuccess.render(),'Could not complete'),undefined,'a hidden operation does not invent a stale verification failure');
+  assert.equal(find(hiddenSuccess.render(),'Result'),undefined);
+  hiddenSuccess.unmount();
+
+  for (const state of ['unknown','connecting','disconnected']) {
+    const h=harness('wifi.tsx','WifiPage');h.render();
+    const next={...automaticWpa,connected:false,live:{...automaticWpa.live,connection_state:state}};
+    h.respond('wifi_get_status',next);await settle();
+    assert.equal(findButton(h.render(),'Connect to 6 GHz once').props.disabled,true);
+    findButton(h.render(),'Connect to 6 GHz once').props.onClick();await settle();
+    assert.equal(h.calls.filter(c=>c.name!=='wifi_get_status').length,0);
+    h.unmount();
+  }
+  const unknownBackend=harness('wifi.tsx','WifiPage');unknownBackend.render();
+  unknownBackend.respond('wifi_get_status',{...wifi,live:{...wifi.live,wifi_backend:''}});await settle();
+  assert.ok(find(unknownBackend.render(),'Backend unavailable'));
+  assert.equal(findButton(unknownBackend.render(),'Use Automatic WiFi'),undefined);
+  assert.equal(findButton(unknownBackend.render(),'Use Only 5/6 GHz'),undefined);
+  assert.match(unknownBackend.moduleExports.wifiSummary(undefined),/unavailable/);
+  unknownBackend.unmount();
+
+  const cleanup=harness('wifi.tsx','WifiPage');cleanup.render();
+  const staleWpa={...wifi,live:{...wifi.live,wifi_backend:'wpa_supplicant',recovery_required:true,band_policy_restore_available:true}};
+  cleanup.respond('wifi_get_status',staleWpa);await settle();
+  assert.ok(find(cleanup.render(),'Saved iwd setting inactive'));
+  assert.match(cleanup.moduleExports.wifiSummary(staleWpa),/^Automatic WiFi.*inactive/);
+  assert.equal(findButton(cleanup.render(),'Clear saved iwd preference').props.disabled,false);
+  const clear=findButton(cleanup.render(),'Clear saved iwd preference');clear.props.onClick();clear.props.onClick();await settle();
+  assert.equal(cleanup.calls.filter(c=>c.name==='wifi_set_band_policy').length,1);
+  assert.ok(find(cleanup.render(),'Checking WiFi connection'));
+  cleanup.respond('wifi_set_band_policy',{success:true,message:'Cleared'});await settle();
+  assert.equal(find(cleanup.render(),'Result'),undefined,'success waits for the actual final state');
+  cleanup.respond('wifi_get_status',{...automaticWpa,live:{...wifi.live,wifi_backend:'wpa_supplicant',ssid:' spaced network '}});await settle();
+  assert.ok(find(cleanup.render(),' spaced network '));
+  assert.ok(find(cleanup.render(),'Result'));
+  assert.equal(cleanup.render().props.children[0].props.title,'Current WiFi connection');
+  cleanup.fire();cleanup.respond('wifi_get_status',{...automaticWpa,live:{...wifi.live,wifi_backend:'wpa_supplicant',connection_uuid:'new-user-profile'}});await settle();
+  assert.equal(find(cleanup.render(),'Result'),undefined,'a changed user profile clears old success');
+  cleanup.unmount();
+
+  const mismatched=harness('wifi.tsx','WifiPage');mismatched.render();
+  mismatched.respond('wifi_get_status',wifi);await settle();
+  findButton(mismatched.render(),'Use Automatic WiFi').props.onClick();await settle();
+  mismatched.respond('wifi_set_band_policy',{success:true,message:'Saved'});await settle();
+  mismatched.respond('wifi_get_status',wifi);await settle();
+  assert.equal(find(mismatched.render(),'Result'),undefined);
+  assert.match(find(mismatched.render(),'Could not complete').props.description,/could not be verified/);
+  mismatched.unmount();
+
+  const roamed=harness('wifi.tsx','WifiPage');roamed.render();
+  roamed.respond('wifi_get_status',automaticWpa);await settle();
+  findButton(roamed.render(),'Connect to 6 GHz once').props.onClick();await settle();
+  roamed.respond('wifi_rescan_and_reconnect',{success:true,message:'Connected to 6 GHz'});await settle();
+  roamed.respond('wifi_get_status',{...automaticWpa,live:{...automaticWpa.live,frequency:'6295'}});await settle();
+  assert.ok(find(roamed.render(),'Result'));
+  roamed.fire();roamed.respond('wifi_get_status',automaticWpa);await settle();
+  assert.equal(find(roamed.render(),'Result'),undefined,'roaming clears an obsolete 6 GHz success');
+  roamed.unmount();
 
   for (const file of ['tdp.tsx', 'vibration.tsx']) {
     const h = harness(file, 'AppWatcher'), watcher = h.exported;

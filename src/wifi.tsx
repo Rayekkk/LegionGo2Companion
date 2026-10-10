@@ -21,11 +21,18 @@ interface WifiSettings {
 }
 
 interface WifiLiveStatus {
+  ssid?: string;
+  connection_state?: "connected" | "connecting" | "disconnected" | "unknown";
+  connection_uuid?: string;
+  band_policy?: WifiSettings["band_policy"];
+  saved_policy_inactive?: boolean;
+  band_policy_restore_available?: boolean;
   signal_dbm?: string;
   tx_bitrate?: string;
   frequency?: string;
   channel?: string;
   wifi_backend?: string;
+  high_band_discovery_pending?: boolean;
   band_policy_error?: string;
   recovery_required?: boolean;
   recovery_errors?: string[];
@@ -55,10 +62,9 @@ const setBandPolicy = callable<[
   mode: "off" | "five_six_no_24" | "five_six_only",
   allowUnverifiedScan?: boolean,
 ], WifiResult>("wifi_set_band_policy");
-const rescanAndReconnect = callable<[], WifiResult>(
+const rescanAndReconnect = callable<[targetBand?: "high" | "six"], WifiResult>(
   "wifi_rescan_and_reconnect",
 );
-const resetWifiSettings = callable<[], WifiResult>("wifi_reset_settings");
 
 const bandName = (frequency?: string | number | null) => {
   const value = Number(frequency);
@@ -69,14 +75,45 @@ const bandName = (frequency?: string | number | null) => {
 };
 
 export const wifiSummary = (status?: WifiStatus) => {
-  if (!status?.success || !status.settings) return "5/6 GHz preference";
-  const policy = status.settings.band_policy ??
+  if (!status?.success || !status.settings) return "WiFi status unavailable";
+  const backend = status.live?.wifi_backend;
+  if (backend !== "iwd" && backend !== "wpa_supplicant") return "WiFi backend unavailable";
+  const saved = status.settings.band_policy ??
     (status.settings.band_preference_enabled ? "five_six_no_24" : "off");
+  const inactiveIwd = backend !== "iwd" && (saved === "five_six_no_24" || saved === "five_six_only");
+  const inactiveSix = backend !== "wpa_supplicant" && saved === "six_ghz_only";
+  const inactive = inactiveIwd || inactiveSix;
+  const policy = inactive ? "off" : saved;
   const label = status.settings.band_policy_legacy_detected ? "Legacy 5 GHz setting"
     : policy === "six_ghz_only" ? "6 GHz only"
     : policy === "five_six_only" ? "5/6 GHz only"
     : policy === "five_six_no_24" ? "5/6 GHz preferred" : "Automatic WiFi";
-  return `${label} · ${status.connected ? bandName(status.live?.frequency) : "disconnected"}`;
+  return `${label}${inactive ? ` · saved ${inactiveIwd ? "iwd" : "6 GHz"} setting inactive` : ""} · ${
+    status.connected ? bandName(status.live?.frequency) : status.live?.connection_state ?? "disconnected"}`;
+};
+
+type WifiAction = "off" | "prefer" | "strict" | "high" | "six";
+const savedPolicy = (status: WifiStatus) => status.settings?.band_policy ??
+  (status.settings?.band_preference_enabled ? "five_six_no_24" : "off");
+const connectionIdentity = (status: WifiStatus | null) =>
+  JSON.stringify([status?.live?.wifi_backend, status?.live?.connection_uuid,
+    status?.live?.connection_state ?? status?.connected, status && savedPolicy(status),
+    status?.live?.frequency, status?.live?.ssid]);
+const canRun = (status: WifiStatus | null, action: WifiAction) => {
+  if (!status?.success || status.settings?.device_family !== "legion_go_2" || status.settings.driver !== "mt7921e") return false;
+  const backend = status.live?.wifi_backend;
+  if (backend !== "iwd" && backend !== "wpa_supplicant") return false;
+  if (status.live?.connection_state === "unknown") return false;
+  const policy = savedPolicy(status);
+  const legacy = status.settings.band_policy_legacy_detected === true;
+  if (action === "off") return status.live?.band_policy_restore_available === true ||
+    (!status.live?.recovery_required && (policy !== "off" || legacy));
+  if (legacy || policy === "six_ghz_only" || status.live?.recovery_required || status.live?.band_policy_error) return false;
+  if (action === "prefer") return backend === "iwd" && policy !== "five_six_no_24";
+  if (action === "strict") return backend === "iwd" && status.connected === true && policy !== "five_six_only";
+  return status.connected === true && (action === "six"
+    ? backend === "wpa_supplicant" && policy === "off"
+    : (backend === "iwd" && policy === "five_six_no_24") || (backend === "wpa_supplicant" && policy === "off"));
 };
 
 const resultMessage = (result: WifiResult) =>
@@ -91,6 +128,7 @@ export const WifiPage: FC = () => {
   const mounted = useRef(true);
   const isVisible = useRef(visible);
   const readRevision = useRef(0);
+  const latestStatus = useRef<WifiStatus | null>(null);
   isVisible.current = visible;
   useEffect(() => { mounted.current = true; return () => {
     mounted.current = false; readRevision.current += 1;
@@ -102,19 +140,27 @@ export const WifiPage: FC = () => {
   const [statusError, setStatusError] = useState("");
   const [confirmStrict, setConfirmStrict] = useState(false);
 
-  const refresh = useCallback(async () => {
-    if (!mounted.current || !isVisible.current || inFlight.current || operationInFlight.current) return;
+  const refresh = useCallback(async (verifyOperation = false): Promise<WifiStatus | null> => {
+    if (!mounted.current || !isVisible.current || inFlight.current || (operationInFlight.current && !verifyOperation)) return null;
     const revision = readRevision.current;
     const request = getWifiStatus();
     inFlight.current = request;
     try {
       const next = await request;
-      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
-      setStatus(next);
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return null;
+      if (!next.success || connectionIdentity(next) !== connectionIdentity(latestStatus.current)) {
+        setNotice(""); setConfirmStrict(false);
+      }
+      latestStatus.current = next.success ? next : null;
+      setStatus(next.success ? next : null);
       setStatusError(next.success ? "" : next.message ?? "WiFi status is unavailable.");
+      return next.success ? next : null;
     } catch {
-      if (mounted.current && isVisible.current && revision === readRevision.current)
+      if (mounted.current && isVisible.current && revision === readRevision.current) {
+        latestStatus.current = null; setStatus(null); setNotice(""); setConfirmStrict(false);
         setStatusError("WiFi status is unavailable. Retrying while this page is open.");
+      }
+      return null;
     } finally {
       if (inFlight.current === request) inFlight.current = null;
       if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
@@ -122,33 +168,49 @@ export const WifiPage: FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) {
+      latestStatus.current = null; setStatus(null); setNotice("");
+      setError(""); setStatusError(""); setConfirmStrict(false);
+      return;
+    }
     if (inFlight.current) refreshAfterRead.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), 10000);
-    return () => { clearInterval(timer); readRevision.current += 1; };
+    return () => { clearInterval(timer); readRevision.current += 1; latestStatus.current = null; };
   }, [refresh, visible]);
 
   const run = useCallback(
-    async (operation: () => Promise<WifiResult>) => {
-      if (!mounted.current || !isVisible.current || operationInFlight.current) return;
+    async (action: WifiAction, operation: () => Promise<WifiResult>) => {
+      if (!mounted.current || !isVisible.current || operationInFlight.current || !canRun(latestStatus.current, action)) return;
+      const before = latestStatus.current;
       readRevision.current += 1;
       operationInFlight.current = true;
       setBusy(true);
       setError("");
       setNotice("");
       setConfirmStrict(false);
+      let result: WifiResult | undefined;
       try {
-        const result = await operation();
-        if (!mounted.current) return;
-        if (result.success) setNotice(resultMessage(result));
-        else setError(resultMessage(result));
+        result = await operation();
+        if (!mounted.current || !isVisible.current) return;
+        if (!result.success) setError(resultMessage(result));
       } catch {
-        if (mounted.current) setError("The backend call ended before the result could be verified.");
+        if (mounted.current && isVisible.current) setError("The backend call ended before the result could be verified.");
       } finally {
         await inFlight.current?.catch(() => undefined);
+        const verified = await refresh(true);
+        if (mounted.current && isVisible.current && result?.success) {
+          const policy = verified && savedPolicy(verified);
+          const expected = action === "off" ? "off" : action === "prefer" ? "five_six_no_24" : action === "strict" ? "five_six_only" : null;
+          const unchanged = verified && before?.live?.wifi_backend === verified.live?.wifi_backend &&
+            (!before?.live?.connection_uuid || before.live.connection_uuid === verified.live?.connection_uuid);
+          const frequency = Number(verified?.live?.frequency);
+          const applied = expected ? policy === expected : verified?.connected && frequency >= (action === "six" ? 5925 : 4900);
+          if (unchanged && applied && !verified.live?.recovery_required && !verified.live?.band_policy_error)
+            setNotice(resultMessage(result));
+          else setError("The final connection or setting could not be verified. Check the current WiFi state.");
+        }
         operationInFlight.current = false;
-        await refresh();
         if (mounted.current) setBusy(false);
       }
     },
@@ -175,11 +237,25 @@ export const WifiPage: FC = () => {
   const legacy = settings.band_policy_legacy_detected === true;
   const supported =
     settings.device_family === "legion_go_2" && settings.driver === "mt7921e";
-  const blocked = busy || live.recovery_required === true;
   const frequency = live.frequency;
+  const iwd = live.wifi_backend === "iwd";
+  const wpa = live.wifi_backend === "wpa_supplicant";
+  const inactive = wpa && (preferred || strict);
+  const disabled = (action: WifiAction) => busy || !canRun(status, action);
 
   return (
     <>
+      <PanelSection title="Current WiFi connection">
+        <PanelSectionRow><Field focusable
+          label={busy ? "Checking WiFi connection" : status.connected ? (live.ssid ?? "Connected WiFi") :
+            live.connection_state === "connecting" ? "WiFi connecting" : live.connection_state === "unknown" ? "Connection state unavailable" : "WiFi disconnected"}
+          description={busy ? "Wait for the operation and final connection check." :
+            `${status.connected ? `${bandName(frequency)} · ${frequency ?? "?"} MHz${live.channel ? ` · channel ${live.channel}` : ""}` : "No verified WiFi link"} · ${iwd ? "iwd" : wpa ? "WPA supplicant" : "backend unavailable"}${live.high_band_discovery_pending ? " · searching for 5/6 GHz" : ""}`} />
+        </PanelSectionRow>
+        {(error || statusError || notice) && <PanelSectionRow><Field focusable
+          label={error || statusError ? "Could not complete" : "Result"} description={error || statusError || notice} /></PanelSectionRow>}
+        {live.band_policy_error && <PanelSectionRow><Field focusable label="Setting mismatch" description={live.band_policy_error} /></PanelSectionRow>}
+      </PanelSection>
       {!supported && (
         <PanelSection title="Unsupported WiFi configuration">
           <PanelSectionRow>
@@ -208,29 +284,37 @@ export const WifiPage: FC = () => {
       )}
 
       <PanelSection title="Band preference">
-        <PanelSectionRow><Field focusable label="Choose WiFi band behavior"
-          description="These choices apply system-wide and survive restart and wake. Only 5/6 GHz can leave WiFi disconnected when neither band is available." /></PanelSectionRow>
+        {!iwd && !wpa && <PanelSectionRow><Field focusable label="Backend unavailable"
+          description="WiFi controls become available after the active backend is verified." /></PanelSectionRow>}
+        {wpa && <PanelSectionRow><Field focusable label="Automatic WiFi with manual selection"
+          description="SteamOS manages roaming automatically. You can reconnect once to a detected 5/6 GHz access point." /></PanelSectionRow>}
+        {inactive && <PanelSectionRow><Field focusable label="Saved iwd setting inactive"
+          description="The previous iwd preference is inactive with WPA. Clear the saved setting below; this does not reconnect WPA." /></PanelSectionRow>}
+        {iwd && <PanelSectionRow><Field focusable label="Choose WiFi band behavior"
+          description="These choices survive restart and wake. Prefer 5/6 GHz keeps 2.4 GHz as fallback. Only 5/6 GHz can leave WiFi disconnected when neither band is available." /></PanelSectionRow>}
         {policy === "six_ghz_only" && <PanelSectionRow><Field focusable label="Existing 6 GHz only policy"
-          description="The saved profile is limited to 6 GHz. Choose another behavior below to replace this policy." /></PanelSectionRow>}
+          description={wpa ? "The saved WPA profile is limited to 6 GHz. Choose Automatic WiFi to restore it." :
+            "The saved 6 GHz profile limit is inactive with iwd. Choose Automatic WiFi to clear the owned profile setting."} /></PanelSectionRow>}
         {legacy && <PanelSectionRow><Field focusable label="Legacy band setting detected"
           description="Restore the legacy setting first; then select a new WiFi behavior." /></PanelSectionRow>}
-        <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || (policy === "off" && !legacy)}
-          onClick={() => void run(() => setBandPolicy("off"))}>
-          {legacy ? "Restore legacy band setting" : policy === "off" ? "> Automatic WiFi" : "Use Automatic WiFi"}
-        </ButtonItem></PanelSectionRow>
-        <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy || preferred}
-          onClick={() => void run(() => setBandPolicy("five_six_no_24"))}>
+        {(iwd || wpa) && <PanelSectionRow><ButtonItem layout="below" disabled={disabled("off")}
+          onClick={() => void run("off", () => setBandPolicy("off"))}>
+          {legacy ? "Restore legacy band setting" : inactive ? "Clear saved iwd preference" : policy === "off" ? "> Automatic WiFi" : "Use Automatic WiFi"}
+        </ButtonItem></PanelSectionRow>}
+        {iwd && <>
+        <PanelSectionRow><ButtonItem layout="below" disabled={disabled("prefer")}
+          onClick={() => void run("prefer", () => setBandPolicy("five_six_no_24"))}>
           {preferred ? "> Prefer 5/6 GHz (2.4 GHz fallback)" : "Prefer 5/6 GHz (2.4 GHz fallback)"}
         </ButtonItem></PanelSectionRow>
-        <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy || strict}
-          onClick={() => setConfirmStrict(value => !value)}>
+        <PanelSectionRow><ButtonItem layout="below" disabled={disabled("strict")}
+          onClick={() => { if (!operationInFlight.current && canRun(latestStatus.current, "strict")) setConfirmStrict(value => !value); }}>
           {strict ? "> Only 5/6 GHz" : confirmStrict ? "Cancel Only 5/6 GHz" : "Use Only 5/6 GHz"}
         </ButtonItem></PanelSectionRow>
         {confirmStrict && !strict && <>
           <PanelSectionRow><Field focusable label="Connection attempt"
             description="A scan can miss a 5/6 GHz access point. This briefly restarts WiFi and tries to connect even without a scan result. If no 5/6 GHz link is verified, Companion restores the previous setting automatically." /></PanelSectionRow>
-          <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy}
-            onClick={() => void run(() => setBandPolicy("five_six_only", true))}>
+          <PanelSectionRow><ButtonItem layout="below" disabled={disabled("strict")}
+            onClick={() => void run("strict", () => setBandPolicy("five_six_only", true))}>
             Confirm Only 5/6 GHz
           </ButtonItem></PanelSectionRow>
         </>}
@@ -239,40 +323,24 @@ export const WifiPage: FC = () => {
         {strict && status.connected && bandName(frequency) === "2.4 GHz" &&
           <PanelSectionRow><Field focusable label="Unexpected 2.4 GHz connection"
             description="The live connection does not match Only 5/6 GHz. Check the result and restore WiFi settings if needed." /></PanelSectionRow>}
-        <PanelSectionRow>
+        </>}
+        {((iwd && preferred) || (wpa && policy === "off")) && <PanelSectionRow>
           <ButtonItem
             layout="below"
-            disabled={blocked || !supported || !preferred || !status.connected}
-            onClick={() => void run(rescanAndReconnect)}
+            disabled={disabled("high")}
+            onClick={() => void run("high", rescanAndReconnect)}
           >
             {busy ? "Working..." : "Rescan and reconnect to 5/6 GHz"}
           </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <Field
-            focusable
-            label={status.connected ? bandName(frequency) : "WiFi disconnected"}
-            description={
-              status.connected
-                ? `${frequency ?? "?"} MHz${live.channel ? ` · channel ${live.channel}` : ""}${live.signal_dbm ? ` · ${live.signal_dbm}` : ""}`
-                : "Connect to WiFi before using manual rescan."
-            }
-          />
-        </PanelSectionRow>
-        {live.band_policy_error && (
-          <PanelSectionRow>
-            <Field focusable label="Setting mismatch" description={live.band_policy_error} />
-          </PanelSectionRow>
-        )}
-        {(error || statusError || notice) && (
-          <PanelSectionRow>
-            <Field
-              focusable
-              label={error || statusError ? "Could not complete" : "Result"}
-              description={error || statusError || notice}
-            />
-          </PanelSectionRow>
-        )}
+        </PanelSectionRow>}
+        {policy === "off" && live.wifi_backend === "wpa_supplicant" && <>
+          <PanelSectionRow><Field focusable label="One-time 6 GHz connection"
+            description="Connects to a freshly detected 6 GHz access point, then clears the temporary selection so normal roaming remains available." /></PanelSectionRow>
+          <PanelSectionRow><ButtonItem layout="below" disabled={disabled("six")}
+            onClick={() => void run("six", () => rescanAndReconnect("six"))}>
+            Connect to 6 GHz once
+          </ButtonItem></PanelSectionRow>
+        </>}
       </PanelSection>
 
       <PanelSection title="Safety">
@@ -280,17 +348,8 @@ export const WifiPage: FC = () => {
           <Field
             focusable
             label="Band choice and rollback"
-            description="The preference keeps 2.4 GHz available. Manual reconnect temporarily selects one confirmed 5/6 GHz access point and clears that selection after connecting. Only 5/6 GHz disables 2.4 GHz in iwd; a failed change is rolled back."
+            description={iwd ? "Prefer 5/6 GHz keeps 2.4 GHz available. Only 5/6 GHz disables 2.4 GHz; failed changes are rolled back." : "One-time reconnect clears its temporary selection after connecting. Failed changes are rolled back automatically."}
           />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={blocked}
-            onClick={() => void run(resetWifiSettings)}
-          >
-            Restore WiFi settings owned by Companion
-          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
     </>
