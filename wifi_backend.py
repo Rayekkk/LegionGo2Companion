@@ -2,10 +2,9 @@
 
 Runs as root inside the plugin_loader process. All public async methods on
 the Plugin class are callable from the React frontend via Decky's IPC. State
-is persisted to settings.json under DECKY_PLUGIN_SETTINGS_DIR.  A minimal
-NetworkManager dispatcher may reapply an explicitly selected per-profile
-power-save state; band policy is persisted by NetworkManager/iwd and guarded
-by an independent rollback journal.
+is persisted to settings.json under DECKY_PLUGIN_SETTINGS_DIR. NetworkManager
+persists an explicitly selected per-profile power-save state; band policy is
+persisted by NetworkManager/iwd and guarded by an independent rollback journal.
 """
 
 import os
@@ -81,6 +80,9 @@ BAND_POLICIES = {
 BAND_POLICY_ROLLBACK_SECONDS = 180
 MANUAL_RECONNECT_ROLLBACK_SECONDS = 60
 BAND_POLICY_ROLLBACK_UNIT_PREFIX = "wifi-optimizer-go2-band-rollback"
+HIGH_BAND_SCAN_SECONDS = 12
+HIGH_BAND_MONITOR_SECONDS = 5
+HIGH_BAND_RETRY_SECONDS = 30
 
 DRIVER_PROFILES = {
     "rtw88": {
@@ -155,7 +157,6 @@ DEFAULT_SETTINGS = {
     "power_save_previous": "",
     "power_save_runtime_previous": "",
     "power_save_legacy_detected": False,
-    "auto_fix_on_wake": False,
     "bssid_lock_enabled": False,
     "bssid_lock_value": "",
     "bssid_lock_connection_uuid": "",
@@ -357,14 +358,392 @@ class Plugin:
             raise asyncio.CancelledError
         return result
 
-    def _acquire_band_policy_file_lock(self):
+    @staticmethod
+    def _high_band_discovery_enabled(settings: dict) -> bool:
+        state = settings.get("band_policy_state") or {}
+        return bool(settings.get("device_family") == "legion_go_2"
+                    and settings.get("driver") == "mt7921e"
+                    and settings.get("band_policy") == BAND_POLICY_HIGH_ONLY
+                    and state.get("mode") == BAND_POLICY_HIGH_ONLY
+                    and state.get("owns_iwd") is True)
+
+    def _get_high_band_link(self, stop: threading.Event | None = None) -> dict | None:
+        """Bind observations to one activated NM connection and kernel device."""
+        devices = self._run_cmd([
+            "/usr/bin/nmcli", "-t", "-f", "DEVICE,TYPE", "dev", "status",
+        ], timeout=1)
+        if not devices.get("success") or (stop is not None and stop.is_set()):
+            return None
+        iface = next((line.rsplit(":", 1)[0] for line in devices.get("stdout", "").splitlines()
+                      if line.endswith(":wifi")), "")
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,15}", iface):
+            return None
+        try:
+            driver = os.path.basename(os.path.realpath(f"/sys/class/net/{iface}/device/driver"))
+            with open(f"/sys/class/net/{iface}/ifindex", encoding="ascii") as handle:
+                ifindex = int(handle.read(32))
+        except (OSError, ValueError):
+            return None
+        if driver != "mt7921e":
+            return None
+        connection = self._run_cmd([
+            "/usr/bin/nmcli", "-g", "GENERAL.STATE,GENERAL.CON-UUID,GENERAL.CON-PATH",
+            "device", "show", iface,
+        ], timeout=1)
+        fields = connection.get("stdout", "").splitlines()
+        if (not connection.get("success") or len(fields) != 3
+                or not re.fullmatch(r"100(?:\s+\(connected\))?", fields[0].strip())
+                or not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", fields[1])
+                or not re.fullmatch(r"/org/freedesktop/NetworkManager/ActiveConnection/\d+", fields[2])):
+            return None
+        if stop is not None and stop.is_set():
+            return None
+        radio = self._run_cmd(["/usr/bin/iw", "dev", iface, "link"], timeout=1)
+        frequency = re.search(r"(?m)^\s*freq:\s*(\d+)", radio.get("stdout", ""))
+        if not radio.get("success") or not frequency:
+            return None
+        return {"iface": iface, "uuid": fields[1], "frequency": int(frequency.group(1)),
+                "episode": (iface, ifindex, fields[1], fields[2])}
+
+    def _discover_high_bands(self, link: dict, stop: threading.Event) -> dict:
+        """Refresh iwd's stale quick-autoconnect cache without forcing a BSSID."""
+        started = time.monotonic()
+        settings = _load_settings()
+        if (stop.is_set() or not self._high_band_discovery_enabled(settings)
+                or self._get_current_backend() != "iwd"
+                or self._band_policy_ownership_error(settings)
+                or self._get_network_recovery_issues()):
+            return {"success": False, "error": "discovery_unavailable"}
+        current = self._get_high_band_link(stop)
+        if not current or current["episode"] != link["episode"]:
+            return {"success": False, "error": "connection_changed"}
+        if current["frequency"] >= 5925:
+            return {"success": True, "scanned": False, "frequency": current["frequency"]}
+        if stop.is_set():
+            return {"success": False, "error": "discovery_cancelled"}
+        tree = self._run_cmd([
+            "/usr/bin/busctl", "--json=short", "call", "net.connman.iwd", "/",
+            "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+        ], timeout=1)
+        try:
+            objects = json.loads(tree.get("stdout", ""))["data"][0]
+            stations = [path for path, interfaces in objects.items()
+                        if interfaces.get("net.connman.iwd.Device", {}).get("Name", {}).get("data") == link["iface"]
+                        and "net.connman.iwd.Station" in interfaces
+                        and re.fullmatch(r"/net/connman/iwd/[a-zA-Z0-9_/]+", path)]
+            if not tree.get("success") or len(stations) != 1:
+                raise ValueError("No unique station")
+            station = stations[0]
+            network_path = objects[station]["net.connman.iwd.Station"].get("ConnectedNetwork", {}).get("data")
+            ssid = objects.get(network_path, {}).get("net.connman.iwd.Network", {}).get("Name", {}).get("data")
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            return {"success": False, "error": "station_unavailable"}
+        if stop.is_set():
+            return {"success": False, "error": "discovery_cancelled"}
+        current = self._get_high_band_link(stop)
+        if not current or current["episode"] != link["episode"]:
+            return {"success": False, "error": "connection_changed"}
+        if stop.is_set():
+            return {"success": False, "error": "discovery_cancelled"}
+        scan = self._run_cmd([
+            "/usr/bin/busctl", "call", "net.connman.iwd", station,
+            "net.connman.iwd.Station", "Scan",
+        ], timeout=2)
+        scanning_seen = False
+        if not scan.get("success"):
+            # busctl's human-readable error need not include the DBus name.
+            # Join an existing scan only when the public property proves it.
+            state = self._run_cmd([
+                "/usr/bin/busctl", "get-property", "net.connman.iwd", station,
+                "net.connman.iwd.Station", "Scanning",
+            ], timeout=1)
+            scanning_seen = bool(state.get("success") and state.get("stdout") == "b true")
+            if not scanning_seen:
+                return {"success": False, "error": "scan_failed"}
+        deadline = started + HIGH_BAND_SCAN_SECONDS
+        while not stop.is_set() and time.monotonic() < deadline:
+            state = self._run_cmd([
+                "/usr/bin/busctl", "get-property", "net.connman.iwd", station,
+                "net.connman.iwd.Station", "Scanning",
+            ], timeout=1)
+            value = state.get("stdout", "")
+            if not state.get("success") or value not in ("b true", "b false"):
+                return {"success": False, "error": "scan_state_unavailable"}
+            scanning_seen = scanning_seen or value == "b true"
+            if value == "b false" and (scanning_seen or (scan.get("success") and time.monotonic() - started >= 1)):
+                after = self._get_high_band_link(stop)
+                if not after or after["episode"] != link["episode"]:
+                    return {"success": False, "error": "connection_changed"}
+                if isinstance(ssid, str):
+                    after["ssid"] = ssid
+                result = self._reselect_discovered_high_band(after, stop)
+                return {**result, "scanned": True,
+                        "elapsed_seconds": round(time.monotonic() - started, 3)}
+            stop.wait(0.25)
+        return {"success": False, "error": "discovery_cancelled" if stop.is_set() else "scan_timeout"}
+
+    def _run_discovery_scan(self, iface: str, ssid: str, stop: threading.Event) -> dict:
+        """A directed scan finds 6 GHz BSSs omitted by iwd's wildcard scan."""
+        if stop.is_set():
+            return {"success": False}
+        try:
+            process = subprocess.Popen(
+                ["/usr/bin/iw", "dev", iface, "scan", "ssid", ssid],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=system_env(LC_ALL="C"),
+            )
+        except OSError:
+            return {"success": False}
+        deadline = time.monotonic() + 8
+        try:
+            while not stop.is_set() and time.monotonic() < deadline:
+                try:
+                    stdout, _stderr = process.communicate(timeout=0.2)
+                    return {"success": process.returncode == 0, "stdout": stdout}
+                except subprocess.TimeoutExpired:
+                    pass
+            return {"success": False}
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=1)
+
+    def _reselect_discovered_high_band(self, link: dict, stop: threading.Event) -> dict:
+        fallback = {"success": True, "frequency": link["frequency"], "reselected": False}
+        if link["frequency"] >= 5925 or stop.is_set():
+            return fallback
+        # DBus Name preserves significant leading/trailing SSID spaces.
+        ssid = link.get("ssid")
+        if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32 or stop.is_set():
+            return fallback
+        scan = self._run_discovery_scan(link["iface"], ssid, stop)
+        if not scan.get("success") or stop.is_set():
+            return {**fallback, "directed_scan_success": False}
+        frequencies = []
+        for block in re.split(r"(?m)^BSS ", scan.get("stdout", ""))[1:]:
+            name = re.search(r"(?m)^[ \t]*SSID: ?(.*)$", block)
+            freq = re.search(r"(?m)^\s*freq:\s*(\d+)", block)
+            if name and freq and name.group(1) == ssid:
+                frequencies.append(int(freq.group(1)))
+        fallback.update(directed_scan_success=True, candidate_frequencies=sorted(set(frequencies)))
+        better = any(5925 <= freq < 7125 or (link["frequency"] < 4900 and 4900 <= freq < 5925)
+                     for freq in frequencies)
+        if not better:
+            return fallback
+        settings = _load_settings()
+        current = self._get_high_band_link(stop)
+        if (not current or current["episode"] != link["episode"] or stop.is_set()
+                or not self._high_band_discovery_enabled(settings)
+                or self._get_current_backend() != "iwd"
+                or self._band_policy_ownership_error(settings) or self._get_network_recovery_issues()
+                or self._get_iwd_profile_conflict(link["uuid"])):
+            return fallback
+        # iwd can roam during the directed scan without changing NM's active
+        # connection path. Do not cycle a link that already reached the best
+        # freshly observed band.
+        if (current["frequency"] >= 5925
+                or (current["frequency"] >= 4900
+                    and not any(5925 <= freq < 7125 for freq in frequencies))):
+            return {**fallback, "frequency": current["frequency"]}
+        # Never override a user's explicit profile band/BSSID selection.
+        for field in ("802-11-wireless.band", "802-11-wireless.bssid"):
+            value, result = self._nmcli_get(link["uuid"], field, timeout=1)
+            if not result.get("success") or value or stop.is_set():
+                return fallback
+        if stop.is_set():
+            return fallback
+        saved = self._band_settings_fields(settings)
+        journal = {
+            "schema": 1, "operation_id": f"discovery-{os.getpid()}-{time.time_ns()}",
+            "operation": "automatic_high_band_reconnect", "phase": "pending",
+            "created_at": int(time.time()), "rollback_delay_seconds": MANUAL_RECONNECT_ROLLBACK_SECONDS,
+            "settings_file": SETTINGS_FILE, "settings_before": saved, "settings_after": saved,
+            "mode_before": BAND_POLICY_HIGH_ONLY, "mode_target": BAND_POLICY_HIGH_ONLY,
+            "profile_before": {"uuid": link["uuid"], "band": "", "bssid": "", "was_active": True},
+            "active_uuid_before": link["uuid"], "iwd_before": self._get_iwd_rank_modifier_snapshot(),
+            "automatic_iface": link["iface"], "automatic_ifindex": link["episode"][1],
+            "automatic_boot_id": self._boot_id(),
+            "rollback_reconnect_required": True, "rollback_reconnect_uuid": link["uuid"], "mutations": {},
+        }
+        self._save_band_policy_journal(journal)
+        watchdog = self._schedule_band_policy_rollback(journal)
+        if not watchdog.get("success"):
+            self._remove_band_policy_journal()
+            return {**fallback, "success": False, "error": "rollback_watchdog_failed"}
+        outcome = {**fallback, "_reselection_from_episode": link["episode"]}
+        try:
+            journal["phase"] = "applying"
+            self._save_band_policy_journal(journal)
+            if self._get_current_backend() != "iwd":
+                raise RuntimeError("The native WiFi backend changed before automatic reconnection")
+            # Finish restoring connectivity even if unloading starts after down.
+            # The independent journal also survives Decky's process grace limit.
+            result = self._reconnect_profile(link["uuid"], cycle=True, activation_timeout=5,
+                                             bound_iface=link["iface"])
+            after = self._get_high_band_link()
+            if (not result.get("success") or not after
+                    or after["episode"][:3] != link["episode"][:3]):
+                raise RuntimeError("The saved WiFi connection did not obtain a verified link")
+            journal["phase"] = "committed"
+            self._save_band_policy_journal(journal)
+            self._cancel_band_policy_rollback(journal)
+            self._remove_band_policy_journal()
+            return {**outcome, "frequency": after["frequency"], "reselected": True}
+        except Exception as exc:
+            rollback = self._restore_band_policy_transaction(journal, str(exc))
+            if rollback.get("success"):
+                self._cancel_band_policy_rollback(journal)
+                self._remove_band_policy_journal()
+            return {**outcome, "success": False, "error": "automatic_reselection_failed",
+                    "rolled_back": rollback.get("success", False)}
+
+    @staticmethod
+    def _boot_id() -> str:
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+                return handle.read(128).strip()
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _suspend_offset() -> float:
+        # CLOCK_BOOTTIME includes suspend; MONOTONIC does not. Windows tests
+        # and systems without this clock retain connection-episode detection.
+        if hasattr(time, "CLOCK_BOOTTIME"):
+            return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+        return 0.0
+
+    async def _high_band_monitor(self, stop: threading.Event):
+        episode = None
+        attempts = 0
+        probe_limit = 2
+        reconnects = 0
+        next_scan = 0.0
+        suspend_offset = self._suspend_offset()
+        was_six = False
+        own_reselection = None
+        while not stop.is_set():
+            settings = await self._worker_complete(_load_settings)
+            if not self._high_band_discovery_enabled(settings):
+                return
+            if await self._worker_complete(self._get_current_backend) != "iwd":
+                # A retained preference is inactive while SteamOS selects WPA.
+                # Keep only the cheap config poll so native iwd return resumes it.
+                episode, attempts, next_scan = None, 0, 0.0
+                own_reselection, was_six = None, False
+                await asyncio.sleep(HIGH_BAND_MONITOR_SECONDS)
+                continue
+            offset = self._suspend_offset()
+            resumed = offset - suspend_offset > 1
+            suspend_offset = offset
+            link = await self._worker_complete(self._get_high_band_link, stop)
+            if not link:
+                if own_reselection is None:
+                    episode = None
+                was_six = False
+            else:
+                if own_reselection is not None:
+                    if link["episode"][:3] == own_reselection[:3]:
+                        # Our activation/recovery path is one attempt, not a
+                        # fresh user connection with a fresh budget.
+                        if link["episode"] != own_reselection:
+                            episode = link["episode"]
+                            own_reselection = None
+                    else:
+                        own_reselection = None
+                if link["episode"] != episode or resumed or (was_six and link["frequency"] < 5925):
+                    episode, attempts, next_scan = link["episode"], 0, 0.0
+                    probe_limit, reconnects = 2, 0
+                was_six = link["frequency"] >= 5925
+                if not was_six and attempts < probe_limit and reconnects < 2 and time.monotonic() >= next_scan:
+                    async with self._get_band_policy_file_gate():
+                        try:
+                            handle = await self._worker_complete(
+                                lambda: self._acquire_band_policy_file_lock(nonblocking=True),
+                                cancelled_cleanup=self._release_band_policy_file_lock)
+                        except BlockingIOError:
+                            await asyncio.sleep(HIGH_BAND_MONITOR_SECONDS)
+                            continue
+                        try:
+                            async with self._get_network_mutation_lock():
+                                self._high_band_discovery_pending = True
+                                try:
+                                    result = await self._worker_complete(self._discover_high_bands, link, stop)
+                                    own_reselection = result.pop("_reselection_from_episode", None)
+                                    if own_reselection is not None:
+                                        reconnects += 1
+                                    if (result.get("reselected") and result.get("success")
+                                            and link["frequency"] < 4900
+                                            and 4900 <= result.get("frequency", 0) < 5925):
+                                        # Early boot scans can miss high bands. After
+                                        # reaching 5 GHz, allow one more discovery
+                                        # for 6 GHz without a third reconnect.
+                                        probe_limit = 3
+                                    self._high_band_discovery_result = result
+                                    decky.logger.info(f"WiFi automatic band discovery: {result}")
+                                finally:
+                                    self._high_band_discovery_pending = False
+                        finally:
+                            self._release_band_policy_file_lock(handle)
+                    attempts += 1
+                    next_scan = time.monotonic() + HIGH_BAND_RETRY_SECONDS
+            await asyncio.sleep(HIGH_BAND_MONITOR_SECONDS)
+
+    def _start_high_band_monitor(self, settings: dict):
+        if not getattr(self, "_high_band_monitor_ready", False) or not self._high_band_discovery_enabled(settings):
+            return
+        task = getattr(self, "_high_band_monitor_task", None)
+        if task and not task.done():
+            return
+        stop = threading.Event()
+        self._high_band_monitor_stop = stop
+        task = asyncio.create_task(self._high_band_monitor(stop))
+        self._high_band_monitor_task = task
+        def completed(done):
+            if not done.cancelled() and done.exception() is not None:
+                self._high_band_discovery_result = {"success": False, "error": "monitor_stopped"}
+                decky.logger.error(f"WiFi automatic band discovery stopped: {done.exception()}")
+        task.add_done_callback(completed)
+
+    async def _stop_high_band_monitor(self):
+        stop = getattr(self, "_high_band_monitor_stop", None)
+        if stop is not None:
+            stop.set()
+        task = getattr(self, "_high_band_monitor_task", None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._high_band_monitor_task = None
+        self._high_band_discovery_pending = False
+
+    async def _restart_high_band_monitor(self):
+        if getattr(self, "_high_band_monitor_ready", False):
+            try:
+                self._start_high_band_monitor(await self._worker_complete(_load_settings))
+            except Exception as exc:
+                # Background discovery must not replace a transaction result
+                # or start scanning with unreadable ownership settings.
+                decky.logger.error(f"WiFi automatic band discovery could not restart: {exc}")
+
+    def _acquire_band_policy_file_lock(self, nonblocking: bool = False):
         """Fence the worker, startup recovery, and systemd watchdog."""
         os.makedirs(BAND_POLICY_RUNTIME_DIR, mode=0o700, exist_ok=True)
         os.chmod(BAND_POLICY_RUNTIME_DIR, 0o700)
         handle = open(BAND_POLICY_LOCK_FILE, "a+", encoding="utf-8")
         os.chmod(BAND_POLICY_LOCK_FILE, 0o600)
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if fcntl is not None:
+                flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0)
+                fcntl.flock(handle.fileno(), flags)
+        except BaseException:
+            handle.close()
+            raise
         return handle
 
     @staticmethod
@@ -847,6 +1226,7 @@ class Plugin:
         uuid: str | None,
         five_ghz_frequencies: list[int] | None = None,
         six_ghz_frequencies: list[int] | None = None,
+        minimum_frequency: int = 4900,
     ) -> dict:
         """Return fresh, exact BSS candidates without changing the connection.
 
@@ -862,10 +1242,19 @@ class Plugin:
         }
         if not iface or not uuid:
             return result
-        ssid, ssid_result = self._nmcli_get(uuid, "802-11-wireless.ssid")
-        if not ssid_result.get("success") or not ssid:
+        # Surround the SSID with nonempty fields: the command runner trims
+        # its outer whitespace, while spaces inside an SSID are significant.
+        metadata = self._run_cmd([
+            "/usr/bin/nmcli", "-g", "connection.uuid,802-11-wireless.ssid,802-11-wireless.hidden",
+            "con", "show", "uuid", uuid,
+        ], timeout=3)
+        fields = metadata.get("stdout", "").splitlines()
+        if (not metadata.get("success") or len(fields) != 3 or fields[0] != uuid
+                or fields[2] not in ("yes", "no")):
             return result
-        ssid = self._nmcli_unescape(ssid)
+        ssid = self._nmcli_unescape(fields[1])
+        if not 1 <= len(ssid.encode("utf-8")) <= 32:
+            return result
         result["ssid"] = ssid
         candidates: dict[str, dict] = {}
         sources: list[str] = []
@@ -879,7 +1268,7 @@ class Plugin:
                 freq = int(float(str(frequency).strip()))
             except (TypeError, ValueError):
                 return
-            if not 4900 <= freq < 7125:
+            if not minimum_frequency <= freq < 7125:
                 return
             try:
                 signal_dbm = float(str(signal).strip())
@@ -923,7 +1312,9 @@ class Plugin:
                     )
                     signal = signal_match.group(1) if signal_match else None
                 elif line.startswith("SSID:"):
-                    visible_ssid = line.split(":", 1)[1].strip()
+                    visible_ssid = line.split(":", 1)[1]
+                    if visible_ssid.startswith(" "):
+                        visible_ssid = visible_ssid[1:]
                     if visible_ssid == ssid:
                         add_candidate(bssid, frequency, signal)
             return True
@@ -934,7 +1325,8 @@ class Plugin:
         )
         if not candidates:
             high_frequencies = sorted(
-                set(five_ghz_frequencies or []) | set(six_ghz_frequencies or [])
+                freq for freq in set(five_ghz_frequencies or []) | set(six_ghz_frequencies or [])
+                if minimum_frequency <= freq < 7125
             )
             if high_frequencies:
                 add_iw_scan(
@@ -1321,10 +1713,13 @@ class Plugin:
             common_reason = "The automatic rollback watchdog is unavailable."
 
         reason_six = common_reason
-        if not reason_six and backend != "iwd":
-            reason_six = "The Go 2 band policy requires the iwd WiFi backend."
-        elif not reason_six and not iwd_active:
-            reason_six = "The iwd service is not active."
+        if not reason_six and backend == "iwd":
+            reason_six = (
+                "iwd does not enforce NetworkManager's per-profile band setting. "
+                "Use the iwd 5/6 GHz policy instead."
+            )
+        elif not reason_six and backend != "wpa_supplicant":
+            reason_six = "The WiFi backend cannot enforce a per-profile band setting."
         elif not reason_six and not nm_supports_6ghz:
             reason_six = "NetworkManager 1.58 or newer is required for 6 GHz only."
         elif not reason_six and not has_6ghz:
@@ -1357,6 +1752,8 @@ class Plugin:
             external_iwd_while_off or external_iwd_during_six
         ):
             reason_high = "An external iwd band policy is already configured."
+        if not reason_high and uuid:
+            reason_high = self._get_iwd_profile_conflict(uuid, allow_disabled_duplicates=True)
         reason_high_hard = reason_high
         if not reason_high and not high_visible:
             reason_high = "No 5 or 6 GHz BSS for the active SSID is currently visible."
@@ -1411,7 +1808,7 @@ class Plugin:
             if os.path.dirname(target) == BAND_POLICY_STATE_DIR:
                 legacy = os.path.join(BAND_POLICY_RUNTIME_DIR, os.path.basename(target))
                 journal = self._load_band_policy_journal(legacy)
-                if journal is not None:
+                if journal is not None and journal.get("phase") != "unreadable":
                     self._save_band_policy_journal(journal, target)
                     self._remove_band_policy_journal(legacy)
                 return journal
@@ -1562,23 +1959,147 @@ class Plugin:
             timeout=4,
         )
 
-    def _profile_is_active(self, uuid: str) -> bool:
+    def _profile_is_active(self, uuid: str, iface: str | None = None) -> bool:
         if not uuid:
             return False
-        # Activity checks need the exact profile, not whichever active WiFi
-        # connection NetworkManager happens to enumerate first.
+        iface = iface or self._get_wifi_interface()
+        if not iface:
+            return False
+        # --active also includes ACTIVATING profiles and other adapters.
+        # Read state and UUID together for the interface whose iw link we use.
         result = self._run_cmd(
-            ["/usr/bin/nmcli", "-t", "-f", "UUID,TYPE", "con", "show", "--active"]
+            ["/usr/bin/nmcli", "-g", "GENERAL.STATE,GENERAL.CON-UUID", "device", "show", iface]
         )
-        return bool(result.get("success") and any(
-            line.split(":") == [uuid, "802-11-wireless"]
-            for line in result.get("stdout", "").splitlines()))
+        lines = result.get("stdout", "").splitlines()
+        return bool(result.get("success") and len(lines) == 2
+                    and re.fullmatch(r"100(?:\s+\(connected\))?", lines[0].strip())
+                    and lines[1].strip() == uuid)
+
+    def _get_iwd_profile_conflict(self, uuid: str, *, allow_disabled_duplicates: bool = False) -> str:
+        """Reject ambiguous saved PSK/SAE profiles without reading credentials.
+
+        iwd has one KnownNetwork per SSID/security family, while NM may have
+        several UUIDs with different settings or credentials for that ESS.
+        Restarting iwd cannot preserve their independent credential stores.
+        A restart rebuilds NM's mirror binding. Only that path can allow
+        disabled duplicates when the target is the sole public metadata match.
+        A profile-only mutation may still use an older cached mirror binding.
+        """
+        unavailable = "Saved WiFi profiles could not be verified before restarting iwd."
+        listed = self._run_cmd([
+            "/usr/bin/nmcli", "-t", "-f", "UUID,TYPE", "con", "show",
+        ], timeout=4)
+        if not listed.get("success"):
+            return unavailable
+        uuids = []
+        for line in listed.get("stdout", "").splitlines():
+            fields = line.split(":")
+            if len(fields) != 2:
+                return unavailable
+            if fields[1] == "802-11-wireless":
+                if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", fields[0]):
+                    return unavailable
+                uuids.append(fields[0])
+        if uuid not in uuids or len(uuids) > 32 or len(set(uuids)) != len(uuids):
+            return unavailable
+        args = [
+            "/usr/bin/nmcli", "-g",
+            "connection.uuid,connection.type,connection.autoconnect,802-11-wireless.ssid,802-11-wireless.hidden,802-11-wireless-security.key-mgmt",
+            "con", "show",
+        ]
+        for saved_uuid in uuids:
+            args.extend(["uuid", saved_uuid])
+        metadata = self._run_cmd(args, timeout=6)
+        if not metadata.get("success"):
+            return unavailable
+        lines = metadata.get("stdout", "").splitlines()
+        profiles = {}
+        index = 0
+        while index < len(lines):
+            if not lines[index]:
+                index += 1
+                continue
+            if len(lines) - index < 6:
+                return unavailable
+            saved_uuid, kind, auto, ssid, hidden, security = lines[index:index + 6]
+            if saved_uuid not in uuids or saved_uuid in profiles or kind != "802-11-wireless":
+                return unavailable
+            if auto not in ("yes", "no") or hidden not in ("yes", "no"):
+                return unavailable
+            profiles[saved_uuid] = (self._nmcli_unescape(ssid), security, auto == "yes", hidden == "yes")
+            index += 6
+        if set(profiles) != set(uuids):
+            return unavailable
+        ssid, security, auto, hidden = profiles[uuid]
+        if not ssid or ssid == "--":
+            return unavailable
+        if security not in ("sae", "wpa-psk"):
+            return ""
+        siblings = {uid: fields for uid, fields in profiles.items()
+                    if fields[0] == ssid and fields[1] in ("sae", "wpa-psk")}
+        if len(siblings) > 1:
+            preferences = (self._get_iwd_known_network_preferences(ssid)
+                           if allow_disabled_duplicates else None)
+            if auto and preferences == (True, hidden):
+                candidates = [uid for uid, fields in siblings.items()
+                              if fields[2:] == preferences]
+                if candidates == [uuid]:
+                    return ""
+            return (
+                "Multiple saved WiFi profiles share this SSID's iwd PSK/SAE network. "
+                "Select one matching autoconnect profile before changing the band policy."
+            )
+        return ""
+
+    def _get_iwd_known_network_preferences(self, ssid: str) -> tuple[bool, bool] | None:
+        """Read only public metadata used by NM to select an iwd mirror."""
+        result = self._run_cmd([
+            "/usr/bin/busctl", "--json=short", "call", "net.connman.iwd", "/",
+            "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+        ], timeout=4)
+        if not result.get("success"):
+            return None
+        try:
+            objects = json.loads(result.get("stdout", ""))["data"][0]
+            if not isinstance(objects, dict):
+                return None
+            matches = []
+            for interfaces in objects.values():
+                known = interfaces.get("net.connman.iwd.KnownNetwork", {})
+                if known.get("Name", {}).get("data") != ssid:
+                    continue
+                if known.get("Type", {}).get("data") != "psk":
+                    continue
+                auto = known.get("AutoConnect", {}).get("data")
+                # NM treats the optional Hidden property as false if absent.
+                hidden = known.get("Hidden", {"data": False}).get("data")
+                if type(auto) is not bool or type(hidden) is not bool:
+                    return None
+                matches.append((auto, hidden))
+            return matches[0] if len(matches) == 1 else None
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            return None
 
     def _reconnect_profile(
-        self, uuid: str, was_active: bool = True, cycle: bool = True
+        self, uuid: str, was_active: bool = True, cycle: bool = True,
+        activation_timeout: int = 25,
+        bound_iface: str | None = None,
     ) -> dict:
         if not uuid or not was_active:
             return {"success": True, "reconnected": False}
+
+        def active():
+            return self._profile_is_active(uuid, bound_iface) if bound_iface else self._profile_is_active(uuid)
+        def frequency():
+            return self._get_link_frequency(bound_iface) if bound_iface else self._get_link_frequency()
+
+        if not cycle and active() and frequency() is not None:
+            return {"success": True, "reconnected": True, "autoconnected": True}
+        if self._get_current_backend() == "iwd":
+            conflict = self._get_iwd_profile_conflict(uuid, allow_disabled_duplicates=not cycle)
+            if conflict:
+                return {"success": False, "reconnected": False,
+                        "error": "ambiguous_iwd_profiles", "stderr": conflict}
 
         # Restarting iwd already cycles the device. NetworkManager briefly has
         # no WiFi device at that point and an immediate `con up` can be matched
@@ -1593,11 +2114,11 @@ class Plugin:
                 return {
                     **down_result,
                     "reconnected": False,
-                    "connection_active": self._profile_is_active(uuid),
+                    "connection_active": active(),
                 }
 
         started = time.monotonic()
-        deadline = started + 15.0
+        deadline = started + max(15.0, min(25.0, float(activation_timeout)))
         # After an iwd restart, a DFS BSS can appear several seconds after the
         # device becomes available. Let iwd finish its own autoconnect before
         # asking NetworkManager to activate the profile manually.
@@ -1606,8 +2127,8 @@ class Plugin:
         last_result = None
 
         while time.monotonic() < deadline:
-            if self._profile_is_active(uuid):
-                if not cycle or saw_inactive:
+            if active():
+                if (not cycle or saw_inactive) and frequency() is not None:
                     return {
                         "success": True,
                         "stdout": "",
@@ -1625,7 +2146,7 @@ class Plugin:
                 time.sleep(0.25)
                 continue
 
-            iface = self._get_wifi_interface()
+            iface = bound_iface or self._get_wifi_interface()
             if iface:
                 state_result = self._run_cmd(
                     [
@@ -1645,7 +2166,8 @@ class Plugin:
                 # 30 is disconnected and 100 is connected. Intermediate
                 # states mean an automatic activation is already underway, so
                 # let it finish instead of racing a second activation.
-                if state_result.get("success") and state in (30, 100):
+                remaining_activation = deadline - time.monotonic() - 3.0
+                if state_result.get("success") and state in (30, 100) and remaining_activation > 0:
                     last_result = self._run_cmd(
                         [
                             "/usr/bin/nmcli",
@@ -1656,18 +2178,25 @@ class Plugin:
                             "ifname",
                             iface,
                         ],
-                        timeout=25,
+                        # Keep time for native iwd recovery after the CLI
+                        # exits. Its error can precede a successful fallback.
+                        timeout=min(activation_timeout, remaining_activation),
                     )
                     # A fast failure does not mean iwd has finished discovering
                     # the target AP (notably on passive/DFS channels). Repeated
                     # activations every 250 ms can race its background scan.
                     next_manual_activation = time.monotonic() + 3.0
-                    if last_result.get("success"):
+                    if (last_result.get("success") and active()
+                            and self._get_link_frequency(iface) is not None):
                         last_result["reconnected"] = True
                         return last_result
 
             time.sleep(0.25)
 
+        verified = bool(active() and frequency() is not None)
+        if verified:
+            return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
+                    "reconnected": True, "autoconnected": True}
         if last_result is None:
             last_result = {
                 "success": False,
@@ -1675,7 +2204,14 @@ class Plugin:
                 "stderr": "WiFi device did not become ready before timeout.",
                 "returncode": 1,
             }
-        last_result["reconnected"] = self._profile_is_active(uuid)
+        elif last_result.get("success"):
+            last_result = {
+                **last_result,
+                "success": False,
+                "stderr": "The requested WiFi profile did not obtain a radio link before timeout.",
+                "returncode": 1,
+            }
+        last_result["reconnected"] = False
         return last_result
 
     def _wait_for_profile_frequency(
@@ -1692,8 +2228,11 @@ class Plugin:
             time.sleep(0.25)
         return last_frequency
 
-    def _rescan_and_reconnect_sync(self) -> dict:
+    def _rescan_and_reconnect_sync(self, target_band: str = "high") -> dict:
         """Temporarily select one freshly seen 5/6 GHz BSS, then unpin it."""
+        if target_band not in ("high", "six"):
+            return {"success": False, "error": "invalid_target_band",
+                    "message": "Choose 5/6 GHz or 6 GHz for this connection attempt."}
         if self._load_band_policy_journal() or self._load_power_save_journal():
             return {
                 "success": False,
@@ -1703,11 +2242,14 @@ class Plugin:
             }
 
         settings = _load_settings()
-        if settings.get("band_policy") != BAND_POLICY_HIGH_ONLY:
+        backend = self._get_current_backend()
+        mode = settings.get("band_policy", BAND_POLICY_OFF)
+        if not (mode == BAND_POLICY_HIGH_ONLY and backend == "iwd"
+                or mode == BAND_POLICY_OFF and backend == "wpa_supplicant"):
             return {
                 "success": False,
                 "error": "preference_disabled",
-                "message": "Enable Prefer 5/6 GHz before using manual reconnect.",
+                "message": "Use the iwd preference or Automatic WiFi with wpa_supplicant before reconnecting.",
             }
         ownership_error = self._band_policy_ownership_error(settings)
         if ownership_error:
@@ -1729,24 +2271,18 @@ class Plugin:
                     "Legion Go 2 with the MediaTek MT7922 driver."
                 ),
             }
-        if self._get_current_backend() != "iwd":
-            return {
-                "success": False,
-                "error": "unsupported_backend",
-                "message": "Manual high-band reconnect requires the iwd backend.",
-            }
-        iwd_service = self._run_cmd(
-            ["/usr/bin/systemctl", "is-active", "iwd"], timeout=3
+        backend_service = self._run_cmd(
+            ["/usr/bin/systemctl", "is-active", backend], timeout=3
         )
-        if iwd_service.get("stdout", "").strip() != "active":
+        if backend_service.get("stdout", "").strip() != "active":
             return {
                 "success": False,
-                "error": "iwd_inactive",
-                "message": "The iwd service is not active.",
+                "error": "backend_inactive",
+                "message": "The selected WiFi backend is not active.",
             }
 
         iface = self._get_wifi_interface()
-        uuid = self._get_active_connection_uuid(iface) if iface else None
+        uuid = self._get_active_connection_uuid(iface, require_connected=True) if iface else None
         if not iface or not uuid:
             return {
                 "success": False,
@@ -1754,15 +2290,20 @@ class Plugin:
                 "message": "Connect to WiFi first, then retry.",
             }
         frequency_before = self._get_link_frequency(iface)
-        if frequency_before is not None and 4900 <= frequency_before < 7125:
+        minimum_frequency = 5925 if target_band == "six" else 4900
+        if frequency_before is not None and minimum_frequency <= frequency_before < 7125:
             return {
                 "success": True,
                 "reconnected": False,
                 "better_band_found": True,
                 "frequency_before": frequency_before,
                 "frequency": frequency_before,
-                "message": "WiFi is already connected on 5/6 GHz.",
+                "message": "WiFi is already connected on the requested band.",
             }
+
+        conflict = self._get_iwd_profile_conflict(uuid) if backend == "iwd" else ""
+        if conflict:
+            return {"success": False, "error": "ambiguous_iwd_profiles", "message": conflict}
 
         bssid_before, bssid_result = self._nmcli_get(
             uuid, "802-11-wireless.bssid"
@@ -1784,6 +2325,11 @@ class Plugin:
                 ),
             }
 
+        band_before, band_result = self._nmcli_get(uuid, "802-11-wireless.band")
+        if not band_result.get("success") or band_before:
+            return {"success": False, "error": "external_band_configuration",
+                    "message": "Clear the saved profile band restriction before a one-time reconnect."}
+
         five_frequencies, six_frequencies = (
             self._get_enabled_high_band_frequencies()
         )
@@ -1792,6 +2338,7 @@ class Plugin:
             uuid,
             five_ghz_frequencies=five_frequencies,
             six_ghz_frequencies=six_frequencies,
+            minimum_frequency=minimum_frequency,
         )
         if not scan.get("scan_ok"):
             return {
@@ -1801,7 +2348,8 @@ class Plugin:
                 "reconnected": False,
                 "frequency_before": frequency_before,
             }
-        candidates = scan.get("candidates") or []
+        candidates = [candidate for candidate in scan.get("candidates", [])
+                      if minimum_frequency <= int(candidate.get("frequency") or 0) < 7125]
         if not candidates:
             return {
                 "success": True,
@@ -1809,8 +2357,17 @@ class Plugin:
                 "better_band_found": False,
                 "frequency_before": frequency_before,
                 "frequency": frequency_before,
-                "message": "No 5/6 GHz BSS for the current network was found.",
+                "message": "No access point on the requested band was found for this network.",
             }
+        if self._get_active_connection_uuid(iface, require_connected=True) != uuid:
+            return {"success": False, "error": "connection_changed",
+                    "message": "The active WiFi connection changed while scanning."}
+        for field, expected in (("802-11-wireless.bssid", bssid_before),
+                                ("802-11-wireless.band", band_before)):
+            value, observed = self._nmcli_get(uuid, field)
+            if not observed.get("success") or value != expected:
+                return {"success": False, "error": "profile_changed",
+                        "message": "The WiFi profile changed while scanning; its settings were preserved."}
         selected = candidates[0]
         selected_bssid = self._normalize_bssid(selected.get("bssid"))
         selected_frequency = int(selected.get("frequency") or 0)
@@ -1826,8 +2383,8 @@ class Plugin:
             "settings_file": SETTINGS_FILE,
             "settings_before": settings_before,
             "settings_after": settings_before,
-            "mode_before": BAND_POLICY_HIGH_ONLY,
-            "mode_target": BAND_POLICY_HIGH_ONLY,
+            "mode_before": mode,
+            "mode_target": mode,
             "profile_before": {
                 "uuid": uuid,
                 "band": "",
@@ -1881,7 +2438,7 @@ class Plugin:
             journal["mutations"]["nm_bssid"]["applied"] = True
             self._save_band_policy_journal(journal)
 
-            reconnect = self._reconnect_profile(uuid, True, cycle=True)
+            reconnect = self._reconnect_profile(uuid, True, cycle=True, bound_iface=iface)
             if not reconnect.get("success"):
                 raise RuntimeError(
                     reconnect.get("stderr")
@@ -1891,7 +2448,8 @@ class Plugin:
             connected_bssid = self._get_link_bssid(iface)
             if not (
                 frequency is not None
-                and 4900 <= frequency < 7125
+                and minimum_frequency <= frequency < 7125
+                and self._profile_is_active(uuid, iface)
                 and connected_bssid == selected_bssid
             ):
                 raise RuntimeError(
@@ -1901,6 +2459,9 @@ class Plugin:
             # The BSSID is needed only to make this one choice deterministic.
             # Clear it while the verified link stays up, preserving roaming and
             # the 2.4 GHz fallback for future connectivity.
+            current_pin, current_pin_result = self._nmcli_get(uuid, "802-11-wireless.bssid")
+            if not current_pin_result.get("success") or self._normalize_bssid(current_pin) != selected_bssid:
+                raise RuntimeError("The temporary selection was changed outside Companion")
             cleared = self._nmcli_modify(
                 uuid, "802-11-wireless.bssid", bssid_before, timeout=8
             )
@@ -1920,6 +2481,12 @@ class Plugin:
                 raise RuntimeError(
                     "The saved WiFi profile still contains the temporary BSSID"
                 )
+            final_frequency = self._get_link_frequency(iface)
+            if (not self._profile_is_active(uuid, iface) or final_frequency is None
+                    or not minimum_frequency <= final_frequency < 7125
+                    or self._get_link_bssid(iface) != selected_bssid):
+                raise RuntimeError("The selected radio link changed while clearing the temporary selection")
+            frequency = final_frequency
 
             journal["rollback_reconnect_completed"] = True
             journal["phase"] = "verified"
@@ -1943,8 +2510,8 @@ class Plugin:
         except Exception as exc:
             decky.logger.error(f"manual high-band reconnect failed: {exc}")
             rollback = self._restore_band_policy_transaction(journal, str(exc))
-            self._cancel_band_policy_rollback(journal)
             if rollback.get("success"):
+                self._cancel_band_policy_rollback(journal)
                 self._remove_band_policy_journal()
             return {
                 "success": False,
@@ -1964,7 +2531,7 @@ class Plugin:
                 "attempts": 1,
             }
 
-    async def rescan_and_reconnect(self) -> dict:
+    async def rescan_and_reconnect(self, target_band: str = "high") -> dict:
         """Public bounded manual recovery action for the high-band preference."""
         async with self._get_band_policy_file_gate():
             try:
@@ -1981,9 +2548,9 @@ class Plugin:
                 }
             try:
                 async with self._get_network_mutation_lock():
-                    return await self._worker_complete(
-                        self._rescan_and_reconnect_sync
-                    )
+                    if target_band == "high":
+                        return await self._worker_complete(self._rescan_and_reconnect_sync)
+                    return await self._worker_complete(self._rescan_and_reconnect_sync, target_band)
             except Exception as exc:
                 decky.logger.error(f"rescan_and_reconnect error: {exc}")
                 return self._unexpected_response(exc)
@@ -2001,6 +2568,23 @@ class Plugin:
             == str(right.get("modifier_value") or "")
         )
 
+    def _restart_selected_iwd(self) -> dict:
+        """Reload a running, selected manager without starting an inactive one."""
+        if self._get_current_backend() != "iwd":
+            return {"success": False, "stderr": "The WiFi backend changed; iwd was not restarted."}
+        active = self._run_cmd(["/usr/bin/systemctl", "is-active", "iwd"], timeout=3)
+        if active.get("stdout", "").strip() != "active":
+            return {"success": False, "stderr": "iwd is inactive; Companion did not start it."}
+        result = self._run_cmd(["/usr/bin/systemctl", "try-restart", "iwd"], timeout=15)
+        if not result.get("success"):
+            return result
+        if self._get_current_backend() != "iwd":
+            return {"success": False, "stderr": "The WiFi backend changed during iwd reload."}
+        active = self._run_cmd(["/usr/bin/systemctl", "is-active", "iwd"], timeout=3)
+        if active.get("stdout", "").strip() != "active":
+            return {"success": False, "stderr": "iwd stopped during reload."}
+        return {"success": True}
+
     def _restore_band_policy_transaction(
         self,
         journal: dict,
@@ -2014,6 +2598,11 @@ class Plugin:
         self._save_band_policy_journal(journal, path)
         conflicts = []
         mutations = journal.get("mutations", {})
+        backend = self._get_current_backend()
+        iwd_only = bool(mutations.get("iwd", {}).get("planned")) and not any(
+            mutation.get("planned") for name, mutation in mutations.items()
+            if name != "iwd" and isinstance(mutation, dict))
+        recovery_active_uuid = self._get_active_connection_uuid()
 
         iwd_mutation = mutations.get("iwd", {})
         if iwd_mutation.get("planned"):
@@ -2028,11 +2617,13 @@ class Plugin:
                     # Persist the required service work before changing the
                     # file. If power is lost after the file restore, recovery
                     # still knows that iwd must be restarted and reconnected.
-                    journal["rollback_iwd_restart_required"] = True
+                    journal["rollback_iwd_restart_required"] = backend != "wpa_supplicant"
+                    journal["rollback_iwd_restart_completed"] = False
                     active_uuid = str(journal.get("active_uuid_before") or "")
-                    if active_uuid:
+                    if active_uuid and backend != "wpa_supplicant":
                         journal["rollback_reconnect_required"] = True
                         journal["rollback_reconnect_uuid"] = active_uuid
+                        journal["rollback_reconnect_completed"] = False
                     self._save_band_policy_journal(journal, path)
                     self._restore_iwd_rank_modifier(before)
                     restored_iwd = self._get_iwd_rank_modifier_snapshot()
@@ -2059,6 +2650,7 @@ class Plugin:
                 if profile.get("was_active"):
                     journal["rollback_reconnect_required"] = True
                     journal["rollback_reconnect_uuid"] = uuid
+                    journal["rollback_reconnect_completed"] = False
                     self._save_band_policy_journal(journal, path)
                 result = self._nmcli_modify(
                     uuid, "802-11-wireless.band", before_band, timeout=8
@@ -2121,12 +2713,21 @@ class Plugin:
             else:
                 conflicts.append("could not read the saved WiFi profile BSSID")
 
+        # A native backend switch owns the running manager and connection.
+        # Restoring our inactive iwd file must never start iwd alongside WPA,
+        # nor reconnect an old profile the user may already have forgotten.
+        backend = self._get_current_backend()
+        if backend == "wpa_supplicant":
+            journal["rollback_iwd_restart_required"] = False
+            journal["rollback_iwd_runtime_skipped_backend"] = backend
+            if iwd_only or (journal.get("operation") == "automatic_high_band_reconnect" and mutations == {}):
+                journal["rollback_reconnect_required"] = False
+                journal["rollback_reconnect_skipped_backend"] = backend
+            self._save_band_policy_journal(journal, path)
         if journal.get("rollback_iwd_restart_required") and not journal.get(
             "rollback_iwd_restart_completed"
         ):
-            restart = self._run_cmd(
-                ["/usr/bin/systemctl", "restart", "iwd"], timeout=15
-            )
+            restart = self._restart_selected_iwd()
             if not restart.get("success"):
                 conflicts.append(f"iwd restart failed: {restart.get('stderr', '')}")
             else:
@@ -2134,20 +2735,50 @@ class Plugin:
                 self._save_band_policy_journal(journal, path)
 
         reconnect_uuid = str(journal.get("rollback_reconnect_uuid") or "")
+        automatic = (journal.get("operation") == "automatic_high_band_reconnect"
+                     and journal.get("mutations") == {})
+        bound_iface = str(journal.get("automatic_iface") or "") if automatic else ""
+        if journal.get("rollback_reconnect_required") and backend not in ("iwd", "wpa_supplicant"):
+            conflicts.append("The active WiFi backend could not be verified for recovery")
         if (
             journal.get("rollback_reconnect_required")
+            and backend in ("iwd", "wpa_supplicant")
             and not journal.get("rollback_reconnect_completed")
             and reconnect_uuid
         ):
-            if self._profile_is_active(reconnect_uuid):
+            current_uuid = self._get_active_connection_uuid(bound_iface or None)
+            changed_connection = (current_uuid not in (None, reconnect_uuid)
+                                  or recovery_active_uuid not in (None, reconnect_uuid))
+            active = (self._profile_is_active(reconnect_uuid, bound_iface)
+                      if bound_iface else self._profile_is_active(reconnect_uuid))
+            frequency = ((self._get_link_frequency(bound_iface) if bound_iface else self._get_link_frequency())
+                         if active else None)
+            device_changed = False
+            if automatic and bound_iface and not changed_connection and not active:
+                try:
+                    with open(f"/sys/class/net/{bound_iface}/ifindex", encoding="ascii") as handle:
+                        current_ifindex = int(handle.read(32))
+                    device_changed = (self._boot_id() == journal.get("automatic_boot_id")
+                                      and current_ifindex != journal.get("automatic_ifindex"))
+                    driver = os.path.basename(os.path.realpath(f"/sys/class/net/{bound_iface}/device/driver"))
+                    device_changed = device_changed or driver != "mt7921e"
+                except (OSError, ValueError):
+                    device_changed = True
+            if changed_connection or (active and frequency is not None):
+                # A connection-only operation has no profile/config writes to
+                # undo. Preserve a different network selected by the user.
                 journal["rollback_reconnect_completed"] = True
                 self._save_band_policy_journal(journal, path)
+            elif device_changed:
+                conflicts.append("The WiFi device changed during automatic reconnection")
             else:
-                reconnect = self._reconnect_profile(
-                    reconnect_uuid,
-                    True,
-                    cycle=not bool(journal.get("rollback_iwd_restart_required")),
-                )
+                if bound_iface:
+                    reconnect = self._reconnect_profile(reconnect_uuid, True, cycle=active,
+                                                         bound_iface=bound_iface, activation_timeout=5)
+                else:
+                    reconnect = self._reconnect_profile(
+                        reconnect_uuid, True,
+                        cycle=not bool(journal.get("rollback_iwd_restart_required")))
                 if not reconnect.get("success"):
                     conflicts.append(
                         f"WiFi reconnect failed: {reconnect.get('stderr', '')}"
@@ -2172,6 +2803,23 @@ class Plugin:
             "rolled_back": not conflicts,
             "conflicts": conflicts,
         }
+
+    @staticmethod
+    def _band_policy_rollback_retryable(journal: dict) -> bool:
+        mutations = journal.get("mutations")
+        profile = journal.get("profile_before")
+        return bool(
+            journal.get("schema") == 1
+            and isinstance(journal.get("settings_before"), dict)
+            and journal.get("settings_before")
+            and isinstance(mutations, dict)
+            and (any(isinstance(mutation, dict) and mutation.get("planned")
+                     for mutation in mutations.values())
+                 or (journal.get("operation") == "automatic_high_band_reconnect"
+                     and journal.get("rollback_reconnect_required") is True
+                     and isinstance(profile, dict)
+                     and journal.get("rollback_reconnect_uuid") == profile.get("uuid")
+                     and journal.get("rollback_reconnect_uuid"))))
 
     def _recover_band_policy_journal(self) -> dict:
         """Complete/rollback an operation interrupted by a plugin restart."""
@@ -2201,18 +2849,7 @@ class Plugin:
             journal["phase"] = "committed"
             self._save_band_policy_journal(journal)
         elif phase == "rollback_failed":
-            mutations = journal.get("mutations")
-            retryable = (
-                journal.get("schema") == 1
-                and isinstance(journal.get("settings_before"), dict)
-                and bool(journal.get("settings_before"))
-                and isinstance(mutations, dict)
-                and any(
-                    isinstance(mutation, dict) and mutation.get("planned")
-                    for mutation in mutations.values()
-                )
-            )
-            if not retryable:
+            if not self._band_policy_rollback_retryable(journal):
                 decky.logger.error(
                     "Previous band policy rollback is incomplete; preserving journal"
                 )
@@ -2317,8 +2954,9 @@ class Plugin:
                     # This mode is a ranking preference, not a band lock. A
                     # 2.4 GHz link is valid when no usable higher-band BSS is
                     # available; the iwd config itself is verified separately.
-                    return {"success": True, "frequency": last_frequency}
-                elif mode == BAND_POLICY_OFF:
+                    if last_frequency is not None:
+                        return {"success": True, "frequency": last_frequency}
+                elif mode == BAND_POLICY_OFF and last_frequency is not None:
                     return {"success": True, "frequency": last_frequency}
             await asyncio.sleep(1)
         return {
@@ -2339,18 +2977,45 @@ class Plugin:
                 return parts[0]
         return None
 
-    def _get_active_connection_uuid(self, iface: str | None = None) -> str | None:
+    def _get_active_connection_uuid(
+        self, iface: str | None = None, *, require_connected: bool = False
+    ) -> str | None:
         if iface is None:
             iface = self._get_wifi_interface()
         if not iface:
             return None
+        fields = "GENERAL.STATE,GENERAL.CON-UUID" if require_connected else "GENERAL.CON-UUID"
         result = self._run_cmd(
-            ["/usr/bin/nmcli", "-g", "GENERAL.CON-UUID", "device", "show", iface]
+            ["/usr/bin/nmcli", "-g", fields, "device", "show", iface], timeout=2
         )
         if not result["success"]:
             return None
         value = result.get("stdout", "").strip()
+        if require_connected:
+            lines = value.splitlines()
+            if len(lines) != 2 or not re.fullmatch(r"100(?:\s+\(.*\))?", lines[0]):
+                return None
+            value = lines[1]
         return value if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) else None
+
+    def _get_connection_state(self, iface: str | None) -> dict:
+        if not iface:
+            # Missing inventory also covers a failed/timed-out NM read.
+            return {"connection_state": "unknown", "connection_uuid": ""}
+        result = self._run_cmd([
+            "/usr/bin/nmcli", "-g", "GENERAL.STATE,GENERAL.CON-UUID",
+            "device", "show", iface,
+        ], timeout=2)
+        lines = result.get("stdout", "").splitlines()
+        match = re.fullmatch(r"(\d+)(?:\s+\(.*\))?", lines[0]) if lines else None
+        if not result.get("success") or len(lines) != 2 or not match:
+            return {"connection_state": "unknown", "connection_uuid": ""}
+        state = int(match.group(1))
+        uuid = lines[1] if re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", lines[1]) else ""
+        name = "connected" if state == 100 and uuid else (
+            "connecting" if 40 <= state <= 90 else "disconnected")
+        return {"connection_state": name, "connection_uuid": uuid}
 
     def _get_current_backend(self) -> str | None:
         """Return 'iwd', 'wpa_supplicant', or None if unknown.
@@ -2379,16 +3044,11 @@ class Plugin:
                 continue
             except Exception:
                 continue
-        # No config found — check which service is running
-        result = self._run_cmd(["/usr/bin/systemctl", "is-active", "iwd"], timeout=3)
-        if result.get("stdout", "").strip() == "active":
-            return "iwd"
-        result = self._run_cmd(
-            ["/usr/bin/systemctl", "is-active", "wpa_supplicant"], timeout=3
-        )
-        if result.get("stdout", "").strip() == "active":
-            return "wpa_supplicant"
-        return None
+        # With no authoritative config, competing managers are ambiguous.
+        active = [name for name in ("iwd", "wpa_supplicant")
+                  if self._run_cmd(["/usr/bin/systemctl", "is-active", name], timeout=3)
+                  .get("stdout", "").strip() == "active"]
+        return active[0] if len(active) == 1 else None
 
     def _restore_legacy_bssid_lock(self, settings: dict | None = None) -> dict:
         """Restore only a legacy BSSID value still demonstrably owned by us."""
@@ -2432,23 +3092,6 @@ class Plugin:
         if self._profile_is_active(uuid):
             self._reconnect_profile(uuid, True)
         return {"success": True, "restored": True}
-
-    def _install_dispatcher(self) -> dict:
-        try:
-            template_path = os.path.join(
-                DECKY_PLUGIN_DIR, "defaults", "dispatcher.sh.tmpl"
-            )
-            with open(template_path, "r") as f:
-                script = f.read()
-            script = script.replace("__SETTINGS_PATH__", SETTINGS_FILE)
-            script = script.replace("__PLUGIN_DIR__", DECKY_PLUGIN_DIR)
-            self._atomic_write_text(DISPATCHER_PATH, script, 0o755)
-            os.chmod(DISPATCHER_PATH, 0o755)
-            decky.logger.info("Dispatcher script installed")
-            return {"success": True}
-        except Exception as e:
-            decky.logger.error(f"Failed to install dispatcher: {e}")
-            return {"success": False, "error": "write_failed", "message": str(e)}
 
     def _remove_dispatcher(self) -> dict:
         try:
@@ -2499,6 +3142,7 @@ class Plugin:
     # ---- Lifecycle ----
 
     async def _main(self):
+        self._high_band_monitor_ready = False
         try:
             try:
                 os.remove(HEALTH_MARKER_FILE)
@@ -2543,9 +3187,6 @@ class Plugin:
             settings["distro_name"] = distro["name"]
             await self._worker_complete(_save_settings, settings)
 
-            if settings.get("auto_fix_on_wake", False):
-                await self._worker_complete(self._install_dispatcher)
-
             # Reapply only the explicitly selected per-profile power setting.
             iface = await self._worker_complete(self._get_wifi_interface)
             if settings.get("power_save_legacy_detected"):
@@ -2587,12 +3228,16 @@ class Plugin:
                     "ready_at": int(time.time()),
                 },
             )
+            self._high_band_monitor_ready = True
+            self._start_high_band_monitor(settings)
             return {"success": True}
         except Exception as e:
             decky.logger.error(f"WiFi Optimizer Go 2 _main error: {e}")
             return {"success": False, "error": str(e)}
 
     async def _unload(self):
+        self._high_band_monitor_ready = False
+        await self._stop_high_band_monitor()
         try:
             try:
                 os.remove(HEALTH_MARKER_FILE)
@@ -2788,8 +3433,8 @@ class Plugin:
         try:
             settings = _load_settings()
             iface = self._get_wifi_interface()
-            uuid = self._get_active_connection_uuid(iface) if iface else None
-            connected = iface is not None and uuid is not None
+            connection = self._get_connection_state(iface)
+            connected = connection["connection_state"] == "connected"
             support_tier = self._get_support_tier(settings)
 
             status = {
@@ -2798,7 +3443,7 @@ class Plugin:
                 "support_tier": support_tier,
                 "version": getattr(decky, "DECKY_PLUGIN_VERSION", "0.0.0"),
                 "settings": settings,
-                "live": {},
+                "live": connection,
                 "drift": {},
             }
 
@@ -2809,10 +3454,27 @@ class Plugin:
                 status["drift"]["recovery"] = True
 
             # Backend info is read-only and system-wide.
-            status["live"]["wifi_backend"] = self._get_current_backend() or ""
-            status["live"]["band_policy"] = settings.get(
-                "band_policy", BAND_POLICY_OFF
-            )
+            backend = self._get_current_backend() or ""
+            saved_policy = settings.get("band_policy", BAND_POLICY_OFF)
+            inactive = ((saved_policy in IWD_BAND_POLICIES and backend != "iwd")
+                        or (saved_policy == BAND_POLICY_SIX_ONLY and backend != "wpa_supplicant"))
+            status["live"].update(wifi_backend=backend, saved_band_policy=saved_policy,
+                                   saved_policy_inactive=inactive,
+                                   band_policy=BAND_POLICY_OFF if inactive else saved_policy)
+            status["live"]["high_band_discovery_pending"] = bool(
+                backend == "iwd" and getattr(self, "_high_band_discovery_pending", False))
+            status["live"]["high_band_discovery"] = dict(
+                getattr(self, "_high_band_discovery_result", {}) if backend == "iwd" else {})
+            journal = self._load_band_policy_journal()
+            status["live"]["band_policy_restore_available"] = bool(
+                backend in ("iwd", "wpa_supplicant")
+                and settings.get("device_family") == "legion_go_2"
+                and settings.get("driver") == "mt7921e"
+                and (saved_policy != BAND_POLICY_OFF or settings.get("band_policy_legacy_detected") or journal)
+                and not self._load_power_save_journal()
+                and (not journal or (journal.get("phase") == "rollback_failed"
+                                     and self._band_policy_rollback_retryable(journal)))
+                and not self._band_policy_ownership_error(settings, allow_restored_iwd=True))
 
             # A strict policy can leave WiFi disconnected. Ownership and drift
             # must still be visible so the user can safely turn the policy off.
@@ -2834,6 +3496,9 @@ class Plugin:
                 ["/usr/bin/iw", "dev", iface, "link"], timeout=T
             )
             link_out = link_result.get("stdout", "")
+            ssid = re.search(r"(?m)^[ \t]*SSID: ?(.*)$", link_out)
+            if ssid:
+                status["live"]["ssid"] = ssid.group(1)
             for line in link_out.split("\n"):
                 line = line.strip()
                 if line.startswith("signal:"):
@@ -2849,7 +3514,18 @@ class Plugin:
                     if len(parts) >= 3:
                         status["live"]["connected_bssid"] = parts[2]
 
-            if settings.get("band_policy") == BAND_POLICY_STRICT_HIGH:
+            # NM activation alone can outlive the radio link during a switch.
+            # Verify the same activated profile after reading the kernel link.
+            if (not link_result.get("success") or not status["live"].get("frequency")
+                    or self._get_active_connection_uuid(iface, require_connected=True)
+                    != connection["connection_uuid"]):
+                status["connected"] = False
+                status["live"]["connection_state"] = "unknown"
+                for field in ("ssid", "frequency", "signal_dbm", "tx_bitrate", "connected_bssid"):
+                    status["live"].pop(field, None)
+                return status
+
+            if backend == "iwd" and saved_policy == BAND_POLICY_STRICT_HIGH:
                 try:
                     linked_frequency = float(status["live"].get("frequency", ""))
                 except (TypeError, ValueError):
@@ -3407,6 +4083,9 @@ class Plugin:
         self, mode: str, allow_unverified_scan: bool = False
     ) -> dict:
         """Run one band transaction while fenced from the rollback service."""
+        # Interrupt discovery before waiting for the gate held by its worker.
+        # Monitor tasks live on Decky's loop, not the transaction worker loop.
+        await self._stop_high_band_monitor()
         async with self._get_band_policy_file_gate():
             try:
                 file_lock = await self._worker_complete(
@@ -3415,6 +4094,7 @@ class Plugin:
                 )
             except Exception as e:
                 decky.logger.error(f"band policy lock error: {e}")
+                await self._restart_high_band_monitor()
                 return {
                     "success": False,
                     "error": "band_policy_lock_failed",
@@ -3438,6 +4118,7 @@ class Plugin:
                 # this directly also guarantees progress if executor threads
                 # are busy with unrelated work.
                 self._release_band_policy_file_lock(file_lock)
+                await self._restart_high_band_monitor()
 
     async def _set_band_policy_impl(
         self, mode: str, lock_already_held: bool = False,
@@ -3472,6 +4153,10 @@ class Plugin:
             }
 
         async with self._network_lock_context(lock_already_held):
+            backend = self._get_current_backend()
+            if backend not in ("iwd", "wpa_supplicant"):
+                return {"success": False, "error": "unsupported_backend",
+                        "message": "The active WiFi backend could not be verified; no changes were made."}
             if self._load_power_save_journal():
                 return {
                     "success": False,
@@ -3507,9 +4192,21 @@ class Plugin:
                         ),
                         "recovery_state_preserved": True,
                     }
+            backend = self._get_current_backend()
+            if backend not in ("iwd", "wpa_supplicant"):
+                return {"success": False, "error": "unsupported_backend",
+                        "message": "The WiFi backend changed during recovery; retry after it is ready."}
             settings = _load_settings()
             current_mode = settings.get("band_policy", BAND_POLICY_OFF)
             legacy = bool(settings.get("band_policy_legacy_detected"))
+            if mode in IWD_BAND_POLICIES and backend != "iwd":
+                return {"success": False, "error": "unsupported_backend",
+                        "message": "High-band preference requires the iwd WiFi backend.",
+                        "band_policy": current_mode, "rolled_back": False}
+            if mode == BAND_POLICY_SIX_ONLY and backend != "wpa_supplicant":
+                return {"success": False, "error": "preflight_failed",
+                        "message": "6 GHz only requires the native WPA WiFi backend.",
+                        "band_policy": current_mode, "rolled_back": False}
 
             if current_mode not in BAND_POLICIES:
                 return {
@@ -3662,8 +4359,11 @@ class Plugin:
 
             active_uuid = self._get_active_connection_uuid()
             state = settings.get("band_policy_state") or {}
+            inactive_iwd_cleanup = (mode == BAND_POLICY_OFF
+                                    and current_mode in IWD_BAND_POLICIES
+                                    and backend == "wpa_supplicant" and not legacy)
             profileless_iwd_transition = (
-                not active_uuid
+                (not active_uuid or inactive_iwd_cleanup)
                 and not legacy
                 and mode in (BAND_POLICY_OFF, *IWD_BAND_POLICIES)
                 and current_mode in (BAND_POLICY_OFF, *IWD_BAND_POLICIES)
@@ -3695,7 +4395,7 @@ class Plugin:
                 # The 5/6 GHz policy owns only the global iwd Rank key.  Its
                 # original profile may have been forgotten since activation;
                 # removing that global key must not depend on the old UUID.
-                profile_uuid = str(active_uuid or "")
+                profile_uuid = "" if inactive_iwd_cleanup else str(active_uuid or "")
             else:
                 profile_uuid = str(active_uuid or state.get("connection_uuid") or "")
 
@@ -3800,6 +4500,17 @@ class Plugin:
                     "rolled_back": False,
                 }
 
+            if backend == "iwd" and active_uuid and not self._iwd_snapshot_matches(iwd_before, final_iwd):
+                profile_conflict = self._get_iwd_profile_conflict(active_uuid, allow_disabled_duplicates=True)
+                if profile_conflict:
+                    return {
+                        "success": False,
+                        "error": "ambiguous_iwd_profiles",
+                        "message": profile_conflict,
+                        "band_policy": current_mode,
+                        "rolled_back": False,
+                    }
+
             settings_before = self._band_settings_fields(settings)
             operation_id = f"{os.getpid()}-{int(time.time() * 1000)}"
             journal = {
@@ -3817,6 +4528,7 @@ class Plugin:
                     "was_active": profile_was_active,
                 },
                 "active_uuid_before": str(active_uuid or ""),
+                "backend_before": backend,
                 "iwd_before": iwd_before,
                 "mutations": {},
             }
@@ -3908,31 +4620,37 @@ class Plugin:
                 elif mode in IWD_BAND_POLICIES:
                     apply_iwd(final_iwd)
 
-                if iwd_changed:
-                    restart = self._run_cmd(
-                        ["/usr/bin/systemctl", "restart", "iwd"], timeout=15
-                    )
+                if self._get_current_backend() != backend:
+                    raise RuntimeError("The WiFi backend changed during the operation.")
+                iwd_runtime_changed = iwd_changed and backend == "iwd"
+                if iwd_runtime_changed:
+                    restart = self._restart_selected_iwd()
                     if not restart.get("success"):
                         raise RuntimeError(
                             restart.get("stderr") or "iwd restart failed"
                         )
 
                 reconnect_uuid = ""
-                if iwd_changed and active_uuid:
+                if self._get_current_backend() != backend:
+                    raise RuntimeError("The WiFi backend changed before reconnection.")
+                if iwd_runtime_changed and active_uuid:
                     reconnect_uuid = active_uuid
                 elif nm_changed and profile_was_active:
                     reconnect_uuid = profile_uuid
                 reconnected = bool(reconnect_uuid)
                 if reconnect_uuid:
+                    current_uuid = self._get_active_connection_uuid()
+                    if current_uuid not in (None, reconnect_uuid):
+                        raise RuntimeError("The active WiFi profile changed; the new connection was preserved.")
                     reconnect = self._reconnect_profile(
-                        reconnect_uuid, True, cycle=not iwd_changed
+                        reconnect_uuid, True, cycle=not iwd_runtime_changed
                     )
                     if not reconnect.get("success"):
                         raise RuntimeError(
                             reconnect.get("stderr") or "WiFi reconnect failed"
                         )
 
-                if mode == BAND_POLICY_HIGH_ONLY:
+                if mode == BAND_POLICY_HIGH_ONLY and not profile_uuid:
                     verification = {
                         "success": True,
                         "frequency": self._get_link_frequency(),
@@ -3954,7 +4672,10 @@ class Plugin:
                             verification.get("message") or "WiFi reconnect failed"
                         )
                 else:
-                    verification = {"success": True, "frequency": None}
+                    verification = {"success": True, "frequency": self._get_link_frequency()}
+
+                if self._get_current_backend() != backend:
+                    raise RuntimeError("The WiFi backend changed before verification completed.")
 
                 on_disk_journal = self._load_band_policy_journal()
                 if (
@@ -4015,7 +4736,8 @@ class Plugin:
                     "reconnected": reconnected,
                     "rolled_back": False,
                     "frequency": verification.get("frequency"),
-                    "message": "Band policy applied and verified.",
+                    "message": ("Saved iwd preference cleared; the WPA connection was not changed."
+                                if inactive_iwd_cleanup else "Band policy applied and verified."),
                 }
             except Exception as e:
                 decky.logger.error(f"set_band_policy apply error: {e}")
@@ -4039,8 +4761,8 @@ class Plugin:
                 rollback = self._restore_band_policy_transaction(
                     journal, str(e)
                 )
-                self._cancel_band_policy_rollback(journal)
                 if rollback.get("success"):
+                    self._cancel_band_policy_rollback(journal)
                     self._remove_band_policy_journal()
                 return {
                     "success": False,
@@ -4155,6 +4877,10 @@ def _run_band_policy_rollback_cli(journal_path: str) -> int:
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 if journal_stat.st_uid != 0 or parent_stat.st_uid != 0:
                     return 2
+    except FileNotFoundError:
+        # A committed worker can remove the journal just before its timer
+        # starts. There is nothing left to restore in that race.
+        return 0
     except OSError:
         return 2
     plugin = Plugin()
@@ -4177,7 +4903,10 @@ def _run_band_policy_rollback_cli(journal_path: str) -> int:
             return 2
         # A verified/committed transaction must remain committed even if
         # stopping the timer raced with its activation.
-        if journal.get("phase") not in ("pending", "applying", "rolling_back"):
+        if journal.get("phase") == "rollback_failed":
+            if not plugin._band_policy_rollback_retryable(journal):
+                return 1
+        elif journal.get("phase") not in ("pending", "applying", "rolling_back"):
             return 0
         result = plugin._restore_band_policy_transaction(
             journal, "automatic watchdog timeout", journal_path=path

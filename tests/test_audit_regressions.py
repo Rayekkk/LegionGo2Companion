@@ -252,6 +252,21 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue((durable/leaf).is_file())
             self.assertFalse((runtime/leaf).exists())
 
+    def test_unreadable_legacy_journal_is_preserved_without_publishing_a_marker(self):
+        with tempfile.TemporaryDirectory() as raw:
+            durable, runtime = Path(raw)/"state", Path(raw)/"run"
+            runtime.mkdir()
+            leaf = "band-policy-transaction.json"
+            original = b"{interrupted or corrupt legacy recovery data"
+            (runtime/leaf).write_bytes(original)
+            with patch.object(wifi, "BAND_POLICY_STATE_DIR", str(durable)), \
+                 patch.object(wifi, "BAND_POLICY_RUNTIME_DIR", str(runtime)), \
+                 patch.object(wifi, "BAND_POLICY_JOURNAL_FILE", str(durable/leaf)):
+                result = wifi.Plugin()._load_band_policy_journal()
+            self.assertEqual(result["phase"], "unreadable")
+            self.assertEqual((runtime/leaf).read_bytes(), original)
+            self.assertFalse((durable/leaf).exists())
+
     def test_remap_restore_preserves_unmanaged_and_externally_changed_buttons(self):
         state = remap._sanitize_state({"enabled": True, "baseline_profile": BASE_PROFILE,
                                        "desktop_action": "disabled", "page_action": "disabled"})

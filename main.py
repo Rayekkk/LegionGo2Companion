@@ -763,8 +763,10 @@ class Plugin:
     async def wifi_set_band_policy(self, mode, allow_unverified_scan=False):
         return await self._wifi.set_band_policy(mode, allow_unverified_scan)
 
-    async def wifi_rescan_and_reconnect(self):
-        return await self._wifi.rescan_and_reconnect()
+    async def wifi_rescan_and_reconnect(self, target_band="high"):
+        if target_band == "high":
+            return await self._wifi.rescan_and_reconnect()
+        return await self._wifi.rescan_and_reconnect(target_band)
 
     async def wifi_reset_settings(self):
         return await self._wifi.reset_settings()

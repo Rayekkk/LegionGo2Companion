@@ -13,6 +13,52 @@ from safe_settings import CorruptSettings
 
 
 class WifiSafetyTests(unittest.TestCase):
+    def test_retired_wake_dispatcher_flag_is_migrated_without_losing_ownership(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / 'wifi_settings.json'
+            original = dict(wifi.DEFAULT_SETTINGS,
+                            auto_fix_on_wake=True,
+                            power_save_disabled=True,
+                            power_save_connection_uuid='dda82d97-6914-4788-802f-fa1ba9a1515f',
+                            power_save_previous='0',
+                            power_save_runtime_previous='on',
+                            band_policy=wifi.BAND_POLICY_HIGH_ONLY,
+                            band_policy_state={'mode': wifi.BAND_POLICY_HIGH_ONLY,
+                                               'owns_iwd': True,
+                                               'original': {'iwd': {'modifier_present': False}},
+                                               'applied': {'iwd_modifier_present': True,
+                                                           'iwd_modifier_value': '0.01'}})
+            path.write_text(json.dumps(original), encoding='utf-8')
+            with patch.object(wifi, 'SETTINGS_FILE', str(path)), \
+                 patch.object(wifi, '_SETTINGS_MANAGER', None), \
+                 patch.object(wifi, '_SETTINGS_MANAGER_PATH', ''):
+                migrated = wifi._load_settings()
+                self.assertNotIn('auto_fix_on_wake', migrated)
+                for field in ('power_save_disabled', 'power_save_connection_uuid',
+                              'power_save_previous', 'power_save_runtime_previous',
+                              'band_policy', 'band_policy_state'):
+                    self.assertEqual(migrated[field], original[field])
+                self.assertFalse(migrated['power_save_legacy_detected'])
+                self.assertNotIn('auto_fix_on_wake', json.loads(path.read_text()))
+                with patch.object(wifi._get_settings_manager(), 'replace') as rewrite:
+                    self.assertEqual(wifi._load_settings(), migrated)
+                    rewrite.assert_not_called()
+
+    def test_status_does_not_show_a_configuring_connection_as_connected(self):
+        plugin = wifi.Plugin()
+        uuid = 'dda82d97-6914-4788-802f-fa1ba9a1515f'
+        with patch.object(wifi, '_load_settings', return_value=dict(wifi.DEFAULT_SETTINGS)), \
+             patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
+             patch.object(plugin, '_get_network_recovery_issues', return_value=[]), \
+             patch.object(plugin, '_get_current_backend', return_value='iwd'), \
+             patch.object(plugin, '_run_cmd', return_value={
+                 'success': True, 'stdout': '50 (connecting (configuring))\n' + uuid}) as command:
+            status = plugin._get_status_sync()
+        self.assertTrue(status['success'], status)
+        self.assertFalse(status['connected'])
+        self.assertNotIn('frequency', status['live'])
+        self.assertEqual(command.call_count, 1)
+
     def test_status_uses_one_settings_snapshot_for_support_and_ownership(self):
         plugin = wifi.Plugin()
         state = dict(wifi.DEFAULT_SETTINGS, driver="mt7921e", device_family="legion_go_2")

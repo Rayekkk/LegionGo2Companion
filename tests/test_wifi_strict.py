@@ -58,6 +58,7 @@ class StrictWifiTests(unittest.TestCase):
             "_get_active_connection_uuid": UUID,
             "_nmcli_get": ("", {"success": True}),
             "_profile_is_active": True, "_get_link_frequency": 5320,
+            "_get_iwd_profile_conflict": "",
             "_get_band_policy_capabilities_sync": {
                 "five_six_only_available": True,
             },
@@ -75,6 +76,14 @@ class StrictWifiTests(unittest.TestCase):
         return asyncio.run(self.plugin._set_band_policy_impl(
             mode, lock_already_held=True,
             allow_unverified_scan=allow_unverified_scan))
+
+    def test_pending_power_save_recovery_blocks_band_change_without_rewriting_it(self):
+        journal = {"schema": 1, "phase": "applying", "operation_id": "test-pending"}
+        self.plugin._save_power_save_journal(journal)
+        result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertEqual(result["error"], "network_recovery_required")
+        self.assertEqual(self.plugin._load_power_save_journal(), journal)
+        self.commands.assert_not_called()
 
     def test_preference_to_strict_writes_iwd_once_and_preserves_baseline(self):
         original_write = self.plugin._set_iwd_rank_modifier
@@ -238,6 +247,47 @@ class StrictWifiTests(unittest.TestCase):
 
 
 class ReconnectPacingTests(unittest.TestCase):
+    def test_slow_cli_failure_leaves_time_for_verified_native_recovery(self):
+        plugin = wifi.Plugin()
+        clock = [0.0]
+        budgets = []
+        def command(argv, **kwargs):
+            if argv[:3] == ['/usr/bin/nmcli', 'con', 'up']:
+                budgets.append(kwargs['timeout'])
+                clock[0] += kwargs['timeout']
+                return {'success': False, 'stderr': 'Secrets were required, but not provided'}
+            return {'success': True, 'stdout': '30 (disconnected)'}
+        with patch.object(plugin, '_get_current_backend', return_value='wpa_supplicant'), \
+             patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
+             patch.object(plugin, '_run_cmd', side_effect=command), \
+             patch.object(plugin, '_profile_is_active', side_effect=lambda _uuid: clock[0] >= 23), \
+             patch.object(plugin, '_get_link_frequency', return_value=6295), \
+             patch.object(wifi.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result = plugin._reconnect_profile(UUID, cycle=False)
+        self.assertTrue(result['success'], result)
+        self.assertEqual(budgets, [14.0])
+        self.assertLessEqual(clock[0], 25)
+
+    def test_verified_link_at_deadline_wins_over_earlier_cli_failure(self):
+        plugin = wifi.Plugin()
+        clock = [0.0]
+        def command(argv, **kwargs):
+            if argv[:3] == ['/usr/bin/nmcli', 'con', 'up']:
+                clock[0] = 25.0
+                return {'success': False, 'stderr': 'Activation failed'}
+            return {'success': True, 'stdout': '30 (disconnected)'}
+        with patch.object(plugin, '_get_current_backend', return_value='wpa_supplicant'), \
+             patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
+             patch.object(plugin, '_run_cmd', side_effect=command), \
+             patch.object(plugin, '_profile_is_active', side_effect=lambda _uuid: clock[0] >= 25), \
+             patch.object(plugin, '_get_link_frequency', return_value=6295), \
+             patch.object(wifi.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            result = plugin._reconnect_profile(UUID, cycle=False)
+        self.assertTrue(result['success'], result)
+        self.assertTrue(result['reconnected'])
+
     def test_fast_activation_failures_are_spaced_while_autoconnect_is_checked(self):
         plugin = wifi.Plugin()
         clock = [0.0]
@@ -259,6 +309,7 @@ class ReconnectPacingTests(unittest.TestCase):
 
         with patch.object(plugin, "_run_cmd", side_effect=run_cmd), \
              patch.object(plugin, "_get_wifi_interface", return_value="wlan0"), \
+             patch.object(plugin, "_get_link_frequency", return_value=5320), \
              patch.object(plugin, "_profile_is_active", side_effect=is_active), \
              patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(wifi.time, "sleep", side_effect=sleep):
@@ -284,6 +335,7 @@ class ReconnectPacingTests(unittest.TestCase):
             clock[0] += seconds
 
         with patch.object(plugin, "_run_cmd", side_effect=run_cmd), \
+             patch.object(plugin, "_get_link_frequency", return_value=5320), \
              patch.object(plugin, "_profile_is_active",
                           side_effect=lambda _uuid: clock[0] >= 4.0), \
              patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \

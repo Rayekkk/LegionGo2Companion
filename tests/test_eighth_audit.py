@@ -136,6 +136,20 @@ class WifiConnectionIdentityTests(unittest.TestCase):
     OWN = 'da58df8b-cdb1-447d-80ab-19d11a634e7e'
     OTHER = '85194f4c-d496-4eec-bae0-d880b4cbcf26'
 
+    def test_ui_connection_requires_completed_networkmanager_activation(self):
+        plugin = wifi.Plugin()
+        for state, expected in (('50 (connecting (configuring))', None),
+                                ('70 (connecting (getting IP configuration))', None),
+                                ('100 (connected)', self.OWN), ('100', self.OWN),
+                                ('1000', None), ('', None)):
+            with self.subTest(state=state), patch.object(plugin, '_run_cmd', return_value={
+                    'success': True, 'stdout': state + '\n' + self.OWN}) as command:
+                self.assertEqual(plugin._get_active_connection_uuid(
+                    'wlan0', require_connected=True), expected)
+                self.assertEqual(command.call_count, 1)
+                self.assertIn('GENERAL.STATE,GENERAL.CON-UUID', command.call_args.args[0])
+                self.assertEqual(command.call_args.kwargs['timeout'], 2)
+
     def responses(self, device_uuid):
         def run(argv, **kwargs):
             if argv[-2:] == ['device', 'show']:
@@ -143,8 +157,9 @@ class WifiConnectionIdentityTests(unittest.TestCase):
             if 'GENERAL.CON-UUID' in argv:
                 self.assertEqual(argv[-1], 'wlan0')
                 return {'success': True, 'stdout': device_uuid + '\n'}
-            if 'UUID,TYPE' in argv:
-                return {'success': True, 'stdout': f'{self.OTHER}:802-11-wireless\n{self.OWN}:802-11-wireless\n'}
+            if 'GENERAL.STATE,GENERAL.CON-UUID' in argv:
+                self.assertEqual(argv[-1], 'wlan0')
+                return {'success': True, 'stdout': f'100 (connected)\n{device_uuid}\n'}
             raise AssertionError(argv)
         return run
 
@@ -162,16 +177,17 @@ class WifiConnectionIdentityTests(unittest.TestCase):
                     patch.object(plugin, '_run_cmd', side_effect=self.responses(value)):
                 self.assertIsNone(plugin._get_active_connection_uuid())
 
-    def test_captured_interface_reuses_discovery_and_activity_checks_all_profiles(self):
+    def test_captured_interface_reuses_discovery_and_activity_belongs_to_that_adapter(self):
         plugin = wifi.Plugin()
         with patch.object(plugin, '_get_wifi_interface') as discovery, \
                 patch.object(plugin, '_run_cmd', side_effect=self.responses(self.OWN)) as command:
             self.assertEqual(plugin._get_active_connection_uuid('wlan0'), self.OWN)
             discovery.assert_not_called()
             self.assertEqual(command.call_count, 1, 'A captured interface needs one device UUID query.')
-            self.assertTrue(plugin._profile_is_active(self.OWN), 'Activity is independent of active-list ordering.')
-            self.assertTrue(plugin._profile_is_active(self.OTHER))
-            self.assertFalse(plugin._profile_is_active('unknown'))
+            self.assertTrue(plugin._profile_is_active(self.OWN, 'wlan0'))
+            self.assertFalse(plugin._profile_is_active(self.OTHER, 'wlan0'))
+            self.assertFalse(plugin._profile_is_active('unknown', 'wlan0'))
+            discovery.assert_not_called()
 
 
 class NonblockingMetadataTests(unittest.TestCase):
