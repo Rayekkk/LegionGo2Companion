@@ -2,6 +2,15 @@
 
 ### Fixed
 
+- Drain completed RPC and hardware-worker snapshots explicitly, avoiding a busy loop during module shutdown when asyncio completes a gather before deferred cleanup callbacks run.
+- Clear or roll back an inactive iwd preference after a native SteamOS WPA switch without starting a competing manager or reconnecting a forgotten profile; retain watchdogs when recovery is incomplete.
+- Show the verified WiFi connection, SSID, band and backend first, expose backend-specific actions, and distinguish inactive saved policies from enforced settings.
+- Invalidate WiFi actions/results after failed reads, native backend/profile changes, roaming and page reopen; verify the final state before showing success and pause automatic radio work while WPA is selected.
+- Discover higher bands automatically on the Legion Go 2 iwd preference path after startup, activation and resume, with bounded scans/reconnections and cooperative cancellation.
+- Require the requested NetworkManager profile, connected device state and physical radio link before reporting WiFi success; reject ambiguous iwd profile ownership and recover interrupted reconnections independently of the plugin process.
+- Retry valid failed WiFi rollback journals, invalidate stale recovery checkpoints after restoring configuration, and migrate the retired wake-dispatcher flag without discarding profile ownership.
+- Offer a one-time 6 GHz connection on the native WPA backend, continue targeted 6 GHz discovery when a scan only finds 5 GHz, and clear the temporary AP pin after verifying the actual link while preserving failed-recovery watchdogs.
+- Preserve unreadable legacy WiFi recovery journals instead of migrating an error marker; isolate offline recovery and plugin-inventory tests from live Linux system directories.
 - Preserve battery and gyro-source changes accepted before page close, including changes still waiting for a status read, and keep reopened snapshots behind their complete mutation tail.
 - Wait for accepted vibration slider saves before loading settings on a reopened page.
 - Apply the same mutation ordering to main-menu battery, gyro, remapper, RGB and vibration summaries; keep battery transaction verification independent of its public read barrier.
