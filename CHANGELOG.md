@@ -1,5 +1,60 @@
 # Unreleased
 
+### Fixed
+
+- Preserve battery and gyro-source changes accepted before page close, including changes still waiting for a status read, and keep reopened snapshots behind their complete mutation tail.
+- Wait for accepted vibration slider saves before loading settings on a reopened page.
+- Apply the same mutation ordering to main-menu battery, gyro, remapper, RGB and vibration summaries; keep battery transaction verification independent of its public read barrier.
+- Run update-publication close barriers outside the event loop during conflict detection and unload, preserving completion through repeated cancellation.
+- Recheck the live output and bound compositor session during final legacy OLED withdrawal, preserving pending cleanup when output identity cannot be verified.
+- Validate each RyzenAdj HTTPS redirect before opening its destination, rejecting foreign hosts, URL credentials and nonstandard ports.
+- Preserve remapper mutation order across page instances and wait for accepted remapper/RGB edits before sampling a reopened page.
+- Keep vibration initial-load retries behind all remaining reads from a failed attempt, while displaying the first error immediately.
+- Resolve WiFi connection UUIDs from the selected interface, so an external adapter cannot supply another profile; reuse captured interface discovery and check named profile activity independently of listing order.
+- Reject nonregular plugin manifests before reading and open settings nonblocking to prevent FIFO substitution from hanging metadata verification.
+- Report WiFi rollback-lock failures without synchronous settings I/O on the event loop or masking the original error.
+- Load final remapper ownership inside its operation lock during unload and uninstall, preventing stale restoration while keeping settings I/O off the event loop.
+- Read console and controller battery status independently, so slow or failed controller sampling cannot hold console controls or duplicate outstanding reads after a console error.
+- Match vibration-test endpoints to the discovered HID identity, revalidate reused event nodes and the opened evdev descriptor, and probe only matching endpoints.
+- Keep vibration-test I/O in one worker transaction that stops, erases and closes the effect before releasing its busy guard, including repeated cancellation and failed starts.
+- Keep module status responsive during slow hardware reads and pending restoration without weakening mutation, conflict or shutdown gates.
+- Run WiFi power-save transactions, device discovery, startup commands and legacy restoration outside the event loop; finish cancelled transactions before releasing the network lock.
+- Move controller monitor settings recovery and file-lock waits off the event loop.
+- Debounce RGB speed gestures, save the final value on close and ignore obsolete or repeated timer callbacks.
+- Serialize Gaming Mode restart clicks with module changes and reject actions from discarded module-management pages.
+- Prevent discarded About-page callbacks from starting new update requests while preserving requests already accepted by the plugin session.
+- Ignore superseded or repeated CPU EPP debounce callbacks while preserving save-on-close.
+- Keep the complete OLED property watcher cache when safety checks require a fresh compositor read.
+- Recheck the live connector, HDR content and compositor session before legacy HDR changes, hand-back, display reset or uninstall restoration; stable Hybrid ticks still reuse the watcher.
+- Refresh reopened module pages as soon as an older status read finishes, and remove the extra three-second wait after a verified WiFi reconnect.
+- Reject new hardware gestures from unmounted WiFi, display, remapper, lighting and vibration pages while still saving previously accepted edits on close.
+- Move module status probes and durable module-choice commits off the event loop, preserving completion through cancellation.
+- Coalesce vibration test taps and finish pending slider saves before testing their confirmed intensity.
+- Adopt committed vibration reset settings even when the subsequent hardware apply fails.
+- Reject vibration heartbeats that predate a committed edit or profile change, and deliver a game change immediately after an older busy request finishes.
+- Confirm fresh global TDP settings after capability changes, keep CPU and helper recovery available after an auto-apply failure, and reject callbacks retained from an earlier game editor.
+- Revalidate live OLED output ownership before brightness hand-back or a delayed backlight write after docking/HDR changes.
+- Coalesce superseded RGB callbacks and preserve newer slider drafts when older writes finish or fail.
+- Drain hardware workers after failed module resume and normal shutdown, including unload errors and repeated cancellation of the drain itself.
+- Wait for the current game's profile before admitting TDP/CPU edits, reload global limits for missing profiles, and keep existing CPU AC profiles accessible without a TDP provider.
+- Replace and restore complete remapper YAML names, including multiline scalars, and separate restored mappings without a final newline.
+- Verify compositor-session ownership before restoring legacy OLED brightness or HDR baselines.
+- Reject stale brightness/Hybrid writers after a compositor restart and seed new vibration profiles from one admitted running-game snapshot.
+- Serialize vibration profile transitions against new gestures, adopt the committed profile scope even after hardware failures, and reject over-capacity profile creation without truncating saved data.
+- Persist legacy OLED brightness and HDR recovery baselines atomically before changing compositor state, and surface failed OLED startup to module management for retry.
+- Restore the available balanced firmware profile even when some PPT capabilities cannot be read, while still requiring readback confirmation.
+- Resolve the vibration edit/reset profile once, serialize reset behind pending slider edits, and discard delayed replies from a previous game or edit.
+- Keep TDP mutations and refreshes tied to their game context, show recoverable initial TDP/Vibration read errors, and expose actual TDP availability independently of CPU controls.
+- Separate preserved remapper blocks when the captured YAML has no final newline.
+- Restore each dedicated button's captured system mapping for Default, including custom actions or an absent mapping, while preserving unrelated live mappings.
+- Share verified TDP/CPU cleanup between module disable and uninstall, including CPU Boost and EPP managed only by game or AC profiles; report partial failures without skipping other controls.
+- Expose failed module starts separately from saved enable choices, block their RPCs and offer a safe retry after draining partial startup work.
+- Show the first OLED, RGB, remapper and WiFi status error with a retry action instead of an indefinite spinner.
+- Download the optional RyzenAdj helper outside the hardware admission gate with transfer deadlines, cancellation and partial-file cleanup.
+- Expire stale frontend game reports and resolve current Steam processes for vibration hotplug/resume and TDP profiles.
+- Confirm fresh vibration writes with bounded readback before reporting success or caching them.
+- Remove the vulnerable Rollup cleanup dependency chain, update brace-expansion, and validate the generated Decky bundle and package build inputs.
+
 ### Added
 
 - Detect gamescope's native Legion Go 2 display profile by the presence of its system Lua file. Automatically retire Companion's legacy display fix, remove its owned Lua file, disable the obsolete display controls, and report cleanup or Gaming Mode restart requirements.
@@ -13,6 +68,7 @@
 
 ### Improved
 
+- Run independent module RPCs concurrently while retaining per-resource ordering and lifecycle barriers; share only in-flight conflict scans, without caching completed admission checks.
 - Keep EDID correction available independently of display-mode setup and the installed Lua script.
 - Keep native-display detection independent of the Lua file's contents, gamescope version, and SteamOS update channel.
 - Remove unreachable updater helpers, legacy backend methods, unused frontend code, and obsolete package entries after a focused dead-code review.
