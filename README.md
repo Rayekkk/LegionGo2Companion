@@ -8,10 +8,10 @@
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/github/license/Rayekkk/LegionGo2Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
-**Power, battery protection, gyro, haptics, lighting, buttons, screen brightness, HDR and Wi-Fi in one Steam overlay.**
-The Legion Go 2 controls you use every day, with saved profiles and automatic recovery after wake.
+**Your Legion Go 2 hardware controls, together in the Steam overlay.**
+Tune power and vibration, personalise lighting and buttons, manage charging, and check your display and Wi-Fi without leaving Gaming Mode.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#usage) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -19,516 +19,464 @@ The Legion Go 2 controls you use every day, with saved profiles and automatic re
 
 ## Features
 
-| | |
-|---|---|
-| **TDP presets and custom limits** | Five presets, sustained power and burst headroom, with a live package-power reading |
-| **Game and charging profiles** | Separate TDP settings for each game and its battery/AC states, applied without opening the menu |
-| **CPU Boost and EPP** | Independent CPU controls, saved and checked against the kernel after each change |
-| **Controller haptics** | Vibration intensity and modes, touchpad feedback, a test action and per-game vibration profiles |
-| **Joystick lighting** | Solid, Breathing, Color cycle and Rainbow effects, with colour, brightness and supported speed controls |
-| **Power-button light** | A separate saved toggle on the verified Legion Go 2 firmware |
-| **Extra-button remapping** | Independent actions for the left controller's Desktop and Page buttons, including F1-F12 and Disabled |
-| **Controller gyro** | Enable gyro reporting through the existing Lenovo driver and choose the left, right or combined controller source |
-| **Gyro and touchpad diagnostics** | A short, passive test compares native controller data with the virtual controller output available to Steam |
-| **Battery protection and status** | The firmware's Long Life charging mode, preserved normal/fast mode, and separate charge levels for both controllers |
-| **OLED brightness fix** | Fixes screen brightness control in SteamOS and additionally offers an HDR metadata fix for affected games |
-| **Wi-Fi band preference** | Prefer 5/6 GHz while keeping 2.4 GHz available, plus a manual rescan/reconnect action |
-| **Settings recovery** | Imports standalone settings, restores saved controls after startup/wake and checks for later drift |
+Legion Go 2 Companion combines eight hardware modules in one Decky plugin. Use the
+controls you need, hide the rest, and keep separate power and vibration settings for
+your games. Saved profiles continue working while the menu is closed.
 
----
+| Module | What you can do |
+|---|---|
+| [TDP](#tdp) | Choose four power presets or Custom limits, adjust CPU Boost and EPP, and save game profiles with separate battery/AC settings |
+| [Vibration](#vibration) | Set handle vibration, touchpad feedback and game profiles; try a short vibration test |
+| [RGB Lighting](#rgb-lighting) | Set the joystick-ring effect, colour, brightness and speed; control the power-button light on verified firmware |
+| [Button Remapper](#button-remapper) | Give the left controller's Desktop and Page buttons separate actions |
+| [Gyro & Touchpad](#gyro--touchpad) | Choose the controller motion source and compare controller readings with the output reaching Steam |
+| [Battery](#battery) | Limit charging to about 80% and view the console and both controller batteries |
+| [OLED Display](#oled-display) | Use display fixes on older systems and correct the HDR metadata that games read |
+| [WiFi](#wifi) | Prefer higher bands with iwd, or make a one-time 5/6 GHz connection with WPA |
 
 ## Requirements
 
 | Requirement | Details |
 |---|---|
-| Device | Lenovo Legion Go 2 |
-| OS | SteamOS; tested on **SteamOS 3.8.16 Stable (kernel 6.16.12)** and **SteamOS 3.10 (kernel 7.2)** |
+| Device | Lenovo Legion Go 2; see model compatibility below |
+| System | SteamOS with [Decky Loader](https://decky.xyz) installed |
+| Tested system builds | SteamOS **3.8.16 Stable (kernel 6.16.12)** and **3.10 (kernel 7.2)**; available controls depend on the system interfaces |
 
-Controls follow the interfaces exposed by the active kernel. Older kernels offer named EPP presets; Companion applies the closest supported preset while preserving the exact saved value for newer kernels.
+**Model compatibility:** the main validation device is **8ASP2 / 83N0**. Joystick RGB
+also supports **8AHP2 / 83N1** when the expected Lenovo controller and complete
+`hid-lenovo-go` lighting interface are present. An 8AHP2 owner confirmed RGB and
+sleep/wake recovery on **SteamOS 3.9.1 Preview, build 20260914.100**. This covers
+controller RGB; maintainers have not independently verified every feature on 8AHP2.
 
----
+Each module checks its own hardware support and explains unavailable controls. The
+**power-button light** additionally requires the verified **83N0 / RRCN16WW** BIOS
+and ACPI layout. The 83N1 RGB extension does not extend that firmware access.
 
 ## Installation
 
-1. Install [Decky Loader](https://decky.xyz) if it is not already installed.
-2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases), when available, or build it using the instructions below.
-3. Remove the overlapping standalone plugins listed below, retaining their settings.
-4. In Gaming Mode, open the **Quick Access Menu → Decky → Settings → Developer**.
-5. Choose **Install Plugin from ZIP** and select the archive.
+1. Install [Decky Loader](https://decky.xyz) if you do not already have it.
+2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases). Choose the plugin ZIP attached to the release.
+3. Uninstall overlapping standalone plugins, keeping their saved settings as described below.
+4. In Gaming Mode, open **Quick Access Menu → Decky → Settings → Developer**.
+5. Choose **Install Plugin from ZIP**, select the archive, then open **Legion Go 2 Companion** in Decky.
 
-The archive contains one `LegionGo2Companion` folder. Decky installs it with the privileges
-needed by the hardware controls; normal use requires no terminal commands.
-
-### Updates
-
-Open **About → Check for Updates** to check the latest stable GitHub release. If a newer
-release has its plugin ZIP attached, **Download** saves it in your Downloads folder and
-shows the path. No public release yet, an incomplete release and a connection failure
-are reported separately. Checking and downloading happen only when requested; opening
-the menu does not contact GitHub.
-
-Companion verifies the archive's version, size, SHA-256 digest and contents before making
-the completed ZIP available. Failed downloads do not replace an existing ZIP. Releases
-without a SHA-256 digest are not offered for download; source archives and development
-branches are never used as a fallback.
-
-Install the downloaded ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
-Review your module choices afterwards: Decky's installation process can reset the gyro
-source, battery protection and Wi-Fi preferences. Downloading alone leaves the running
-plugin and all settings unchanged.
+Normal use needs no terminal commands. If you build your own ZIP, follow the
+[development instructions](#development).
 
 > [!IMPORTANT]
-> Companion pauses **all modules** if **LeGoTDP**, **LeGo Vibe Control** or
-> **LeGo2 Brightness Fix** is installed. Uninstall the listed plugins in Decky Settings,
-> keep their saved settings, then restart Decky or the console. Disabling them is not
-> enough. WiFi Optimizer and HueSync are not included in this installation check.
-
-### Conflict protection
-
-The backend checks before startup and every component request, and scans installed
-plugins every five seconds while running. A newly detected conflict blocks further
-requests and stops all module workers after an in-flight operation finishes. The frontend
-replaces hardware controls with a paused screen and the names of the detected plugins.
-
-Detection uses both installation-folder names and plugin manifests, so renamed copies
-also count. Removing a conflict does not silently restart partially stopped modules:
-**Check again** confirms the current state, then a Decky or console restart starts a fresh
-instance. User profiles are kept. A plugin whose identity cannot be read safely also
-pauses Companion until the installation can be verified.
+> Companion pauses **all modules** while **LeGoTDP**, **LeGo Vibe Control** or
+> **LeGo2 Brightness Fix** is installed. Uninstall the named plugins in Decky Settings,
+> keep their settings, then restart Decky or the console. Disabling them is not enough.
+> **Check again** confirms that the conflict is gone; a restart is still required.
 
 ### Moving from standalone plugins
 
-Companion imports TDP, vibration, display and Wi-Fi settings from their existing Decky
-settings folders. Existing Companion values take precedence; missing values can be filled
-from the old files. Importing does not modify or delete those source files.
+Keep the old plugins' Decky settings folders when uninstalling them. Companion imports
+missing TDP, vibration, display and Wi-Fi settings; values already saved in Companion
+take precedence. It leaves the original files intact. Deleted settings cannot be imported.
 
-Keep the standalone settings folders when removing their plugins. If those files have
-already been deleted, there is nothing to import. Companion keeps its own settings outside
-the installed plugin folder, so replacing the plugin files preserves them.
+Companion's own settings live outside its installed plugin folder, so replacing the
+plugin files preserves them. After installation, check **Manage Modules** and **OLED
+Display**, where setup or a Gaming Mode restart may be requested.
 
-Open **OLED Display** after installation. It may ask for a display mode and offer
-**Restart Game Mode** if the installed script differs from the one gamescope has loaded.
+### Updating
 
-<details>
-<summary><b>Building from source</b></summary>
+1. Open **About → Check for Updates**.
+2. If a newer stable release has a downloadable plugin ZIP, choose **Download <version>**.
+3. Wait for the confirmed download path in your Downloads folder.
+4. Install that ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
+5. Review your module settings afterwards, especially gyro, battery protection and Wi-Fi.
 
-<br>
-
-Requires Node.js 18+ and a ZIP tool: `zip` on Linux, or 7-Zip on Windows. From the source
-directory:
-
-```bash
-npm ci
-npm run typecheck
-npm run test:frontend
-npm run build      # compile the frontend into dist/
-npm run package    # create LegionGo2Companion-<version>.zip
-```
-
-Packaging uses the existing frontend build, so run **build before package**. Install the
-result through Decky rather than copying a checkout containing `node_modules` into its
-plugins directory.
-
-Backend tests require Python 3.10+ and run with `npm test`. GitHub Actions checks the
-backend on Linux (Python 3.10) and Windows (Python 3.13), and runs frontend tests, builds
-and package validation on Node.js 24 LTS. Hardware calls are mocked; CI does not publish
-releases.
-
-</details>
-
----
+**Downloading does not install the update.** Decky's installation process can reset
+those hardware preferences. Companion verifies the ZIP before offering the completed
+file; if checking or downloading fails, the page shows the reason and you can try again.
+Opening About alone does not contact GitHub.
 
 ## Usage
 
-Open **Legion Go 2 Companion** from the Decky menu. The main page shows a short status for
-each hardware area; selecting one opens its controls. **All Controls** returns to that
-overview. Choosing an item from a dropdown keeps the current page open.
+### Quick start
+
+Open Companion in Decky. **Hardware Controls** shows a short status beside each module;
+select a row to open its page, and use **‹ All Controls** to return. Dropdown selections
+keep you on the current page.
+
+1. Open **Manage Modules** and leave enabled the modules you want to use.
+2. Open a module and check its status before changing a setting.
+3. For game-specific TDP or vibration, launch the game first, then enable **Per Game Profile** on that page.
+4. Wait for the result after a change. A saved preference can be waiting for hardware confirmation; check the current/applied state too.
+
+The overview keeps the last received summaries when reopened. A note about old data
+means a fresh status could not yet be confirmed. Changes remain saved across reboots;
+managed profiles and supported controls recover after wake without reopening Decky.
 
 ### Manage Modules
 
-Open **Manage Modules** to turn each hardware module on or off. All modules are available
-by default. Disabling one stops its workers and game reports, releases its hardware
-controls and hides its page from the main menu. The choice survives Decky restarts and
-console reboots. Saved profiles and preferences return when the module is enabled again.
+Disabling a module stops its work, withdraws its hardware controls and hides its page.
+Its saved preferences remain available when you enable it again. This differs from
+turning off an individual setting: for example, **Joystick ring lights** can stay off
+while RGB control remains active to keep them off after wake.
 
-Lighting, remapping, battery and gyro controls restore the state they captured before
-taking control. Vibration returns to driver defaults. TDP returns to the balanced firmware
-profile; managed CPU Boost and EPP return to standard boost and `balance_performance`
-because earlier versions did not retain the original CPU policy. Wi-Fi restores its
-owned configuration and can briefly reconnect during the change.
+Restoration depends on the module:
 
-**OLED Display** also removes its installed script. Gamescope keeps a loaded script until
-the session ends, so the page offers **Restart Gaming Mode (closes games)** when needed.
-If hardware restoration fails, the module stays blocked and the page shows the error with
-**Retry Cleanup**. An interrupted cleanup is retried on the next startup before that
-module is allowed to run, and during uninstall if Companion is not paused by a plugin
-conflict. Failed restoration keeps its recovery record.
+| Module | When disabled |
+|---|---|
+| TDP & CPU | Returns TDP to the balanced firmware profile, CPU Boost to standard boost, and EPP to `balance_performance` |
+| Vibration | Returns to driver defaults |
+| RGB, Button Remapper, Gyro & Touchpad, Battery | Restores the captured state for controls still owned by Companion |
+| WiFi | Restores the configuration Companion changed; Wi-Fi may briefly reconnect |
+| OLED Display | Withdraws display adjustments and its script; Gaming Mode may need a restart |
+
+If cleanup cannot finish, the module stays blocked and offers **Retry <module> Cleanup**.
+An enabled module that could not start offers **Retry <module> Start**. Recovery records
+are retained and unfinished cleanup is retried on startup. **Restart Gaming Mode (closes
+games)** ends the current gaming session, so save and close your games first.
 
 ### TDP
 
-**Enable** gives Companion control of the TDP limits. Turning it off releases that control;
-CPU Boost and EPP are independent controls.
+Use **Enable** to give Companion control of the power limits, then choose a preset.
+**CPU Boost** and **EPP** are independent controls in the same page.
 
-**Presets** apply immediately:
+#### Presets and Custom
 
-| Preset | SPL | SPPT | FPPT |
+Four presets are available, plus **Custom**. SPL is sustained power; SPPT and FPPT allow
+higher power for slower and shorter bursts. These are APU limits, not the whole console's
+battery consumption.
+
+| Preset | SPL: sustained | SPPT: slow burst | FPPT: fast burst |
 |---|---|---|---|
 | Silent | 8 W | 15 W | 20 W |
 | Balanced | 16 W | 25 W | 30 W |
 | Performance | 20 W | 32 W | 35 W |
-| **Full Power** | **35 W** | **37 W** | **45 W** |
+| Full Power | 35 W | 37 W | 45 W |
 
-The available range is checked against the firmware. In **Custom**, **Advanced TDP
-Control** is on by default and exposes separate SPL, SPPT and FPPT sliders. Turning it
-off leaves one **TDP** slider (5–35 W); SPPT follows at TDP +10 W up to 37 W and FPPT
-at TDP +15 W up to 45 W. **Apply TDP** commits the slider values. Unlocking Custom
-TDP to 50 W extends the three limits to 50/50/50 W.
+Presets apply immediately to the active profile. In **Custom**, adjust the sliders and
+use **Apply TDP**, **Apply & Save for <game>** or **Save AC for <game>**, depending on
+which profile you are editing.
 
-**Per Game Profile** stores TDP limits, CPU Boost and EPP for the running game.
-**Separate AC Profile** gives that game independent battery and charging settings for
-all three controls. The editing buttons select which profile you are changing;
-connecting the charger selects which one the backend applies. Editing an inactive
-profile saves its choices without changing the active profile on the hardware.
+**Advanced TDP Control** is on by default and shows all three limits. Turn it off for
+one **TDP** slider: normally 5–35 W, with SPPT following at +10 W up to 37 W and FPPT
+at +15 W up to 45 W. The available range is checked against your firmware.
 
-**CPU Boost** controls the kernel's boost setting. **EPP** uses **Prefer CPU** and
-**Prefer GPU** labels: these change the CPU's energy preference, and lower CPU demand can
-leave more of the shared power budget for graphics. Newer kernels offer 0–100% in 10% steps;
-older kernels offer supported presets and **System default**. The CPU section identifies whether changes
-belong to the global profile, the game's battery profile or its AC profile. Choices are
-restored after startup, resume and power-source changes, and checked for drift.
+**Profile overview** identifies the profile you are editing, its selected limits and
+whether AC is connected. **Current TDP** shows hardware limits and live **Package draw**;
+the latter is the APU power reading.
 
-Leaving a game, disabling its per-game profile or starting a game without a profile
-restores the global choices. Existing profiles without CPU values inherit the global
-ones until edited. New profiles start with the current choices; if no global CPU choice
-was saved yet, Companion records the readable baseline so it can return to it later.
+#### Game and charging profiles
 
-**Current TDP** shows the limits alongside live package power. Package power is the APU
-reading, not the entire console's battery drain.
+With a game running, turn on **Per Game Profile** to save its TDP, CPU Boost and EPP
+settings. Turn on **Separate AC Profile** if you want different settings while charging.
+Use **Battery profile** and **AC profile** to choose which one to edit.
+
+The charger selects which profile applies on the hardware. Editing the inactive profile
+saves it for later without changing the current hardware settings. Leaving the game,
+turning off its profile, or playing a game without a profile returns to the global choices.
+New game profiles start with the current choices; older profiles without CPU settings
+inherit the global CPU choices until edited.
+
+#### CPU Power Controls
+
+**CPU Boost** allows or disables turbo frequencies. **EPP** controls the CPU's energy
+preference: **Prefer CPU** favours CPU performance; **Prefer GPU** reduces CPU energy
+demand and can leave more of the shared power budget for graphics.
+
+Newer kernels expose a **0–100% slider in 10% steps**: 0% is Prefer CPU and 100% is Prefer
+GPU. Older kernels expose supported named preferences, including **System default**
+when available. Companion uses the closest supported preset while keeping the exact
+saved value for systems that can apply it. CPU changes save automatically to the profile
+shown above the controls and are checked against the kernel.
+
+#### Extras
+
+**Unlock Custom TDP to 50 W** extends the three Custom limits up to 50/50/50 W using the
+optional `ryzenadj` helper. If the helper is temporarily unavailable, normal firmware
+limits remain available and your profiles are kept. Use **Retry Extras download** when offered.
 
 > [!WARNING]
-> **Extras** extends the Custom range up to 50 W through `ryzenadj`, beyond the normal
-> firmware range. Higher requested limits can increase heat and power use and may still
-> be constrained by the hardware. Enable this only if you intend to use that range.
+> The 50 W range exceeds the manufacturer's normal firmware limits. It can increase
+> heat and power use, and the hardware can still constrain the request. Enable it only
+> if you intend to use that range.
+
+If status or a profile could not load, use **Retry status** or **Retry profile** and wait
+for fresh values before editing.
 
 ### Vibration
 
-Choose the handle **Intensity** and **Mode**, then configure touchpad vibration separately.
-**Test Vibration (0.5s)** gives a short check of the selected handle settings.
+Set **Intensity** for both handles: Off, Low, Medium or High. **Mode** selects the
+vibration pattern; the choices come from the driver and can include FPS, Racing,
+Standard, SPG and RPG. **Touchpad vibration** and **Touchpad intensity** are separate.
 
-With a game running, enable **Per Game Profile** to save its haptic settings. Returning to
-the global profile uses the global choices again. Controller reconnection and wake trigger
-reapplication when the driver becomes available.
+Changes save automatically. With a game running, **Per Game Profile** switches between
+that game's haptics and the global settings. Saved game profiles apply when their game
+starts, and global settings return when you leave it or turn its profile off.
+
+- **Test Vibration (0.5s)** tests the selected handle intensity and mode.
+- **Reset to defaults** resets the currently selected global or game profile.
+- **Show driver details** expands the controller interface information for diagnosis.
+- **Retry settings** reloads settings after a load failure.
+
+Controller reconnection and wake reapply saved haptics once the driver is available.
 
 ### RGB Lighting
 
-Joystick-ring control accepts the **8ASP2 / 83N0** and **8AHP2 / 83N1** models
-when the expected Lenovo controller and complete `hid-lenovo-go` lighting interface
-are available. RGB control and sleep/wake recovery were confirmed by an 8AHP2
-owner on SteamOS 3.9.1 Preview (build 20260914.100).
-This report applies to controller RGB only; it does not establish that all
-Companion functions have been physically verified on 8AHP2. Each hardware
-control retains its own capability checks, and maintainers have not independently
-tested this variant.
-
-**Enable RGB control** lets Companion manage the rings. **Joystick ring lights** switches
-their output on or off. Select an effect, then adjust the controls relevant to it:
+Turn on **Enable RGB control**, then use **Joystick ring lights** to switch both rings
+on or off. Choose a **Lighting effect** and adjust the controls it uses:
 
 | Effect | Controls |
 |---|---|
-| **Solid** | Colour and brightness |
-| **Breathing** | Colour, brightness and speed |
-| **Color cycle** | Brightness and speed |
-| **Rainbow** | Brightness and speed |
+| Solid | Hue, saturation and brightness |
+| Breathing | Hue, saturation, brightness and speed |
+| Color cycle | Brightness and speed |
+| Rainbow | Brightness and speed |
 
-Colour uses hue and saturation; the preview shows the current choice. Changes are saved as
-you make them, with slider writes grouped while you move a control. Animations run in the
-controller firmware.
+The two previews show the selected colour for Solid and Breathing. Changes save
+automatically; the controller runs the animations. Saved settings, including lights off,
+are reapplied after startup and wake when the controller becomes available.
 
-With RGB control enabled, Companion detects resume in the backend and force-reapplies
-the saved ring settings, even when Quick Access is closed. If the controller interface
-is temporarily unavailable, it retries for up to 12 seconds and continues checking
-during the startup/wake settling window. The saved off setting is reapplied too.
-
-**Power button light** is a separate setting. **Restore lighting state from before
-Companion** returns the captured lighting state and releases Companion's lighting control.
-
-> [!NOTE]
-> The power-button light is limited to the verified **83N0 / RRCN16WW** BIOS and ACPI
-> layout. If the firmware does not match, that control stays unavailable until the new
-> layout has been checked.
+**Power button light** is separate and available only on the verified firmware described
+in [Requirements](#requirements). **Restore lighting state from before Companion**
+restores the captured lighting state and releases Companion's lighting control.
 
 ### Button Remapper
 
-Enable remapping, then select an action independently for **Desktop button** and **Page
-button**. Choices include Steam menus, the on-screen keyboard, screenshots, window
-switching, navigation keys and F1-F12. **Disabled** makes that button produce no action.
+Turn on **Enable button remapping**, then choose separate actions for the left
+controller's **Desktop button** (upper extra button) and **Page button** (lower extra
+button). Options include Steam menus, the on-screen keyboard, screenshots, window
+switching, navigation keys and F1–F12. **Disabled** makes a button produce no action.
 
-**Default** restores the captured system behaviour for that button. Disabling remapping
-restores the mappings Companion still owns, while preserving unrelated profile entries
-and changes made elsewhere.
+**Default** restores that button's captured system mapping. **Restore Default Actions**
+restores both. Turning remapping off restores mappings Companion still owns while
+preserving unrelated mappings and changes made elsewhere. Actions are saved and
+reapplied through SteamOS's existing InputPlumber service.
 
 ### Gyro & Touchpad
 
-Choose a gyro source to let Companion enable reporting from the corresponding removable
-controller and route its motion through the existing InputPlumber service. **Both
-controllers (average)** combines the two handles; it is not the sensor inside the console
-body. **System default** releases the controls and restores the values Companion still
-owns. Button assignments, Steam controller identity and unrelated input filters are kept.
+Choose **Controller motion source**: **Left controller**, **Right controller**,
+**Both controllers (average)** or **System default**. Selecting a controller enables its gyro reporting and routes its
+motion through InputPlumber. These sensors are in the removable handles; Both averages
+their readings. The page shows the current route separately from the saved choice.
 
-**Start 30-second test** shows native left/right gyro and touchpad readings alongside the
-existing virtual controller output. Rotate the device and move a finger on the touchpad
-while testing. Raw gyro values are diagnostic readings, not degrees per second. A stream
-with no packets is shown separately from a stream carrying zero values.
+**System default** or **Release Companion Control** restores the previous settings still
+owned by Companion. If an interrupted change is reported, use the release action to
+recover before making another change.
 
-The test stops when the page is hidden or closed, after 30 seconds, or when the frontend
-stops renewing its short lease. It does not grab the controller. Reports reaching the
-virtual controller confirm that stage of the input path; a game's Steam Input layout must
-still assign gyro and touchpad actions. Body-sensor integration and firmware calibration
-are not enabled by this page.
+For a quick check, choose **Start 30-Second Test**, move each controller and touch the
+touchpad. Compare **Physical controllers** with **Existing Steam controller** to see
+whether input reaches the virtual controller. **Stop Test** ends it early; it also stops
+after 30 seconds or when the page is hidden. Zero readings and missing reports are
+shown separately.
+
+The test observes existing reports. It does not enable sensors, calibrate the console
+body or configure a game's Steam Input layout. You still need gyro/touchpad assignments
+in that game's controller layout. Raw test values are diagnostic counts, not degrees
+per second.
 
 ### Battery
 
-**Battery protection** enables Lenovo's firmware-controlled Long Life mode, intended to
-limit charging to around 80%. This is a fixed firmware mode, with no adjustable percentage
-or forced discharge. Enabling it while the battery is above the limit does not immediately
-lower the charge level.
+**Charging state** shows the console battery and charging status. **Battery protection**
+uses Lenovo's Long Life mode to limit charging to **about 80%**. The percentage is fixed
+by firmware. If the battery is already above the limit, enabling protection does not
+actively discharge it.
 
-Turning protection off returns to the normal charging mode captured before enabling it,
-including **Fast** when it was active. **Release battery control** restores the captured
-state while it is still owned by Companion and stops automatic reapplication. The page
-distinguishes the saved choice from the actual charging mode and reports failed changes.
-It also shows the left and right controller battery levels and whether each controller is
-attached. These values are read passively from a verified native controller report. The
-feature does not change the battery on first installation until selected by the user.
+Turning protection off restores the previous normal charging mode, including **Fast**
+when it was active. **Release Companion Control** returns the captured state and stops
+maintaining a charging preference. If a change was interrupted, use **Recover and
+Release Control** first. The page distinguishes the saved preference from the battery's
+confirmed state. First installation leaves the charging mode alone until you choose it.
+
+**Controller batteries** shows separate left/right charge levels and connection states.
+Detached controllers are labelled separately, with a controller-reported level when available.
 
 ### OLED Display
 
-This module fixes screen brightness control in SteamOS. It also offers an HDR fix
-by correcting the display metadata exposed to games.
+The available controls depend on whether SteamOS already supplies the Legion Go 2
+OLED display profile.
 
-When the system profile
-`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`
-exists, Companion automatically retires its display fix and removes
-its recognised user Lua script. The display controls are locked with an
-explanation; **EDID for games** remains independently available. A requested
-Gaming Mode restart unloads the old script and closes running games. Cleanup
-errors are shown and retried automatically. Detection checks only file presence;
-Lua contents, binary features, and the SteamOS channel are not checked. The first
-handover requests one Gaming Mode restart to reload the display configuration;
-see the [technical review](docs/NATIVE_DISPLAY_SUPPORT.md).
+**With native display support:** Companion retires its older brightness/display fix and
+removes its recognised user script. PQ, Gamma 2.2, Hybrid and brightness forwarding are
+locked with an explanation. **EDID for games** remains available independently. Cleanup
+retries automatically if needed; use **Restart Game Mode** when requested to finish
+the handover.
 
-On older systems, choose a mode on first run, or use **Switch Display Mode** later:
+**On older systems:** choose a mode at first setup, or use **Switch Display Mode** later.
 
-| Mode | Behaviour | Trade-off |
+| Mode | What it does | What you may notice |
 |---|---|---|
-| **Hybrid** *(recommended)* | Uses Gamma 2.2 for SDR and switches to PQ for HDR content | The panel briefly blanks during a mode transition |
-| **PQ** | Keeps the panel in its HDR transfer function | SDR dimming is handled through gamescope and can lift the apparent black floor |
-| **Gamma 2.2** | Keeps direct panel brightness control | HDR highlights are tone mapped into the lower luminance range |
+| Hybrid (recommended) | Uses Gamma 2.2 for SDR and switches to PQ for HDR content | The panel briefly blanks when the mode changes |
+| PQ | Keeps the panel in its HDR transfer function | SDR dimming through gamescope can raise the apparent black floor |
+| Gamma 2.2 | Keeps direct panel brightness control | HDR highlights are tone mapped into a lower luminance range |
 
-**Brightness slider** forwards Steam's slider only when the panel is in PQ without HDR
-content. When Steam is already controlling HDR brightness, this part stands aside.
+**Brightness slider → Enabled** forwards Steam's slider while the panel is in PQ and
+Steam is not already handling HDR brightness. A standby/not-applicable status explains
+when forwarding is unnecessary.
 
-**EDID for games** corrects gamescope's published display metadata so affected games can
-read the panel's luminance values. Restart an already running game to let it read the
-updated metadata. This option also works without installing a display-mode script.
+**EDID for games → Enabled** corrects the display metadata games read, including panel
+luminance. It works independently of the legacy display-mode script. Restart a game
+that was already running so it can read the updated metadata.
 
-**Reset Display Fix** withdraws the module's brightness, HDR and EDID changes, removes its
-installed display script (or restores the previous third-party script from backup), clears
-its saved settings and returns to the initial mode chooser. Confirm the reset, then use
-**Restart Game Mode** if requested to unload the script already held by gamescope.
-An interrupted reset keeps the module paused and offers a retry instead of losing recovery data.
+On systems using the legacy fix, **Reset Display Fix → Confirm Display Reset** withdraws
+brightness, HDR and EDID changes, removes Companion's script, restores a previous
+third-party script from backup if present, and clears this module's settings. It returns
+to initial setup; an incomplete reset stays paused and offers **Retry Display Reset**.
 
-> [!NOTE]
-> Hybrid and PQ share a display script and can switch immediately. Moving to or from
-> Gamma 2.2 can require **Restart Game Mode**, because gamescope loads that script when
-> the session starts. The page reports when a restart is needed.
+> [!IMPORTANT]
+> **Restart Game Mode** closes Steam and running games. Save and close your games first.
+> Hybrid/PQ can switch immediately; changing to or from Gamma 2.2 can require a restart.
+> Follow the page's restart status.
 
 ### WiFi
 
-**Prefer 5/6 GHz** changes iwd's band preference system-wide. It keeps 2.4 GHz available
-when that is the connection the device can use; it does not pin the adapter to one band
-or access point. **Only 5/6 GHz** disables 2.4 GHz in iwd, leaving both 5 and 6 GHz
-available. An explicitly confirmed attempt may proceed even when a scan misses the
-higher-band access point; DFS and 6 GHz discovery are not always consistent. Companion
-checks the actual connected frequency and automatically restores the prior policy if
-it cannot connect on 5/6 GHz. Automatic module restoration still requires a confirmed
-higher-band scan result.
-Outside 5/6 GHz coverage, Wi-Fi can remain disconnected until you switch back to
-**Prefer 5/6 GHz** or **Automatic WiFi**.
+Check **Current WiFi connection** first: it shows the confirmed SSID, band/frequency and
+active backend (**iwd** or **WPA supplicant**). The available actions follow that backend
+and the supported Legion Go 2 MT7922 adapter using `mt7921e`.
 
-**Rescan and reconnect to 5/6 GHz** makes a bounded attempt to move the current connection
-to a suitable higher-band access point. It briefly interrupts the connection. The page
-shows the actual connected band and selected policy separately, so enabling the preference
-is not mistaken for a completed switch.
+**Automatic WiFi** restores Companion's owned band settings and leaves selection to
+SteamOS. A saved policy is not proof of the current connection; check the live band and
+operation result.
 
----
+| Backend | Option | Behaviour |
+|---|---|---|
+| iwd | Prefer 5/6 GHz (2.4 GHz fallback) | Favours higher bands while keeping 2.4 GHz available |
+| iwd | Only 5/6 GHz | Excludes 2.4 GHz; can leave Wi-Fi disconnected outside higher-band coverage |
+| iwd with Prefer enabled, or WPA with Automatic WiFi | Rescan and reconnect to 5/6 GHz | Makes a bounded attempt to connect to a suitable detected higher-band access point |
+| WPA with Automatic WiFi | Connect to 6 GHz once | Connects to a freshly detected 6 GHz access point, then clears the temporary selection for normal roaming |
 
-## How it works
+Saved iwd preferences survive restart and wake. With **Prefer 5/6 GHz** active, Companion
+also searches for suitable higher-band access points and attempts to move the connection
+automatically. WPA uses SteamOS's normal automatic roaming; its manual actions are
+one-time attempts, not a continuous higher-band policy.
 
-### One interface, separate hardware controls
+Selecting **Only 5/6 GHz** asks for confirmation. A failed initial attempt restores the
+previous policy if no higher-band link is verified. If the policy was successfully
+applied and you later leave coverage, choose **Automatic WiFi** or **Prefer 5/6 GHz** to
+allow 2.4 GHz again. Manual reconnect actions briefly interrupt Wi-Fi.
 
-Companion brings together the TDP, vibration, display and Wi-Fi implementations with RGB
-and button-remapping, gyro, diagnostic and battery pages. Each backend owns its hardware interface and settings; the
-Decky entry point coordinates startup, shutdown and calls from the frontend.
+If SteamOS's backend changes, a saved iwd preference can be shown as inactive under WPA.
+Use **Clear saved iwd preference** when offered. Older saved restrictions show a restore
+action before new choices become available. Companion uses the active system backend;
+it does not switch it or run another Wi-Fi manager.
 
-| Area | System interface |
-|---|---|
-| TDP | Lenovo WMI within the firmware range; the verified `ryzenadj` helper for Extras |
-| CPU Boost / EPP | Kernel CPU policy controls under sysfs |
-| Live package power | RAPL energy counters |
-| Haptics / joystick RGB | `hid-lenovo-go` sysfs controls |
-| Button mappings | InputPlumber's D-Bus profile API |
-| Controller gyro | Lenovo's IMU bypass controls and InputPlumber's D-Bus event filters |
-| Passive diagnostics | Read-only HID report copies during an explicit bounded test |
-| Battery protection | The system battery's kernel `charge_types` attribute |
-| OLED | A gamescope display script, X properties and gamescope's EDID copy |
-| Wi-Fi | NetworkManager and iwd configuration |
+### About
 
-Button remapping reuses InputPlumber rather than installing another input service. The
-display fix changes the EDID copy published by gamescope, not the panel's firmware.
-
-### Saving, wake and drift
-
-Settings use atomic replacement with backup/recovery handling. A failed TDP settings save
-attempts to restore the previous effective target, and a delayed vibration edit is rejected
-if its game/profile context has changed.
-
-If neither saved settings copy can be recovered, affected controls report the problem
-and stop applying changes. Missing ownership information is never replaced with guessed
-restoration values. Keep the damaged files until a valid settings copy can be restored.
-
-The backend continues managing saved profiles while Quick Access is closed. TDP checks
-for changed limits and retries failed profile transitions with backoff. RGB and remapping
-normally verify state once per minute; for the first 30 seconds after startup or wake they
-check every five seconds to catch a controller or service that appears late. Matching
-lighting and mappings do not need another hardware write or profile reload.
-
-Battery and gyro choices also restore on startup and wake and check for drift once per
-minute. Battery changes keep a durable recovery record before writing to the kernel, so
-an interrupted first change retains the original charging mode. Diagnostic readers are
-closed outside a test. When Battery is viewed, Companion opens a verified read-only
-controller descriptor only long enough to receive one report, closes it immediately and
-caches the result for 15 seconds; merely installing Companion does not sample HID reports.
-
-If the verified InputPlumber process exits, the existing monitor tick schedules an earlier
-check of gyro and button mappings. Recovery still verifies the controller and ownership
-before applying saved choices; failed attempts use increasing retry intervals.
-
-Wi-Fi recovery journals are stored persistently so a reboot cannot erase an unfinished
-transaction. Recovery stops on a conflicting external change instead of overwriting it.
-
-### Background work
-
-Page-specific periodic status refreshes pause while Quick Access is hidden. Decky's
-`alwaysRender` keeps the selected page mounted during a native dropdown, preserving its
-navigation state without keeping those refresh timers running.
-
-The main menu keeps the last received summaries when reopened. Repeated read failures
-or a delayed response add a small note with the age of the data; a fresh response clears
-it automatically. InputPlumber's version label is cached separately from live controller
-state, with invalidation when its executable changes.
-
-RGB effects run on the controller. Backlight notifications are event-driven where the
-kernel supports them; gamescope state still needs periodic checks, with the shorter
-interval used by Hybrid. Background profile and recovery checks remain active because
-they are needed outside the menu. There is no fixed CPU percentage or battery-life claim:
-the cost depends on the enabled controls, mode and system build.
-
----
+**About** shows the installed version, included modules, author and license information.
+Use its update controls as described in [Updating](#updating). Results and the completed
+download path remain available if you leave and return to About during the operation.
 
 ## Troubleshooting
 
-<details>
-<summary><b>Companion says all modules are paused</b></summary>
+| What you see | What to do |
+|---|---|
+| All modules paused | Uninstall the conflicting standalone plugins, keep their settings, then restart Decky or the console. Renamed copies still count; keep backups outside Decky's plugin directory. If verification failed, repair the unreadable/incomplete installation. |
+| A module is missing from the overview | Check Manage Modules. A disabled module is hidden; a failed start or pending cleanup has a retry action there. |
+| A hardware control is unavailable | Read the page's reason. Driver, InputPlumber, adapter and firmware checks determine availability; installing Companion does not supply missing system interfaces. |
+| A preference is saved but not confirmed | Check the current hardware state and the error. Wait for recovery or use the offered retry. An unavailable reading is not treated as a confirmed on/off state. |
+| Extras is unavailable | Keep using the firmware range. Connect to the internet and use Retry Extras download; saved extended profiles are retained. |
+| Gyro test has data but the game does not react | Check that game's Steam Input layout and gyro/touchpad assignments. The passive test checks the input path. |
+| Battery is above 80% after protection is enabled | The firmware stops further charging according to its Long Life mode; it does not actively discharge an already charged battery. |
+| OLED controls are locked | Read the native-support or cleanup message. Use the requested restart; EDID correction remains separate. |
+| A game still reads old HDR values | Check EDID status and restart the game. A requested Gaming Mode restart is needed for display-script changes. |
+| Wi-Fi stays on 2.4 GHz | Check the active backend and live band. Use the applicable rescan action; a preference cannot create an available 5/6 GHz access point. |
+| Wi-Fi disconnected with Only 5/6 GHz | Choose Automatic WiFi or Prefer 5/6 GHz to allow 2.4 GHz again. |
+| Recovery required, settings damaged or cleanup incomplete | Keep the saved settings, backups and recovery record. Follow the page's reason and retry action; deleting them can remove the information needed to restore the previous state. |
+| Update check/download failed | Read the error and retry. You can also download the plugin ZIP from Releases and install it manually. |
 
-<br>
+When reporting a problem, include the plugin version, SteamOS build/kernel, console model
+and the affected page's status/error. [CHANGELOG.md](CHANGELOG.md) lists changes by version.
 
-LeGoTDP, LeGo Vibe Control or LeGo2 Brightness Fix is still installed. Uninstall the named
-plugins from Decky Settings, retain their settings, and restart Decky or the console.
-**Check again** can confirm that the conflict is gone, but restarting is still required.
-Keep backup copies outside Decky's plugin directory: renaming a folder does not hide its
-manifest from the guard. If the message says verification failed, repair the unreadable or
-incomplete plugin installation before restarting.
-
-</details>
-
-<details>
-<summary><b>A hardware control is unavailable</b></summary>
-
-<br>
-
-Read the reason on that page. Haptics and RGB need the controller driver's matching
-controls; remapping needs InputPlumber; Wi-Fi needs the supported network configuration.
-The power-button light also checks the exact BIOS and ACPI layout. Installing Companion
-does not install a missing kernel driver or make another firmware layout compatible.
-
-</details>
+## How it works
 
 <details>
-<summary><b>Extras is enabled, but only the normal TDP range is available</b></summary>
+<summary><b>Hardware interfaces, recovery and background work</b></summary>
 
-<br>
+Companion coordinates independent hardware modules through Decky. Each module manages
+its own settings and verifies the interface it uses.
 
-The `ryzenadj` helper may be unavailable. The standard WMI range continues to work, and
-the saved Extras choice and profiles are retained. Connect to the internet and use the
-download-retry control on the TDP page.
+| Area | System interface |
+|---|---|
+| TDP | Lenovo WMI in the firmware range; verified `ryzenadj` helper for Extras |
+| CPU Boost / EPP | Kernel CPU policy controls under sysfs |
+| Package power | RAPL energy counters |
+| Haptics / joystick RGB | `hid-lenovo-go` sysfs controls |
+| Button mappings | InputPlumber's D-Bus profile API |
+| Controller gyro | Lenovo IMU bypass controls and InputPlumber D-Bus event filters |
+| Passive diagnostics | Read-only copies of native and virtual controller HID reports during an explicit test |
+| Battery protection | The kernel battery `charge_types` attribute |
+| OLED | Gamescope display script, X properties and gamescope's published EDID copy |
+| Wi-Fi | NetworkManager with the active iwd or WPA supplicant backend |
 
-In the extended range, the SMU can constrain the request. The displayed SPL is the applied
-target; the Strix Point STAPM reading is not a reliable direct read-back of that target.
+Display corrections change gamescope's EDID copy, not the panel firmware. Native-display
+handover detects the system profile at
+`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`.
+Detection checks file presence, not Lua contents or SteamOS channel. The first handover
+requests a Gaming Mode restart. See the [technical review](docs/NATIVE_DISPLAY_SUPPORT.md).
+
+Settings use atomic replacement and backup/recovery handling. Failed changes retain
+restoration information; controls pause if settings cannot be recovered. Restoration
+only changes state still owned by Companion, preserving conflicting external changes.
+The TDP/CPU module uses balanced firmware power, standard boost and
+`balance_performance` for module withdrawal because earlier versions did not capture
+the original CPU policy. Interrupted cleanup is also retried during uninstall when
+Companion is not paused by a plugin conflict.
+
+Background profile/recovery checks continue with Quick Access closed. RGB and remapping
+normally check once per minute, with five-second checks during the first 30 seconds
+after startup/wake; matching state avoids another write or profile reload. Battery and
+gyro also recover after startup/wake and check for drift. RGB retries a temporarily
+missing controller during wake recovery. InputPlumber restarts trigger earlier recovery
+checks, with backoff after failures.
+
+Page refreshes pause while Quick Access is hidden. Diagnostic readers close outside a
+test; controller battery sampling is a short read with a 15-second cache when requested.
+RGB animations run in firmware, and slider edits are grouped while a control is moving.
+Actual overhead depends on enabled modules, display mode and the system build.
+
+Conflict detection checks plugin folders and manifests, including renamed copies. It
+blocks requests and stops workers when a conflict appears; a restart is required after
+removal. WiFi Optimizer and HueSync are not included in that installation check.
+
+The update downloader accepts stable release plugin ZIPs with a SHA-256 digest. It checks
+version, size, digest and archive contents before completing the download. Failed
+downloads do not replace an existing ZIP. Source archives and development branches are
+not used as fallback downloads.
 
 </details>
-
-<details>
-<summary><b>The OLED page says standby, or a game still has the old HDR values</b></summary>
-
-<br>
-
-Brightness forwarding is supposed to stand aside when the panel is outside PQ or an HDR
-game is using Steam's own brightness path. Check the separate EDID status for metadata
-correction. A game launched before the correction may keep its old values until restarted.
-If the page requests a Game Mode restart, the display script has not taken effect yet.
-
-</details>
-
-<details>
-<summary><b>Wi-Fi stays on 2.4 GHz, or reports recovery required</b></summary>
-
-<br>
-
-A preference cannot create an available 5/6 GHz network. Check the live band and the result
-of the rescan action. A recovery warning instead means an interrupted operation could not
-be restored safely, usually because the network configuration changed elsewhere. Keep the
-recovery journal and include the reported reason when diagnosing it.
-
-</details>
-
----
 
 ## Development
 
+<details>
+<summary><b>Build, test and package from source</b></summary>
+
+Requires Node.js 18+ and a ZIP tool (`zip` on Linux or 7-Zip on Windows). Backend tests
+require Python 3.10+.
+
 ```bash
 npm ci
-npm run typecheck      # check frontend types
-npm run test:frontend  # navigation and pending-setting lifecycle checks
+npm run typecheck      # frontend types
+npm run test:frontend  # frontend regression suites
 npm test              # Python backend tests
-npm run build         # compile the frontend
-npm run package       # package the current build
+npm run build         # compile and validate the frontend
+npm run package       # create LegionGo2Companion-<version>.zip
 ```
 
-Backend tests require Python. Linux-specific permission and symlink checks skip on
-Windows. Hardware calls are mocked in the unit suite; console testing is still needed
-for startup, resume, game transitions and native Steam UI behaviour.
+**Build before packaging:** package uses the existing frontend build. Install the result
+through Decky; a source checkout with `node_modules` is not an installation package.
 
-The release archive includes frontend source/build inputs, license notices and the bundled
-pyudev source. The optional RyzenAdj executable is downloaded separately and checked
-against its pinned hash. See [SOURCE.md](SOURCE.md) for frontend rebuilding and
-[CHANGELOG.md](CHANGELOG.md) for version history.
+GitHub Actions checks backend tests on Linux/Python 3.10 and Windows/Python 3.13, plus
+frontend tests, build and package validation on Node.js 24 LTS. Linux-specific checks
+skip on Windows. Hardware calls are mocked; device testing is still required for
+startup, wake, game transitions and native Steam UI behaviour. CI does not publish releases.
+
+The archive includes frontend source/build inputs, license notices and bundled pyudev
+source. RyzenAdj is downloaded separately and verified against its pinned hash.
+See [SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component provenance.
+
+</details>
 
 ---
 
 ## Credits
 
 - [LeGoTDP](https://github.com/Rayekkk/LeGoTDP), [LeGo Vibe Control](https://github.com/Rayekkk/LeGo-Vibe-Control), [LeGo2 Brightness Fix](https://github.com/Rayekkk/LeGo2BrightnessFix) and the unpublished WiFi Optimizer Go 2 - the standalone foundations
+- Andrii Dmytrenko ([@Antti](https://github.com/Antti)) - 8AHP2 / 83N1 joystick RGB support and owner testing in [PR #2](https://github.com/Rayekkk/LegionGo2Companion/pull/2)
 - Ally Vibe Control by [piyush-tyagi-13](https://github.com/piyush-tyagi-13/ally-vibe-control), with original per-game profile work by M4ttiA - inherited MIT-licensed vibration code
 - [HueSync](https://github.com/honjow/HueSync) by honjow and Steam Deck Homebrew - reference for the lighting interface and Go 2 sysfs controls
 - [RyzenAdj](https://github.com/FlyGoat/RyzenAdj), [pyudev](https://github.com/pyudev/pyudev), [InputPlumber](https://github.com/ShadowBlip/InputPlumber) and [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) - the supporting tools and interfaces
