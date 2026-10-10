@@ -38,7 +38,12 @@ RGB_EFFECT_LABELS = {
     "chroma": "Color cycle",
     "rainbow": "Rainbow",
 }
+RGB_SUPPORTED_MODELS = frozenset({
+    ("Legion Go 8ASP2", "83N0"),
+    ("Legion Go 8AHP2", "83N1"),
+})
 
+# Power-button MMIO is independently restricted to the audited machine below.
 EXPECTED_FAMILY = "Legion Go 8ASP2"
 EXPECTED_PRODUCT = "83N0"
 EXPECTED_BOARD = "LNVNB161216"
@@ -138,11 +143,8 @@ def _read_identity() -> dict[str, str]:
 
 def _rgb_capability() -> tuple[str | None, str]:
     identity = _read_identity()
-    if (
-        identity["product_family"] != EXPECTED_FAMILY
-        or identity["product_name"] != EXPECTED_PRODUCT
-    ):
-        return None, "RGB control is limited to the Lenovo Legion Go 2 (83N0)."
+    if (identity["product_family"], identity["product_name"]) not in RGB_SUPPORTED_MODELS:
+        return None, "RGB control requires a Lenovo Legion Go 2 (8ASP2/83N0 or 8AHP2/83N1)."
 
     if not os.path.lexists(RGB_LED_PATH):
         return None, "The hid-lenovo-go joystick-ring interface is not available."

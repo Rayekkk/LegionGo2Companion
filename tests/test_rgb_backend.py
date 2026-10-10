@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import hashlib
+import stat
 import sys
 import tempfile
 import types
@@ -70,6 +71,118 @@ class RgbBackendTests(unittest.TestCase):
     def setUp(self):
         rgb_backend._power_capability_cache = None
         rgb_backend._last_error = ""
+
+    def test_rgb_capability_accepts_both_go2_models_only_with_verified_interface(self):
+        real = "/sys/devices/test/0003:17EF:61EB.0001/leds/go:rgb:joystick_rings"
+        with tempfile.TemporaryDirectory() as raw:
+            make_led(Path(raw))
+            for family, product in (("Legion Go 8ASP2", "83N0"), ("Legion Go 8AHP2", "83N1")):
+                with (
+                    self.subTest(product=product),
+                    patch.object(rgb_backend, "_read_identity", return_value={
+                        "product_family": family, "product_name": product,
+                    }),
+                    patch.object(rgb_backend.os.path, "lexists", return_value=True),
+                    patch.object(rgb_backend.os.path, "realpath", side_effect=lambda path:
+                                 "/sys/bus/hid/drivers/hid-lenovo-go" if path.replace("\\", "/").endswith("/driver") else real),
+                    patch.object(rgb_backend.os, "stat", return_value=types.SimpleNamespace(st_mode=stat.S_IFREG)),
+                    patch.object(rgb_backend.os, "access", return_value=True),
+                    patch.object(rgb_backend, "_read_small", side_effect=lambda path:
+                                 Path(raw, Path(path).name).read_text().strip()),
+                ):
+                    self.assertEqual(rgb_backend._rgb_capability(), (real, ""))
+                    with patch.object(rgb_backend.os.path, "realpath", return_value=real.replace("61EB", "6182")):
+                        self.assertIsNone(rgb_backend._rgb_capability()[0])
+                    with patch.object(rgb_backend.os.path, "realpath", side_effect=lambda path:
+                                      "/sys/bus/hid/drivers/hid-generic" if path.replace("\\", "/").endswith("/driver") else real):
+                        self.assertIsNone(rgb_backend._rgb_capability()[0])
+                    with patch.object(rgb_backend.os, "stat", side_effect=FileNotFoundError):
+                        self.assertIsNone(rgb_backend._rgb_capability()[0])
+                    with patch.object(rgb_backend.os, "access", return_value=False):
+                        self.assertIsNone(rgb_backend._rgb_capability()[0])
+                    with patch.object(rgb_backend, "_rgb_channel_maxima", return_value=(256, 255, 255)):
+                        self.assertIsNone(rgb_backend._rgb_capability()[0])
+
+    def test_rgb_capability_rejects_unknown_or_mismatched_model_pairs(self):
+        for family, product in (
+            ("Legion Go 8ASP2", "83N1"), ("Legion Go 8AHP2", "83N0"),
+            ("Legion Go 8AHP2", "unknown"), ("unknown", "83N1"),
+        ):
+            with (
+                self.subTest(family=family, product=product),
+                patch.object(rgb_backend, "_read_identity", return_value={
+                    "product_family": family, "product_name": product,
+                }),
+                patch.object(rgb_backend.os.path, "lexists") as probe,
+            ):
+                self.assertIsNone(rgb_backend._rgb_capability()[0])
+                probe.assert_not_called()
+
+    def test_8ahp2_does_not_gain_power_register_access(self):
+        with (
+            patch.object(rgb_backend, "_read_identity", return_value={
+                "product_family": "Legion Go 8AHP2", "product_name": "83N1",
+                "board_name": rgb_backend.EXPECTED_BOARD,
+                "bios_version": rgb_backend.AUDITED_BIOS,
+            }),
+            patch.object(rgb_backend, "_map_power_register") as mmio,
+        ):
+            self.assertFalse(rgb_backend._power_capability()[0])
+            self.assertIsNone(rgb_backend._read_power_led())
+            self.assertFalse(rgb_backend._write_power_led(False))
+            mmio.assert_not_called()
+
+    def test_both_models_validate_modern_and_legacy_abi_before_acceptance(self):
+        real = "/sys/devices/test/0003:17EF:61EB.0001/leds/go:rgb:joystick_rings"
+        required_attrs = (
+            "enabled", "profile", "mode", "effect", "brightness", "multi_intensity", "speed",
+            "enabled_index", "profile_range", "mode_index", "effect_index",
+            "max_brightness", "multi_index", "speed_range",
+        )
+        for family, product in (("Legion Go 8ASP2", "83N0"), ("Legion Go 8AHP2", "83N1")):
+            for legacy in (False, True):
+                with self.subTest(product=product, legacy=legacy), tempfile.TemporaryDirectory() as raw:
+                    led = Path(raw)
+                    make_led(led)
+                    if legacy:
+                        (led / "multi_max_intensity").unlink()
+                    with (
+                        patch.object(rgb_backend, "_read_identity", return_value={
+                            "product_family": family, "product_name": product,
+                        }),
+                        patch.object(rgb_backend.os.path, "lexists", return_value=True),
+                        patch.object(rgb_backend.os.path, "realpath", side_effect=lambda path:
+                                     "/sys/bus/hid/drivers/hid-lenovo-go" if path.replace("\\", "/").endswith("/driver") else real),
+                        patch.object(rgb_backend.os, "stat", return_value=types.SimpleNamespace(st_mode=stat.S_IFREG)),
+                        patch.object(rgb_backend.os, "access", return_value=True),
+                        patch.object(rgb_backend, "_read_small", side_effect=lambda path, *args:
+                                     (led / Path(path).name).read_text(encoding="ascii").strip()),
+                        patch.object(rgb_backend, "_write_attr") as writes,
+                    ):
+                        self.assertEqual(rgb_backend._rgb_capability(), (real, ""))
+                        for attr in required_attrs:
+                            def missing(path, *, follow_symlinks):
+                                self.assertFalse(follow_symlinks)
+                                if Path(path).name == attr:
+                                    raise FileNotFoundError(path)
+                                return types.SimpleNamespace(st_mode=stat.S_IFREG)
+                            with self.subTest(missing=attr), patch.object(rgb_backend.os, "stat", side_effect=missing):
+                                self.assertIsNone(rgb_backend._rgb_capability()[0])
+                        for attr, invalid in (
+                            ("enabled_index", "true"), ("profile_range", "1-4"),
+                            ("mode_index", "dynamic"), ("effect_index", "monocolor"),
+                            ("max_brightness", "256"), ("multi_index", "blue green red"),
+                            ("speed_range", "0-255"),
+                        ):
+                            original = (led / attr).read_bytes()
+                            try:
+                                (led / attr).write_text(invalid, encoding="ascii")
+                                with self.subTest(invalid=attr):
+                                    self.assertIsNone(rgb_backend._rgb_capability()[0])
+                            finally:
+                                (led / attr).write_bytes(original)
+                        self.assertEqual(rgb_backend._rgb_capability(), (real, ""))
+                        writes.assert_not_called()
 
     def test_legacy_led_abi_uses_u8_color_and_preserves_modern_snapshot_on_restore(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -195,6 +308,58 @@ class RgbBackendTests(unittest.TestCase):
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(plugin._drift_loop())
         self.assertEqual(attempts, [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 100.0])
+
+    def test_resume_retries_missing_controller_and_force_reapplies_saved_on_or_off(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as raw:
+                make_led(Path(raw))
+                state = copy.deepcopy(rgb_backend.DEFAULT_STATE)
+                state.update(
+                    configured=True, control_enabled=True, rings_enabled=enabled,
+                    original_rgb=rgb_backend._read_rgb_snapshot(raw),
+                )
+                # Matching readback must not suppress the writes after resume.
+                self.assertTrue(rgb_backend._apply_rgb_snapshot(
+                    raw, rgb_backend._target_for_state(state, raw)
+                ))
+                memory = MemorySettings(state)
+                before = copy.deepcopy(memory.data)
+                now = [0.0]
+                ticks = [0]
+                probes = [0]
+
+                async def advance(seconds):
+                    now[0] += seconds
+                    if seconds == rgb_backend.RESUME_CHECK_S:
+                        ticks[0] += 1
+                        if ticks[0] > 1:
+                            raise asyncio.CancelledError
+
+                def capability():
+                    probes[0] += 1
+                    return (None, "controller reconnecting") if probes[0] == 1 else (raw, "")
+
+                fake_time = types.SimpleNamespace(
+                    CLOCK_BOOTTIME=7, monotonic=lambda: now[0],
+                    clock_gettime=lambda _clock: now[0] + 60.0,
+                )
+                with (
+                    patch.object(rgb_backend, "settings", memory),
+                    patch.object(rgb_backend, "time", fake_time),
+                    patch.object(rgb_backend, "_last_suspend_offset", 0.0),
+                    patch.object(rgb_backend.asyncio, "sleep", side_effect=advance),
+                    patch.object(rgb_backend, "_rgb_capability", side_effect=capability),
+                    patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
+                    patch.object(rgb_backend, "_write_attr", wraps=rgb_backend._write_attr) as writes,
+                ):
+                    with self.assertRaises(asyncio.CancelledError):
+                        asyncio.run(rgb_backend.Plugin()._drift_loop())
+                expected = ["profile", "speed", "multi_intensity", "brightness", "effect", "mode", "enabled"]
+                self.assertEqual([call.args[1] for call in writes.call_args_list], expected if enabled else ["enabled"])
+                self.assertTrue(all(call.kwargs["force"] for call in writes.call_args_list))
+                self.assertEqual(writes.call_args_list[-1].args[2], "true" if enabled else "false")
+                self.assertEqual(memory.data, before)
+                self.assertEqual(rgb_backend._last_error, "")
 
     def test_transient_rgb_failure_keeps_settings_and_recovers_on_both_led_abis(self):
         for legacy in (True, False):
