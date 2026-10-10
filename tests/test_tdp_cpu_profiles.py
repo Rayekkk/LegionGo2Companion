@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import test_integration
 import main
+import module_control
 import tdp_backend as tdp
 from safe_settings import AtomicSettingsManager
 
@@ -115,6 +116,44 @@ class CpuProfileTests(unittest.TestCase):
         self.assertEqual(tdp._target_for_preset(
             simplified, 20000, 32000, 35000, 'performance'),
             (20000, 32000, 35000))
+
+    def test_uninstall_restores_managed_cpu_controls_and_preserves_settings(self):
+        before = self.payload()
+        asyncio.run(self.plugin._uninstall())
+        self.assert_hardware(True, 'balance_performance')
+        self.assertEqual(self.payload(), before)
+
+    def test_disabled_tdp_still_releases_cpu_controls_from_game_ac_profile(self):
+        self.seed({'111': self.game(boost=None, epp=None,
+            ac_cpu_boost_enabled=False, ac_epp='77')}, enabled=False,
+            cpu_boost_enabled=None, epp=None)
+        before = self.payload()
+        asyncio.run(module_control.withdraw('tdp', self.plugin))
+        self.assert_hardware(True, 'balance_performance')
+        tdp._restore_defaults_locked.assert_not_called()
+        self.assertEqual(self.payload(), before)
+
+    def test_failed_firmware_cleanup_does_not_skip_cpu_restoration(self):
+        before = self.payload()
+        with patch.object(tdp, '_restore_defaults_locked', return_value={
+                'success': False, 'stderr': 'firmware did not confirm'}):
+            with self.assertRaisesRegex(RuntimeError, 'firmware did not confirm'):
+                asyncio.run(self.plugin._uninstall())
+        self.assert_hardware(True, 'balance_performance')
+        self.assertEqual(self.payload(), before)
+
+    def test_unmanaged_cpu_controls_are_not_changed_by_uninstall(self):
+        self.seed({}, enabled=False, cpu_boost_enabled=None, epp=None)
+        asyncio.run(self.plugin._uninstall())
+        self.assert_hardware(False, '77')
+
+    def test_failed_cpu_cleanup_is_reported_and_remaining_controls_are_attempted(self):
+        with patch.object(tdp, '_apply_cpu_boost_hardware', return_value={
+                'success': False, 'error': 'boost readback mismatch'}):
+            with self.assertRaisesRegex(RuntimeError, 'boost readback mismatch'):
+                asyncio.run(module_control.withdraw('tdp', self.plugin))
+        self.assertEqual([path.read_text().strip() for path in self.epp_paths],
+                         ['balance_performance'] * 2)
 
     def test_simplified_custom_derives_limits_and_persists_preference(self):
         self.assertTrue(asyncio.run(self.plugin.get_settings())['advanced_tdp_control'])

@@ -73,7 +73,7 @@ class UpdaterScopeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             binary = Path(raw) / "ryzenadj"
             binary.write_bytes(b"previous helper")
-            def wrong_archive(_url, out, timeout):
+            def wrong_archive(_url, out, timeout, cancel=None):
                 out.write(b"untrusted replacement archive")
             with patch.object(tdp, "BIN_DIR", raw), \
                  patch.object(tdp, "BIN_PATH", str(binary)), \
@@ -94,7 +94,7 @@ class UpdaterScopeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             binary = Path(raw) / "ryzenadj"
             binary.write_bytes(b"previous helper")
-            def fixture_archive(_url, out, timeout):
+            def fixture_archive(_url, out, timeout, cancel=None):
                 out.write(payload)
             with patch.object(tdp, "BIN_DIR", raw), \
                  patch.object(tdp, "BIN_PATH", str(binary)), \

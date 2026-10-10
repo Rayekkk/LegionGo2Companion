@@ -53,7 +53,13 @@ interface ControllerDiagnostics {
   virtual: Stream<{ gyro: Vector | null; touchpad: Touchpad | null }>;
 }
 
-export const getControllerStatus = callable<[], ControllerStatus>("controller_get_status");
+let controllerMutationChain: Promise<void> = Promise.resolve();
+let controllerMutationsPending = 0;
+const readControllerStatus = callable<[], ControllerStatus>("controller_get_status");
+export const getControllerStatus = async () => {
+  if (controllerMutationsPending) await controllerMutationChain;
+  return readControllerStatus();
+};
 const startDiagnostics = callable<[], ControllerDiagnostics>("controller_start_diagnostics");
 const getDiagnostics = callable<[string], ControllerDiagnostics>("controller_get_diagnostics");
 const stopDiagnostics = callable<[string], ControllerDiagnostics>("controller_stop_diagnostics");
@@ -108,7 +114,8 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
   const isVisible = useRef(visible);
   const generation = useRef(0);
   const statusRevision = useRef(0);
-  const statusRead = useRef<Promise<ControllerStatus> | null>(null);
+  const statusRead = useRef<Promise<ControllerStatus | undefined> | null>(null);
+  const refreshAfterRead = useRef(false);
   const saving = useRef(false);
   const startInFlight = useRef(false);
   const stopInFlight = useRef<Promise<unknown> | null>(null);
@@ -154,11 +161,15 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
   const refresh = useCallback(async () => {
     if (!mounted.current || !isVisible.current || saving.current || statusRead.current || startInFlight.current || token.current) return;
     const revision = ++statusRevision.current;
-    const request = getControllerStatus();
+    const request = (async () => {
+      if (controllerMutationsPending) await controllerMutationChain;
+      if (!mounted.current || !isVisible.current || revision !== statusRevision.current) return;
+      return getControllerStatus();
+    })();
     statusRead.current = request;
     try {
       const next = await request;
-      if (mounted.current && isVisible.current && revision === statusRevision.current) {
+      if (next && mounted.current && isVisible.current && revision === statusRevision.current) {
         setStatus(next);
         setError("");
       }
@@ -168,6 +179,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       }
     } finally {
       if (statusRead.current === request) statusRead.current = null;
+      if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
     }
   }, []);
 
@@ -176,6 +188,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       stop("Test stopped when this page was hidden.");
       return;
     }
+    if (statusRead.current) refreshAfterRead.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), 10000);
     return () => {
@@ -248,26 +261,34 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
     // Visibility gates polling, not the user's explicit selection callback.
     if (!mounted.current || saving.current || startInFlight.current || stopInFlight.current || token.current) return;
     saving.current = true;
+    controllerMutationsPending += 1;
+    const previousRead = statusRead.current;
     const activeGeneration = generation.current;
     statusRevision.current += 1;
     setBusy(true);
     setError("");
     setNotice("");
-    try {
-      await statusRead.current?.catch(() => undefined);
-      const next = await operation();
-      if (!mounted.current || generation.current !== activeGeneration) return;
-      setStatus(next);
-      if (next.error || next.conflict) setError(next.error || next.reason || "Another controller configuration is active.");
-      else setNotice(message);
-    } catch (failure) {
-      if (mounted.current && generation.current === activeGeneration) {
-        setError(errorText(failure, "The requested gyro source could not be confirmed."));
+    const run = async () => {
+      try {
+        await previousRead?.catch(() => undefined);
+        const next = await operation();
+        if (!mounted.current || generation.current !== activeGeneration) return;
+        setStatus(next);
+        if (next.error || next.conflict) setError(next.error || next.reason || "Another controller configuration is active.");
+        else setNotice(message);
+      } catch (failure) {
+        if (mounted.current && generation.current === activeGeneration) {
+          setError(errorText(failure, "The requested gyro source could not be confirmed."));
+        }
+      } finally {
+        controllerMutationsPending -= 1;
+        saving.current = false;
+        if (mounted.current && generation.current === activeGeneration) setBusy(false);
       }
-    } finally {
-      saving.current = false;
-      if (mounted.current && generation.current === activeGeneration) setBusy(false);
-    }
+    };
+    const queued = controllerMutationChain.then(run, run);
+    controllerMutationChain = queued.catch(() => undefined);
+    await queued;
   }, []);
 
   if (!status) return <PanelSection title="Controller">

@@ -86,6 +86,7 @@ const resultMessage = (result: WifiResult) =>
 export const WifiPage: FC = () => {
   const visible = useQuickAccessVisible();
   const inFlight = useRef<Promise<WifiStatus> | null>(null);
+  const refreshAfterRead = useRef(false);
   const operationInFlight = useRef(false);
   const mounted = useRef(true);
   const isVisible = useRef(visible);
@@ -116,11 +117,13 @@ export const WifiPage: FC = () => {
         setStatusError("WiFi status is unavailable. Retrying while this page is open.");
     } finally {
       if (inFlight.current === request) inFlight.current = null;
+      if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
     }
   }, []);
 
   useEffect(() => {
     if (!visible) return;
+    if (inFlight.current) refreshAfterRead.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), 10000);
     return () => { clearInterval(timer); readRevision.current += 1; };
@@ -128,21 +131,20 @@ export const WifiPage: FC = () => {
 
   const run = useCallback(
     async (operation: () => Promise<WifiResult>) => {
-      if (operationInFlight.current) return;
+      if (!mounted.current || !isVisible.current || operationInFlight.current) return;
       readRevision.current += 1;
       operationInFlight.current = true;
       setBusy(true);
       setError("");
       setNotice("");
+      setConfirmStrict(false);
       try {
         const result = await operation();
+        if (!mounted.current) return;
         if (result.success) setNotice(resultMessage(result));
         else setError(resultMessage(result));
-        if (result.reconnected) {
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-        }
       } catch {
-        setError("The backend call ended before the result could be verified.");
+        if (mounted.current) setError("The backend call ended before the result could be verified.");
       } finally {
         await inFlight.current?.catch(() => undefined);
         operationInFlight.current = false;
@@ -157,8 +159,9 @@ export const WifiPage: FC = () => {
     return (
       <PanelSection>
         <PanelSectionRow>
-          <Spinner />
+          {statusError ? <Field focusable label="WiFi status unavailable" description={statusError} /> : <Spinner />}
         </PanelSectionRow>
+        {statusError && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
       </PanelSection>
     );
   }
@@ -212,11 +215,11 @@ export const WifiPage: FC = () => {
         {legacy && <PanelSectionRow><Field focusable label="Legacy band setting detected"
           description="Restore the legacy setting first; then select a new WiFi behavior." /></PanelSectionRow>}
         <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || (policy === "off" && !legacy)}
-          onClick={() => { setConfirmStrict(false); void run(() => setBandPolicy("off")); }}>
+          onClick={() => void run(() => setBandPolicy("off"))}>
           {legacy ? "Restore legacy band setting" : policy === "off" ? "> Automatic WiFi" : "Use Automatic WiFi"}
         </ButtonItem></PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy || preferred}
-          onClick={() => { setConfirmStrict(false); void run(() => setBandPolicy("five_six_no_24")); }}>
+          onClick={() => void run(() => setBandPolicy("five_six_no_24"))}>
           {preferred ? "> Prefer 5/6 GHz (2.4 GHz fallback)" : "Prefer 5/6 GHz (2.4 GHz fallback)"}
         </ButtonItem></PanelSectionRow>
         <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy || strict}
@@ -227,7 +230,7 @@ export const WifiPage: FC = () => {
           <PanelSectionRow><Field focusable label="Connection attempt"
             description="A scan can miss a 5/6 GHz access point. This briefly restarts WiFi and tries to connect even without a scan result. If no 5/6 GHz link is verified, Companion restores the previous setting automatically." /></PanelSectionRow>
           <PanelSectionRow><ButtonItem layout="below" disabled={blocked || !supported || legacy}
-            onClick={() => { setConfirmStrict(false); void run(() => setBandPolicy("five_six_only", true)); }}>
+            onClick={() => void run(() => setBandPolicy("five_six_only", true))}>
             Confirm Only 5/6 GHz
           </ButtonItem></PanelSectionRow>
         </>}

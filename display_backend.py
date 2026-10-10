@@ -574,8 +574,8 @@ def _read_props_uncached(names, display=None) -> dict:
     return values
 
 
-def _read_props(names) -> dict:
-    cached = _cached_props(names)
+def _read_props(names, *, fresh=False) -> dict:
+    cached = None if fresh else _cached_props(names)
     return cached if cached is not None else _read_props_uncached(names)
 
 
@@ -1512,18 +1512,20 @@ class Plugin:
             Plugin._require_settings()
 
     @staticmethod
-    def _store_settings(values: dict) -> None:
-        """Persist one logical runtime transaction in a single commit."""
+    def _store_settings(values: dict, *, required: bool = False) -> None:
+        """Persist one transaction; recovery baselines must succeed before writes."""
         try:
             with _settings_lock:
                 settings.read()
                 Plugin._require_settings()
-                for name, value in values.items():
-                    settings.setSetting(name, value)
-                settings.commit()
+                payload = dict(settings.settings)
+                payload.update(values)
+                settings.replace(payload)
         except CorruptSettings:
             raise
         except Exception as e:
+            if required:
+                raise RuntimeError(f"Could not save display recovery state: {e}") from e
             decky.logger.warning(
                 f"{LOG} could not save {', '.join(values.keys())}: {e}")
 
@@ -1685,7 +1687,10 @@ class Plugin:
                 Plugin._state["setup_done"] = False
                 if session is None:
                     raise RuntimeError("Could not identify the Gaming Mode session. Retry reset in Gaming Mode.")
-                props = Plugin._session_props([ATOM_IS_EXTERNAL])
+                props = Plugin._session_props([ATOM_IS_EXTERNAL], fresh=True)
+                current = _gamescope_start_time()
+                if current is None or not Plugin._same_session(session, current):
+                    raise RuntimeError("Gaming Mode session changed during reset. Retry reset in Gaming Mode.")
                 external = _as_int(props.get(ATOM_IS_EXTERNAL))
                 if external not in (0, 1):
                     raise RuntimeError("Could not verify the active display. Retry reset in Gaming Mode.")
@@ -1931,6 +1936,27 @@ class Plugin:
             return True
         if not Plugin._state["active"] and Plugin._last_written is None:
             return True
+        session = Plugin._ownership_session_current()
+        if session is not True:
+            return session is False
+        # A connector can change without restarting gamescope. Confirm the live
+        # atom directly; a watcher snapshot may predate docking or Steam's write.
+        props = Plugin._session_props([ATOM_IS_EXTERNAL, ATOM_SDR_NITS], fresh=True)
+        session = Plugin._ownership_session_current()
+        if session is not True:
+            return session is False
+        external = _as_int(props.get(ATOM_IS_EXTERNAL))
+        live = _as_float(props.get(ATOM_SDR_NITS))
+        if external not in (0, 1) or live is None or not math.isfinite(live):
+            return False
+        if (Plugin._last_written is not None
+                and abs(live - Plugin._last_written) > 0.01):
+            Plugin._last_written = None
+            Plugin._state["active"] = False
+            return True
+        if external == 1 and Plugin._last_written is None:
+            Plugin._state["active"] = False
+            return True
         target = (Plugin._baseline if Plugin._baseline is not None
                   else FALLBACK_BASELINE_NITS)
         if not _write_nits(target):
@@ -1944,12 +1970,33 @@ class Plugin:
         return True
 
     @staticmethod
+    def _ownership_session_current() -> bool | None:
+        """Unknown sessions defer release; a new compositor owns fresh atoms."""
+        current = _gamescope_start_time()
+        if current is None or Plugin._gamescope_started_at is None:
+            return None
+        if Plugin._same_session(Plugin._gamescope_started_at, current):
+            return True
+        Plugin._last_written = None
+        Plugin._baseline = None
+        Plugin._hdr_baseline = None
+        Plugin._state["active"] = False
+        Plugin._hybrid_suspended_external = False
+        Plugin._reset_hybrid_timing()
+        return False
+
+    @staticmethod
     def _remember_brightness_baseline(value: float) -> None:
+        try:
+            Plugin._store_settings({
+                "brightness_baseline": value,
+                "brightness_baseline_session": Plugin._gamescope_started_at,
+            }, required=True)
+        except Exception as error:
+            Plugin._state["active"] = False
+            Plugin._state["reason"] = str(error)
+            raise
         Plugin._baseline = value
-        Plugin._store_settings({
-            "brightness_baseline": value,
-            "brightness_baseline_session": Plugin._gamescope_started_at,
-        })
         decky.logger.info(f"{LOG} baseline {value:.2f} nits")
 
     @staticmethod
@@ -1959,8 +2006,17 @@ class Plugin:
             if Plugin.native_display_active():
                 Plugin._state["active"] = False
                 return None
+            if Plugin._ownership_session_current() is not True:
+                Plugin._state["active"] = False
+                return None
             if Plugin._state.get("reset_in_progress") or (
                     Plugin._state.get("panel_mode") is None and Plugin._last_written is None):
+                Plugin._state["active"] = False
+                return None
+            # A gate result can outlive a failed baseline commit. RAM receives
+            # the baseline only after that commit, so it is also the writer's
+            # admission check before any new brightness control is applied.
+            if Plugin._baseline is None:
                 Plugin._state["active"] = False
                 return None
             if (not Plugin._state["active"]
@@ -1971,6 +2027,18 @@ class Plugin:
                 # The loop may hold a stale gate result while a toggle or mode
                 # change is being processed. Hand back any prior value, but never
                 # let that stale result authorise a new write.
+                Plugin._release_locked()
+                return None
+            # A backlight notification can arrive after docking or HDR-content
+            # switching but before the next gate tick. Revalidate that output
+            # before forwarding the built-in panel's brightness.
+            props = Plugin._session_props([ATOM_IS_EXTERNAL, ATOM_HDR_OUT, ATOM_HDR_APP], fresh=True)
+            if Plugin._ownership_session_current() is not True:
+                Plugin._state["active"] = False
+                return None
+            if (_as_int(props.get(ATOM_IS_EXTERNAL)) != 0
+                    or _as_int(props.get(ATOM_HDR_OUT)) != 1
+                    or _as_int(props.get(ATOM_HDR_APP)) != 0):
                 Plugin._release_locked()
                 return None
             ok = _write_nits(nits)
@@ -2020,7 +2088,7 @@ class Plugin:
             Plugin._state["setup_note"] = note
 
     @staticmethod
-    def _session_props(names) -> dict:
+    def _session_props(names, *, fresh=False) -> dict:
         """Read atoms, re-find a session that moved, and learn the EDID path.
 
         Every caller needs the same two things before anything else: a session
@@ -2031,7 +2099,9 @@ class Plugin:
         work to do no matter which mode the panel runs in.
         """
         wanted = list(dict.fromkeys(list(names) + [ATOM_EDID_PATH]))
-        props = _read_props(wanted)
+        # Safety-critical writes bypass the watcher without destroying its
+        # complete snapshot. Incremental notifications still need that cache.
+        props = _read_props(wanted, fresh=True) if fresh else _read_props(wanted)
         needs_control_root = ATOM_IS_EXTERNAL in wanted
         complete = props and (
             not needs_control_root or ATOM_IS_EXTERNAL in props)
@@ -2056,7 +2126,7 @@ class Plugin:
             # preserves the single interception point used by diagnostics and
             # tests.
             _invalidate_prop_cache()
-            props = _read_props(wanted)
+            props = _read_props(wanted, fresh=True) if fresh else _read_props(wanted)
             complete = props and (
                 not needs_control_root or ATOM_IS_EXTERNAL in props)
             if not complete:
@@ -2236,6 +2306,17 @@ class Plugin:
         if now < Plugin._hdr_backoff_until:
             return False
 
+        if Plugin._ownership_session_current() is not True:
+            return False
+        props = Plugin._session_props([ATOM_IS_EXTERNAL, ATOM_HDR_APP], fresh=True)
+        if Plugin._ownership_session_current() is not True:
+            return False
+        content = _as_int(props.get(ATOM_HDR_APP))
+        if _as_int(props.get(ATOM_IS_EXTERNAL)) != 0 or content not in (0, 1):
+            return False
+        if Plugin._state.get("active_mode") == MODE_HYBRID and bool(content) != target:
+            return False
+
         Plugin._hdr_fights += 1
         if Plugin._hdr_fights > HDR_FIGHT_LIMIT:
             Plugin._hdr_backoff_until = now + HDR_BACKOFF_S
@@ -2280,16 +2361,23 @@ class Plugin:
 
     @staticmethod
     def _remember_hdr_baseline(value: bool) -> None:
+        try:
+            Plugin._store_settings({
+                "hdr_baseline": bool(value),
+                "hdr_baseline_session": Plugin._gamescope_started_at,
+            }, required=True)
+        except Exception as error:
+            Plugin._state["hybrid_reason"] = str(error)
+            raise
         Plugin._hdr_baseline = bool(value)
-        Plugin._store_settings({
-            "hdr_baseline": bool(value),
-            "hdr_baseline_session": Plugin._gamescope_started_at,
-        })
 
     @staticmethod
     def _hybrid_pass_locked() -> None:
         """Move the panel between gamma 2.2 and PQ from what the game asks for."""
         if Plugin.native_display_active():
+            return
+        if Plugin._ownership_session_current() is not True:
+            Plugin._state["hybrid_reason"] = "waiting to verify the current gamescope session"
             return
         if Plugin._state.get("reset_in_progress") or Plugin._state.get("active_mode") != MODE_HYBRID:
             return
@@ -2310,7 +2398,28 @@ class Plugin:
                 Plugin._session_note or "gamescope not reachable"
             return
 
-        if _as_int(props.get(ATOM_IS_EXTERNAL)):
+        external = _as_int(props.get(ATOM_IS_EXTERNAL))
+        # Stable Hybrid ticks keep using the watcher. Baseline capture, support
+        # advertisement and a possible modeset require a live admission read.
+        if external != 1 and (
+                Plugin._hdr_baseline is None or Plugin._hybrid_suspended_external
+                or _as_int(props.get(ATOM_FORCE_HDR_SUPPORT)) != 1
+                or _as_int(props.get(ATOM_HDR_ENABLED)) not in (0, 1)
+                or _as_int(props.get(ATOM_HDR_APP)) not in (0, 1)
+                or _as_int(props.get(ATOM_HDR_ENABLED)) != _as_int(props.get(ATOM_HDR_APP))):
+            props = Plugin._session_props(
+                [ATOM_HDR_APP, ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT,
+                 ATOM_IS_EXTERNAL, ATOM_HDR_OUT], fresh=True)
+            if Plugin._ownership_session_current() is not True:
+                Plugin._state["hybrid_reason"] = "waiting to verify the current gamescope session"
+                return
+            external = _as_int(props.get(ATOM_IS_EXTERNAL))
+        if external not in (0, 1):
+            Plugin._cancel_hybrid_sdr_candidate()
+            Plugin._state["hybrid_reason"] = "could not verify the active display"
+            return
+
+        if external == 1:
             if not Plugin._hybrid_suspended_external:
                 Plugin._reset_hybrid_timing()
                 dropped = _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
@@ -2452,8 +2561,14 @@ class Plugin:
         """Stop forcing support and leave the output useful for what follows."""
         if Plugin.native_display_active():
             return True
+        session = Plugin._ownership_session_current()
+        if session is not True:
+            return session is False
         Plugin._reset_hybrid_timing()
-        props = Plugin._session_props([ATOM_IS_EXTERNAL])
+        props = Plugin._session_props([ATOM_IS_EXTERNAL], fresh=True)
+        session = Plugin._ownership_session_current()
+        if session is not True:
+            return session is False
         external = _as_int(props.get(ATOM_IS_EXTERNAL))
 
         dropped = _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
@@ -2806,6 +2921,7 @@ class Plugin:
 
     async def _main(self):
         decky.logger.info(f"{LOG} startup")
+        previous_settings_error = Plugin._state.get("settings_error", "")
         try:
             await _offload(Plugin._read_settings)
         except Exception as error:
@@ -2813,7 +2929,9 @@ class Plugin:
             Plugin._state["settings_error"] = message
             Plugin._state["setup_error"] = message
             decky.logger.error(f"{LOG} {message}")
-            return
+            raise
+        if previous_settings_error and Plugin._state.get("setup_error") == previous_settings_error:
+            Plugin._state["setup_error"] = ""
         Plugin._state["settings_error"] = ""
         Plugin._native_probe_after = 0.0
         Plugin._state["reset_in_progress"] = settings.getSetting("reset_in_progress", False) is True
@@ -2938,7 +3056,11 @@ class Plugin:
                     with Plugin._runtime_lock:
                         if Plugin.native_display_active():
                             return
-                        props = Plugin._session_props([ATOM_IS_EXTERNAL])
+                        if Plugin._ownership_session_current() is not True:
+                            return
+                        props = Plugin._session_props([ATOM_IS_EXTERNAL], fresh=True)
+                        if Plugin._ownership_session_current() is not True:
+                            return
                         _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
                         if _as_int(props.get(ATOM_IS_EXTERNAL)) == 0:
                             _write_atom_int(ATOM_HDR_ENABLED, 0)

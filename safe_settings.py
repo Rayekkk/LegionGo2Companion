@@ -76,6 +76,9 @@ def _validate_directory(directory: str) -> str:
 def _open_readonly_nofollow(path: str) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
+    # A regular file can be replaced by a FIFO between lstat and open. The
+    # descriptor check must happen before any wait for a FIFO writer.
+    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
         return os.open(path, flags)
     except OSError:

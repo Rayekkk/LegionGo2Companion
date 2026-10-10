@@ -40,7 +40,14 @@ interface RemapResult {
   status?: RemapStatus;
 }
 
-export const getRemapStatus = callable<[], RemapStatus>("remap_get_status");
+// Accepted edits survive page close. Every later menu/page snapshot follows them.
+let remapMutationChain: Promise<void> = Promise.resolve();
+let remapMutationsPending = 0;
+const readRemapStatus = callable<[], RemapStatus>("remap_get_status");
+export const getRemapStatus = async () => {
+  if (remapMutationsPending) await remapMutationChain;
+  return readRemapStatus();
+};
 const setRemapEnabled = callable<[boolean], RemapResult>("remap_set_enabled");
 const setRemapAction = callable<[string, string], RemapResult>("remap_set_action");
 const restoreRemapDefaults = callable<[], RemapResult>("remap_restore_defaults");
@@ -93,11 +100,11 @@ export const RemapPage: FC = () => {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const pending = useRef(0);
-  const chain = useRef<Promise<void>>(Promise.resolve());
   const mounted = useRef(true);
   const isVisible = useRef(visible);
   const readRevision = useRef(0);
   const readInFlight = useRef(false);
+  const refreshAfterRead = useRef(false);
   isVisible.current = visible;
   useEffect(() => { mounted.current = true; return () => {
     mounted.current = false; readRevision.current += 1;
@@ -108,6 +115,8 @@ export const RemapPage: FC = () => {
     readInFlight.current = true;
     const revision = readRevision.current;
     try {
+      if (remapMutationsPending) await remapMutationChain;
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       const next = await getRemapStatus();
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
@@ -115,23 +124,27 @@ export const RemapPage: FC = () => {
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current)
         setError("Button-remapper status is unavailable. Retrying while this page is open.");
-    } finally { readInFlight.current = false; }
+    } finally {
+      readInFlight.current = false;
+      if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
+    }
   }, []);
 
   useEffect(() => {
     if (!visible) return;
+    if (readInFlight.current) refreshAfterRead.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), 10000);
     return () => { clearInterval(timer); readRevision.current += 1; };
   }, [refresh, visible]);
 
   const enqueue = useCallback((operation: () => Promise<RemapResult>, message: string) => {
+    if (!mounted.current) return Promise.resolve();
     readRevision.current += 1;
     pending.current += 1;
+    remapMutationsPending += 1;
     const run = async () => {
-      setBusy(true);
-      setNotice("");
-      setError("");
+      if (mounted.current) { setBusy(true); setNotice(""); setError(""); }
       try {
         const result = await operation();
         if (!mounted.current) return;
@@ -141,17 +154,22 @@ export const RemapPage: FC = () => {
       } catch {
         if (mounted.current) setError("The backend call ended before InputPlumber confirmed the mapping.");
       } finally {
+        remapMutationsPending -= 1;
         pending.current -= 1;
         if (mounted.current && !pending.current) setBusy(false);
       }
     };
-    const queued = chain.current.then(run, run);
-    chain.current = queued.catch(() => undefined);
+    const queued = remapMutationChain.then(run, run);
+    remapMutationChain = queued.catch(() => undefined);
     return queued;
   }, []);
 
   if (!status) {
-    return <PanelSection><PanelSectionRow><Spinner /></PanelSectionRow></PanelSection>;
+    return <PanelSection><PanelSectionRow>{error
+      ? <Field focusable label="Button-remapper status unavailable" description={error} />
+      : <Spinner />}</PanelSectionRow>
+      {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
+    </PanelSection>;
   }
 
   const options: DropdownOption[] = status.actions.map((action) => ({
@@ -170,6 +188,7 @@ export const RemapPage: FC = () => {
         rgOptions={options}
         disabled={blocked || !status.enabled}
         onChange={(option) => {
+          if (!mounted.current) return;
           const action = String(option.data);
           setStatus((current) => current ? {
             ...current,

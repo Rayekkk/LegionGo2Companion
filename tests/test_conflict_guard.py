@@ -60,6 +60,15 @@ class DetectionTests(unittest.TestCase):
             (other / "plugin.json").write_text('{"name":')
             with self.assertRaises(ValueError): installed_conflicts(current)
 
+    def test_deep_manifest_is_reported_as_an_unverifiable_identity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
+            other = root / "unrelated-plugin"; other.mkdir()
+            (other / "plugin.json").write_text(
+                '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}')
+            with self.assertRaisesRegex(ValueError, "manifest"):
+                installed_conflicts(current)
+
 
 class GateTests(unittest.IsolatedAsyncioTestCase):
     def make_plugin(self):
@@ -70,6 +79,38 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                                               _unload=AsyncMock(), _uninstall=AsyncMock())
             setattr(plugin, "_" + name, component); self.components.append(component)
         return plugin
+
+    async def test_deep_manifest_stops_live_modules_without_killing_the_guard(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
+            other = root / "unrelated-plugin"; other.mkdir()
+            manifest = other / "plugin.json"
+            manifest.write_text(json.dumps({"name": "OtherPlugin"}))
+            plugin = self.make_plugin()
+            with patch.object(main, "_installed_standalone_plugins",
+                              side_effect=lambda: installed_conflicts(current)), \
+                    patch.object(main, "_migrate_legacy_settings"), \
+                    patch.object(main, "_reload_component_settings"):
+                try:
+                    await plugin._main()
+                    manifest.write_text(
+                        '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}')
+                    await plugin._check_guard()
+                    self.assertTrue(plugin._guard_blocked)
+                    self.assertIn("manifest", plugin._guard_error)
+                    self.assertFalse(plugin._modules_started)
+                    for component in self.components:
+                        component._unload.assert_awaited_once()
+                    with self.assertRaisesRegex(RuntimeError, "could not be verified"):
+                        await plugin.rgb_set_brightness(20)
+                    # The watcher uses this same check. Repairing the file must
+                    # still produce a snapshot rather than an escaped decoder error.
+                    manifest.write_text(json.dumps({"name": "OtherPlugin"}))
+                    status = await plugin.get_version()
+                    self.assertTrue(status["blocked"])
+                    self.assertTrue(status["restart_required"])
+                finally:
+                    await plugin._unload()
 
     async def test_unchanged_guard_still_scans_without_reading_display_or_version(self):
         plugin = self.make_plugin()

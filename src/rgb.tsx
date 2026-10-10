@@ -70,7 +70,13 @@ interface RgbResult {
   status?: RgbStatus;
 }
 
-export const getRgbStatus = callable<[], RgbStatus>("rgb_get_status");
+let rgbMutationChain: Promise<void> = Promise.resolve();
+let rgbMutationsPending = 0;
+const readRgbStatus = callable<[], RgbStatus>("rgb_get_status");
+export const getRgbStatus = async () => {
+  if (rgbMutationsPending) await rgbMutationChain;
+  return readRgbStatus();
+};
 const setControlEnabled = callable<[boolean], RgbResult>("rgb_set_control_enabled");
 const setRingsEnabled = callable<[boolean], RgbResult>("rgb_set_rings_enabled");
 const setEffect = callable<[string], RgbResult>("rgb_set_effect");
@@ -145,8 +151,6 @@ const RGBSliderStyles: FC<{ hue: number; saturation: number }> = ({
   `}</style>
 );
 
-let rgbMutationChain: Promise<void> = Promise.resolve();
-
 export const RgbPage: FC = () => {
   const visible = useQuickAccessVisible();
   const [status, setStatus] = useState<RgbStatus | null>(null);
@@ -157,114 +161,188 @@ export const RgbPage: FC = () => {
   const pendingWrites = useRef<Record<string, () => void>>({});
   const colorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const brightnessTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const speedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const mounted = useRef(true);
   const isVisible = useRef(visible);
   const readRevision = useRef(0);
   const readInFlight = useRef(false);
+  const refreshAfterRead = useRef(false);
+  const drafts = useRef<Partial<RgbSettings>>({});
+  const draftVersions = useRef<Partial<Record<keyof RgbSettings, number>>>({});
+  const draftSequence = useRef(0);
+  const colorVersion = useRef(0);
+  const brightnessVersion = useRef(0);
+  const speedVersion = useRef(0);
   isVisible.current = visible;
   useEffect(() => { mounted.current = true; return () => {
     mounted.current = false; readRevision.current += 1;
   }; }, []);
 
-  const timersPending = () => colorTimer.current != null || brightnessTimer.current != null;
+  const timersPending = () => colorTimer.current != null || brightnessTimer.current != null || speedTimer.current != null;
+
+  const flushPendingWrites = useCallback(() => {
+    for (const timer of [colorTimer, brightnessTimer, speedTimer]) {
+      if (timer.current != null) clearTimeout(timer.current);
+      timer.current = undefined;
+    }
+    const writes = Object.values(pendingWrites.current);
+    pendingWrites.current = {};
+    for (const flush of writes) flush();
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!mounted.current || !isVisible.current || readInFlight.current || pendingCount.current > 0 || timersPending()) return;
     readInFlight.current = true;
     const revision = readRevision.current;
     try {
+      // An older page may still be flushing accepted slider/button edits.
+      // Its complete mutation tail must precede this page's status snapshot.
+      if (rgbMutationsPending) await rgbMutationChain;
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       const next = await getRgbStatus();
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
+      drafts.current = {}; draftVersions.current = {};
       setStatus(next);
       setError(next.error || "");
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current)
         setError("Lighting status is unavailable. Retrying while this page is open.");
-    } finally { readInFlight.current = false; }
+    } finally {
+      readInFlight.current = false;
+      if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
+    }
   }, []);
 
   useEffect(() => {
     if (!visible) return;
+    if (readInFlight.current) refreshAfterRead.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), 10000);
     return () => { clearInterval(timer); readRevision.current += 1; };
   }, [refresh, visible]);
 
-  useEffect(() => () => {
-    if (colorTimer.current) clearTimeout(colorTimer.current);
-    if (brightnessTimer.current) clearTimeout(brightnessTimer.current);
-    const writes = Object.values(pendingWrites.current);
-    pendingWrites.current = {};
-    for (const flush of writes) flush();
-  }, []);
+  useEffect(() => flushPendingWrites, [flushPendingWrites]);
 
   const updateLocal = useCallback((patch: Partial<RgbSettings>) => {
+    if (!mounted.current) return;
     readRevision.current += 1;
+    Object.assign(drafts.current, patch);
+    for (const key of Object.keys(patch) as Array<keyof RgbSettings>)
+      draftVersions.current[key] = ++draftSequence.current;
     setStatus((current) => current?.settings ? {
       ...current,
       settings: { ...current.settings, ...patch },
     } : current);
   }, []);
 
-  const enqueue = useCallback((operation: () => Promise<RgbResult>) => {
+  const enqueue = useCallback((operation: () => Promise<RgbResult>, fields: Array<keyof RgbSettings> = [], persistAfterClose = false) => {
+    // Debounced gestures accepted while mounted still flush on close. New
+    // callbacks from a discarded page must not initiate hardware changes.
+    if (!mounted.current && !persistAfterClose) return Promise.resolve();
     readRevision.current += 1;
-    const pending = Object.values(pendingWrites.current);
-    pendingWrites.current = {};
-    if (colorTimer.current) clearTimeout(colorTimer.current);
-    if (brightnessTimer.current) clearTimeout(brightnessTimer.current);
-    for (const flush of pending) flush();
+    flushPendingWrites();
+    const versions = fields.map(key => [key, draftVersions.current[key]] as const);
+    const settleDrafts = () => {
+      for (const [key, version] of versions) if (version === draftVersions.current[key]) {
+        delete drafts.current[key]; delete draftVersions.current[key];
+      }
+    };
     pendingCount.current += 1;
+    rgbMutationsPending += 1;
+    if (mounted.current) setBusy(true);
     const run = async () => {
-      setBusy(true);
-      setError("");
-      setNotice("");
+      let needsRefresh = false;
+      if (mounted.current) { setError(""); setNotice(""); }
       try {
         const result = await operation();
-        if (result.status && mounted.current) setStatus(result.status);
+        if (!mounted.current) return;
+        settleDrafts();
+        if (result.status?.settings) {
+          setStatus({ ...result.status, settings: { ...result.status.settings, ...drafts.current } });
+        } else if (result.status) setStatus(result.status);
+        else needsRefresh = true;
         if (result.success) setNotice("The lighting state was applied and saved.");
         else {
           setError(result.error || "The hardware did not confirm the change.");
           toaster.toast({ title: "Lighting change failed", body: result.error || "The hardware did not confirm the change." });
         }
       } catch {
+        needsRefresh = true;
+        if (!mounted.current) return;
+        settleDrafts();
         setError("The backend call ended before the lighting state was verified.");
         toaster.toast({ title: "Lighting change failed", body: "The save could not be confirmed. Reopen Lighting to check the current state." });
       } finally {
+        rgbMutationsPending -= 1;
         pendingCount.current -= 1;
-        if (mounted.current && pendingCount.current === 0) setBusy(false);
+        if (mounted.current && pendingCount.current === 0) {
+          setBusy(false);
+          if (needsRefresh) void refresh();
+        }
       }
     };
     const queued = rgbMutationChain.then(run, run);
     rgbMutationChain = queued.catch(() => undefined);
     return queued;
-  }, []);
+  }, [flushPendingWrites, refresh]);
 
   const scheduleColor = useCallback((hue: number, saturation: number) => {
+    if (!mounted.current) return;
     updateLocal({ hue, saturation });
     if (colorTimer.current) clearTimeout(colorTimer.current);
+    const version = ++colorVersion.current;
+    let flushed = false;
     const flush = () => {
+      if (flushed || version !== colorVersion.current) return;
+      flushed = true;
       colorTimer.current = undefined;
       delete pendingWrites.current.color;
-      void enqueue(() => setColor(hue, saturation));
+      void enqueue(() => setColor(hue, saturation), ["hue", "saturation"], true);
     };
     pendingWrites.current.color = flush;
     colorTimer.current = setTimeout(flush, 450);
   }, [enqueue, updateLocal]);
 
   const scheduleBrightness = useCallback((brightness: number) => {
+    if (!mounted.current) return;
     updateLocal({ brightness });
     if (brightnessTimer.current) clearTimeout(brightnessTimer.current);
+    const version = ++brightnessVersion.current;
+    let flushed = false;
     const flush = () => {
+      if (flushed || version !== brightnessVersion.current) return;
+      flushed = true;
       brightnessTimer.current = undefined;
       delete pendingWrites.current.brightness;
-      void enqueue(() => setBrightness(brightness));
+      void enqueue(() => setBrightness(brightness), ["brightness"], true);
     };
     pendingWrites.current.brightness = flush;
     brightnessTimer.current = setTimeout(flush, 450);
   }, [enqueue, updateLocal]);
 
+  const scheduleSpeed = useCallback((speed: number) => {
+    if (!mounted.current) return;
+    updateLocal({ speed });
+    if (speedTimer.current != null) clearTimeout(speedTimer.current);
+    const version = ++speedVersion.current;
+    let flushed = false;
+    const flush = () => {
+      if (flushed || version !== speedVersion.current) return;
+      flushed = true;
+      speedTimer.current = undefined;
+      delete pendingWrites.current.speed;
+      void enqueue(() => setSpeed(speed), ["speed"], true);
+    };
+    pendingWrites.current.speed = flush;
+    speedTimer.current = setTimeout(flush, 450);
+  }, [enqueue, updateLocal]);
+
   if (!status?.settings) {
-    return <PanelSection><PanelSectionRow><Spinner /></PanelSectionRow></PanelSection>;
+    return <PanelSection><PanelSectionRow>{error
+      ? <Field focusable label="Lighting status unavailable" description={error} />
+      : <Spinner />}</PanelSectionRow>
+      {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
+    </PanelSection>;
   }
 
   const settings = status.settings;
@@ -336,7 +414,7 @@ export const RgbPage: FC = () => {
               onChange={(option) => {
                 const effect = String(option.data);
                 updateLocal({ effect });
-                void enqueue(() => setEffect(effect));
+                void enqueue(() => setEffect(effect), ["effect"]);
               }}
             />
           </PanelSectionRow>
@@ -421,11 +499,7 @@ export const RgbPage: FC = () => {
                   { notchIndex: 2, label: "Fast", value: 100 },
                 ]}
                 disabled={blocked}
-                onChange={(value) => {
-                  const speed = Math.round(value);
-                  updateLocal({ speed });
-                  void enqueue(() => setSpeed(speed));
-                }}
+                onChange={(value) => scheduleSpeed(Math.round(value))}
               />
             </PanelSectionRow>
           )}

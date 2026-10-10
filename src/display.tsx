@@ -126,6 +126,7 @@ const ModeChoice: FC<{
 export const DisplayPage: FC = () => {
   const visible = useQuickAccessVisible();
   const [state, setState] = useState<State | null>(null);
+  const [statusError, setStatusError] = useState("");
   const [busy, setBusy] = useState(false);
   // Both lists start folded away: on first run the recommendation is the whole
   // point, and afterwards the mode is a decision already made.
@@ -136,6 +137,7 @@ export const DisplayPage: FC = () => {
   const isVisible = useRef(visible);
   const writing = useRef(false);
   const readInFlight = useRef(false);
+  const refreshAfterRead = useRef(false);
   const readRevision = useRef(0);
   const latestState = useRef<State | null>(null);
   const acceptState = useCallback((next: State) => {
@@ -153,23 +155,31 @@ export const DisplayPage: FC = () => {
     const revision = readRevision.current;
     try {
       const next = await getState();
-      if (mounted.current && isVisible.current && revision === readRevision.current) acceptState(next);
+      if (mounted.current && isVisible.current && revision === readRevision.current) {
+        acceptState(next);
+        setStatusError("");
+      }
     } catch {
-      /* backend not up yet; the next tick will pick it up */
-    } finally { readInFlight.current = false; }
+      if (mounted.current && isVisible.current && revision === readRevision.current)
+        setStatusError("Display status is unavailable. Retrying while this page is open.");
+    } finally {
+      readInFlight.current = false;
+      if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
+    }
   }, [acceptState]);
 
   // Only poll while the panel is actually on screen. The backend keeps working
   // either way - this is just what the user sees.
   useEffect(() => {
     if (!visible) return;
+    if (readInFlight.current) refreshAfterRead.current = true;
     void refresh();
     const id = setInterval(refresh, 1000);
     return () => { clearInterval(id); readRevision.current += 1; };
   }, [visible, refresh]);
 
   const beginWrite = () => {
-    if (writing.current) return false;
+    if (!mounted.current || writing.current) return false;
     writing.current = true; readRevision.current += 1; setBusy(true);
     return true;
   };
@@ -262,8 +272,9 @@ export const DisplayPage: FC = () => {
     return (
       <PanelSection>
         <PanelSectionRow>
-          <Spinner />
+          {statusError ? <Field focusable label="Display status unavailable" description={statusError} /> : <Spinner />}
         </PanelSectionRow>
+        {statusError && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
       </PanelSection>
     );
   }

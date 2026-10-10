@@ -69,23 +69,17 @@ async def withdraw(name, component):
     # first so a system update cannot route that recovery through legacy writes.
     if name == 'display':
         await component.cleanup_native_display()
-    await component._unload()
-    await module_runtime.drain(name)
+    try:
+        await component._unload()
+    finally:
+        await module_runtime.drain(name)
     check = module_runtime.require_success
     note = ''
     if name == 'tdp':
         import tdp_backend as backend
         def restore():
             with backend._mutation_lock:
-                state = backend._load_settings()
-                if state.get('enabled'):
-                    check(backend._restore_defaults_locked())
-                # Older versions did not retain original CPU policy values.
-                # Explicit withdrawal returns managed controls to standard policy.
-                if state.get('cpu_boost_enabled') is not None:
-                    check(backend._apply_cpu_boost_hardware(True))
-                if state.get('epp') is not None:
-                    check(backend._apply_epp_hardware('balance_performance'))
+                check(backend._release_controls_locked())
         await asyncio.to_thread(restore)
     elif name == 'vibration':
         import vibration_backend as backend
@@ -138,12 +132,20 @@ async def withdraw(name, component):
                 for restore in (component._release, component._edid_restore):
                     if not restore():
                         raise RuntimeError('Display restoration could not be confirmed. Retry cleanup in Gaming Mode.')
-                props = component._session_props([backend.ATOM_IS_EXTERNAL])
-                if not backend._write_atom_int(backend.ATOM_FORCE_HDR_SUPPORT, 0):
-                    raise RuntimeError('Could not release display HDR support. Retry cleanup in Gaming Mode.')
-                if backend._as_int(props.get(backend.ATOM_IS_EXTERNAL)) == 0:
-                    if not backend._write_atom_int(backend.ATOM_HDR_ENABLED, 0):
-                        raise RuntimeError('Could not restore the internal display mode. Retry cleanup in Gaming Mode.')
+                # A stopped property watcher can still hold the pre-docking
+                # snapshot. Only the bound, live compositor may receive these
+                # final writes; pending recovery can run before _main binds one.
+                if component._ownership_session_current() is True:
+                    props = component._session_props([backend.ATOM_IS_EXTERNAL], fresh=True)
+                    if component._ownership_session_current() is True:
+                        external = backend._as_int(props.get(backend.ATOM_IS_EXTERNAL))
+                        if external not in (0, 1):
+                            raise RuntimeError('Could not verify the active display. Retry cleanup in Gaming Mode.')
+                        if not backend._write_atom_int(backend.ATOM_FORCE_HDR_SUPPORT, 0):
+                            raise RuntimeError('Could not release display HDR support. Retry cleanup in Gaming Mode.')
+                        if external == 0:
+                            if not backend._write_atom_int(backend.ATOM_HDR_ENABLED, 0):
+                                raise RuntimeError('Could not restore the internal display mode. Retry cleanup in Gaming Mode.')
                 result = backend._uninstall_script()
                 if result.startswith('could not'):
                     raise RuntimeError(result)

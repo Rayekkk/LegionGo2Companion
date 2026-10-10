@@ -5,6 +5,7 @@
 import decky
 from system_process import system_env
 import module_runtime
+from active_app import resolve_running_app, scan_proc_for_appid
 import asyncio
 import copy
 import glob
@@ -689,7 +690,7 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _download_ryzenadj() -> None:
+def _download_ryzenadj(cancel=None) -> None:
     decky.logger.info(f"[legotdp] Downloading ryzenadj from {RYZENADJ_URL}")
     os.makedirs(BIN_DIR, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
@@ -697,7 +698,7 @@ def _download_ryzenadj() -> None:
     bin_tmp = ""
     try:
         with open(tmp_path, "wb") as out:
-            updater.download_to(RYZENADJ_URL, out, timeout=30)
+            updater.download_to(RYZENADJ_URL, out, timeout=30, cancel=cancel)
 
         actual = _sha256_file(tmp_path)
         if actual != RYZENADJ_SHA256:
@@ -726,6 +727,8 @@ def _download_ryzenadj() -> None:
             raise RuntimeError(
                 f"ryzenadj binary checksum mismatch: got {binary_digest}, "
                 f"expected {RYZENADJ_BINARY_SHA256}")
+        if cancel is not None and cancel():
+            raise InterruptedError("RyzenAdj download was cancelled")
         os.replace(bin_tmp, BIN_PATH)
         bin_tmp = ""
         decky.logger.info(f"[legotdp] ryzenadj installed at {BIN_PATH}")
@@ -739,16 +742,21 @@ def _download_ryzenadj() -> None:
                 pass
 
 
-def _ensure_ryzenadj() -> None:
+def _ensure_ryzenadj(cancel=None, download=True) -> bool:
+    if cancel is not None and cancel():
+        raise InterruptedError("RyzenAdj download was cancelled")
     if not os.path.isfile(BIN_PATH) or _sha256_file(BIN_PATH) != RYZENADJ_BINARY_SHA256:
+        if not download:
+            return False
         if os.path.isfile(BIN_PATH):
             decky.logger.warning(
                 "[legotdp] existing ryzenadj failed integrity verification; replacing it")
             os.unlink(BIN_PATH)
-        _download_ryzenadj()
+        _download_ryzenadj(cancel=cancel)
     mode = os.stat(BIN_PATH).st_mode
     if not (mode & stat.S_IXUSR):
         os.chmod(BIN_PATH, mode | 0o111)
+    return True
 
 
 # ── ryzenadj helpers ───────────────────────────────────────────────────────────
@@ -1203,9 +1211,8 @@ def _get_running_appid() -> str:
     Prefer the frontend's Router-based value while it is fresh - the /proc scan below
     misses games running inside pressure-vessel/gamescope. Falls back to the scan when
     the frontend has gone quiet (panel closed)."""
-    if time.monotonic() - _frontend_appid_ts < _FRONTEND_APPID_TTL:
-        return _frontend_appid
-    return _scan_proc_for_appid()
+    return resolve_running_app(_frontend_appid, _frontend_appid_ts,
+                               time.monotonic(), _scan_proc_for_appid, _FRONTEND_APPID_TTL)
 
 
 def _suspend_offset() -> float | None:
@@ -1232,27 +1239,7 @@ def _scan_proc_for_appid() -> str:
     # The Steam "reaper" wrapper (reaper SteamLaunch AppId=NNNN -- ...) runs outside
     # the game's pressure-vessel/gamescope sandbox, so its cmdline is the most reliable
     # background signal. Fall back to SteamAppId in the environ.
-    for path in glob.glob("/proc/*/cmdline"):
-        try:
-            with open(path, "rb") as f:
-                for arg in f.read().split(b"\x00"):
-                    if arg.startswith(b"AppId="):
-                        appid = arg[len(b"AppId="):].decode(errors="replace")
-                        if appid and appid != "0":
-                            return appid
-        except OSError:
-            continue
-    for path in glob.glob("/proc/*/environ"):
-        try:
-            with open(path, "rb") as f:
-                for entry in f.read().split(b"\x00"):
-                    if entry.startswith(b"SteamAppId="):
-                        appid = entry[len(b"SteamAppId="):].decode(errors="replace")
-                        if appid and appid != "0":
-                            return appid
-        except OSError:
-            continue
-    return ""
+    return scan_proc_for_appid()
 
 
 # ── TDP enforce ────────────────────────────────────────────────────────────────
@@ -1568,7 +1555,9 @@ def _restore_defaults_locked() -> dict:
     try:
         _drift_target, _drift_settled, _drift_attempts = (), (), 0
         path = _profile_path()
-        if _wmi_caps() and path and _write_profile(path, "balanced"):
+        if path:
+            if not _write_profile(path, "balanced") or _read_profile(path) != "balanced":
+                return {"success": False, "stdout": "", "stderr": "Balanced firmware profile was not confirmed", "returncode": -1}
             _last_source, _applied_mw, _applied_at = "", (), 0.0
             _invalidate_limits_cache()
             decky.logger.info("[legotdp] restore_defaults: platform profile -> balanced")
@@ -1586,6 +1575,31 @@ def _restore_defaults_locked() -> dict:
             _ryzenadj_lock.release()
     finally:
         _apply_lock.release()
+
+
+def _release_controls_locked() -> dict:
+    """Return every managed power control to standard policy without erasing intent."""
+    state = _load_settings()
+    profiles = _load_profiles()
+    errors = []
+    operations = []
+    if state.get("enabled", True):
+        operations.append(("TDP", _restore_defaults_locked, ()))
+    # A game or its AC profile may have managed a control with no global choice.
+    choices = [state, *profiles.values()]
+    if any(choice.get(key) is not None for choice in choices
+           for key in ("cpu_boost_enabled", "ac_cpu_boost_enabled")):
+        operations.append(("CPU Boost", _apply_cpu_boost_hardware, (True,)))
+    if any(choice.get(key) is not None for choice in choices for key in ("epp", "ac_epp")):
+        operations.append(("EPP", _apply_epp_hardware, ("balance_performance",)))
+    for name, operation, args in operations:
+        try:
+            result = operation(*args)
+            if result.get("success") is not True:
+                errors.append(f"{name}: {result.get('error') or result.get('stderr') or 'restoration was not confirmed'}")
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    return {"success": not errors, "error": "; ".join(errors)}
 
 
 def _clamp_profile(profile: dict, ceilings: tuple[int, int, int]) -> None:
@@ -2211,6 +2225,12 @@ def _tdp_user_transaction():
 
 
 class Plugin:
+    def __init__(self):
+        self._tasks = []
+        self._helper_cancel = threading.Event()
+        self._extras_retry_busy = False
+        self._helper_error = ""
+
     _ready: bool = False
     # Surfaced through is_ready() so a failed start shows up in the panel
     # instead of leaving the user with sliders that silently do nothing.
@@ -2350,16 +2370,23 @@ class Plugin:
         if getattr(self, "_extras_retry_busy", False):
             return {"success": False, "error": "A retry is already running"}
         self._extras_retry_busy = True
+        cancellation = self._helper_cancel
         def retry():
             global _ryzenadj_available, _current_game_id, _transition_key
             try:
-                _ensure_ryzenadj()
+                if not _ensure_ryzenadj(cancel=cancellation.is_set):
+                    raise RuntimeError("Verified RyzenAdj is unavailable")
                 with _mutation_lock:
+                    if cancellation.is_set():
+                        return {"success": False, "error": "RyzenAdj download was cancelled"}
                     _ryzenadj_available = True
+                    self._helper_error = ""
                     _current_game_id = "\x00"
                     _transition_key = None
                 return {"success": True}
             except Exception as exc:
+                if not cancellation.is_set():
+                    self._helper_error = str(exc)
                 return {"success": False, "error": str(exc)}
             finally:
                 self._extras_retry_busy = False
@@ -2588,16 +2615,31 @@ class Plugin:
         def _do() -> dict:
             caps = _wmi_caps()
             std = {k: caps[k]["max"] for k in WMI_ATTRS} if caps else dict(FALLBACK_STD_W)
+            firmware_only = _wmi_only()
+            firmware_available = bool(caps) and _profile_path() is not None
+            helper_available = (not firmware_only and _ryzenadj_available
+                                and os.path.isfile(BIN_PATH))
+            available = firmware_available or helper_available
+            error = ""
+            if not available:
+                error = "Firmware TDP controls are unavailable"
+                if not firmware_only:
+                    error += " and verified RyzenAdj is unavailable"
+                    if self._helper_error:
+                        error += f": {self._helper_error}"
             return {
                 "min": min(caps[k]["min"] for k in WMI_ATTRS) if caps else HARD_MIN_MW // 1000,
                 "std": std,
                 # ryzenadj is not installed on these, so the two ranges are
                 # the same and the frontend hides the Extras switch rather than
                 # offering a range nothing here would apply.
-                "max": dict(std) if _wmi_only() or not _ryzenadj_available
+                "max": dict(std) if not helper_available
                        else {k: HARD_MAX_MW // 1000 for k in WMI_ATTRS},
                 "wmi": bool(caps),
-                "extras": not _wmi_only() and _ryzenadj_available,
+                "extras": helper_available,
+                "tdp_available": available,
+                "tdp_error": error,
+                "helper_retry_available": not firmware_only and not helper_available,
                 "presets": _presets(),
             }
         return await _offload(_do)
@@ -2844,6 +2886,8 @@ class Plugin:
             decky.logger.error(f"[legotdp] migration failed: {e}")
 
     async def _main(self):
+        self._helper_cancel = threading.Event()
+        self._helper_error = ""
         decky.logger.info(f"[legotdp] startup  v{updater.plugin_version()}")
         try:
             global _current_ac_online, _ryzenadj_available, _last_suspend_offset
@@ -2864,13 +2908,10 @@ class Plugin:
                     decky.logger.info(
                         "[legotdp] firmware-only device, skipping the ryzenadj download")
                 else:
-                    await _offload(_ensure_ryzenadj)
-                    _ryzenadj_available = True
+                    _ryzenadj_available = bool(await _offload(lambda: _ensure_ryzenadj(download=False)))
             except Exception as e:
                 _ryzenadj_available = False
-                # Only fatal when there is no firmware path to fall back on.
-                if not wmi:
-                    raise
+                self._helper_error = str(e)
                 decky.logger.warning(
                     f"[legotdp] ryzenadj unavailable ({e}); Extras range disabled")
             def _apply_saved() -> dict:
@@ -2916,14 +2957,20 @@ class Plugin:
                 asyncio.create_task(self._enforce_loop()),
                 asyncio.create_task(self._info_loop()),
             ]
+            if not _wmi_only() and not _ryzenadj_available:
+                # Optional network work never delays the firmware path or the
+                # admission gate shared with other modules.
+                self._tasks.append(asyncio.create_task(self.retry_extras()))
             decky.logger.info(
                 f"[legotdp] ready (wmi={'yes' if wmi else 'no'}, "
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")
         except Exception as e:
             Plugin._setup_error = str(e)
             decky.logger.error(f"[legotdp] setup failed: {e}")
+            raise
 
     async def _unload(self):
+        self._helper_cancel.set()
         Plugin._ready = False
         def _invalidate_ac_ladder() -> None:
             with _mutation_lock:
@@ -2961,16 +3008,6 @@ class Plugin:
             # still be in flight holding this lock. Take it, or that pass could
             # re-assert the limits after we have handed the profile back.
             with _mutation_lock:
-                _load_settings()
-                if not _apply_lock.acquire(timeout=8.0):
-                    decky.logger.warning(
-                        "[legotdp] uninstall: apply busy, leaving the profile as it is")
-                    return
-                try:
-                    path = _profile_path()
-                    if path and _write_profile(path, "balanced"):
-                        decky.logger.info("[legotdp] uninstall: platform profile -> balanced")
-                finally:
-                    _apply_lock.release()
+                module_runtime.require_success(_release_controls_locked())
         await _offload(_do)
         decky.logger.info("[legotdp] uninstalled")

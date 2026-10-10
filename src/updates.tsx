@@ -81,19 +81,21 @@ function statusText(check: UpdateCheck | undefined, currentVersion: string): [st
 export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }) => {
   const [view, setView] = useState<UpdateState>(() => state);
   const busyRef = useRef(state.busy !== null);
+  const mounted = useRef(true);
 
   useEffect(() => {
+    mounted.current = true;
     const update = (next: UpdateState) => {
       busyRef.current = next.busy !== null;
       setView(next);
     };
     listeners.add(update);
     update(state);
-    return () => { listeners.delete(update); };
+    return () => { mounted.current = false; listeners.delete(update); };
   }, []);
 
   const run = async (kind: "check" | "download", expected?: string) => {
-    if (!active || busyRef.current || state.busy !== null) return;
+    if (!mounted.current || !active || busyRef.current || state.busy !== null) return;
     if (kind === "download" && (!state.check?.update_available || !state.check.download_available
       || !expected || state.check.latest_version !== expected)) return;
     busyRef.current = true;

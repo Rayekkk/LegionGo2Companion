@@ -8,6 +8,7 @@ Standalone plugin update checks and archive downloads are intentionally absent."
 import json
 import os
 import ssl
+import time
 
 import urllib.parse
 import urllib.request
@@ -21,6 +22,8 @@ ALLOWED_HOSTS = frozenset({
 })
 
 MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024
+MAX_DOWNLOAD_SECONDS = 120
+READ_TIMEOUT_SECONDS = 3
 
 CA_BUNDLES = (
     "/etc/ssl/certs/ca-certificates.crt",   # Arch, SteamOS, Debian
@@ -36,7 +39,16 @@ def checked_url(url: str) -> str:
         raise ValueError(f"refusing non-https URL scheme '{parsed.scheme}'")
     if (parsed.hostname or "").lower() not in ALLOWED_HOSTS:
         raise ValueError(f"refusing download from untrusted host '{parsed.hostname}'")
+    if parsed.username is not None or parsed.password is not None or parsed.port not in (None, 443):
+        raise ValueError("refusing download URL credentials or a non-HTTPS port")
     return url
+
+class _HelperRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Check each hop before urllib opens it, including an intermediate
+        # downgrade which a final-response check would see only afterwards.
+        checked_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 class Updater:
     """Internal backend helper; no standalone plugin update API."""
@@ -105,29 +117,38 @@ class Updater:
             checked_url(url),
             headers=headers or {"User-Agent": self.user_agent},
         )
-        response = urllib.request.urlopen(
-            request, context=self.ssl_context(), timeout=timeout)
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=self.ssl_context()), _HelperRedirect())
+        response = opener.open(request, timeout=timeout)
         try:
-            # urllib follows redirects automatically. Validate the final URL as
-            # well, otherwise an allowed host could redirect the root process
-            # to a host the initial check would have rejected.
+            # Retain a final-response check alongside the pre-request hop guard.
             checked_url(response.geturl())
         except Exception:
             response.close()
             raise
         return response
 
-    def download_to(self, url: str, out, timeout: int) -> int:
-        """Stream a URL into a file object, aborting past the size ceiling.
+    def download_to(self, url: str, out, timeout: int, cancel=None) -> int:
+        """Stream a URL with size/time ceilings and cooperative cancellation.
 
         Returns the number of bytes written. The caller is responsible for
         removing a partial file, since a truncated archive that looks complete
         is worse than no archive at all.
         """
         written = 0
-        with self.open_url(url, timeout=timeout) as resp:
+        deadline = time.monotonic() + MAX_DOWNLOAD_SECONDS
+        def check():
+            if cancel is not None and cancel():
+                raise InterruptedError("RyzenAdj download was cancelled")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("RyzenAdj download exceeded its total time limit")
+        check()
+        with self.open_url(url, timeout=min(timeout, READ_TIMEOUT_SECONDS)) as resp:
+            reader = getattr(resp, "read1", resp.read)
             while True:
-                chunk = resp.read(64 * 1024)
+                check()
+                chunk = reader(64 * 1024)
+                check()
                 if not chunk:
                     break
                 written += len(chunk)

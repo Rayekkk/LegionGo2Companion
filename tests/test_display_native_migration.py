@@ -57,7 +57,7 @@ class NativeDisplayMigrationTests(unittest.TestCase):
         self.stack.enter_context(patch.object(display, '_loaded_script_variant', return_value=display.MODE_PQ))
         self.detector = self.stack.enter_context(patch.object(display.display_native,
             'detect_native_display_support', side_effect=lambda: dict(self.detection)))
-        self.stack.enter_context(patch.object(display.Plugin, '_session_props', side_effect=lambda _names: dict(self.props)))
+        self.stack.enter_context(patch.object(display.Plugin, '_session_props', side_effect=lambda _names, **kwargs: dict(self.props)))
         self.stack.enter_context(patch.object(display, '_read_props_uncached', side_effect=lambda _names: dict(self.props)))
         self.stack.enter_context(patch.object(display, '_write_atom_int', side_effect=self.write_atom))
         self.plugin = display.Plugin()

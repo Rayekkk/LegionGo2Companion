@@ -15,12 +15,12 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 const settle = async () => { for (let i=0; i<30; i++) await Promise.resolve(); };
 function harness(initial=base(), initialControllers=controllerBase()) {
   const slots=[], effects=new Map(), scheduled=[], timers=new Map(), calls=[];
-  let cursor=0, visible=true, timerId=0, response=initial, controllerResponse=initialControllers, tree;
+  let cursor=0, visible=true, timerId=0, response=initial, controllerResponse=initialControllers, tree, writes=0;
   const methods={battery_get_status:()=>response,battery_get_controller_levels:()=>controllerResponse};
   const same=(a,b)=>a && a.length===b.length && b.every((v,i)=>Object.is(v,a[i]));
   const hooks={
     useState(value) { const i=cursor++; if(!(i in slots))slots[i]=typeof value==='function'?value():value;
-      return [slots[i], v=>slots[i]=typeof v==='function'?v(slots[i]):v]; },
+      return [slots[i], v=>{writes++;slots[i]=typeof v==='function'?v(slots[i]):v;}]; },
     useRef(value) { const i=cursor++; if(!(i in slots))slots[i]={current:value}; return slots[i]; },
     useCallback(fn,deps) {const i=cursor++;if(!slots[i]||!same(slots[i].deps,deps))slots[i]={fn,deps};return slots[i].fn;},
     useEffect(fn,deps) {const i=cursor++,old=effects.get(i);if(!old||!same(old.deps,deps))scheduled.push(()=>{
@@ -43,6 +43,7 @@ function harness(initial=base(), initialControllers=controllerBase()) {
   return {methods,calls,timers,render,unmount,summary:mod.exports.batterySummary,
     setResponse:value=>{response=value;},setVisible:value=>{visible=value;return render();},
     get tree(){return tree;},tick(){for(const fn of [...timers.values()])fn();},
+    get writes(){return writes;},
     async ready(){render();await settle();return render();}};
 }
 function walk(node,out=[]) {if(!node||typeof node!=='object')return out;
@@ -56,6 +57,55 @@ const button=(h,label)=>walk(h.tree).find(n=>n.type==='ButtonItem'&&content(n).i
 const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
 
 (async()=>{
+  {
+    const h=harness(),old=deferred();h.methods.battery_get_controller_levels=()=>old.promise;
+    await h.ready();h.setVisible(false);h.setResponse(base({capacity:55}));h.setVisible(true);
+    await settle();h.render();assert.match(content(h.tree),/Battery: 55%/);
+    assert.equal(count(h,'battery_get_controller_levels'),1,'Reopening must not queue another controller read before the old one finishes.');
+    h.methods.battery_get_controller_levels=()=>controllerBase({left:88});
+    old.resolve(controllerBase({left:42}));await settle();h.render();
+    assert.equal(count(h,'battery_get_controller_levels'),2);
+    assert.match(content(h.tree),/Left controller: 88%/);
+    assert.doesNotMatch(content(h.tree),/Left controller: 42%/);
+    h.unmount();
+  }
+  {
+    const h=harness(),levels=deferred();h.methods.battery_get_controller_levels=()=>levels.promise;
+    await h.ready();h.unmount();const writes=h.writes;levels.resolve(controllerBase());await settle();
+    assert.equal(h.writes,writes,'A late controller reply cannot update an unmounted battery page.');
+  }
+  {
+    const h=harness();h.methods.battery_get_controller_levels=()=>{throw Error('HID unavailable');};
+    await h.ready();assert.ok(toggle(h));assert.equal(toggle(h).props.disabled,false);
+    assert.match(content(h.tree),/Unknown/);h.unmount();
+  }
+  {
+    const h=harness(),levels=deferred();
+    h.methods.battery_get_controller_levels=()=>levels.promise;
+    await h.ready();
+    assert.ok(toggle(h),'Console controls must be visible while controller battery sampling is pending.');
+    const committed=base({managed:true,requested_enabled:true,enabled:true,current_mode:'Long_Life',baseline:'Fast'});
+    h.methods.battery_set_enabled=()=>{h.setResponse(committed);return {success:true,status:committed};};
+    toggle(h).props.onChange(true);await settle();h.render();
+    assert.equal(count(h,'battery_set_enabled'),1,'Console protection must not wait for unrelated controller sampling.');
+    assert.equal(toggle(h).props.checked,true);
+    h.tick();await settle();
+    assert.equal(count(h,'battery_get_controller_levels'),1,'Slow controller sampling remains bounded during independent status polling.');
+    levels.resolve(controllerBase({left:42}));await settle();h.render();
+    assert.match(content(h.tree),/Left controller: 42%/);
+    assert.equal(toggle(h).props.checked,true,'A controller reply cannot replace the console mutation result.');
+    h.unmount();
+  }
+  {
+    const h=harness(),levels=deferred();let fail=true;
+    h.methods.battery_get_controller_levels=()=>levels.promise;
+    h.methods.battery_get_status=()=>{if(fail)throw Error('battery unavailable');return base();};
+    await h.ready();assert.match(content(h.tree),/Status unavailable/);
+    fail=false;button(h,'Check Again').props.onClick();await settle();h.render();
+    assert.ok(toggle(h),'Retrying console status must not wait for the old controller request.');
+    assert.equal(count(h,'battery_get_controller_levels'),1,'A console read error must not duplicate an in-flight controller read.');
+    levels.resolve(controllerBase());await settle();h.unmount();
+  }
   // Opening a page only reads the actual firmware state; it never adopts a setting.
   let h=harness();await h.ready();
   assert.equal(toggle(h).props.checked,false);assert.equal(toggle(h).props.disabled,false);

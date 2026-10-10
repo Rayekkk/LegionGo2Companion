@@ -86,7 +86,8 @@ class DisplayDiscoveryTests(unittest.TestCase):
                  patch.object(display, "_write_nits") as write_nits, \
                  patch.object(display, "_install_script") as install, \
                  patch.object(display.Plugin, "_edid_pass") as edid:
-                asyncio.run(plugin._main())
+                with self.assertRaises(CorruptSettings):
+                    asyncio.run(plugin._main())
                 self.assertIsNone(plugin._task)
                 self.assertIsNone(plugin._prop_task)
                 public = asyncio.run(plugin.get_state())

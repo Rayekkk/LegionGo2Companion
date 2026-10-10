@@ -111,13 +111,14 @@ function findButton(node,text){
        max:{spl:35,sppt:37,fppt:45}}},
  });
  await simple.setGame(null);simple.startWatcher();simple.render();await settle();
+ simple.render();await settle();
  let simplePage=simple.render();
  const sections=simplePage.props.children[1].props.children;
  assert.equal(sections[0].props.title,'Game Profile');
  assert.equal(sections[1].type.name,'LivePanel');
  assert.equal(sections[2].props.title,'Preset');
- assert.equal(simplePage.props.children[2].type.name,'CpuPowerControlsSection');
- assert.equal(simplePage.props.children[4].props.title,'Extras');
+ assert.ok(findComponent(simplePage,'CpuPowerControlsSection'));
+ assert.ok(simplePage.props.children.some(child=>child?.props?.title==='Extras'));
  assert.equal(find(simplePage,'TDP - 20 W').props.max,35);
  const sliderLabels=(node)=>Array.isArray(node)?node.flatMap(sliderLabels):
    !node||typeof node!=='object'?[]:
@@ -156,6 +157,7 @@ function findButton(node,text){
  const power=mount('tdp.tsx','TdpPage',{...initialTdp,get_caps:()=>new Promise(resolve=>{finishCaps=resolve;})});
  power.render();await settle();power.callbacks.power_source({ac:true});finishCaps({});await settle();
  let seeded=power.render();await settle();
+ seeded=power.render();
  assert.equal(count(power,'get_power_source'),1);
  assert.equal(findComponent(seeded,'CpuPowerControlsSection').props.powerSource,true,'New charger event survives slow init.');
  power.unmount();
@@ -234,6 +236,29 @@ function findButton(node,text){
    cpu_boost:{available:true,enabled:true,error:''},
    epp:{available:true,error:'',min:0,max:255,value:'128',numeric_value:128,numeric_supported:true,profiles:[]}
  });
+ // A timeout already queued by the browser can fire after clearTimeout.
+ // Superseded and repeated callbacks must not overwrite the latest gesture.
+ for (const duplicate of [false, true]) {
+   const h=mount('tdp.tsx','CpuPowerControlsSection',{
+     get_cpu_power_controls:cpuState(),set_epp:cpuState(),
+   },{appId:'111',acProfile:false,expectedAppId:'111'});
+   h.render();await settle();
+   const slider=find(h.render(),'EPP');slider.props.onChange(20);
+   const old=[...h.timers.values()][0].fn;
+   if (duplicate) {
+     old();await settle();old();await settle();
+     assert.equal(count(h,'set_epp'),1,'A flushed CPU gesture is idempotent.');
+   } else {
+     slider.props.onChange(80);
+     const latest=[...h.timers.values()][0].fn;
+     old();await settle();
+     assert.equal(count(h,'set_epp'),0,'A superseded CPU timer cannot write or clear the current timer.');
+     assert.equal(h.timers.size,1);
+     latest();await settle();
+     assert.deepEqual(h.calls.filter(c=>c.name==='set_epp').map(c=>c.args[0]),['204']);
+   }
+   h.unmount();
+ }
  // Repeated reopenings share the pending read and request one fresh snapshot
  // afterward. A reply captured before hiding must not become actionable.
  const globalCpu={app_id:'',ac_profile:false,active:true,cpu_boost_enabled:true,epp:'128'};

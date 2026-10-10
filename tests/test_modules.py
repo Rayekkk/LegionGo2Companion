@@ -163,6 +163,76 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.modules_set_enabled('rgb', True)
         self.plugin._rgb._main.assert_awaited_once()
 
+    async def test_startup_failure_is_visible_gated_and_retryable_without_losing_intent(self):
+        self.plugin._module_state = {name: {'enabled': name == 'rgb'} for name in main.MODULE_NAMES}
+        self.plugin._save_modules()
+        self.plugin._rgb._main.side_effect = [RuntimeError('RGB settings unreadable'), None]
+        await self.plugin._run_stage('_main')
+        status = self.plugin._module_status()['rgb']
+        self.assertTrue(status['enabled'], 'The saved user choice is retained')
+        self.assertFalse(status['ready'])
+        self.assertFalse(status['pending'])
+        self.assertIn('RGB settings unreadable', status['error'])
+        self.assertTrue(self.make_plugin()._module_enabled('rgb'))
+        with self.assertRaisesRegex(RuntimeError, 'could not start'):
+            await self.plugin.rgb_get_status()
+        self.plugin._rgb.get_status.assert_not_awaited()
+        result = await self.plugin.modules_set_enabled('rgb', True)
+        self.assertTrue(result['rgb']['ready'])
+        self.assertEqual(result['rgb']['error'], '')
+        self.assertEqual(self.plugin._rgb._main.await_count, 2)
+        self.assertEqual(self.plugin._rgb._unload.await_count, 2, 'Cleanup precedes the retry')
+        self.assertTrue((await self.plugin.rgb_get_status())['success'])
+
+    async def test_explicit_unsuccessful_start_result_is_exposed(self):
+        self.plugin._wifi._main.return_value = {'success': False, 'error': 'Recovery journal needs attention'}
+        await self.plugin._run_stage('_main')
+        self.assertFalse(self.plugin._module_status()['wifi']['ready'])
+        self.assertIn('Recovery journal', self.plugin._module_status()['wifi']['error'])
+        self.plugin._wifi._unload.assert_awaited_once()
+        self.assertTrue(self.plugin._module_status()['rgb']['ready'])
+
+    async def test_remapper_and_battery_start_errors_are_independent_and_retryable(self):
+        for name in ('remap', 'battery'):
+            getattr(self.plugin, '_' + name)._main.side_effect = [OSError(name + ' settings unreadable'), None]
+        await self.plugin._run_stage('_main')
+        self.assertTrue(self.plugin._module_status()['tdp']['ready'])
+        for name in ('remap', 'battery'):
+            with self.subTest(name=name):
+                self.assertFalse(self.plugin._module_status()[name]['ready'])
+                self.assertIn('settings unreadable', self.plugin._module_status()[name]['error'])
+                result = await self.plugin.modules_set_enabled(name, True)
+                self.assertTrue(result[name]['ready'])
+                self.assertEqual(result[name]['error'], '')
+                self.assertEqual(getattr(self.plugin, '_' + name)._unload.await_count, 2)
+
+    async def test_retry_cannot_start_over_workers_whose_cleanup_failed(self):
+        self.plugin._rgb._main.side_effect = RuntimeError('startup failed')
+        self.plugin._rgb._unload.side_effect = RuntimeError('worker cleanup failed')
+        await self.plugin._run_stage('_main')
+        self.assertIn('worker cleanup failed', self.plugin._module_status()['rgb']['error'])
+        with self.assertRaisesRegex(RuntimeError, 'worker cleanup failed'):
+            await self.plugin.modules_set_enabled('rgb', True)
+        self.plugin._rgb._main.assert_awaited_once()
+        self.assertTrue(self.plugin._module_status()['rgb']['pending'])
+
+    async def test_extras_network_retry_does_not_hold_other_hardware_rpcs(self):
+        entered, finish = asyncio.Event(), asyncio.Event()
+        async def retry():
+            entered.set()
+            await finish.wait()
+            return {'success': True}
+        self.plugin._tdp.retry_extras = AsyncMock(side_effect=retry)
+        task = asyncio.create_task(self.plugin.retry_extras())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertFalse(self.plugin._guard_lock.locked())
+            self.assertEqual(len(self.plugin._update_jobs), 1)
+            self.assertTrue((await asyncio.wait_for(self.plugin.battery_get_status(), 1))['success'])
+        finally:
+            finish.set()
+            self.assertTrue((await task)['success'])
+
     async def test_cancelled_request_finishes_cleanup_before_releasing_gate(self):
         entered, finish = asyncio.Event(), asyncio.Event()
         async def stop(*args): entered.set(); await finish.wait(); return ''

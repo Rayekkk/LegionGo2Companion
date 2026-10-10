@@ -4,6 +4,7 @@
 
 import json
 import os
+import stat
 
 
 PLUGIN_NAMES = {
@@ -42,13 +43,28 @@ def installed_conflicts(plugin_dir):
             if not entry.is_dir():
                 continue
             try:
-                with open(os.path.join(entry.path, "plugin.json"), encoding="utf-8-sig") as f:
-                    text = f.read(65537)
+                fd = os.open(os.path.join(entry.path, "plugin.json"),
+                             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
             except FileNotFoundError:
                 continue
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise ValueError("A plugin manifest is not a regular file.")
+                with os.fdopen(fd, encoding="utf-8-sig") as f:
+                    fd = None  # The file object owns this descriptor now.
+                    text = f.read(65537)
+            finally:
+                if fd is not None:
+                    os.close(fd)
             if len(text) > 65536:
                 raise ValueError("A plugin manifest is too large to verify safely.")
-            manifest = json.loads(text)
+            try:
+                manifest = json.loads(text)
+            except RecursionError as exc:
+                # A bounded manifest can still exceed the decoder's nesting
+                # limit. Report an unverifiable identity to the admission gate
+                # instead of terminating its periodic watcher.
+                raise ValueError("A plugin manifest is nested too deeply to verify safely.") from exc
             if not isinstance(manifest, dict):
                 raise ValueError("A plugin manifest is not a JSON object.")
             name = PLUGIN_NAMES.get(_identity(manifest.get("name")))

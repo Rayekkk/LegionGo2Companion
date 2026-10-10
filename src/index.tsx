@@ -15,6 +15,7 @@ import { DisplayPage } from "./display";
 import { TdpPage, startTdpWatcher, stopTdpWatcher, tdpModeLabel } from "./tdp";
 import {
   VibrationPage,
+  getVibrationSettings,
   startVibrationWatcher,
   stopVibrationWatcher,
 } from "./vibration";
@@ -28,10 +29,10 @@ import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 
 type ModuleKey = "tdp" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
-type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; pending?: boolean; error?: string; note?: string}>>;
+type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
 const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP & CPU", vibration: "Vibration", display: "OLED Display", wifi: "WiFi", rgb: "RGB Lighting", remap: "Button Remapper", battery: "Battery", controller: "Gyro & Touchpad"};
-const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && !modules[key]?.pending;
+const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
 const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
 
@@ -140,7 +141,7 @@ const refreshGuard = async () => {
   } finally { if (guardRead === request) guardRead = null; }
 };
 const getTdpSettings = callable<[], TdpSettings>("get_settings");
-const getVibeSettings = callable<[], VibeSettingsResponse>("vibe_get_settings");
+const getVibeSettings = getVibrationSettings;
 const getDriverStatus = callable<[], DriverStatus>("vibe_get_driver_status");
 const getDisplayState = callable<[], DisplayState>("display_get_state");
 
@@ -373,13 +374,13 @@ const displaySummary = (state?: DisplayState) => {
 };
 
 const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
-  const [busy, setBusy] = useState<ModuleKey | null>(null);
+  const [busy, setBusy] = useState<ModuleKey | "restart" | null>(null);
   const [error, setError] = useState("");
   const writing = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const change = async (name: ModuleKey, enabled: boolean) => {
-    if (writing.current) return;
+    if (!mounted.current || writing.current) return;
     writing.current = true; setBusy(name); setError("");
     try {
       const next = await setModuleEnabled(name, enabled);
@@ -389,6 +390,16 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
       void refreshGuard();
     } finally { writing.current = false; if (mounted.current) setBusy(null); }
   };
+  const restart = async () => {
+    if (!mounted.current || writing.current) return;
+    writing.current = true; setBusy("restart"); setError("");
+    try {
+      const result = await restartModulesSession();
+      if (!result.success && mounted.current) setError(result.error || result.message || "Gaming Mode restart failed.");
+    } catch {
+      if (mounted.current) setError("Could not confirm the Gaming Mode restart.");
+    } finally { writing.current = false; if (mounted.current) setBusy(null); }
+  };
   return <PanelSection title="Manage Modules">
     <PanelSectionRow><Field focusable label="Choose your modules" description="Disabling stops the module, withdraws its hardware controls and hides its page. Saved preferences return when you enable it again. OLED can require a Gaming Mode restart." /></PanelSectionRow>
     {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
@@ -396,11 +407,11 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
         description={busy === name ? "Applying and verifying the change…" : modules[name]?.error || modules[name]?.note || (moduleEnabled(modules, name) ? "Enabled" : "Disabled — hidden from the main menu")}
         onChange={enabled => void change(name, enabled)} />
       {modules[name]?.pending && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} Cleanup</ButtonItem>}
+      {modules[name]?.enabled && modules[name]?.ready === false && !modules[name]?.pending &&
+        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, true)}>Retry {moduleLabels[name]} Start</ButtonItem>}
     </PanelSectionRow>)}
     {error && <PanelSectionRow><Field focusable label="Could not confirm" description={error} /></PanelSectionRow>}
-    {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" disabled={busy !== null} onClick={() => {
-      void restartModulesSession().then(result => { if (!result.success && mounted.current) setError(result.error || result.message || "Gaming Mode restart failed."); }).catch(() => { if (mounted.current) setError("Could not confirm the Gaming Mode restart."); });
-    }}>Restart Gaming Mode (closes games)</ButtonItem></PanelSectionRow>}
+    {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" disabled={busy !== null} onClick={() => void restart()}>Restart Gaming Mode (closes games)</ButtonItem></PanelSectionRow>}
   </PanelSection>;
 };
 

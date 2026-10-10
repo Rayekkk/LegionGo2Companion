@@ -50,7 +50,7 @@ class DisplayResetTests(unittest.TestCase):
         self.stack.enter_context(patch.object(display, '_strip_displayid', return_value=b'patched-edid'))
         self.stack.enter_context(patch.object(display, '_published_edid_is_safe', return_value=True))
         self.stack.enter_context(patch.object(display.Plugin, '_session_props',
-                                            side_effect=lambda _names: {display.ATOM_IS_EXTERNAL: self.external}))
+                                            side_effect=lambda _names, **kwargs: {display.ATOM_IS_EXTERNAL: self.external}))
         self.stack.enter_context(patch.object(display, '_write_nits',
                                             side_effect=lambda value: self.nits.append(value) or True))
         self.stack.enter_context(patch.object(display, '_write_atom_int',

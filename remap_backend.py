@@ -360,6 +360,61 @@ def _events_for_block(block: str) -> list[tuple[str, str]] | None:
     return events
 
 
+def _expected_mapping(state: dict[str, Any], button: str, action: str | None = None) -> str | None:
+    action = state[f"{button}_action"] if action is None else action
+    if action != "default":
+        return _render_mapping(button, action)
+    _, blocks = _mapping_blocks(state.get("baseline_profile"))
+    originals = [block for block in blocks if _source_for_block(block) == BUTTON_SOURCES[button]]
+    if len(originals) > 1:
+        raise RemapError("The original profile contains ambiguous dedicated-button mappings.")
+    # An absent baseline mapping is also a system default: do not invent one.
+    return originals[0] if originals else None
+
+
+def _mapping_matches(actual: str | None, expected: str | None) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    events = _events_for_block(expected)
+    if events is not None:
+        return _events_for_block(actual) == events
+    # Preserve unfamiliar baseline actions without interpreting two failed
+    # parses as equivalent. Only the unchanged complete block is confirmed.
+    return actual.replace("\r\n", "\n").strip() == expected.replace("\r\n", "\n").strip()
+
+
+def _name_field(header: str) -> tuple[int, int]:
+    lines = header.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if re.match(r"^name:", line)]
+    if len(starts) != 1:
+        raise RemapError("The profile must contain one top-level name.")
+    start = starts[0]
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or
+                                lines[end][0].isspace() or lines[end].startswith("#")):
+        end += 1
+    return start, end
+
+
+def _replace_name(header: str, name_header: str) -> str:
+    lines = header.splitlines(keepends=True)
+    start, end = _name_field(header)
+    source = name_header.splitlines(keepends=True)
+    first, last = _name_field(name_header)
+    replacement = "".join(source[first:last])
+    if not replacement.endswith("\n"):
+        replacement += "\n"
+    return "".join(lines[:start]) + replacement + "".join(lines[end:])
+
+
+def _join_profile(header: str, blocks: list[str]) -> str:
+    result = "".join(part if part.endswith("\n") else part + "\n"
+                     for part in [header, *blocks])
+    if len(result.encode("utf-8")) > MAX_PROFILE_BYTES:
+        raise RemapError("The resulting InputPlumber profile is too large.")
+    return result
+
+
 def _build_profile(base_profile: str, state: dict[str, Any]) -> str:
     header, blocks = _mapping_blocks(base_profile)
     by_source: dict[str, int] = {}
@@ -372,7 +427,7 @@ def _build_profile(base_profile: str, state: dict[str, Any]) -> str:
         raise RemapError("The active profile contains ambiguous dedicated-button mappings.")
 
     replacements = {
-        BUTTON_SOURCES[button]: _render_mapping(button, state[f"{button}_action"])
+        BUTTON_SOURCES[button]: _expected_mapping(state, button)
         for button in BUTTON_SOURCES
     }
     output_blocks = []
@@ -380,26 +435,17 @@ def _build_profile(base_profile: str, state: dict[str, Any]) -> str:
     for block in blocks:
         source = _source_for_block(block)
         if source in replacements:
-            output_blocks.append(replacements[source])
+            if replacements[source] is not None:
+                output_blocks.append(replacements[source])
             replaced.add(source)
         else:
             output_blocks.append(block)
     for button, source in BUTTON_SOURCES.items():
-        if source not in replaced:
-            output_blocks.append(_render_mapping(button, state[f"{button}_action"]))
+        if source not in replaced and replacements[source] is not None:
+            output_blocks.append(replacements[source])
 
-    if not header.endswith("\n"):
-        header += "\n"
-    header = re.sub(
-        r"(?m)^name:\s*.*$",
-        f"name: {PROFILE_NAME}",
-        header,
-        count=1,
-    )
-    result = header + "".join(output_blocks)
-    if len(result.encode("utf-8")) > MAX_PROFILE_BYTES:
-        raise RemapError("The resulting InputPlumber profile is too large.")
-    return result
+    header = _replace_name(header, f"name: {PROFILE_NAME}\n")
+    return _join_profile(header, output_blocks)
 
 
 def _profile_matches(profile: str, state: dict[str, Any]) -> bool:
@@ -417,10 +463,7 @@ def _profile_matches(profile: str, state: dict[str, Any]) -> bool:
                 return False
             found[source] = block
     for button, source in BUTTON_SOURCES.items():
-        block = found.get(source)
-        if block is None or _events_for_block(block) != _action_events(
-            button, state[f"{button}_action"]
-        ):
+        if not _mapping_matches(found.get(source), _expected_mapping(state, button)):
             return False
     return True
 
@@ -452,9 +495,9 @@ def _previous_actions(current: str, state: dict[str, Any]) -> dict[str, str | No
                 raise RemapError("The active profile contains ambiguous dedicated-button mappings.")
             by_source[source] = block
     for button, source in BUTTON_SOURCES.items():
-        events = _events_for_block(by_source[source]) if source in by_source else None
         result[button] = next((action for action in _owned_actions(state, button)
-                               if events == _action_events(button, action)), None)
+                               if _mapping_matches(by_source.get(source),
+                                                   _expected_mapping(state, button, action))), None)
     return result
 
 
@@ -502,6 +545,13 @@ def _restore_if_owned(state: dict[str, Any]) -> bool:
         return _restore_if_owned_locked(state)
 
 
+def _restore_current_if_owned() -> bool:
+    # A cancelled monitor can still finish its worker. Read the final durable
+    # ownership only after acquiring the same lock as that operation.
+    with _operation_lock:
+        return _restore_if_owned_locked(_load_state())
+
+
 def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
     baseline = state.get("baseline_profile")
     if not _valid_profile(baseline):
@@ -511,7 +561,7 @@ def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
     if _profile_name(current) != PROFILE_NAME:
         return False
     header, blocks = _mapping_blocks(current)
-    _, base_blocks = _mapping_blocks(baseline)
+    base_header, base_blocks = _mapping_blocks(baseline)
     originals = {_source_for_block(block): block for block in base_blocks
                  if _source_for_block(block)}
     sources = {source: button for button, source in BUTTON_SOURCES.items()}
@@ -519,17 +569,15 @@ def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
     for block in blocks:
         source = _source_for_block(block)
         button = sources.get(source)
-        if button and any(_events_for_block(block) == _action_events(button, action)
+        if button and any(_mapping_matches(block, _expected_mapping(state, button, action))
                           for action in _owned_actions(state, button)):
             # Restore only a mapping still equal to our last applied action.
             if source in originals:
                 output.append(originals[source])
         else:
             output.append(block)
-    original_name = re.search(r"(?m)^name:.*$", baseline)
-    if original_name:
-        header = re.sub(r"(?m)^name:.*$", lambda _: original_name.group(0), header, count=1)
-    desired = header + "".join(output)
+    header = _replace_name(header, base_header)
+    desired = _join_profile(header, output)
     if desired == current:
         return False
     restored = _load_profile(path, desired)
@@ -758,7 +806,7 @@ class Plugin:
             except asyncio.CancelledError:
                 pass
         try:
-            await module_runtime.offload('remap', _restore_if_owned, _load_state())
+            await module_runtime.offload('remap', _restore_current_if_owned)
         except Exception as exc:
             decky.logger.warning(f"[legiongo2companion-remap] unload restore failed: {exc}")
         finally:
@@ -766,7 +814,7 @@ class Plugin:
 
     async def _uninstall(self):
         try:
-            await module_runtime.offload('remap', _restore_if_owned, _load_state())
+            await module_runtime.offload('remap', _restore_current_if_owned)
         except Exception as exc:
             decky.logger.warning(f"[legiongo2companion-remap] uninstall restore failed: {exc}")
         finally:

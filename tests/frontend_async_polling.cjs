@@ -31,7 +31,7 @@ function harness(file, component, initiallyVisible = true) {
   const timer = (kind, fn, delay) => { const id = ++nextTimer; timers.set(id, { kind, fn, delay }); return id; };
   const mod = { exports: {} }, jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
   const callable = name => (...args) => new Promise((resolve, reject) => calls.push({ name, args, resolve, reject, settled: false }));
-  const relativeReads = { getWifiStatus: 'wifi_get_status', getRgbStatus: 'rgb_get_status',
+  const relativeReads = { getVibrationSettings: 'vibe_get_settings', getWifiStatus: 'wifi_get_status', getRgbStatus: 'rgb_get_status',
     getRemapStatus: 'remap_get_status', getBatteryStatus: 'battery_get_status',
     getControllerBatteryLevels: 'battery_get_controller_levels', getControllerStatus: 'controller_get_status' };
   const source = fs.readFileSync(path.join(root, 'src', file), 'utf8') + `\nexport { ${component} as Tested };`;
@@ -82,7 +82,9 @@ function find(node, label) {
 }
 function findButton(node, text) {
   if (!node || typeof node !== 'object') return;
-  if (node.type === 'ButtonItem' && node.props?.children === text) return node;
+  const children = node.props?.children;
+  const label = Array.isArray(children) ? children.join('') : children;
+  if (node.type === 'ButtonItem' && label === text) return node;
   for (const child of Array.isArray(node) ? node : [node.props?.children]) {
     const result = findButton(child, text); if (result) return result;
   }
@@ -120,6 +122,319 @@ const cases = [
   ['wifi.tsx', 'WifiPage', 'wifi_get_status', wifi],
 ];
 (async () => {
+  {
+    const h=harness('battery.tsx','BatteryPage'),initial={success:true,supported:true,enabled:false,managed:false},
+      final={success:true,supported:true,enabled:true,managed:true};
+    h.render();h.respond('battery_get_status',initial);await settle();
+    find(h.render(),'Battery protection').props.onChange(true);await settle();h.unmount();
+    const overview=h.moduleExports.getBatteryStatus();h.respond('battery_set_enabled',{success:true});await settle();
+    assert.equal(h.calls.filter(c=>c.name==='battery_get_status').length,2,'A result without a snapshot still starts its verification read inside the transaction.');
+    h.respond('battery_get_status',final);await settle();
+    assert.equal(h.calls.filter(c=>c.name==='battery_get_status').length,3,'The public getter waits for verification without making the transaction wait for itself.');
+    h.respond('battery_get_status',final);assert.equal(await overview,final);
+  }
+
+  for (const spec of [
+    {file:'battery.tsx',component:'BatteryPage',read:'battery_get_status',getter:'getBatteryStatus',props:{},
+      initial:{success:true,supported:true,enabled:false,managed:false},
+      final:{success:true,supported:true,enabled:true,managed:true},method:'battery_set_enabled',label:'Battery protection',selection:true},
+    {file:'controller.tsx',component:'ControllerPage',read:'controller_get_status',getter:'getControllerStatus',props:{visible:true},
+      initial:{available:true,gyro_source:'system',controlled:false},final:{available:true,gyro_source:'left',controlled:true},
+      method:'controller_set_gyro_source',label:'Controller motion source',selection:{data:'left'}},
+    {file:'remap.tsx',component:'RemapPage',read:'remap_get_status',getter:'getRemapStatus',props:{},initial:remap,
+      final:{...remap,desktop_action:'f3'},method:'remap_set_action',label:'Desktop button',selection:{data:'f3'}},
+    {file:'rgb.tsx',component:'RgbPage',read:'rgb_get_status',getter:'getRgbStatus',props:{},initial:rgb,
+      final:{...rgb,settings:{...rgb.settings,effect:'breathe'}},method:'rgb_set_effect',label:'Lighting effect',selection:{data:'breathe'}},
+  ]) {
+    const h=harness(spec.file,spec.component);h.render(spec.props);h.respond(spec.read,spec.initial);await settle();
+    find(h.render(),spec.label).props.onChange(spec.selection);await settle();h.unmount();
+    const overview=h.moduleExports[spec.getter]();await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'The main-menu getter must wait for edits accepted by a closed page.');
+    h.respond(spec.method,spec.component==='ControllerPage'?spec.final:{success:true,status:spec.final});await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,2);
+    h.respond(spec.read,spec.final);assert.equal(await overview,spec.final);
+  }
+
+  for (const failed of [false, true]) for (const spec of [
+    {file:'battery.tsx',component:'BatteryPage',read:'battery_get_status',props:{},
+      initial:{success:true,supported:true,enabled:false,managed:false},
+      final:{success:true,supported:true,enabled:true,managed:true,requested_enabled:true},
+      method:'battery_set_enabled',label:'Battery protection',selection:true,key:'checked',expected:true},
+    {file:'controller.tsx',component:'ControllerPage',read:'controller_get_status',props:{visible:true},
+      initial:{available:true,gyro_source:'system',controlled:false},
+      final:{available:true,gyro_source:'left',applied_source:'left',controlled:true},
+      method:'controller_set_gyro_source',label:'Controller motion source',selection:{data:'left'},key:'selectedOption',expected:'left'},
+  ]) {
+    const h=harness(spec.file,spec.component);h.render(spec.props);h.respond(spec.read,spec.initial);
+    await settle();h.fire();await settle();
+    find(h.render(),spec.label).props.onChange(spec.selection);await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.method).length,0,'An accepted change waits for its earlier status read.');
+    h.unmount();h.remount();await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,2,'A reopened page cannot overtake an accepted change still waiting for its read.');
+    h.respond(spec.read,spec.initial);await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.method).length,1);
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,2,'The new status read also waits for the actual mutation.');
+    if(failed) {
+      if(spec.component==='ControllerPage')h.render({visible:false});else h.visible(false);
+      h.reject(spec.method);
+    }
+    else h.respond(spec.method,spec.component==='BatteryPage'?{success:true,status:spec.final}:spec.final);
+    await settle();
+    if(failed) {
+      assert.equal(h.calls.filter(c=>c.name===spec.read).length,2,'A hidden reopened page must not read after the old mutation ends.');
+      if(spec.component==='ControllerPage')h.render({visible:true});else h.visible(true);
+      await settle();
+    }
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,3,'Completion or rejection immediately releases the reopened status read.');
+    h.respond(spec.read,failed?spec.initial:spec.final);await settle();
+    assert.equal(find(h.render(),spec.label).props[spec.key],failed?(spec.key==='checked'?false:'system'):spec.expected);
+    h.unmount();
+  }
+
+  // A reopened page must observe all edits accepted by its previous instance.
+  // The old instance may still have an RPC running and another one queued.
+  for (const spec of [
+    {file:'remap.tsx',component:'RemapPage',read:'remap_get_status',initial:remap,
+      method:'remap_set_action',label:'Desktop button',values:[{data:'f3'},{data:'f1'},{data:'f3'}],
+      first:{...remap,desktop_action:'f3'},final:{...remap,desktop_action:'f1'}},
+    {file:'rgb.tsx',component:'RgbPage',read:'rgb_get_status',initial:rgb,
+      method:'rgb_set_effect',label:'Lighting effect',values:[{data:'breathe'},{data:'rainbow'},{data:'monocolor'}],
+      first:{...rgb,settings:{...rgb.settings,effect:'breathe'}},
+      final:{...rgb,settings:{...rgb.settings,effect:'rainbow'}}},
+  ]) {
+    const h=harness(spec.file,spec.component);h.render();h.respond(spec.read,spec.initial);await settle();
+    const select=find(h.render(),spec.label).props.onChange;
+    select(spec.values[0]);select(spec.values[1]);await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.method).length,1);
+    h.unmount();h.remount();await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'Reopening waits for the accepted mutation tail before reading status.');
+    h.respond(spec.method,{success:true,status:spec.first});await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'The second queued edit still precedes the new snapshot.');
+    assert.equal(h.calls.filter(c=>c.name===spec.method).length,2);
+    h.respond(spec.method,{success:true,status:spec.final});await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,2);
+    h.respond(spec.read,spec.final);await settle();
+    assert.equal(find(h.render(),spec.label).props.selectedOption,
+      spec.file==='rgb.tsx'?'rainbow':'f1','The reopened page displays the last accepted edit.');
+    find(h.render(),spec.label).props.onChange(spec.values[2]);await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.method).length,3);
+    h.respond(spec.method,{success:true,status:spec.initial});await settle();h.unmount();
+  }
+  for (const spec of [
+    {file:'remap.tsx',component:'RemapPage',read:'remap_get_status',initial:remap,method:'remap_set_action',label:'Desktop button',value:{data:'f3'}},
+    {file:'rgb.tsx',component:'RgbPage',read:'rgb_get_status',initial:rgb,method:'rgb_set_effect',label:'Lighting effect',value:{data:'breathe'}},
+  ]) {
+    const h=harness(spec.file,spec.component);h.render();h.respond(spec.read,spec.initial);await settle();
+    find(h.render(),spec.label).props.onChange(spec.value);await settle();h.unmount();h.remount();await settle();
+    h.visible(false);h.reject(spec.method);await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'A hidden page does not start a read when the older failed mutation finishes.');
+    h.visible(true);await settle();
+    assert.equal(h.calls.filter(c=>c.name===spec.read).length,2,'A failed mutation cannot leave the new page waiting forever.');
+    h.respond(spec.read,spec.initial);await settle();assert.ok(find(h.render(),spec.label));h.unmount();
+  }
+
+  const moduleState={display:{enabled:false,note:'Restart required'},rgb:{enabled:true,ready:true}};
+  {
+    const h=harness('index.tsx','ModulesPage');const tree=h.render({modules:moduleState});
+    const toggle=find(tree,'RGB Lighting').props.onChange;
+    const restart=findButton(tree,'Restart Gaming Mode (closes games)').props.onClick;
+    h.unmount();const writes=h.writes;toggle(false);restart();await settle();
+    assert.equal(h.calls.length,0,'Discarded module controls cannot start restoration or a session restart.');
+    assert.equal(h.writes,writes);
+  }
+  {
+    const h=harness('index.tsx','ModulesPage');let tree=h.render({modules:moduleState});
+    const restart=findButton(tree,'Restart Gaming Mode (closes games)').props.onClick;
+    restart();restart();find(tree,'RGB Lighting').props.onChange(false);await settle();
+    assert.equal(h.calls.length,1,'A session restart coalesces repeated clicks and excludes module changes.');
+    assert.equal(h.calls[0].name,'modules_restart_session');
+    assert.equal(findButton(h.render(),'Restart Gaming Mode (closes games)').props.disabled,true);
+    h.respond('modules_restart_session',{success:false,error:'session unavailable'});await settle();tree=h.render();
+    assert.equal(findButton(tree,'Restart Gaming Mode (closes games)').props.disabled,false);
+    assert.match(find(tree,'Could not confirm').props.description,/session unavailable/);
+    restart();await settle();assert.equal(h.calls.length,2,'A failed restart can be retried.');
+    h.unmount();const writes=h.writes;h.respond('modules_restart_session',{success:false,error:'late error'});await settle();
+    assert.equal(h.writes,writes,'Restart completion cannot update a discarded page.');
+  }
+  // Immediate actions must follow already accepted slider edits, including
+  // restore/disable actions that would otherwise overtake their debounce.
+  for (const action of ['disable', 'restore', 'effect']) {
+    const h=harness('rgb.tsx','RgbPage');h.render();h.respond('rgb_get_status',rgb);await settle();
+    find(h.render(),'Brightness').props.onChange(90);
+    if(action==='disable')find(h.render(),'Enable RGB control').props.onChange(false);
+    else if(action==='restore')findButton(h.render(),'Restore lighting state from before Companion').props.onClick();
+    else find(h.render(),'Lighting effect').props.onChange({data:'breathe'});
+    await settle();
+    const writes=h.calls.filter(c=>c.name!=='rgb_get_status');
+    assert.equal(writes[0]?.name,'rgb_set_brightness',`The earlier slider save precedes ${action}.`);
+    assert.equal(writes.length,1,'The later operation remains queued until the slider finishes.');
+    h.respond('rgb_set_brightness',{success:true,status:{...rgb,settings:{...rgb.settings,brightness:90}}});await settle();
+    const method=action==='disable'?'rgb_set_control_enabled':action==='restore'?'rgb_restore_original':'rgb_set_effect';
+    assert.equal(h.calls.at(-1).name,method);
+    h.respond(method,{success:true,status:rgb});await settle();
+    for(const [id,t]of [...h.timers])if(t.kind==='timeout'){h.timers.delete(id);t.fn();}
+    await settle();assert.equal(h.calls.filter(c=>c.name==='rgb_set_brightness').length,1);
+    h.unmount();
+  }
+  for(const leave of ['timer','unmount']) {
+    const h=harness('rgb.tsx','RgbPage');h.render();
+    const breathing={...rgb,settings:{...rgb.settings,effect:'breathe'}};
+    h.respond('rgb_get_status',breathing);await settle();
+    find(h.render(),'Speed').props.onChange(0);await settle();
+    assert.equal(h.calls.filter(c=>c.name==='rgb_set_speed').length,0,'Speed edits debounce before hardware I/O.');
+    assert.equal(find(h.render(),'Speed').props.disabled,false,'A speed gesture stays responsive while its timer is pending.');
+    for(const t of h.timers.values())if(t.kind==='interval')t.fn();
+    await settle();
+    assert.equal(h.calls.filter(c=>c.name==='rgb_get_status').length,1,'Polling cannot replace an unsaved speed draft.');
+    const obsolete=[...h.timers.values()].find(t=>t.kind==='timeout').fn;
+    find(h.render(),'Speed').props.onChange(100);obsolete();await settle();
+    assert.equal(h.calls.filter(c=>c.name==='rgb_set_speed').length,0,'Superseded speed timers cannot queue a save.');
+    if(leave==='unmount')h.unmount();
+    else for(const[id,t]of [...h.timers])if(t.kind==='timeout'){h.timers.delete(id);t.fn();t.fn();}
+    await settle();
+    const writes=h.calls.filter(c=>c.name==='rgb_set_speed');
+    assert.equal(writes.length,1,'Only the final speed is saved, once, including on close.');
+    assert.equal(writes[0].args[0],100);
+    h.respond('rgb_set_speed',{success:true,status:{...breathing,settings:{...breathing.settings,speed:100}}});await settle();
+    if(leave==='timer')h.unmount();
+  }
+  {
+    const h=harness('rgb.tsx','RgbPage');h.render();h.respond('rgb_get_status',rgb);await settle();
+    const tree=h.render(),gestures=[()=>find(tree,'Hue').props.onChange(120),
+      ()=>find(tree,'Brightness').props.onChange(80),()=>find(tree,'Enable RGB control').props.onChange(false)];
+    h.unmount();const writes=h.writes,calls=h.calls.length;
+    gestures.forEach(run=>run());
+    for(const [id,t] of [...h.timers])if(t.kind==='timeout'){h.timers.delete(id);t.fn();}
+    await settle();assert.equal(h.writes,writes,'Closed RGB controls cannot create new drafts.');
+    assert.equal(h.calls.length,calls,'Closed RGB controls cannot start new writes.');
+  }
+  for (const [file,component,read,value] of [...cases,
+    ['battery.tsx','BatteryPage','battery_get_status',{success:true,supported:false}],
+    ['controller.tsx','ControllerPage','controller_get_status',{supported:false}],
+  ]) {
+    const h=harness(file,component);h.render({visible:true});
+    for(let i=0;i<3;i++){
+      if(file==='controller.tsx'){h.render({visible:false});h.render({visible:true});}
+      else {h.visible(false);h.visible(true);}
+    }
+    assert.equal(h.calls.filter(c=>c.name===read).length,1,`${component}: rapid reopening never overlaps reads.`);
+    const before=h.writes;h.respond(read,value);
+    if(file==='battery.tsx')h.respond('battery_get_controller_levels',{available:false});
+    await settle();assert.equal(h.writes,before,'A reply from before hiding stays discarded.');
+    assert.equal(h.calls.filter(c=>c.name===read).length,2,
+      `${component} immediately starts one fresh read after reopening instead of waiting for polling.`);
+    h.respond(read,value);
+    if(file==='battery.tsx')h.respond('battery_get_controller_levels',{available:false});
+    await settle();h.unmount();
+  }
+  for (const queued of [false,true]) {
+    const h=harness('remap.tsx','RemapPage');h.render();h.respond('remap_get_status',remap);await settle();
+    const change=find(h.render(),'Desktop button').props.onChange;
+    if(queued)change({data:'f3'});
+    h.unmount();const before=h.writes;
+    if(!queued)change({data:'f3'});
+    await settle();assert.equal(h.writes,before,'Unmounted remap callbacks never update React state.');
+    assert.equal(h.calls.filter(c=>c.name==='remap_set_action').length,queued?1:0,
+      'A previously accepted mapping still saves; a new callback after unmount is ignored.');
+    if(queued){h.respond('remap_set_action',{success:true,status:remap});await settle();}
+  }
+  {
+    const h=harness('display.tsx','DisplayPage');h.render();h.respond('display_get_state',display);await settle();
+    const change=find(findPanel(h.render(),'Brightness slider'),'Enabled').props.onChange;
+    h.unmount();const before=h.writes;change(false);await settle();
+    assert.equal(h.calls.filter(c=>c.name==='display_set_enabled').length,0,'Unmounted display callbacks cannot start writes.');
+    assert.equal(h.writes,before);
+  }
+  for (const failed of [false,true]) {
+    const h=harness('wifi.tsx','WifiPage');h.render();h.respond('wifi_get_status',wifi);await settle();
+    const click=findButton(h.render(),'Use Automatic WiFi').props.onClick;click();h.unmount();
+    const writes=h.writes;
+    if(failed)h.reject('wifi_set_band_policy');
+    else h.respond('wifi_set_band_policy',{success:true,message:'Saved'});
+    await settle();assert.equal(h.writes,writes,'A late WiFi mutation result cannot update an unmounted page.');
+    click();await settle();
+    assert.equal(h.writes,writes,'A queued WiFi callback cannot update an unmounted page.');
+    assert.equal(h.calls.filter(c=>c.name==='wifi_set_band_policy').length,1,
+      'A queued callback cannot start another WiFi operation after unmount.');
+  }
+  {
+    const h=harness('wifi.tsx','WifiPage');h.render();h.respond('wifi_get_status',wifi);await settle();
+    findButton(h.render(),'Use Automatic WiFi').props.onClick();
+    h.respond('wifi_set_band_policy',{success:true,reconnected:true,message:'Verified'});await settle();
+    assert.equal(h.calls.filter(c=>c.name==='wifi_get_status').length,2,
+      'Verified reconnect refreshes immediately instead of holding the page for three seconds.');
+    assert.equal([...h.timers.values()].filter(t=>t.kind==='timeout').length,0);
+    h.respond('wifi_get_status',{...wifi,settings:{...wifi.settings,band_policy:'off'}});await settle();
+    assert.equal(findButton(h.render(),'Prefer 5/6 GHz (2.4 GHz fallback)').props.disabled,false);h.unmount();
+  }
+  {
+    const h = harness('rgb.tsx', 'RgbPage'); h.render(); h.respond('rgb_get_status', rgb); await settle();
+    find(h.render(), 'Hue').props.onChange(120);
+    for (const [id,t] of [...h.timers]) if (t.kind==='timeout') { h.timers.delete(id); t.fn(); }
+    await settle(); find(h.render(), 'Brightness').props.onChange(90);
+    h.reject('rgb_set_color'); await settle();
+    for (const [id,t] of [...h.timers]) if (t.kind==='timeout') { h.timers.delete(id); t.fn(); }
+    await settle(); h.respond('rgb_set_brightness',{success:true,status:{...rgb,settings:{...rgb.settings,brightness:90}}});
+    await settle(); assert.equal(find(h.render(),'Brightness').props.value,90);
+    assert.equal(find(h.render(),'Hue').props.value,rgb.settings.hue,'a failed old draft cannot be resurrected by the next verified result');
+    h.unmount();
+  }
+  {
+    const h = harness('rgb.tsx', 'RgbPage'); h.render(); h.respond('rgb_get_status', rgb); await settle();
+    find(h.render(), 'Hue').props.onChange(120);
+    const oldTimer = [...h.timers.values()].find(t => t.kind === 'timeout').fn;
+    find(h.render(), 'Hue').props.onChange(240);
+    oldTimer();
+    for (const [id, timer] of [...h.timers]) if (timer.kind === 'timeout') { h.timers.delete(id); timer.fn(); }
+    await settle();
+    assert.equal(h.calls.filter(c => c.name === 'rgb_set_color').length, 1, 'superseded RGB callback cannot enqueue obsolete work');
+    assert.equal(h.calls.find(c => c.name === 'rgb_set_color').args[0], 240);
+    h.respond('rgb_set_color', {success:true,status:{...rgb,settings:{...rgb.settings,hue:240}}}); await settle(); h.unmount();
+  }
+  {
+    const h = harness('rgb.tsx', 'RgbPage'); h.render(); h.respond('rgb_get_status', rgb); await settle();
+    find(h.render(), 'Hue').props.onChange(120);
+    for (const [id, timer] of [...h.timers]) if (timer.kind === 'timeout') { h.timers.delete(id); timer.fn(); }
+    await settle();
+    find(h.render(), 'Brightness').props.onChange(90);
+    h.respond('rgb_set_color', {success:true,status:{...rgb,settings:{...rgb.settings,hue:120}}}); await settle();
+    assert.equal(find(h.render(), 'Brightness').props.value, 90, 'old RGB reply preserves a newer unsaved slider draft');
+    for (const [id, timer] of [...h.timers]) if (timer.kind === 'timeout') { h.timers.delete(id); timer.fn(); }
+    await settle();
+    h.respond('rgb_set_brightness', {success:true,status:{...rgb,settings:{...rgb.settings,hue:120,brightness:90}}});
+    await settle(); assert.equal(find(h.render(), 'Hue').props.value, 120); h.unmount();
+  }
+  {
+    const h = harness('index.tsx', 'ModulesPage');
+    const modules = { rgb: { enabled: true, ready: false, error: 'Startup failed', pending: false } };
+    const view = h.render({ modules });
+    const retry = findButton(view, 'Retry RGB Lighting Start');
+    assert.ok(retry, 'failed startup offers a distinct retry without cleanup first');
+    assert.equal(find(view, 'RGB Lighting').props.checked, false, 'failed readiness is visible');
+    retry.props.onClick(); retry.props.onClick(); await settle();
+    assert.equal(h.calls.filter(c => c.name === 'modules_set_enabled').length, 1);
+    h.respond('modules_set_enabled', { rgb: { enabled: true, ready: true } }); await settle();
+    assert.equal(findButton(h.render({ modules: { rgb: { enabled: true, ready: true } } }),
+      'Retry RGB Lighting Start'), undefined);
+    h.unmount();
+  }
+  for (const [file, component, read, value] of cases) {
+    const h = harness(file, component);
+    h.render(); h.reject(read); await settle();
+    let view = h.render();
+    assert.match(JSON.stringify(view), /status unavailable/, `${component} shows the first read failure`);
+    const retry = findButton(view, 'Retry status');
+    assert.ok(retry, `${component} allows an explicit retry`);
+    retry.props.onClick(); retry.props.onClick(); await settle();
+    assert.equal(h.calls.filter(c => c.name === read).length, 2, 'retry remains bounded');
+    h.reject(read); await settle();
+    assert.ok(findButton(h.render(), 'Retry status'), 'repeated errors remain actionable');
+    h.visible(false); const before = h.calls.length; h.fire();
+    assert.equal(h.calls.length, before, 'failed hidden pages do not poll');
+    h.visible(true); h.respond(read, value); await settle();
+    assert.equal(findButton(h.render(), 'Retry status'), undefined, 'successful recovery clears initial error');
+    h.unmount();
+  }
   for (const [file, component, read, value] of cases) {
     const h = harness(file, component, false);
     h.render(); assert.equal(h.calls.length, 0, `${component} does no work while hidden`);

@@ -5,6 +5,7 @@
 
 import decky
 import module_runtime
+from active_app import resolve_running_app, scan_proc_for_appid
 import copy
 import os
 import re
@@ -109,6 +110,9 @@ _RESUME_CHECK_S = 5.0
 # App id the frontend last reported as running. Drives profile resolution
 # for hotplug and resume re-applies, which have no frontend round trip.
 _active_app_id: str = DEFAULT_APP
+_active_app_ts: float | None = None
+_READBACK_ATTEMPTS = 3
+_READBACK_DELAY_S = 0.05
 
 # Serialises sysfs writes between RPC calls, hotplug and resume.
 _apply_lock = threading.Lock()
@@ -120,6 +124,7 @@ _ff_busy = False
 
 # Force-feedback ioctl numbers (Linux x86-64, sizeof(ff_effect) == 48)
 _EVIOCGBIT_FF = 0x80204535
+_EVIOCGID     = 0x80084502  # _IOR('E', 0x02, struct input_id), Linux UAPI.
 _EVIOCSFF     = 0x40304580
 _EVIOCRMFF    = 0x40044581
 _EV_FF        = 0x15
@@ -258,7 +263,7 @@ def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False) -
             with open(os.path.join(sys_path, rel_path), encoding="ascii") as handle:
                 if handle.read().strip() == value:
                     return True
-        except OSError:
+        except (OSError, UnicodeError):
             # Fall through to the normal write path.  The device may have been
             # rebound under the same sysfs path since the cache was populated.
             pass
@@ -266,10 +271,17 @@ def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False) -
     try:
         with open(path, 'w') as f:
             f.write(value + '\n')
+        for attempt in range(_READBACK_ATTEMPTS):
+            with open(path, encoding="ascii") as source:
+                if source.read().strip() == value:
+                    break
+            if attempt + 1 == _READBACK_ATTEMPTS:
+                raise OSError("The controller did not confirm the requested value")
+            time.sleep(_READBACK_DELAY_S)
         _attr_cache[key] = value
         decky.logger.info(f"[lego-vibe] {rel_path} = '{value}'")
         return True
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         _attr_cache.pop(key, None)
         decky.logger.error(f"[lego-vibe] write {path}: {exc}")
         return False
@@ -400,8 +412,8 @@ def _load_profiles() -> dict:
         if isinstance(raw_entry.get("name"), str):
             entry["name"] = raw_entry["name"][:MAX_NAME_LENGTH]
         profiles[app_id] = entry
-        if len(profiles) >= MAX_GAME_PROFILES:
-            break
+        # Keep older over-capacity stores intact. Limit creation, never truncate
+        # saved profiles during a read followed by an unrelated edit.
     if DEFAULT_APP not in profiles:
         profiles[DEFAULT_APP] = {"overwrite": False, "settings": dict(DEFAULT_PROFILE)}
     return profiles
@@ -414,17 +426,22 @@ def _save_profiles(profiles: dict) -> None:
         settings.commit()
 
 
+def _running_app_id() -> str:
+    return resolve_running_app(_active_app_id, _active_app_ts, time.monotonic(),
+                               scan_proc_for_appid) or DEFAULT_APP
+
+
 def _resolve_app_id(profiles: dict, app_id: str | None = None) -> str:
     """A game's profile only wins while it is both running and flagged."""
-    app_id = _active_app_id if app_id is None else app_id
+    app_id = _running_app_id() if app_id is None else app_id
     if app_id != DEFAULT_APP and profiles.get(app_id, {}).get("overwrite"):
         return app_id
     return DEFAULT_APP
 
 
-def _active_values(profiles: dict | None = None) -> dict:
+def _active_values(profiles: dict | None = None, app_id: str | None = None) -> dict:
     profiles = _load_profiles() if profiles is None else profiles
-    entry = profiles.get(_resolve_app_id(profiles), {})
+    entry = profiles.get(_resolve_app_id(profiles, app_id), {})
     return _coerce_profile(entry.get("settings"))
 
 
@@ -458,16 +475,22 @@ def _migrate() -> None:
         settings.commit()
 
 
-def _settings_payload() -> dict:
-    """What get_settings() reports: the resolved profile plus which one it is."""
+def _profile_context() -> tuple[dict, dict]:
+    """Resolve a game and its profile once for a complete read or mutation."""
     profiles = _load_profiles()
-    app_id = _resolve_app_id(profiles)
-    return {
-        "settings":   _active_values(profiles),
-        "app_id":     _active_app_id,
+    running = _running_app_id()
+    app_id = _resolve_app_id(profiles, running)
+    return profiles, {
+        "settings":   _active_values(profiles, running),
+        "app_id":     running,
         "profile_id": app_id,
         "overwrite":  app_id != DEFAULT_APP,
     }
+
+
+def _settings_payload() -> dict:
+    """What get_settings() reports: the resolved profile plus which one it is."""
+    return _profile_context()[1]
 
 
 def _device_status() -> dict:
@@ -525,11 +548,12 @@ def _resume_detected() -> bool:
     return previous is not None and current - previous >= 1.0
 
 
-def _update_active(field: str, value) -> dict:
+def _update_active(field: str, value, *, profiles: dict | None = None,
+                   profile_id: str | None = None) -> dict:
     """Write one field into whichever profile is currently in effect."""
     with _settings_lock:
-        profiles = _load_profiles()
-        app_id = _resolve_app_id(profiles)
+        profiles = _load_profiles() if profiles is None else profiles
+        app_id = _resolve_app_id(profiles) if profile_id is None else profile_id
         entry = profiles.setdefault(app_id, {"overwrite": app_id != DEFAULT_APP,
                                              "settings": dict(DEFAULT_PROFILE)})
         entry["settings"] = _coerce_profile(entry.get("settings"))
@@ -574,34 +598,66 @@ def _has_rumble(node: str) -> bool:
 
 
 def _find_ff_device() -> str | None:
-    """
-    Return the evdev node of the Legion controller, matched by the same
-    vendor:product as the discovered HID device. Falls back to any
-    rumble-capable node so the test button still does something on
-    hardware we failed to identify.
-    """
-    cached = _ff_device_cache.get("node")
-    if cached and os.path.exists(cached):
-        return cached
-
+    """Find rumble only on an endpoint matching the discovered HID identity."""
     sys_path = _get_device_path()
     want = _device_ids(sys_path) if sys_path else None
+    if want is None:
+        _ff_device_cache["node"] = None
+        return None
 
-    fallback = None
+    cached = _ff_device_cache.get("node")
+    if cached and os.path.exists(cached) and _node_ids(cached) == want:
+        return cached
+    _ff_device_cache["node"] = None
     for node in _event_nodes():
-        if not _has_rumble(node):
-            continue
-        if want and _node_ids(node) == want:
+        # Most input endpoints are keyboards or unrelated pads. Reject their
+        # IDs before opening them for the more expensive capability ioctl.
+        if _node_ids(node) == want and _has_rumble(node):
             decky.logger.info(f"[lego-vibe] FF device: {node} (matched {want[0]}:{want[1]})")
             _ff_device_cache["node"] = node
             return node
-        if fallback is None:
-            fallback = node
+    return None
 
-    if fallback:
-        decky.logger.warning(f"[lego-vibe] FF device: {fallback} (no VID:PID match, using first rumble-capable node)")
-        _ff_device_cache["node"] = fallback
-    return fallback
+
+def _play_rumble(node: str, duration: int, magnitude: int) -> None:
+    """Verify the actual descriptor, then own its effect through final cleanup."""
+    sys_path = _get_device_path()
+    want = _device_ids(sys_path) if sys_path else None
+    if want is None:
+        raise RuntimeError("The Legion controller is no longer available.")
+    fd = os.open(node, os.O_RDWR | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        # event numbers can be reused between discovery and open. EVIOCGID
+        # describes this fd, unlike a later lookup of the path in sysfs.
+        identity = bytearray(8)
+        fcntl.ioctl(fd, _EVIOCGID, identity)
+        _bus, vendor, product, _version = struct.unpack('HHHH', identity)
+        if (f'{vendor:04x}', f'{product:04x}') != want:
+            raise RuntimeError("The rumble endpoint changed; reopen Vibration and try again.")
+        effect_buf = bytearray(struct.pack(
+            '<HhHHHHHxxHH28x', _FF_RUMBLE, -1, 0, 0, 0,
+            duration, 0, magnitude, magnitude,
+        ))
+        fcntl.ioctl(fd, _EVIOCSFF, effect_buf)
+        effect_id = struct.unpack_from('<h', effect_buf, 2)[0]
+        if effect_id < 0:
+            raise RuntimeError(f"Driver rejected FF effect (id={effect_id})")
+
+        def event(value):
+            now = time.time()
+            return struct.pack('<qqHHi', int(now), int((now % 1) * 1e6) % 1_000_000,
+                               _EV_FF, effect_id, value)
+        try:
+            os.write(fd, event(1))
+            time.sleep(duration / 1000.0)
+        finally:
+            try:
+                os.write(fd, event(0))
+            finally:
+                # The kernel takes the effect id by value, despite _IOW(int).
+                fcntl.ioctl(fd, _EVIOCRMFF, effect_id)
+    finally:
+        os.close(fd)
 
 
 # ── Hotplug monitor (only when pyudev is available) ────────────────────────────
@@ -750,13 +806,16 @@ class Plugin:
         forever. Recording the failure instead tells the user their old settings
         did not come across, before they start rebuilding them on top.
         """
+        self._migration_error = None
         try:
             await _offload(_migrate)
         except Exception as exc:
             Plugin._setup_error = f"settings migration failed: {exc}"
+            self._migration_error = Plugin._setup_error
             decky.logger.error(f"[lego-vibe] migration failed: {exc}")
 
     async def _main(self):
+        Plugin._setup_error = getattr(self, '_migration_error', None)
         global _monitor_task, _drift_task, _last_suspend_offset
         decky.logger.info(
             f"[lego-vibe] startup pyudev={_PYUDEV}")
@@ -765,19 +824,21 @@ class Plugin:
                 global _last_suspend_offset
                 _last_suspend_offset = _suspend_offset()
                 values = _active_values()
-                decky.logger.info(f"[lego-vibe] applying global profile: {values}")
+                decky.logger.info(f"[lego-vibe] applying active profile: {values}")
                 _apply_settings(values, force=True)
             await _offload(_start)
             _monitor_task = asyncio.create_task(_monitor_hotplug())
             _drift_task = asyncio.create_task(self._drift_loop())
-            # Deliberately not cleared on success: _migration() runs first and
-            # may have recorded a failure here, and that is precisely what the
-            # panel needs to show. The attribute already starts out None.
+            # Preserve migration failures, while a successful retry clears a
+            # transient startup failure from the previous attempt.
         except Exception as exc:
             Plugin._setup_error = str(exc)
             decky.logger.error(f"[lego-vibe] setup failed: {exc}")
+            raise
 
     async def _unload(self):
+        global _active_app_ts
+        _active_app_ts = None
         global _monitor_task, _drift_task
         tasks = [task for task in (_monitor_task, _drift_task) if task]
         for task in tasks:
@@ -836,11 +897,12 @@ class Plugin:
             return {"success": False, "changed": False,
                     "error": "invalid app id", **(await _offload(_settings_payload))}
         def _do() -> dict:
-            global _active_app_id
-            changed = app_id != _active_app_id
+            global _active_app_id, _active_app_ts
+            changed = app_id != _running_app_id()
+            _active_app_id = app_id
+            _active_app_ts = time.monotonic()
             if not changed and getattr(self, "_active_applied", False):
                 return {"success": True, "changed": False, **_settings_payload()}
-            _active_app_id = app_id
             values = _active_values()
             decky.logger.info(f"[lego-vibe] active app -> {app_id}, applying {values}")
             ok = _apply_settings(values)
@@ -850,12 +912,12 @@ class Plugin:
 
     async def _set_field(self, field: str, value, expected_app_id=None, expected_profile_id=None) -> dict:
         def _do() -> dict:
-            payload = _settings_payload()
+            profiles, payload = _profile_context()
             if ((expected_app_id is not None and expected_app_id != payload["app_id"])
                     or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
                 return {"success": False, "error": "Active profile changed; reload and try again", **payload}
-            values = _update_active(field, value)
-            return {"success": _apply_settings(values), "settings": values}
+            values = _update_active(field, value, profiles=profiles, profile_id=payload["profile_id"])
+            return {"success": _apply_settings(values), **payload, "settings": values}
         return await _offload(_do)
 
     async def set_intensity(self, level: int, expected_app_id=None, expected_profile_id=None) -> dict:
@@ -884,16 +946,19 @@ class Plugin:
             return {"success": False, "error": "enabled must be a boolean"}
         return await self._set_field(PKEY_TP_EN, enabled, expected_app_id, expected_profile_id)
 
-    async def reset_to_default(self) -> dict:
+    async def reset_to_default(self, expected_app_id=None, expected_profile_id=None) -> dict:
         def _do() -> dict:
-            profiles = _load_profiles()
-            app_id = _resolve_app_id(profiles)
+            profiles, payload = _profile_context()
+            if ((expected_app_id is not None and expected_app_id != payload["app_id"])
+                    or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
+                return {"success": False, "error": "Active profile changed; reload and try again", **payload}
+            app_id = payload["profile_id"]
             entry = profiles.setdefault(app_id, {"overwrite": app_id != DEFAULT_APP,
                                                  "settings": {}})
             entry["settings"] = dict(DEFAULT_PROFILE)
             _save_profiles(profiles)
             ok = _apply_settings(entry["settings"], force=True)
-            return {"success": ok, "settings": entry["settings"]}
+            return {"success": ok, **payload, "settings": entry["settings"]}
         return await _offload(_do)
 
     async def reapply(self) -> dict:
@@ -943,11 +1008,14 @@ class Plugin:
         name = name[:MAX_NAME_LENGTH] if isinstance(name, str) else ""
 
         def _do() -> dict:
-            profiles = _load_profiles()
+            profiles, context = _profile_context()
             entry = profiles.get(app_id)
             if entry is None:
+                if len(profiles) >= MAX_GAME_PROFILES:
+                    return {**context, "success": False,
+                            "error": "The vibration profile limit has been reached."}
                 # Seed a new per-game profile from whatever is active right now.
-                entry = {"overwrite": enabled, "settings": _active_values(profiles)}
+                entry = {"overwrite": enabled, "settings": _active_values(profiles, context["app_id"])}
                 profiles[app_id] = entry
             else:
                 entry["overwrite"] = enabled
@@ -957,11 +1025,14 @@ class Plugin:
             if name:
                 entry["name"] = name
             _save_profiles(profiles)
-            values = _active_values(profiles)
+            running = context["app_id"]
+            profile_id = _resolve_app_id(profiles, running)
+            values = _active_values(profiles, running)
             ok = _apply_settings(values)
             decky.logger.info(
                 f"[lego-vibe] per-game profile {app_id} overwrite={enabled}, applied {values}")
-            return {"success": ok, "settings": values, "overwrite": enabled}
+            return {"success": ok, "settings": values, "app_id": running,
+                    "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
         return await _offload(_do)
 
     async def delete_game_profile(self, app_id: str) -> dict:
@@ -1008,50 +1079,19 @@ class Plugin:
             duration = max(100, min(2000, int(duration_ms)))
             magnitude = int(0xFFFF * intensity_pct / 100)
 
-            # Probing every /dev/input/event* with an ioctl is the slow part; the
-            # effect upload and the two writes below are microseconds.
+            # Filter by HID identity before probing matching endpoints. The
+            # final worker also verifies the actual opened descriptor.
             ff_path = await _offload(_find_ff_device)
             if ff_path is None:
                 decky.logger.warning("[lego-vibe] test_vibration: no FF device found")
-                return {"success": False, "error": "No rumble-capable input device found"}
+                return {"success": False, "error": "No matching Legion controller rumble input was found. Reconnect the controller and retry."}
 
-            fd = os.open(ff_path, os.O_RDWR)
-            try:
-                effect_buf = bytearray(struct.pack(
-                    '<HhHHHHHxxHH28x',
-                    _FF_RUMBLE, -1, 0,
-                    0, 0,
-                    duration, 0,
-                    magnitude, magnitude,
-                ))
-                fcntl.ioctl(fd, _EVIOCSFF, effect_buf)
-                effect_id = struct.unpack_from('<h', effect_buf, 2)[0]
-                if effect_id < 0:
-                    return {"success": False, "error": f"Driver rejected FF effect (id={effect_id})"}
-
-                def _input_event(ev_type: int, code: int, value: int) -> bytes:
-                    t = time.time()
-                    return struct.pack('<qqHHi', int(t), int((t % 1) * 1e6) % 1_000_000,
-                                       ev_type, code, value)
-
-                os.write(fd, _input_event(_EV_FF, effect_id, 1))
-                await asyncio.sleep(duration / 1000.0)
-                os.write(fd, _input_event(_EV_FF, effect_id, 0))
-                # EVIOCRMFF is declared _IOW(..., int) but the kernel reads the
-                # effect id straight out of the argument value
-                # (input_ff_erase(dev, (int)(unsigned long) p, file)). Passing a
-                # packed buffer makes it erase whatever id the pointer happens
-                # to look like, which always failed with EINVAL and leaked the
-                # effect slot. Pass the id by value.
-                fcntl.ioctl(fd, _EVIOCRMFF, effect_id)
-
-                decky.logger.info(
-                    f"[lego-vibe] test_vibration: level={level} ({intensity_pct}%) "
-                    f"mag={magnitude:#06x} duration={duration}ms via {ff_path}"
-                )
-                return {"success": True}
-            finally:
-                os.close(fd)
+            await module_runtime.complete(_offload(_play_rumble, ff_path, duration, magnitude))
+            decky.logger.info(
+                f"[lego-vibe] test_vibration: level={level} ({intensity_pct}%) "
+                f"mag={magnitude:#06x} duration={duration}ms via {ff_path}"
+            )
+            return {"success": True}
         except Exception as exc:
             _ff_device_cache["node"] = None
             decky.logger.error(f"[lego-vibe] test_vibration failed: {exc}")

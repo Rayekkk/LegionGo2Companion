@@ -5,6 +5,7 @@
 
 import {
   ButtonItem,
+  Field,
   findModuleExport,
   Focusable,
   PanelSection,
@@ -43,6 +44,9 @@ interface ApplyResponse {
   success: boolean;
   settings: VibeSettings;
   error?: string;
+  app_id?: string;
+  profile_id?: string;
+  overwrite?: boolean;
 }
 
 interface DriverStatus {
@@ -99,7 +103,7 @@ const setIntensity = callable<[number, string, string], ApplyResponse>("vibe_set
 const setRumbleMode = callable<[number, string, string], ApplyResponse>("vibe_set_rumble_mode");
 const setTouchpadIntensity = callable<[number, string, string], ApplyResponse>("vibe_set_touchpad_intensity");
 const setTouchpadEnabled = callable<[boolean, string, string], ApplyResponse>("vibe_set_touchpad_enabled");
-const resetToDefault = callable<[], ApplyResponse>("vibe_reset_to_default");
+const resetToDefault = callable<[string, string], ApplyResponse>("vibe_reset_to_default");
 const reapply = callable<[], ApplyResponse>("vibe_reapply");
 
 const setProfileOverwrite = callable<[string, boolean, string], ApplyResponse & { overwrite: boolean }>("vibe_set_profile_overwrite");
@@ -177,13 +181,14 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
   // Said out loud rather than swallowed: this going quiet again is exactly how
   // the previous registration rotted unnoticed.
   console.warn("[lego-vibe] no resume-from-suspend notification available; "
-    + "settings will only be restored if the controller re-enumerates");
+    + "settings will be restored by the backend resume and drift checks");
   return null;
 }
 
 // ── Running app watcher ───────────────────────────────────────────────────────
 
-type SettingsListener = (res: SettingsResponse) => void;
+type SettingsListener = (res: SettingsResponse, readEpoch?: number) => void;
+let vibeReadEpoch = 0;
 
 /**
  * Tracks the foreground game and tells the backend about it, so the backend
@@ -300,20 +305,27 @@ class AppWatcher {
     const now = Date.now();
     if (!changed && now - this.lastPush < APP_HEARTBEAT_MS) return;
     this.busy = true;
+    const readEpoch = vibeReadEpoch;
     try {
       const res = await setActiveApp(id);
       if (!this.started || generation !== this.generation) return;
+      if (this.activeId() !== id) return;
       // Committed only once the backend has it. Recording the id before the
       // call meant a single failed RPC - the loader restarting, say - left
       // every later tick thinking there was nothing to send, so the hardware
       // kept the previous game's profile for the rest of the session.
       this.currentId = id;
       this.lastPush = now;
-      this.listeners.forEach((fn) => fn(res));
+      this.listeners.forEach((fn) => fn(res, readEpoch));
     } catch (e) {
       console.error("[lego-vibe] setActiveApp failed, will retry", e);
     } finally {
-      if (generation === this.generation) this.busy = false;
+      if (generation === this.generation) {
+        this.busy = false;
+        // A game changed while the previous RPC was busy. Deliver its profile
+        // immediately instead of waiting for the next two-second timer tick.
+        if (this.started && this.activeId() !== id) void this.check();
+      }
     }
   }
 }
@@ -398,6 +410,7 @@ const DEFAULT_SETTINGS: VibeSettings = {
 };
 
 let vibeMutationChain: Promise<unknown> = Promise.resolve();
+let vibeMutationsPending = 0;
 
 const LGoVibeControl = () => {
   const [settings, setSettings] = useState<VibeSettings>(DEFAULT_SETTINGS);
@@ -409,21 +422,47 @@ const LGoVibeControl = () => {
 
   const [loading, setLoading] = useState(true);
   const [setupErr, setSetupErr] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [applying, setApplying] = useState(false);
+  const [profileChanging, setProfileChanging] = useState(false);
   const [testing, setTesting] = useState(false);
 
   const visible = useQuickAccessVisible();
   const initialDriverReadRef = useRef(false);
+  const initialLoadRef = useRef<Promise<void> | null>(null);
   const driverRevisionRef = useRef(0);
+  const mounted = useRef(true);
+  const currentApp = useRef(DEFAULT_APP);
+  const gameRevision = useRef(0);
+  const mutationsPending = useRef(0);
+  const controlActionPending = useRef(false);
+  const testPending = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   // Coalesces a slider drag into a single backend call. The UI still moves
   // immediately; only the RPC and its disk commit are deferred.
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingWrites = useRef<Record<string, () => void>>({});
+  const writeVersions = useRef<Record<string, number>>({});
+  const flushPendingWrites = useCallback(() => {
+    for (const timer of Object.values(timers.current)) clearTimeout(timer);
+    timers.current = {};
+    const writes = Object.values(pendingWrites.current);
+    pendingWrites.current = {};
+    for (const flush of writes) flush();
+  }, []);
   const debounce = useCallback((key: string, fn: () => void, delay = 150) => {
     const pending = timers.current[key];
     if (pending) clearTimeout(pending);
+    const version = (writeVersions.current[key] ?? 0) + 1;
+    writeVersions.current[key] = version;
+    let flushed = false;
     const flush = () => {
+      // A cleared browser callback may already be queued. It must neither
+      // replay a flushed gesture after Reset nor save a superseded slider value.
+      if (flushed || writeVersions.current[key] !== version) return;
+      flushed = true;
       delete timers.current[key];
       delete pendingWrites.current[key];
       fn();
@@ -432,20 +471,22 @@ const LGoVibeControl = () => {
     timers.current[key] = setTimeout(flush, delay);
   }, []);
 
-  useEffect(
-    () => () => {
-      for (const t of Object.values(timers.current)) clearTimeout(t);
-      for (const flush of Object.values(pendingWrites.current)) flush();
-    },
-    [],
-  );
+  useEffect(() => flushPendingWrites, [flushPendingWrites]);
 
   // Bumped by every optimistic edit. A reply may only overwrite the UI while it
   // is still the newest thing that happened, otherwise a slow sysfs write snaps
   // the slider back to a value the user has already moved off.
   const editSeq = useRef(0);
 
-  const adoptResponse = useCallback((res: SettingsResponse) => {
+  const adoptResponse = useCallback((res: SettingsResponse, readEpoch?: number) => {
+    if (!mounted.current) return;
+    const changedGame = currentApp.current !== res.app_id;
+    if (!changedGame && readEpoch !== undefined && readEpoch !== vibeReadEpoch) return;
+    // A heartbeat for the same game can carry a snapshot from before a queued
+    // edit. Keep the draft until that edit answers; a new game always wins.
+    if (!changedGame && (mutationsPending.current || Object.keys(pendingWrites.current).length)) return;
+    if (changedGame) gameRevision.current += 1;
+    currentApp.current = res.app_id;
     // Counts as an edit: switching game replaces the whole profile, and a field
     // reply still in flight from the previous one must not undo that.
     editSeq.current += 1;
@@ -455,11 +496,26 @@ const LGoVibeControl = () => {
     setGameName(AppWatcher.displayName());
   }, []);
 
+  const enqueueMutation = useCallback((operation: () => Promise<ApplyResponse>) => {
+    vibeReadEpoch += 1;
+    mutationsPending.current += 1;
+    vibeMutationsPending += 1;
+    if (mounted.current) setApplying(true);
+    const request = vibeMutationChain.then(operation, operation);
+    vibeMutationChain = request.catch(() => undefined);
+    return request.finally(() => {
+      vibeReadEpoch += 1;
+      mutationsPending.current -= 1;
+      vibeMutationsPending -= 1;
+      if (mounted.current) setApplying(mutationsPending.current > 0);
+    });
+  }, []);
+
   const refreshDriver = useCallback(async () => {
     const revision = driverRevisionRef.current;
     try {
       const status = await getDriverStatus();
-      if (revision === driverRevisionRef.current) setDriver(status);
+      if (mounted.current && revision === driverRevisionRef.current) setDriver(status);
     } catch (e) {
       console.error("[lego-vibe] getDriverStatus failed", e);
     }
@@ -471,40 +527,63 @@ const LGoVibeControl = () => {
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const check = async () => {
+      if (initialLoadRef.current) await initialLoadRef.current;
       if (!active) return;
-      try {
-        const state = await isReady();
-        if (!active) return;
-        if (state.error) {
-          setSetupErr(state.error);
+      const request = (async () => {
+        try {
+          const state = await isReady();
+          if (!active) return;
+          if (state.error) {
+            setSetupErr(state.error);
+            setLoading(false);
+            return;
+          }
+          if (!state.ready) {
+            if (active) retryTimer = setTimeout(check, 1000);
+            return;
+          }
+          if (vibeMutationsPending) await vibeMutationChain;
+          if (!active) return;
+          const driverRevision = driverRevisionRef.current;
+          const settingsRevision = editSeq.current;
+          const reads = [
+            getSettings(),
+            getDriverStatus(),
+            getCapabilities().catch(() => ({ mode: FALLBACK_MODES })),
+          ] as const;
+          let snapshot: [SettingsResponse, DriverStatus, { mode: string[] }];
+          try { snapshot = await Promise.all(reads); }
+          catch (error) {
+            if (active) {
+              setLoadError(error instanceof Error ? error.message : "Vibration settings could not be loaded. Check the Decky connection and retry.");
+              setLoading(false);
+            }
+            // A rejection does not finish the other RPCs. Keep a retry behind
+            // this attempt instead of filling the backend queue with duplicates.
+            await Promise.allSettled(reads);
+            throw error;
+          }
+          const [current, status, caps] = snapshot;
+          if (!active) return;
+          if (settingsRevision === editSeq.current) adoptResponse(current);
+          if (driverRevision === driverRevisionRef.current) setDriver(status);
+          initialDriverReadRef.current = true;
+          setModes(caps?.mode?.length ? caps.mode : FALLBACK_MODES);
+          setLoadError("");
           setLoading(false);
-          return;
+        } catch (e) {
+          if (!active) return;
+          setLoadError(e instanceof Error ? e.message : "Vibration settings could not be loaded. Check the Decky connection and retry.");
+          setLoading(false);
         }
-        if (!state.ready) {
-          if (active) retryTimer = setTimeout(check, 1000);
-          return;
-        }
-        const driverRevision = driverRevisionRef.current;
-        const [current, status, caps] = await Promise.all([
-          getSettings(),
-          getDriverStatus(),
-          getCapabilities().catch(() => ({ mode: FALLBACK_MODES } as any)),
-        ]);
-        if (!active) return;
-        adoptResponse(current);
-        if (driverRevision === driverRevisionRef.current) setDriver(status);
-        initialDriverReadRef.current = true;
-        setModes(caps?.mode?.length ? caps.mode : FALLBACK_MODES);
-        setLoading(false);
-      } catch (e) {
-        if (!active) return;
-        notifyFailure("LeGo Vibe Control failed to load", e);
-        setLoading(false);
-      }
+      })();
+      initialLoadRef.current = request;
+      try { await request; }
+      finally { if (initialLoadRef.current === request) initialLoadRef.current = null; }
     };
     void check();
     return () => { active = false; if (retryTimer !== undefined) clearTimeout(retryTimer); };
-  }, [adoptResponse]);
+  }, [adoptResponse, loadAttempt]);
 
   // Hotplug pushes the driver status from the backend, so the dot is right even
   // while the panel is shut. Registered unconditionally: a controller is plugged
@@ -528,11 +607,11 @@ const LGoVibeControl = () => {
   // without pyudev there is no hotplug monitor at all, and a plugin reload
   // starts with whatever the hardware already is.
   useEffect(() => {
-    if (loading) return;
+    if (loading || loadError || setupErr) return;
     const initialRead = initialDriverReadRef.current;
     initialDriverReadRef.current = false;
     if (visible && !initialRead) void refreshDriver();
-  }, [visible, loading, refreshDriver]);
+  }, [visible, loading, loadError, setupErr, refreshDriver]);
 
   // Game changes are applied by the backend; just adopt what it reports.
   useEffect(() => AppWatcher.listen(adoptResponse), [adoptResponse]);
@@ -541,30 +620,33 @@ const LGoVibeControl = () => {
 
   const applyField = useCallback(
     async (key: string, optimistic: Partial<VibeSettings>, call: (app: string, profile: string) => Promise<ApplyResponse>) => {
+      if (!mounted.current || controlActionPending.current) return;
+      vibeReadEpoch += 1;
       const seq = ++editSeq.current;
+      const revision = gameRevision.current;
       const expectedApp = appId;
       const expectedProfile = perGameOn ? appId : DEFAULT_APP;
       setSettings((prev) => ({ ...prev, ...optimistic }));
       debounce(key, () => {
-        setApplying(true);
-        const request = vibeMutationChain.then(() => call(expectedApp, expectedProfile));
-        vibeMutationChain = request.catch(() => undefined);
+        const isCurrent = () => mounted.current && revision === gameRevision.current && seq === editSeq.current;
+        const request = enqueueMutation(() => call(expectedApp, expectedProfile));
         request.then((res) => {
+            if (!isCurrent()) return;
             checkResult("Could not apply setting", res);
-            if (res.settings && seq === editSeq.current) setSettings(res.settings);
+            if (res.app_id !== undefined && res.profile_id !== undefined && res.overwrite !== undefined)
+              adoptResponse(res as SettingsResponse);
+            else if (res.settings) setSettings(res.settings);
           })
           .catch((e) => {
+            if (!isCurrent()) return;
             notifyFailure("Could not apply setting", e);
             // Only resync when nothing newer is pending; the newer edit's own
             // reply is the one that should decide what the panel shows.
-            if (seq === editSeq.current) {
-              void getSettings().then(adoptResponse).catch(() => undefined);
-            }
-          })
-          .finally(() => setApplying(false));
+            void getSettings().then(res => { if (isCurrent()) adoptResponse(res); }).catch(() => undefined);
+          });
       });
     },
-    [debounce, adoptResponse, appId, perGameOn],
+    [debounce, adoptResponse, enqueueMutation, appId, perGameOn],
   );
 
   const handleLevel = useCallback(
@@ -593,57 +675,106 @@ const LGoVibeControl = () => {
   );
 
   const handleReset = useCallback(async () => {
-    setApplying(true);
+    if (!mounted.current || controlActionPending.current) return;
+    controlActionPending.current = true;
+    setProfileChanging(true);
+    const expectedApp = appId, expectedProfile = perGameOn ? appId : DEFAULT_APP;
+    const revision = gameRevision.current;
+    flushPendingWrites();
+    const seq = ++editSeq.current;
+    const isCurrent = () => mounted.current && revision === gameRevision.current && seq === editSeq.current;
     try {
-      const res = await resetToDefault();
+      const res = await enqueueMutation(() => resetToDefault(expectedApp, expectedProfile));
+      if (!isCurrent()) return;
+      // Reset commits its profile before applying hardware. A failed apply
+      // still carries the authoritative saved settings and profile context.
+      if (res.app_id !== undefined && res.profile_id !== undefined && res.overwrite !== undefined)
+        adoptResponse(res as SettingsResponse);
+      else if (res.settings) setSettings(res.settings);
       if (checkResult("Reset failed", res)) {
-        setSettings(res.settings);
         notify("LeGo Vibe Control", "Settings restored to defaults");
       }
     } catch (e) {
-      notifyFailure("Reset failed", e);
+      if (isCurrent()) notifyFailure("Reset failed", e);
     } finally {
-      setApplying(false);
+      controlActionPending.current = false;
+      if (mounted.current) setProfileChanging(false);
     }
-  }, []);
+  }, [appId, perGameOn, enqueueMutation, flushPendingWrites, adoptResponse]);
 
   const handleTest = useCallback(async () => {
+    if (!mounted.current || testPending.current || controlActionPending.current) return;
+    testPending.current = true;
     setTesting(true);
+    const revision = gameRevision.current;
     try {
+      // A slider value is optimistic until its debounced save completes.
+      // Test the confirmed value from this gesture, rather than the old one.
+      flushPendingWrites();
+      await vibeMutationChain;
+      if (!mounted.current || revision !== gameRevision.current) return;
       const res = await testVibration(500);
       checkResult("Test vibration failed", res);
     } catch (e) {
       notifyFailure("Test vibration failed", e);
     } finally {
-      setTesting(false);
+      testPending.current = false;
+      if (mounted.current) setTesting(false);
     }
-  }, []);
+  }, [flushPendingWrites]);
 
   const handlePerGameToggle = useCallback(
     async (val: boolean) => {
+      if (!mounted.current || controlActionPending.current) return;
+      controlActionPending.current = true;
+      setProfileChanging(true);
+      const revision = gameRevision.current;
+      flushPendingWrites();
+      ++editSeq.current;
+      const isCurrent = () => mounted.current && revision === gameRevision.current;
       setPerGameOn(val);
-      setApplying(true);
       try {
         // The backend applies the resolved profile for us, which is what the
         // old frontend skipped when *enabling* a profile - the UI showed the
         // game's values while the hardware kept the global ones.
-        const res = await setProfileOverwrite(appId, val, AppWatcher.displayName());
-        if (checkResult("Could not switch profile", res)) {
-          setSettings(res.settings);
-        } else {
-          setPerGameOn(!val);
-        }
+        const name = AppWatcher.displayName();
+        const res = await enqueueMutation(() => setProfileOverwrite(appId, val, name));
+        if (!isCurrent()) return;
+        checkResult("Could not switch profile", res);
+        if (res.app_id !== undefined && res.profile_id !== undefined && res.overwrite !== undefined)
+          adoptResponse(res as SettingsResponse);
+        else if (res.success) setSettings(res.settings);
+        else setPerGameOn(!val);
       } catch (e) {
-        setPerGameOn(!val);
-        notifyFailure("Could not switch profile", e);
+        if (isCurrent()) {
+          setPerGameOn(!val);
+          notifyFailure("Could not switch profile", e);
+          try {
+            const snapshot = await getSettings();
+            if (isCurrent()) adoptResponse(snapshot);
+          } catch (readError) {
+            if (isCurrent()) setLoadError(readError instanceof Error ? readError.message : "Could not confirm the active vibration profile.");
+          }
+        }
       } finally {
-        setApplying(false);
+        controlActionPending.current = false;
+        if (mounted.current) setProfileChanging(false);
       }
     },
-    [appId],
+    [appId, enqueueMutation, flushPendingWrites, adoptResponse],
   );
 
   // Render
+
+  const retryLoad = () => {
+    setLoadError(""); setSetupErr(null); setLoading(true);
+    setLoadAttempt(attempt => attempt + 1);
+  };
+
+  if (loadError) return <PanelSection title="Vibration settings unavailable">
+    <PanelSectionRow><Field focusable label="Could not load settings" description={loadError} /></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={retryLoad}>Retry settings</ButtonItem></PanelSectionRow>
+  </PanelSection>;
 
   if (setupErr) {
     return (
@@ -733,6 +864,7 @@ const LGoVibeControl = () => {
         <PanelSectionRow>
           <SliderField
             label="Intensity"
+            disabled={profileChanging}
             description={
               <span>
                 Level: <span style={styles.valueTag}>{LEVEL_LABELS[settings.level]}</span>
@@ -750,6 +882,7 @@ const LGoVibeControl = () => {
         <PanelSectionRow>
           <SliderField
             label="Mode"
+            disabled={profileChanging}
             description={
               <span>
                 Mode: <span style={styles.valueTag}>{modeLabel(modeName)}</span>
@@ -770,6 +903,7 @@ const LGoVibeControl = () => {
         <PanelSectionRow>
           <ToggleField
             label="Touchpad vibration"
+            disabled={profileChanging}
             description="Enable vibration on touchpad"
             checked={settings.touchpadEnabled}
             onChange={handleTpToggle}
@@ -790,7 +924,7 @@ const LGoVibeControl = () => {
             step={1}
             notchCount={4}
             notchLabels={LEVEL_NOTCHES.map((label, notchIndex) => ({ notchIndex, label }))}
-            disabled={!settings.touchpadEnabled}
+            disabled={profileChanging || !settings.touchpadEnabled}
             onChange={handleTpIntensity}
           />
         </PanelSectionRow>
@@ -831,5 +965,9 @@ const LGoVibeControl = () => {
 // ── Plugin entry point ────────────────────────────────────────────────────────
 
 export const VibrationPage = LGoVibeControl;
+export const getVibrationSettings = async () => {
+  if (vibeMutationsPending) await vibeMutationChain;
+  return getSettings();
+};
 export const startVibrationWatcher = () => AppWatcher.start();
 export const stopVibrationWatcher = () => AppWatcher.stop();

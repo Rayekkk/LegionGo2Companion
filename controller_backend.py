@@ -855,7 +855,7 @@ class Plugin:
                 continue
             next_check = now + CHECK_SECONDS
             try:
-                source = _state()["gyro_source"]
+                source = (await asyncio.to_thread(_state))["gyro_source"]
                 if source == "system":
                     retry_delay = RECOVERY_RETRY_SECONDS
                     continue

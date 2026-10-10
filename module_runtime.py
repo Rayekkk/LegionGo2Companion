@@ -36,7 +36,9 @@ async def offload(module, function, *args, **kwargs):
 
 async def drain(module):
     while _workers.get(module):
-        await asyncio.gather(*tuple(_workers[module]), return_exceptions=True)
+        # Cancelling gather directly would cancel the Task around to_thread,
+        # remove it from the registry and leave its actual thread running.
+        await complete(asyncio.gather(*tuple(_workers[module]), return_exceptions=True))
 
 def require_success(result):
     if not isinstance(result, dict) or result.get('success') is not True:

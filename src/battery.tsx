@@ -44,7 +44,13 @@ interface BatteryResult {
   status?: BatteryStatus;
 }
 
-export const getBatteryStatus = callable<[], BatteryStatus>("battery_get_status");
+let batteryMutationChain: Promise<void> = Promise.resolve();
+let batteryMutationsPending = 0;
+const readBatteryStatus = callable<[], BatteryStatus>("battery_get_status");
+export const getBatteryStatus = async () => {
+  if (batteryMutationsPending) await batteryMutationChain;
+  return readBatteryStatus();
+};
 export const getControllerBatteryLevels = callable<[], ControllerBatteryStatus>("battery_get_controller_levels");
 const setBatteryEnabled = callable<[boolean], BatteryResult>("battery_set_enabled");
 const releaseBatteryControl = callable<[], BatteryResult>("battery_release_control");
@@ -107,7 +113,11 @@ export const BatteryPage: FC = () => {
   const saving = useRef(false);
   const generation = useRef(0);
   const readRevision = useRef(0);
-  const readInFlight = useRef<Promise<[BatteryStatus, ControllerBatteryStatus]> | null>(null);
+  const readInFlight = useRef<Promise<BatteryStatus | undefined> | null>(null);
+  const controllerReadInFlight = useRef<Promise<ControllerBatteryStatus> | null>(null);
+  const controllerReadRevision = useRef(0);
+  const refreshAfterRead = useRef(false);
+  const refreshControllersAfterRead = useRef(false);
   isVisible.current = visible;
 
   useEffect(() => {
@@ -116,22 +126,23 @@ export const BatteryPage: FC = () => {
       mounted.current = false;
       generation.current += 1;
       readRevision.current += 1;
+      controllerReadRevision.current += 1;
     };
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refreshConsole = useCallback(async () => {
     if (!mounted.current || !isVisible.current || saving.current || readInFlight.current) return;
     const revision = ++readRevision.current;
-    const request = Promise.all([
-      getBatteryStatus(),
-      getControllerBatteryLevels().catch(unavailableControllerBatteries),
-    ]);
+    const request = (async () => {
+      if (batteryMutationsPending) await batteryMutationChain;
+      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
+      return getBatteryStatus();
+    })();
     readInFlight.current = request;
     try {
-      const [next, controllerLevels] = await request;
-      if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
+      const next = await request;
+      if (!next || !mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
-      setControllers(controllerLevels);
       setError(next.error || (!next.success ? "Battery status could not be read." : ""));
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current) {
@@ -139,47 +150,80 @@ export const BatteryPage: FC = () => {
       }
     } finally {
       if (readInFlight.current === request) readInFlight.current = null;
+      if (refreshAfterRead.current) { refreshAfterRead.current = false; void refreshConsole(); }
     }
   }, []);
 
+  const refreshControllers = useCallback(async () => {
+    if (!mounted.current || !isVisible.current || controllerReadInFlight.current) return;
+    const revision = ++controllerReadRevision.current;
+    const request = getControllerBatteryLevels().catch(unavailableControllerBatteries);
+    controllerReadInFlight.current = request;
+    try {
+      const next = await request;
+      if (mounted.current && isVisible.current && revision === controllerReadRevision.current) setControllers(next);
+    } finally {
+      if (controllerReadInFlight.current === request) controllerReadInFlight.current = null;
+      if (refreshControllersAfterRead.current) { refreshControllersAfterRead.current = false; void refreshControllers(); }
+    }
+  }, []);
+
+  const refresh = useCallback(() => {
+    void refreshConsole();
+    void refreshControllers();
+  }, [refreshConsole, refreshControllers]);
+
   useEffect(() => {
     if (!visible) return;
+    if (readInFlight.current) refreshAfterRead.current = true;
+    if (controllerReadInFlight.current) refreshControllersAfterRead.current = true;
     void refresh();
     const timer = setInterval(() => void refresh(), 10000);
     return () => {
       clearInterval(timer);
       readRevision.current += 1;
+      controllerReadRevision.current += 1;
     };
   }, [refresh, visible]);
 
   const apply = useCallback(async (operation: () => Promise<BatteryResult>, message: string) => {
     if (!mounted.current || !isVisible.current || saving.current) return;
     saving.current = true;
+    batteryMutationsPending += 1;
+    const previousRead = readInFlight.current;
     readRevision.current += 1;
     const activeGeneration = generation.current;
     const canUpdate = () => mounted.current && activeGeneration === generation.current;
     setBusy(true);
     setNotice("");
     setError("");
-    try {
-      // Finish the earlier read before writing, and ignore its stale result.
-      await readInFlight.current?.catch(() => undefined);
-      const result = await operation();
-      const next = result.status ?? (result.success ? await getBatteryStatus() : undefined);
-      if (!canUpdate()) return;
-      if (next) setStatus(next);
-      if (!result.success) setError(result.error || next?.error || "The requested charging change was not confirmed.");
-      else if (next?.error || next?.success === false) {
-        setError(next.error || "The preference was saved, but the current battery state could not be confirmed.");
-      } else setNotice(message);
-    } catch {
-      if (canUpdate()) {
-        setError("The battery operation could not be confirmed. Check the current and saved states before trying again.");
+    const run = async () => {
+      try {
+        // Finish the earlier read before writing, and ignore its stale result.
+        await previousRead?.catch(() => undefined);
+        const result = await operation();
+        // Verification belongs to this transaction; the public menu getter
+        // waits for its tail and must not be called from inside that same tail.
+        const next = result.status ?? (result.success ? await readBatteryStatus() : undefined);
+        if (!canUpdate()) return;
+        if (next) setStatus(next);
+        if (!result.success) setError(result.error || next?.error || "The requested charging change was not confirmed.");
+        else if (next?.error || next?.success === false) {
+          setError(next.error || "The preference was saved, but the current battery state could not be confirmed.");
+        } else setNotice(message);
+      } catch {
+        if (canUpdate()) {
+          setError("The battery operation could not be confirmed. Check the current and saved states before trying again.");
+        }
+      } finally {
+        batteryMutationsPending -= 1;
+        saving.current = false;
+        if (canUpdate()) setBusy(false);
       }
-    } finally {
-      saving.current = false;
-      if (canUpdate()) setBusy(false);
-    }
+    };
+    const queued = batteryMutationChain.then(run, run);
+    batteryMutationChain = queued.catch(() => undefined);
+    await queued;
   }, []);
 
   if (!status) return <PanelSection title="Battery protection">

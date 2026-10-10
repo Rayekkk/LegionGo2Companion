@@ -59,6 +59,17 @@ const check = (patch = {}) => ({ success: true, current_version: '0.6.2', latest
 const downloaded = { success: true, version: '0.6.3', path: '/home/deck/Downloads/LegionGo2Companion-0.6.3.zip', sha256: 'a'.repeat(64) };
 
 (async () => {
+  for (const operation of ['updates_check', 'updates_download']) {
+    const closed=harness();let tree=closed.render();
+    if(operation==='updates_download') {
+      button(tree,'Check for Updates').props.onClick();closed.respond('updates_check',check());await settle();tree=closed.render();
+    }
+    const callback=button(tree,operation==='updates_check'?'Check for Updates':'Download 0.6.3').props.onClick;
+    closed.unmount();const calls=closed.calls.length,writes=closed.writes;
+    callback();await settle();
+    assert.equal(closed.calls.length,calls,'A callback from a closed About page cannot initiate another request.');
+    assert.equal(closed.writes,writes);
+  }
   const h = harness();
   let tree = h.render();
   assert.ok(field(tree, 'GitHub releases'));

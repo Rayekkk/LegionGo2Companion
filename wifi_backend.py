@@ -1200,10 +1200,10 @@ class Plugin:
 
     def _get_band_policy_capabilities_sync(self, rescan: bool = True) -> dict:
         iface = self._get_wifi_interface()
-        uuid = self._get_active_connection_uuid()
+        uuid = self._get_active_connection_uuid(iface) if iface else None
         backend = self._get_current_backend() or ""
         _, device_family, _ = self._detect_device_family()
-        driver = self._detect_wifi_driver()
+        driver = self._detect_wifi_driver(iface)
         target_supported = device_family == "legion_go_2" and driver == "mt7921e"
 
         nm_version_result = self._run_cmd(
@@ -1563,7 +1563,16 @@ class Plugin:
         )
 
     def _profile_is_active(self, uuid: str) -> bool:
-        return bool(uuid and self._get_active_connection_uuid() == uuid)
+        if not uuid:
+            return False
+        # Activity checks need the exact profile, not whichever active WiFi
+        # connection NetworkManager happens to enumerate first.
+        result = self._run_cmd(
+            ["/usr/bin/nmcli", "-t", "-f", "UUID,TYPE", "con", "show", "--active"]
+        )
+        return bool(result.get("success") and any(
+            line.split(":") == [uuid, "802-11-wireless"]
+            for line in result.get("stdout", "").splitlines()))
 
     def _reconnect_profile(
         self, uuid: str, was_active: bool = True, cycle: bool = True
@@ -1737,7 +1746,7 @@ class Plugin:
             }
 
         iface = self._get_wifi_interface()
-        uuid = self._get_active_connection_uuid()
+        uuid = self._get_active_connection_uuid(iface) if iface else None
         if not iface or not uuid:
             return {
                 "success": False,
@@ -2330,17 +2339,18 @@ class Plugin:
                 return parts[0]
         return None
 
-    def _get_active_connection_uuid(self) -> str | None:
+    def _get_active_connection_uuid(self, iface: str | None = None) -> str | None:
+        if iface is None:
+            iface = self._get_wifi_interface()
+        if not iface:
+            return None
         result = self._run_cmd(
-            ["/usr/bin/nmcli", "-t", "-f", "UUID,TYPE", "con", "show", "--active"]
+            ["/usr/bin/nmcli", "-g", "GENERAL.CON-UUID", "device", "show", iface]
         )
         if not result["success"]:
             return None
-        for line in result["stdout"].split("\n"):
-            parts = line.split(":")
-            if len(parts) >= 2 and parts[1] == "802-11-wireless":
-                return parts[0]
-        return None
+        value = result.get("stdout", "").strip()
+        return value if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) else None
 
     def _get_current_backend(self) -> str | None:
         """Return 'iwd', 'wpa_supplicant', or None if unknown.
@@ -2495,7 +2505,7 @@ class Plugin:
             except FileNotFoundError:
                 pass
             decky.logger.info("WiFi Optimizer Go 2 starting")
-            self._rotate_logs()
+            await self._worker_complete(self._rotate_logs)
             band_lock = await self._worker_complete(
                 self._acquire_band_policy_file_lock,
                 cancelled_cleanup=self._release_band_policy_file_lock
@@ -2519,25 +2529,25 @@ class Plugin:
                 # Deliberately do not create HEALTH_MARKER_FILE. The installer
                 # must roll back instead of accepting a backend that cannot
                 # safely determine ownership of the current network state.
-                return
+                return {"success": False, "error": "Unresolved WiFi recovery state remains on disk."}
             info = await self.get_device_info()
-            settings = _load_settings()
+            settings = await self._worker_complete(_load_settings)
             settings["model"] = info.get("model", "unknown")
             settings["driver"] = info.get("driver", "unknown")
             settings["device_family"] = info.get("device_family", "unknown")
             settings["device_label"] = info.get("device_label", "Unknown Device")
             settings["chip_label"] = info.get("chip_label", "unknown")
             settings["supports_6ghz"] = info.get("supports_6ghz", False)
-            distro = self._detect_distro()
+            distro = await self._worker_complete(self._detect_distro)
             settings["distro_id"] = distro["id"]
             settings["distro_name"] = distro["name"]
-            _save_settings(settings)
+            await self._worker_complete(_save_settings, settings)
 
             if settings.get("auto_fix_on_wake", False):
-                self._install_dispatcher()
+                await self._worker_complete(self._install_dispatcher)
 
             # Reapply only the explicitly selected per-profile power setting.
-            iface = self._get_wifi_interface()
+            iface = await self._worker_complete(self._get_wifi_interface)
             if settings.get("power_save_legacy_detected"):
                 decky.logger.error(
                     "Legacy global power-save state has no ownership snapshot; "
@@ -2552,10 +2562,10 @@ class Plugin:
 
             # Read-only sanity check. The fork never switches NetworkManager's
             # WiFi backend; it merely refuses restricted modes unless iwd is live.
-            conf_backend = self._get_current_backend()
+            conf_backend = await self._worker_complete(self._get_current_backend)
             if conf_backend:
-                active = self._run_cmd(
-                    ["/usr/bin/systemctl", "is-active", conf_backend], timeout=3
+                active = await self._worker_complete(
+                    lambda: self._run_cmd(["/usr/bin/systemctl", "is-active", conf_backend], timeout=3)
                 )
                 state = (active.get("stdout") or "").strip()
                 if state and state != "active":
@@ -2569,7 +2579,7 @@ class Plugin:
                 f"family={info.get('device_family')}, driver={info.get('driver')}, "
                 f"chip={info.get('chip_label')}, distro={distro['id']}"
             )
-            self._atomic_write_json(
+            await self._worker_complete(self._atomic_write_json,
                 HEALTH_MARKER_FILE,
                 {
                     "plugin": "wifi-optimizer-go2",
@@ -2577,8 +2587,10 @@ class Plugin:
                     "ready_at": int(time.time()),
                 },
             )
+            return {"success": True}
         except Exception as e:
             decky.logger.error(f"WiFi Optimizer Go 2 _main error: {e}")
+            return {"success": False, "error": str(e)}
 
     async def _unload(self):
         try:
@@ -2595,7 +2607,7 @@ class Plugin:
             decky.logger.info("WiFi Optimizer uninstalling")
             band_cleanup = await self.set_band_policy(BAND_POLICY_OFF)
             power_cleanup = await self.set_power_save(False)
-            bssid_cleanup = self._restore_legacy_bssid_lock()
+            bssid_cleanup = await self._worker_complete(self._restore_legacy_bssid_lock)
             preserve_recovery = not (
                 band_cleanup.get("success")
                 and power_cleanup.get("success")
@@ -2619,7 +2631,7 @@ class Plugin:
                     "preserving settings for manual recovery: "
                     + bssid_cleanup.get("message", "unknown error")
                 )
-            self._remove_dispatcher()
+            await self._worker_complete(self._remove_dispatcher)
             cleanup_paths = [ENFORCED_FILE]
             if not preserve_recovery:
                 cleanup_paths.extend(
@@ -2661,11 +2673,12 @@ class Plugin:
 
         return (product, "unknown", "Unknown Device")
 
-    def _detect_wifi_driver(self) -> str:
+    def _detect_wifi_driver(self, iface: str | None = None) -> str:
         """Detect the kernel driver of the active WiFi interface via sysfs.
         Normalizes sub-module names (e.g. rtw88_pci) to the canonical
         DRIVER_PROFILES key (rtw88)."""
-        iface = self._get_wifi_interface()
+        if iface is None:
+            iface = self._get_wifi_interface()
         if not iface:
             return "unknown"
         try:
@@ -2695,6 +2708,9 @@ class Plugin:
         return info
 
     async def get_device_info(self) -> dict:
+        return await self._worker_complete(self._get_device_info_sync)
+
+    def _get_device_info_sync(self) -> dict:
         try:
             product, device_family, device_label = self._detect_device_family()
             driver = self._detect_wifi_driver()
@@ -2772,7 +2788,7 @@ class Plugin:
         try:
             settings = _load_settings()
             iface = self._get_wifi_interface()
-            uuid = self._get_active_connection_uuid()
+            uuid = self._get_active_connection_uuid(iface) if iface else None
             connected = iface is not None and uuid is not None
             support_tier = self._get_support_tier(settings)
 
@@ -3077,312 +3093,315 @@ class Plugin:
             }
 
         async with self._get_power_save_lock():
-            if self._load_band_policy_journal():
+            return await self._worker_complete(self._set_power_save_sync, disabled)
+
+    def _set_power_save_sync(self, disabled: bool) -> dict:
+        if self._load_band_policy_journal():
+            return {
+                "success": False,
+                "error": "network_recovery_required",
+                "message": (
+                    "A band-policy transaction still needs recovery; "
+                    "power save was not changed."
+                ),
+                "recovery_state_preserved": True,
+            }
+        existing_journal = self._load_power_save_journal()
+        if existing_journal:
+            self._recover_power_save_journal()
+            remaining_journal = self._load_power_save_journal()
+            if remaining_journal:
                 return {
                     "success": False,
-                    "error": "network_recovery_required",
+                    "error": "power_save_recovery_required",
                     "message": (
-                        "A band-policy transaction still needs recovery; "
-                        "power save was not changed."
+                        "A previous power-save rollback needs manual recovery."
+                    ),
+                    "rollback_conflicts": remaining_journal.get(
+                        "rollback_conflicts", []
                     ),
                     "recovery_state_preserved": True,
                 }
-            existing_journal = self._load_power_save_journal()
-            if existing_journal:
-                self._recover_power_save_journal()
-                remaining_journal = self._load_power_save_journal()
-                if remaining_journal:
-                    return {
-                        "success": False,
-                        "error": "power_save_recovery_required",
-                        "message": (
-                            "A previous power-save rollback needs manual recovery."
-                        ),
-                        "rollback_conflicts": remaining_journal.get(
-                            "rollback_conflicts", []
-                        ),
-                        "recovery_state_preserved": True,
-                    }
 
-            settings = _load_settings()
-            if settings.get("power_save_legacy_detected"):
+        settings = _load_settings()
+        if settings.get("power_save_legacy_detected"):
+            return {
+                "success": False,
+                "error": "legacy_power_save_state",
+                "message": (
+                    "The previous plugin enabled a global power-save override "
+                    "without recording the original per-profile value. No "
+                    "safe value can be inferred; reset or uninstall the "
+                    "upstream plugin first."
+                ),
+                "recovery_state_preserved": True,
+            }
+        if not disabled and not settings.get("power_save_disabled"):
+            return {"success": True, "power_save_off": False, "rolled_back": False}
+
+        iface = self._get_wifi_interface()
+        active_uuid = self._get_active_connection_uuid(iface) if iface else None
+        managed_uuid = str(settings.get("power_save_connection_uuid") or "")
+        already_managed = bool(settings.get("power_save_disabled"))
+
+        if disabled:
+            if not iface or not active_uuid:
                 return {
                     "success": False,
-                    "error": "legacy_power_save_state",
-                    "message": (
-                        "The previous plugin enabled a global power-save override "
-                        "without recording the original per-profile value. No "
-                        "safe value can be inferred; reset or uninstall the "
-                        "upstream plugin first."
-                    ),
-                    "recovery_state_preserved": True,
+                    "error": "no_wifi",
+                    "message": "Connect to WiFi before changing power save.",
                 }
-            if not disabled and not settings.get("power_save_disabled"):
-                return {"success": True, "power_save_off": False, "rolled_back": False}
-
-            iface = self._get_wifi_interface()
-            active_uuid = self._get_active_connection_uuid()
-            managed_uuid = str(settings.get("power_save_connection_uuid") or "")
-            already_managed = bool(settings.get("power_save_disabled"))
-
-            if disabled:
-                if not iface or not active_uuid:
-                    return {
-                        "success": False,
-                        "error": "no_wifi",
-                        "message": "Connect to WiFi before changing power save.",
-                    }
-                if already_managed and managed_uuid != active_uuid:
-                    return {
-                        "success": False,
-                        "error": "managed_profile_not_active",
-                        "message": (
-                            "Restore power save on the previously managed profile "
-                            "before selecting another network."
-                        ),
-                    }
-                profile_uuid = active_uuid
-            else:
-                if not managed_uuid:
-                    return {
-                        "success": False,
-                        "error": "power_save_recovery_state_missing",
-                        "message": "The managed power-save profile is missing.",
-                    }
-                profile_uuid = managed_uuid
-
-            nm_raw, nm_result = self._nmcli_get(
-                profile_uuid, "802-11-wireless.powersave"
-            )
-            nm_before = self._parse_nm_power_save(nm_raw)
-            if not nm_result.get("success") or nm_before is None:
+            if already_managed and managed_uuid != active_uuid:
                 return {
                     "success": False,
-                    "error": "profile_state_unparseable",
+                    "error": "managed_profile_not_active",
                     "message": (
-                        "The profile power-save value is not a supported "
-                        "NetworkManager enum; no changes were made."
+                        "Restore power save on the previously managed profile "
+                        "before selecting another network."
                     ),
-                    "detail": nm_result.get("stderr", ""),
                 }
-
-            # Ownership is profile-scoped.  Check it before reading or writing
-            # the volatile interface state so a reapply cannot overwrite an
-            # external profile change (and does not require a runtime probe to
-            # report that conflict).
-            if already_managed and nm_before != "2":
+            profile_uuid = active_uuid
+        else:
+            if not managed_uuid:
                 return {
                     "success": False,
-                    "error": "ownership_conflict",
+                    "error": "power_save_recovery_state_missing",
+                    "message": "The managed power-save profile is missing.",
+                }
+            profile_uuid = managed_uuid
+
+        nm_raw, nm_result = self._nmcli_get(
+            profile_uuid, "802-11-wireless.powersave"
+        )
+        nm_before = self._parse_nm_power_save(nm_raw)
+        if not nm_result.get("success") or nm_before is None:
+            return {
+                "success": False,
+                "error": "profile_state_unparseable",
+                "message": (
+                    "The profile power-save value is not a supported "
+                    "NetworkManager enum; no changes were made."
+                ),
+                "detail": nm_result.get("stderr", ""),
+            }
+
+        # Ownership is profile-scoped.  Check it before reading or writing
+        # the volatile interface state so a reapply cannot overwrite an
+        # external profile change (and does not require a runtime probe to
+        # report that conflict).
+        if already_managed and nm_before != "2":
+            return {
+                "success": False,
+                "error": "ownership_conflict",
+                "message": (
+                    "The profile power-save policy changed outside WiFi "
+                    "Optimizer; it was not overwritten."
+                ),
+            }
+
+        runtime_active = bool(iface and active_uuid == profile_uuid)
+        runtime_before = ""
+        if runtime_active:
+            runtime_before, runtime_result = self._get_runtime_power_save(iface)
+            if not runtime_result.get("success") or runtime_before not in (
+                "on",
+                "off",
+            ):
+                return {
+                    "success": False,
+                    "error": "runtime_state_unparseable",
                     "message": (
-                        "The profile power-save policy changed outside WiFi "
-                        "Optimizer; it was not overwritten."
+                        "The current runtime power-save state could not be "
+                        "read; no changes were made."
                     ),
+                    "detail": runtime_result.get("stderr", ""),
                 }
 
-            runtime_active = bool(iface and active_uuid == profile_uuid)
-            runtime_before = ""
-            if runtime_active:
-                runtime_before, runtime_result = self._get_runtime_power_save(iface)
-                if not runtime_result.get("success") or runtime_before not in (
-                    "on",
-                    "off",
-                ):
-                    return {
-                        "success": False,
-                        "error": "runtime_state_unparseable",
-                        "message": (
-                            "The current runtime power-save state could not be "
-                            "read; no changes were made."
-                        ),
-                        "detail": runtime_result.get("stderr", ""),
-                    }
-
-            settings_after = dict(settings)
-            if disabled:
-                if already_managed:
-                    nm_target = "2"
-                    nm_original = self._parse_nm_power_save(
-                        str(settings.get("power_save_previous") or "")
-                    )
-                    if nm_original is None:
-                        return {
-                            "success": False,
-                            "error": "power_save_recovery_state_invalid",
-                            "message": "The saved prior profile value is invalid.",
-                        }
-                    runtime_original = str(
-                        settings.get("power_save_runtime_previous") or ""
-                    )
-                    if runtime_original not in ("on", "off"):
-                        # Legacy state did not record runtime. Preserve the
-                        # exact current state instead of guessing.
-                        runtime_original = runtime_before
-                else:
-                    nm_target = "2"
-                    nm_original = nm_before
-                    runtime_original = runtime_before
-                runtime_target = "off"
-                settings_after.update(
-                    {
-                        "power_save_disabled": True,
-                        "power_save_connection_uuid": profile_uuid,
-                        "power_save_previous": nm_original,
-                        "power_save_runtime_previous": runtime_original,
-                        "power_save_legacy_detected": False,
-                    }
-                )
-            else:
-                nm_target = self._parse_nm_power_save(
+        settings_after = dict(settings)
+        if disabled:
+            if already_managed:
+                nm_target = "2"
+                nm_original = self._parse_nm_power_save(
                     str(settings.get("power_save_previous") or "")
                 )
-                if nm_target is None:
+                if nm_original is None:
                     return {
                         "success": False,
                         "error": "power_save_recovery_state_invalid",
                         "message": "The saved prior profile value is invalid.",
                     }
-                runtime_target = str(
+                runtime_original = str(
                     settings.get("power_save_runtime_previous") or ""
                 )
-                if runtime_active and runtime_target not in ("on", "off"):
-                    # Legacy state: retain the observed state exactly.
-                    runtime_target = runtime_before
-                settings_after.update(
-                    {
-                        "power_save_disabled": False,
-                        "power_save_connection_uuid": "",
-                        "power_save_previous": "",
-                        "power_save_runtime_previous": "",
-                        "power_save_legacy_detected": False,
-                    }
-                )
-
-            journal = {
-                "schema": 1,
-                "phase": "pending",
-                "created_at": int(time.time()),
-                "settings_file": SETTINGS_FILE,
-                "settings_before": self._power_settings_fields(settings),
-                "profile_before": {
-                    "uuid": profile_uuid,
-                    "nm_power_save": nm_before,
-                },
-                "runtime_before": {
-                    "iface": iface if runtime_active else "",
-                    "power_save": runtime_before if runtime_active else "",
-                },
-                "mutations": {},
-            }
-            try:
-                self._save_power_save_journal(journal)
-                journal["phase"] = "applying"
-                self._save_power_save_journal(journal)
-
-                if nm_before != nm_target:
-                    journal["mutations"]["nm_power_save"] = {
-                        "planned": True,
-                        "expected": nm_target,
-                    }
-                    self._save_power_save_journal(journal)
-                    modified = self._nmcli_modify(
-                        profile_uuid,
-                        "802-11-wireless.powersave",
-                        nm_target,
-                        timeout=8,
-                    )
-                    if not modified.get("success"):
-                        raise RuntimeError(
-                            modified.get("stderr")
-                            or "NetworkManager rejected the power-save value"
-                        )
-                    verified_raw, verified_result = self._nmcli_get(
-                        profile_uuid, "802-11-wireless.powersave"
-                    )
-                    verified_nm = self._parse_nm_power_save(verified_raw)
-                    if (
-                        not verified_result.get("success")
-                        or verified_nm != nm_target
-                    ):
-                        raise RuntimeError(
-                            "NetworkManager power-save verification did not "
-                            "match the request"
-                        )
-
-                if runtime_active and runtime_before != runtime_target:
-                    journal["mutations"]["runtime_power_save"] = {
-                        "planned": True,
-                        "expected": runtime_target,
-                    }
-                    self._save_power_save_journal(journal)
-                    changed = self._run_cmd(
-                        [
-                            "/usr/bin/iw",
-                            "dev",
-                            iface,
-                            "set",
-                            "power_save",
-                            runtime_target,
-                        ],
-                        timeout=4,
-                    )
-                    if not changed.get("success"):
-                        raise RuntimeError(
-                            changed.get("stderr") or "iw rejected the power-save state"
-                        )
-                    verified_runtime, verified_result = self._get_runtime_power_save(
-                        iface
-                    )
-                    if (
-                        not verified_result.get("success")
-                        or verified_runtime != runtime_target
-                    ):
-                        raise RuntimeError(
-                            "Runtime power-save verification did not match the request"
-                        )
-
-                journal["settings_after"] = self._power_settings_fields(
-                    settings_after
-                )
-                self._write_band_settings_fields(
-                    SETTINGS_FILE, journal["settings_after"]
-                )
-                journal["phase"] = "committed"
-                self._save_power_save_journal(journal)
-                self._remove_power_save_journal()
-                return {
-                    "success": True,
-                    "power_save_off": disabled,
-                    "rolled_back": False,
+                if runtime_original not in ("on", "off"):
+                    # Legacy state did not record runtime. Preserve the
+                    # exact current state instead of guessing.
+                    runtime_original = runtime_before
+            else:
+                nm_target = "2"
+                nm_original = nm_before
+                runtime_original = runtime_before
+            runtime_target = "off"
+            settings_after.update(
+                {
+                    "power_save_disabled": True,
+                    "power_save_connection_uuid": profile_uuid,
+                    "power_save_previous": nm_original,
+                    "power_save_runtime_previous": runtime_original,
+                    "power_save_legacy_detected": False,
                 }
-            except Exception as e:
-                decky.logger.error(f"set_power_save apply error: {e}")
-                try:
-                    rollback = self._restore_power_save_transaction(journal, str(e))
-                except Exception as rollback_error:
-                    decky.logger.error(
-                        f"power-save rollback infrastructure failed: {rollback_error}"
+            )
+        else:
+            nm_target = self._parse_nm_power_save(
+                str(settings.get("power_save_previous") or "")
+            )
+            if nm_target is None:
+                return {
+                    "success": False,
+                    "error": "power_save_recovery_state_invalid",
+                    "message": "The saved prior profile value is invalid.",
+                }
+            runtime_target = str(
+                settings.get("power_save_runtime_previous") or ""
+            )
+            if runtime_active and runtime_target not in ("on", "off"):
+                # Legacy state: retain the observed state exactly.
+                runtime_target = runtime_before
+            settings_after.update(
+                {
+                    "power_save_disabled": False,
+                    "power_save_connection_uuid": "",
+                    "power_save_previous": "",
+                    "power_save_runtime_previous": "",
+                    "power_save_legacy_detected": False,
+                }
+            )
+
+        journal = {
+            "schema": 1,
+            "phase": "pending",
+            "created_at": int(time.time()),
+            "settings_file": SETTINGS_FILE,
+            "settings_before": self._power_settings_fields(settings),
+            "profile_before": {
+                "uuid": profile_uuid,
+                "nm_power_save": nm_before,
+            },
+            "runtime_before": {
+                "iface": iface if runtime_active else "",
+                "power_save": runtime_before if runtime_active else "",
+            },
+            "mutations": {},
+        }
+        try:
+            self._save_power_save_journal(journal)
+            journal["phase"] = "applying"
+            self._save_power_save_journal(journal)
+
+            if nm_before != nm_target:
+                journal["mutations"]["nm_power_save"] = {
+                    "planned": True,
+                    "expected": nm_target,
+                }
+                self._save_power_save_journal(journal)
+                modified = self._nmcli_modify(
+                    profile_uuid,
+                    "802-11-wireless.powersave",
+                    nm_target,
+                    timeout=8,
+                )
+                if not modified.get("success"):
+                    raise RuntimeError(
+                        modified.get("stderr")
+                        or "NetworkManager rejected the power-save value"
                     )
-                    return {
-                        "success": False,
-                        "error": "power_save_apply_failed",
-                        "message": str(e),
-                        "rolled_back": False,
-                        "rollback_conflicts": [str(rollback_error)],
-                        "recovery_state_preserved": os.path.isfile(
-                            POWER_SAVE_JOURNAL_FILE
-                        ),
-                    }
-                if rollback.get("success"):
-                    self._remove_power_save_journal()
+                verified_raw, verified_result = self._nmcli_get(
+                    profile_uuid, "802-11-wireless.powersave"
+                )
+                verified_nm = self._parse_nm_power_save(verified_raw)
+                if (
+                    not verified_result.get("success")
+                    or verified_nm != nm_target
+                ):
+                    raise RuntimeError(
+                        "NetworkManager power-save verification did not "
+                        "match the request"
+                    )
+
+            if runtime_active and runtime_before != runtime_target:
+                journal["mutations"]["runtime_power_save"] = {
+                    "planned": True,
+                    "expected": runtime_target,
+                }
+                self._save_power_save_journal(journal)
+                changed = self._run_cmd(
+                    [
+                        "/usr/bin/iw",
+                        "dev",
+                        iface,
+                        "set",
+                        "power_save",
+                        runtime_target,
+                    ],
+                    timeout=4,
+                )
+                if not changed.get("success"):
+                    raise RuntimeError(
+                        changed.get("stderr") or "iw rejected the power-save state"
+                    )
+                verified_runtime, verified_result = self._get_runtime_power_save(
+                    iface
+                )
+                if (
+                    not verified_result.get("success")
+                    or verified_runtime != runtime_target
+                ):
+                    raise RuntimeError(
+                        "Runtime power-save verification did not match the request"
+                    )
+
+            journal["settings_after"] = self._power_settings_fields(
+                settings_after
+            )
+            self._write_band_settings_fields(
+                SETTINGS_FILE, journal["settings_after"]
+            )
+            journal["phase"] = "committed"
+            self._save_power_save_journal(journal)
+            self._remove_power_save_journal()
+            return {
+                "success": True,
+                "power_save_off": disabled,
+                "rolled_back": False,
+            }
+        except Exception as e:
+            decky.logger.error(f"set_power_save apply error: {e}")
+            try:
+                rollback = self._restore_power_save_transaction(journal, str(e))
+            except Exception as rollback_error:
+                decky.logger.error(
+                    f"power-save rollback infrastructure failed: {rollback_error}"
+                )
                 return {
                     "success": False,
                     "error": "power_save_apply_failed",
                     "message": str(e),
-                    "rolled_back": rollback.get("rolled_back", False),
-                    "rollback_conflicts": rollback.get("conflicts", []),
-                    "recovery_state_preserved": not rollback.get("success"),
+                    "rolled_back": False,
+                    "rollback_conflicts": [str(rollback_error)],
+                    "recovery_state_preserved": os.path.isfile(
+                        POWER_SAVE_JOURNAL_FILE
+                    ),
                 }
+            if rollback.get("success"):
+                self._remove_power_save_journal()
+            return {
+                "success": False,
+                "error": "power_save_apply_failed",
+                "message": str(e),
+                "rolled_back": rollback.get("rolled_back", False),
+                "rollback_conflicts": rollback.get("conflicts", []),
+                "recovery_state_preserved": not rollback.get("success"),
+            }
 
     async def set_band_policy(
         self, mode: str, allow_unverified_scan: bool = False
@@ -3401,9 +3420,6 @@ class Plugin:
                     "error": "band_policy_lock_failed",
                     "message": "The cross-process rollback lock is unavailable.",
                     "detail": str(e),
-                    "band_policy": _load_settings().get(
-                        "band_policy", BAND_POLICY_OFF
-                    ),
                     "rolled_back": False,
                 }
             try:
@@ -4073,7 +4089,7 @@ class Plugin:
                         + power_cleanup.get("message", "unknown error")
                     ),
                 }
-            bssid_cleanup = self._restore_legacy_bssid_lock()
+            bssid_cleanup = await self._worker_complete(self._restore_legacy_bssid_lock)
             if not bssid_cleanup.get("success"):
                 return {
                     "success": False,
@@ -4084,7 +4100,7 @@ class Plugin:
                         + bssid_cleanup.get("message", "unknown error")
                     ),
                 }
-            self._remove_dispatcher()
+            await self._worker_complete(self._remove_dispatcher)
             try:
                 os.remove(SETTINGS_FILE)
             except FileNotFoundError:
@@ -4113,10 +4129,10 @@ class Plugin:
             fresh["device_label"] = info.get("device_label", "Unknown Device")
             fresh["chip_label"] = info.get("chip_label", "unknown")
             fresh["supports_6ghz"] = info.get("supports_6ghz", False)
-            distro = self._detect_distro()
+            distro = await self._worker_complete(self._detect_distro)
             fresh["distro_id"] = distro["id"]
             fresh["distro_name"] = distro["name"]
-            _save_settings(fresh)
+            await self._worker_complete(_save_settings, fresh)
 
             decky.logger.info("Settings reset to defaults")
             return {"success": True, "message": "Settings reset to defaults"}

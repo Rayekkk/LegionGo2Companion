@@ -74,6 +74,34 @@ class MemorySettings:
 
 
 class RemapBackendTests(unittest.TestCase):
+    def test_default_baseline_without_final_newline_separates_appended_mapping(self):
+        baseline = """version: 1
+kind: DeviceProfile
+name: Original
+mapping:
+- name: Desktop
+  source_event:
+    gamepad:
+      button: Keyboard
+  target_events:
+  - keyboard: KeyF7"""
+        state = remap_backend._sanitize_state({
+            'enabled': True, 'baseline_profile': baseline,
+            'desktop_action': 'default', 'page_action': 'f2',
+        })
+        generated = remap_backend._build_profile(baseline, state)
+        self.assertIn('keyboard: KeyF7\n- name: Companion Page', generated)
+        self.assertTrue(remap_backend._profile_matches(generated, state))
+        self.assertEqual(len(remap_backend._mapping_blocks(generated)[1]), 2)
+
+    def test_unfamiliar_default_mapping_requires_unchanged_complete_block(self):
+        baseline = BASE_PROFILE.replace('button: Screenshot', 'axis: MouseWheel')
+        state = remap_backend._sanitize_state({'enabled': True, 'baseline_profile': baseline})
+        generated = remap_backend._build_profile(BASE_PROFILE, state)
+        self.assertIn('axis: MouseWheel', generated)
+        self.assertTrue(remap_backend._profile_matches(generated, state))
+        self.assertFalse(remap_backend._profile_matches(generated.replace('axis: MouseWheel', 'axis: MouseMotion'), state))
+
     def setUp(self):
         watcher = patch.object(remap_backend, "_service_watch", remap_backend.ProcessWatch())
         watcher.start()
@@ -192,7 +220,7 @@ class RemapBackendTests(unittest.TestCase):
                     remap_backend._mutate_sync({"desktop_action": "f2"})
             hardware[0] = hardware[0].replace("button: LeftPaddle1", "button: RightPaddle2")
             hardware[0] = hardware[0].replace(
-                remap_backend._render_mapping("page", "default"),
+                remap_backend._expected_mapping(initial, "page"),
                 remap_backend._render_mapping("page", "f12"),
             )
             with patch.object(remap_backend, "_load_profile", side_effect=load):
@@ -266,6 +294,39 @@ mapping:
         self.assertTrue(remap_backend._profile_matches(result, state))
         self.assertEqual(result.count("button: Keyboard"), 1)
         self.assertEqual(result.count("button: QuickAccess2"), 1)
+
+    def test_default_restores_custom_baseline_and_preserves_unrelated_live_edits(self):
+        baseline = BASE_PROFILE.replace(
+            "  - gamepad:\n      button: Guide\n  - gamepad:\n      button: North\n",
+            "  - keyboard: KeyF7\n",
+        ).replace("  - gamepad:\n      button: Screenshot\n", "  - keyboard: KeyF8\n")
+        state = remap_backend._sanitize_state({"enabled": True, "baseline_profile": baseline,
+            "desktop_action": "escape", "page_action": "f2"})
+        live = remap_backend._build_profile(baseline, state).replace("LeftPaddle1", "RightPaddle2")
+        state["desktop_action"] = "default"
+        restored = remap_backend._build_profile(live, state)
+        self.assertIn("keyboard: KeyF7", restored)
+        self.assertIn("keyboard: KeyF2", restored)
+        self.assertIn("button: RightPaddle2", restored)
+        self.assertNotIn("button: Guide", restored)
+        self.assertTrue(remap_backend._profile_matches(restored, state))
+        state["page_action"] = "default"
+        restored = remap_backend._build_profile(restored, state)
+        self.assertIn("keyboard: KeyF8", restored)
+        self.assertTrue(remap_backend._profile_matches(restored, state))
+        self.assertFalse(remap_backend._profile_matches(restored.replace("KeyF8", "KeyF9"), state))
+
+    def test_default_preserves_absent_baseline_mapping_after_custom_action(self):
+        header, blocks = remap_backend._mapping_blocks(BASE_PROFILE)
+        baseline = header + "".join(block for block in blocks if not remap_backend._source_for_block(block))
+        state = remap_backend._sanitize_state({"enabled": True, "baseline_profile": baseline,
+            "desktop_action": "f1", "page_action": "default"})
+        live = remap_backend._build_profile(baseline, state)
+        self.assertNotIn("button: QuickAccess2", live)
+        state["desktop_action"] = "default"
+        restored = remap_backend._build_profile(live, state)
+        self.assertNotIn("button: Keyboard", restored)
+        self.assertTrue(remap_backend._profile_matches(restored, state))
 
     def test_disabled_accepts_inputplumber_empty_list_serialization(self):
         state = remap_backend._sanitize_state({

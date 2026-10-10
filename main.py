@@ -133,22 +133,36 @@ def _guard_component_calls(cls):
             @functools.wraps(fn)
             async def guarded(self, *args, **kwargs):
                 await self._check_guard()
+                if fn.__name__ == 'modules_get_status':
+                    # This read-only snapshot must remain available while a
+                    # slow RPC or pending restoration holds the mutation gate.
+                    if self._guard_blocked or self._closing:
+                        raise RuntimeError(self._guard_message())
+                    return await fn(self, *args, **kwargs)
                 async with self._guard_lock:
                     if self._guard_blocked or self._closing:
                         raise RuntimeError(self._guard_message())
                     module = _rpc_module(fn.__name__)
                     if module and not self._module_enabled(module):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
-                    if fn.__name__ in UPDATE_RPCS:
+                    if module and self._module_health.get(module, {}).get('ready') is False:
+                        raise RuntimeError('This module could not start. Retry it in Manage Modules.')
+                    if fn.__name__ in UPDATE_RPCS or fn.__name__ == 'retry_extras':
                         # Register download work before releasing the admission
                         # gate, but never hold hardware controls behind networking.
-                        self._ensure_updates()
+                        if fn.__name__ in UPDATE_RPCS:
+                            self._ensure_updates()
                         task = asyncio.create_task(fn(self, *args, **kwargs))
                         self._update_jobs.add(task)
                         task.add_done_callback(self._update_jobs.discard)
+                    elif module:
+                        # Independent modules need not queue behind a slow WiFi
+                        # probe. Lifecycle changes still drain every admitted RPC.
+                        task = asyncio.create_task(self._run_rpc(module, fn, args, kwargs))
+                        self._rpc_jobs.add(task)
+                        task.add_done_callback(self._rpc_jobs.discard)
                     else:
-                        # A cancelled hardware RPC must not release the gate
-                        # while its backend transaction is still running.
+                        await module_runtime.complete(self._drain_rpc_jobs())
                         return await module_runtime.complete(fn(self, *args, **kwargs))
                 return await module_runtime.complete(task)
             return guarded
@@ -162,6 +176,11 @@ class Plugin:
 
     def __init__(self):
         self._guard_lock = asyncio.Lock()
+        self._rpc_locks = {name: asyncio.Lock() for name in MODULE_NAMES}
+        # These calls share InputPlumber filters, profiles and HID diagnostics.
+        self._rpc_locks['remap'] = self._rpc_locks['controller']
+        self._rpc_jobs = set()
+        self._guard_scan = None
         self._guard_task = None
         self._guard_blocked = False
         self._guard_conflicts = []
@@ -186,6 +205,7 @@ class Plugin:
             and isinstance(value.get('resume', {}), dict)
             else {'enabled': False, 'error': 'Invalid module settings. Review before enabling.'}
             for name, value in self._module_state.items() if name in MODULE_NAMES}
+        self._module_health = {}
         self._tdp = tdp_backend.Plugin()
         self._vibration = vibration_backend.Plugin()
         self._display = display_backend.Plugin()
@@ -209,6 +229,25 @@ class Plugin:
             pass
         self._updates = CompanionUpdates(PLUGIN_DIR, home, uid, gid)
 
+    async def _run_rpc(self, module, function, args, kwargs):
+        resource = 'controller' if function.__name__ == 'battery_get_controller_levels' else module
+        async with self._rpc_locks[resource]:
+            # A queued call may have been admitted before a conflict or shutdown.
+            if self._guard_blocked or self._closing:
+                raise RuntimeError(self._guard_message())
+            return await function(self, *args, **kwargs)
+
+    async def _drain_rpc_jobs(self):
+        while self._rpc_jobs:
+            await asyncio.gather(*tuple(self._rpc_jobs), return_exceptions=True)
+
+    async def _stop_component(self, name):
+        try:
+            await getattr(self, '_' + name)._unload()
+        finally:
+            # Monitor cancellation cannot cancel a thread's hardware operation.
+            await module_runtime.drain(name)
+
     def _module_enabled(self, name):
         value = self._module_state.get(name, {})
         return isinstance(value, dict) and value.get('enabled', True) is True and not value.get('pending', False)
@@ -219,8 +258,10 @@ class Plugin:
 
     def _module_status(self):
         result = {name: {'enabled': self._module_enabled(name),
+                       'ready': self._module_health.get(name, {}).get('ready', True),
                        'pending': bool(self._module_state.get(name, {}).get('pending')),
-                       'error': self._module_state.get(name, {}).get('error', ''),
+                       'error': (self._module_state.get(name, {}).get('error', '')
+                                 or self._module_health.get(name, {}).get('error', '')),
                        'note': self._module_state.get(name, {}).get('note', '')}
                 for name in MODULE_NAMES}
         display = self._module_state.get('display', {})
@@ -230,14 +271,34 @@ class Plugin:
                 result['display']['note'] = ''
         return result
 
+    async def _start_module(self, name):
+        component = getattr(self, '_' + name)
+        try:
+            if self._module_health.get(name, {}).get('ready') is False:
+                # A failed startup may have partially created workers. Finish
+                # their cleanup before retrying the saved user choice.
+                await self._stop_component(name)
+            self._module_health[name] = {'ready': False}
+            result = await component._main()
+            if isinstance(result, dict) and result.get('success') is False:
+                raise RuntimeError(result.get('error') or result.get('message') or 'Module startup failed.')
+            self._module_health[name] = {'ready': True}
+        except Exception as exc:
+            self._module_health[name] = {'ready': False, 'error': str(exc)}
+            try:
+                await self._stop_component(name)
+            except Exception as stop_error:
+                self._module_health[name]['error'] += f' Cleanup failed: {stop_error}'
+            raise
+
     async def _publish_modules(self):
         try:
-            await decky.emit('companion_guard', self._guard_status())
+            await decky.emit('companion_guard', await asyncio.to_thread(self._guard_status))
         except Exception as exc:
             decky.logger.warning(f'Module status notification failed: {exc}')
 
     async def modules_get_status(self):
-        return self._module_status()
+        return await asyncio.to_thread(self._module_status)
 
     async def modules_restart_session(self):
         result = await self._display.restart_session()
@@ -252,40 +313,41 @@ class Plugin:
         if enabled:
             if self._module_state.get(name, {}).get('pending'):
                 raise RuntimeError('Retry disabling this module to finish restoration first.')
-            if self._module_enabled(name):
-                return self._module_status()
+            if self._module_enabled(name) and self._module_health.get(name, {}).get('ready', True):
+                return await asyncio.to_thread(self._module_status)
             # Startup is gated until the durable intent is written; failure stays visible.
             self._module_state[name] = {'enabled': True, 'resume': resume}
             try:
-                self._save_modules()
+                await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception:
                 self._module_state = previous
                 raise
             try:
-                await component._main()
+                await self._start_module(name)
                 await restore_intent(name, component, resume)
                 self._module_state[name] = {'enabled': True}
-                self._save_modules()
+                await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception as exc:
                 self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
                 try:
-                    self._save_modules()
+                    await module_runtime.complete(asyncio.to_thread(self._save_modules))
                 finally:
                     try:
-                        await component._unload()
+                        if self._module_health.get(name, {}).get('ready', True):
+                            await self._stop_component(name)
                     finally:
                         await self._publish_modules()
                 raise
         else:
             if not self._module_enabled(name) and not self._module_state.get(name, {}).get('pending'):
-                return self._module_status()
+                return await asyncio.to_thread(self._module_status)
             # Persist the gate before cleanup. An interrupted withdrawal never starts
             # the module on next boot; it retries cleanup with the saved ownership.
             if not self._module_state.get(name, {}).get('pending'):
                 resume = await asyncio.to_thread(capture_intent, name)
             self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume}
             try:
-                self._save_modules()
+                await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception:
                 self._module_state = previous
                 raise
@@ -294,13 +356,13 @@ class Plugin:
                 note = await withdraw(name, component)
                 self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
                 if name == 'display':
-                    self._module_state[name]['session'] = display_backend._gamescope_start_time()
-                self._save_modules()
+                    self._module_state[name]['session'] = await asyncio.to_thread(display_backend._gamescope_start_time)
+                await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception as exc:
                 self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
-                self._save_modules()
+                await module_runtime.complete(asyncio.to_thread(self._save_modules))
         await self._publish_modules()
-        return self._module_status()
+        return await asyncio.to_thread(self._module_status)
 
     async def _run_stage(self, stage: str) -> None:
         components = (
@@ -320,7 +382,8 @@ class Plugin:
             and callable(getattr(component, stage, None))
         )
         results = await asyncio.gather(
-            *(getattr(component, stage)() for _, component in runnable),
+            *(self._start_module(name) if stage == '_main' else getattr(component, stage)()
+              for name, component in runnable),
             return_exceptions=True,
         )
         for (name, _), result in zip(runnable, results):
@@ -348,6 +411,18 @@ class Plugin:
                 "message": self._guard_message() if self._guard_blocked else ""}
 
     async def _inspect_guard(self):
+        # Concurrent menu reads share the pending scan only. Completed scans are
+        # never cached, preserving conflict detection on each later admission.
+        if self._guard_scan is None or self._guard_scan.done():
+            self._guard_scan = asyncio.create_task(self._inspect_guard_once())
+        task = self._guard_scan
+        try:
+            await asyncio.shield(task)
+        finally:
+            if task.done() and self._guard_scan is task:
+                self._guard_scan = None
+
+    async def _inspect_guard_once(self):
         # Only these fields can change during a conflict scan. Building the
         # full status also reads version metadata and probes the display session.
         before = (self._guard_blocked, tuple(self._guard_conflicts), self._guard_error)
@@ -361,11 +436,11 @@ class Plugin:
             # module globals would risk duplicate workers or lost restoration state.
             self._guard_blocked = True
             if self._updates is not None:
-                self._updates.close()
+                await module_runtime.complete(asyncio.to_thread(self._updates.close))
         if before != (self._guard_blocked, tuple(self._guard_conflicts), self._guard_error):
             decky.logger.warning("[legiongo2companion] " + self._guard_message())
             try:
-                await decky.emit("companion_guard", self._guard_status())
+                await decky.emit("companion_guard", await asyncio.to_thread(self._guard_status))
             except Exception as exc:
                 decky.logger.warning(f"[legiongo2companion] guard event unavailable: {exc}")
 
@@ -379,11 +454,11 @@ class Plugin:
 
     async def _stop_modules(self):
         async def stop():
+            await self._drain_rpc_jobs()
             await self._run_stage("_unload")
-            if self._guard_blocked:
-                # Cancelling a monitor does not stop its thread. A live conflict
-                # must finish those writes before advertising a paused plugin.
-                await asyncio.gather(*(module_runtime.drain(name) for name in MODULE_NAMES))
+            # Both normal shutdown and conflict withdrawal must finish threads
+            # that outlive the cancellation of their async monitor.
+            await asyncio.gather(*(module_runtime.drain(name) for name in MODULE_NAMES))
         try:
             await module_runtime.complete(stop())
         finally:
@@ -403,13 +478,13 @@ class Plugin:
             note = await withdraw(name, getattr(self, '_' + name))
             self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
             if name == 'display':
-                self._module_state[name]['session'] = display_backend._gamescope_start_time()
-            self._save_modules()
+                self._module_state[name]['session'] = await asyncio.to_thread(display_backend._gamescope_start_time)
+            await module_runtime.complete(asyncio.to_thread(self._save_modules))
         except Exception as exc:
             self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
             decky.logger.error(f'Module {name} recovery failed: {exc}')
             try:
-                self._save_modules()
+                await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception as save_error:
                 decky.logger.error(f'Module {name} recovery could not be saved: {save_error}')
 
@@ -418,6 +493,7 @@ class Plugin:
         if self._guard_blocked:
             return
         async with self._guard_lock:
+            await module_runtime.complete(self._drain_rpc_jobs())
             await asyncio.to_thread(_migrate_legacy_settings)
             await asyncio.to_thread(_reload_component_settings)
             await self._run_stage("_migration")
@@ -433,6 +509,7 @@ class Plugin:
         async with self._guard_lock:
             if self._modules_started or self._guard_blocked or self._closing:
                 return
+            await module_runtime.complete(self._drain_rpc_jobs())
             await asyncio.to_thread(_migrate_legacy_settings)
             await asyncio.to_thread(_reload_component_settings)
             await self._inspect_guard()
@@ -444,30 +521,34 @@ class Plugin:
             await self._run_stage("_main")
             for name in MODULE_NAMES:
                 entry = self._module_state.get(name, {})
-                if self._module_enabled(name) and entry.get('resume'):
+                if (self._module_enabled(name) and self._module_health.get(name, {}).get('ready', True)
+                        and entry.get('resume')):
                     try:
                         await restore_intent(name, getattr(self, '_' + name), entry['resume'])
                         self._module_state[name] = {'enabled': True}
-                        self._save_modules()
+                        await module_runtime.complete(asyncio.to_thread(self._save_modules))
                     except Exception as exc:
                         self._module_state[name] = {'enabled': False, 'pending': True,
                                                     'resume': entry['resume'], 'error': str(exc)}
                         try:
-                            self._save_modules()
+                            await module_runtime.complete(asyncio.to_thread(self._save_modules))
                         except Exception as save_error:
                             decky.logger.error(f'Module {name} recovery could not be saved: {save_error}')
                         try:
-                            await getattr(self, '_' + name)._unload()
+                            await self._stop_component(name)
                         except Exception as stop_error:
                             decky.logger.error(f'Module {name} recovery could not stop: {stop_error}')
+        await self._publish_modules()
         await self._check_guard()
 
     async def _unload(self):
         self._closing = True
-        if self._updates is not None:
-            self._updates.close()
         async def cleanup():
             try:
+                if self._updates is not None:
+                    # close waits for a root Downloads rename already in
+                    # progress. Keep that filesystem barrier off the event loop.
+                    await asyncio.to_thread(self._updates.close)
                 task, self._guard_task = self._guard_task, None
                 if task is not None:
                     task.cancel()
@@ -476,9 +557,13 @@ class Plugin:
                     except asyncio.CancelledError:
                         pass
                 async with self._guard_lock:
+                    await self._drain_rpc_jobs()
                     if self._modules_started:
                         await self._stop_modules()
             finally:
+                if self._guard_scan is not None:
+                    await self._guard_scan
+                    self._guard_scan = None
                 if self._update_jobs:
                     await asyncio.gather(*tuple(self._update_jobs), return_exceptions=True)
         await module_runtime.complete(cleanup())
@@ -515,7 +600,7 @@ class Plugin:
 
     async def get_version(self):
         await self._check_guard()
-        return self._guard_status()
+        return await asyncio.to_thread(self._guard_status)
 
     async def get_settings(self):
         return await self._tdp.get_settings()
@@ -620,8 +705,8 @@ class Plugin:
     async def vibe_set_touchpad_enabled(self, enabled, expected_app_id=None, expected_profile_id=None):
         return await self._vibration.set_touchpad_enabled(enabled, expected_app_id, expected_profile_id)
 
-    async def vibe_reset_to_default(self):
-        return await self._vibration.reset_to_default()
+    async def vibe_reset_to_default(self, expected_app_id=None, expected_profile_id=None):
+        return await self._vibration.reset_to_default(expected_app_id, expected_profile_id)
 
     async def vibe_reapply(self):
         return await self._vibration.reapply()
