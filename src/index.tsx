@@ -136,7 +136,7 @@ const refreshGuard = async () => {
     stopTdpWatcher(); stopVibrationWatcher();
     overviewPaused = true;
     clearOverview();
-    guardListeners.forEach(listener => listener({version: "1.0.4", blocked: true,
+    guardListeners.forEach(listener => listener({version: "2.0.0", blocked: true,
       guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
   } finally { if (guardRead === request) guardRead = null; }
 };
@@ -173,7 +173,7 @@ const overviewSources: OverviewSource[] = [
   { key: "controller", module: "controller", read: async () => ({ controller: await getControllerStatus() }) },
 ].map(source => ({ ...source, revision: 0, pending: null,
   lastReadAt: null, failures: 0, pendingSince: null } as OverviewSource));
-let overviewCache: Overview = { version: "1.0.4" };
+let overviewCache: Overview = { version: "2.0.0" };
 let overviewModules = EMPTY_MODULES;
 let overviewPaused = true;
 const overviewListeners = new Set<(overview: Overview) => void>();
@@ -213,7 +213,7 @@ const invalidateOverviewReads = () => {
 const clearOverview = () => {
   invalidateOverviewReads();
   overviewSources.forEach(source => { source.lastReadAt = null; });
-  overviewCache = { version: "1.0.4" };
+  overviewCache = { version: "2.0.0" };
 };
 const configureOverviewModules = (modules: ModuleStates) => {
   for (const source of overviewSources) {
