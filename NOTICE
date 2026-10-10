@@ -28,14 +28,24 @@ different from HueSync's older Go 2 mapping.
 Third-party components
 ================================================================================
 
+@decky/rollup 1.0.2 configuration
+Copyright (c) 2024 Steam Deck Homebrew
+License: BSD-3-Clause; see LICENSE.DECKY-ROLLUP
+
+The local Rollup configuration retains the Decky preset's globals and source-map
+policy while replacing its glob-based output cleanup with Node's filesystem API.
+The preset package and its deletion dependencies are not installed or bundled.
+
 RyzenAdj 0.19.0
 Copyright (C) 2018-2024 Jiaxun Yang and contributors
 https://github.com/FlyGoat/RyzenAdj
 License: GNU Lesser General Public License v3
 
-RyzenAdj is not distributed in the release archive. The TDP backend downloads
-the pinned official binary over HTTPS when the extended range is needed and
-invokes it as a separate process.
+RyzenAdj is not distributed in the release archive. On supported devices, the
+TDP backend checks for the pinned official binary locally and downloads it over
+HTTPS in the background if it is missing, or when Extras is retried. Firmware
+controls can start before the download finishes. The helper is invoked as a
+separate process.
 
 pyudev 0.24.4 (the pyudev/ directory)
 Copyright (C) 2010-2015 Sebastian Wiesner and contributors

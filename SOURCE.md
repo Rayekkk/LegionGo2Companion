@@ -7,15 +7,21 @@ LGPL-2.1. `npm run package` includes its full package source in
 generated directories are not part of the Git checkout.
 
 The source and build inputs for the combined frontend are included in the
-release archive as `src/`, `rollup.config.js`, `tsconfig.json`, `package.json`
-and `package-lock.json`. With Node.js 18 or newer, rebuild the bundle with:
+release archive as `src/`, `scripts/`, `rollup.config.js`, `tsconfig.json`,
+`package.json` and `package-lock.json`. With Node.js 18 or newer, rebuild the bundle with:
 
 ```bash
-npm ci
+npm ci --ignore-scripts
 npm run build
 ```
 
 This permits replacing or modifying `@decky/api` and relinking the frontend.
+The local Rollup configuration is adapted from `@decky/rollup` 1.0.2 under
+BSD-3-Clause (`LICENSE.DECKY-ROLLUP`). It preserves Decky's Steam globals while
+using Node's filesystem API for output cleanup. The old preset and its vulnerable
+deletion dependency chain are no longer installed. The build also checks the
+generated JavaScript, external globals, plugin export and embedded source map.
+
 The combined project source is available at
 https://github.com/Rayekkk/LegionGo2Companion. Its public standalone source bases
 are available at https://github.com/Rayekkk/LeGoTDP,

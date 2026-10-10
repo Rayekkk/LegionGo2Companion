@@ -21,6 +21,7 @@ const stageDir = join(buildDir, PLUGIN_DIR_NAME);
 const zipPath = join(repoRoot, `${PLUGIN_DIR_NAME}-${version}.zip`);
 
 const CONTENTS = [
+  "active_app.py",
   "main.py",
   "module_control.py",
   "module_runtime.py",
@@ -51,9 +52,12 @@ const CONTENTS = [
   "LICENSE",
   "LICENSE.MIT",
   "LICENSE.HUESYNC",
+  "LICENSE.DECKY-ROLLUP",
   "NOTICE",
   "requirements.txt",
   "src",
+  "scripts/check-build.mjs",
+  "scripts/package.mjs",
   "gamescope",
   "pyudev",
   "dist",
