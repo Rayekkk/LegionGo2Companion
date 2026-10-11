@@ -9,9 +9,9 @@
 [![License](https://img.shields.io/github/license/Rayekkk/LegionGo2Companion?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
 **Your Legion Go 2 hardware controls, together in the Steam overlay.**
-Tune power and vibration, personalise lighting and buttons, manage charging, and check your display and Wi-Fi without leaving Gaming Mode.
+Tune power, cooling and vibration, personalise lighting and buttons, manage charging, and check your display and Wi-Fi without leaving Gaming Mode.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#usage) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#quick-start) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -19,13 +19,14 @@ Tune power and vibration, personalise lighting and buttons, manage charging, and
 
 ## Features
 
-Legion Go 2 Companion combines eight hardware modules in one Decky plugin. Use the
+Legion Go 2 Companion combines nine hardware modules in one Decky plugin. Use the
 controls you need, hide the rest, and keep separate power and vibration settings for
 your games. Saved profiles continue working while the menu is closed.
 
 | Module | What you can do |
 |---|---|
 | [TDP](#tdp) | Choose four power presets or Custom limits, adjust CPU Boost and EPP, and save game profiles with separate battery/AC settings |
+| [Fan Control](#fan-control) | Edit a fan curve with touch or controller, view measured speed and temperature, and optionally assign curves to Companion TDP presets |
 | [Vibration](#vibration) | Set handle vibration, touchpad feedback and game profiles; try a short vibration test |
 | [RGB Lighting](#rgb-lighting) | Set the joystick-ring effect, colour, brightness and speed; control the power-button light on verified firmware |
 | [Button Remapper](#button-remapper) | Give the left controller's Desktop and Page buttons separate actions |
@@ -50,7 +51,15 @@ controller RGB; maintainers have not independently verified every feature on 8AH
 
 Each module checks its own hardware support and explains unavailable controls. The
 **power-button light** additionally requires the verified **83N0 / RRCN16WW** BIOS
-and ACPI layout. The 83N1 RGB extension does not extend that firmware access.
+and ACPI layout. **Fan Control** requires the validated **83N0 / Legion Go 8ASP2,
+RRCN16WW BIOS and EC 1.16** platform. Other model/firmware variants are unavailable
+for Fan Control until validated; 83N1 joystick RGB support does not extend either
+firmware control.
+
+Use only one fan controller at a time. Stop another EC fan-control tool and let it
+return control to firmware before enabling Companion's curve. Detected raw-port
+owners, an existing EC override or unknown ownership block activation; these checks
+cannot detect or exclude every non-cooperating EC writer.
 
 ## Installation
 
@@ -82,10 +91,10 @@ Display**, where setup or a Gaming Mode restart may be requested.
 ### Updating
 
 1. Open **About → Check for Updates**.
-2. If a newer stable release has a downloadable plugin ZIP, choose **Download <version>**.
+2. If a newer stable release has a downloadable plugin ZIP, choose **Download &lt;version&gt;**.
 3. Wait for the confirmed download path in your Downloads folder.
 4. Install that ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
-5. Review your module settings afterwards, especially gyro, battery protection and Wi-Fi.
+5. Review your module settings afterwards, especially fan control, gyro, battery protection and Wi-Fi. Fan Control requires explicit re-enabling after startup or reload.
 
 **Downloading does not install the update.** Decky's installation process can reset
 those hardware preferences. Companion verifies the ZIP before offering the completed
@@ -102,12 +111,14 @@ keep you on the current page.
 
 1. Open **Manage Modules** and leave enabled the modules you want to use.
 2. Open a module and check its status before changing a setting.
-3. For game-specific TDP or vibration, launch the game first, then enable **Per Game Profile** on that page.
-4. Wait for the result after a change. A saved preference can be waiting for hardware confirmation; check the current/applied state too.
+3. For custom cooling, open **Fan Control**, review the curve and save any edits, then turn on **Enable Fan Control**. Leave it off to keep firmware automatic control.
+4. For game-specific TDP or vibration, launch the game first, then enable **Per Game Profile** on that page.
+5. Wait for the result after a change. A saved preference can be waiting for hardware confirmation; check the current/applied state too.
 
 The overview keeps the last received summaries when reopened. A note about old data
-means a fresh status could not yet be confirmed. Changes remain saved across reboots;
-managed profiles and supported controls recover after wake without reopening Decky.
+means a fresh status could not yet be confirmed. Preferences remain saved across
+reboots. Managed profiles and supported controls recover after wake; **Fan Control
+stays off after startup, reload, sleep or a fault until you explicitly enable it again**.
 
 ### Manage Modules
 
@@ -121,13 +132,14 @@ Restoration depends on the module:
 | Module | When disabled |
 |---|---|
 | TDP & CPU | Returns TDP to the balanced firmware profile, CPU Boost to standard boost, and EPP to `balance_performance` |
+| Fan Control | Releases the custom override to firmware automatic. Curves, assignments and display units are kept; enabling the module again does not activate the curve |
 | Vibration | Returns to driver defaults |
 | RGB, Button Remapper, Gyro & Touchpad, Battery | Restores the captured state for controls still owned by Companion |
 | WiFi | Restores the configuration Companion changed; Wi-Fi may briefly reconnect |
 | OLED Display | Withdraws display adjustments and its script; Gaming Mode may need a restart |
 
-If cleanup cannot finish, the module stays blocked and offers **Retry <module> Cleanup**.
-An enabled module that could not start offers **Retry <module> Start**. Recovery records
+If cleanup cannot finish, the module stays blocked and offers **Retry &lt;module&gt; Cleanup**.
+An enabled module that could not start offers **Retry &lt;module&gt; Start**. Recovery records
 are retained and unfinished cleanup is retried on startup. **Restart Gaming Mode (closes
 games)** ends the current gaming session, so save and close your games first.
 
@@ -150,7 +162,7 @@ battery consumption.
 | Full Power | 35 W | 37 W | 45 W |
 
 Presets apply immediately to the active profile. In **Custom**, adjust the sliders and
-use **Apply TDP**, **Apply & Save for <game>** or **Save AC for <game>**, depending on
+use **Apply TDP**, **Apply & Save for &lt;game&gt;** or **Save AC for &lt;game&gt;**, depending on
 which profile you are editing.
 
 **Advanced TDP Control** is on by default and shows all three limits. Turn it off for
@@ -198,6 +210,81 @@ limits remain available and your profiles are kept. Use **Retry Extras download*
 
 If status or a profile could not load, use **Retry status** or **Retry profile** and wait
 for fresh values before editing.
+
+### Fan Control
+
+Open **Fan Control** directly below TDP. New settings start with the **Balanced**
+curve, **RPM** units and one **global curve**; custom control and preset assignments
+are off. Existing curves and display units are preserved.
+
+Review the graph, use **Save global curve** for any edits, then turn on **Enable Fan
+Control**. Saving while control is off does not start the fan controller. When it is
+already enabled, saving the active curve updates its target. Turn the switch off to
+return to **Firmware automatic**; a saved curve remains available for later.
+
+#### Edit the curve
+
+The graph has **8 points across 0–100°C**. Move the first seven points; the last is
+fixed at **100°C / full speed**. Temperatures stay in order, and fan speeds can stay
+equal or rise as temperature increases. The editor stops a point crossing its
+neighbours or creating a falling speed segment.
+
+Drag a point, or focus the graph and use the controller:
+
+| Control | Action |
+|---|---|
+| A | Enter point editing |
+| LB / RB | Select the previous / next point |
+| D-pad left / right | Adjust temperature by 1°C |
+| D-pad up / down | Adjust speed by the selected step |
+| B | Finish point editing; normal Back navigation is available afterwards |
+
+**Speed edit step** starts at **100 RPM**. Choose a smaller or larger step as needed.
+**Full screen curve editor** provides the same curve controls with more space.
+**Discard changes** returns to the saved curve. Unsaved drafts are kept while switching
+between curves and the full-screen editor; save them before leaving the page.
+
+**Starting curve** offers **Silent**, **Balanced** and **Aggressive** as editable
+templates. Silent allows a stop at the cold end, Balanced starts with running cooling,
+and Aggressive raises cooling earlier. Selecting a template changes only the draft:
+save it as-is or adjust it first. These are Companion starting points, not Lenovo
+firmware profiles. Edited points show **Edited curve** rather than a template name.
+
+#### Readings and units
+
+The overview, page header and live graph marker show **measured fan speed**, separately
+from the requested curve. They also work in firmware automatic mode without enabling
+custom control. **APU** here means the higher of **CPU Tctl and GPU edge**; it is not a
+separate measured whole-package temperature. Missing or stale readings show a dash.
+
+In **Settings**, **Show fan speed as percentage** changes the menu, graph and readings;
+the full-screen editor calls this **Speed unit**. The choice is saved. **100% means
+4800 RPM**, the tested operating ceiling for the supported unit/firmware. A **0 RPM**
+point requests an actual stop; turning custom control off instead returns to firmware
+automatic. See [Fan Control internals and limits](#fan-control-internals-and-limits).
+
+#### Optional TDP assignments
+
+The global curve is used unless **Settings → Assign curves to TDP presets** is on.
+This option starts off and hides the assignment controls, even if old assignments
+remain saved. With assignments off, the global curve stays the same when you change
+Companion TDP or SteamOS QAM power modes.
+
+Turn it on to choose **Global**, **Silent**, **Balanced**, **Performance**, **Maximum**
+or **Custom** in **Curve**. Maximum corresponds to **Full Power** on Companion's TDP
+page. Choose or edit points, then use **Assign curve to &lt;preset&gt;**. Selecting a row
+only chooses what you are editing; it does not assign or activate that curve.
+
+An unassigned preset uses the global curve. **Use global curve for &lt;preset&gt;** removes
+its assignment. Turning assignments off keeps saved curves and open drafts and uses
+only the global curve. Assignments follow **Companion TDP presets**, including those
+selected by game/AC profiles, **not SteamOS QAM Performance profiles**. They are separate
+from the three Starting curve templates.
+
+After startup, reload, sleep or a fault, review the status and explicitly enable
+custom control again. Disabling Fan Control or its module returns to firmware
+automatic. If the page says **Fan Control blocked**, **Fan recovery pending** or
+**Fan Control needs attention**, follow [Troubleshooting](#troubleshooting).
 
 ### Vibration
 
@@ -370,6 +457,12 @@ download path remain available if you leave and return to About during the opera
 | A hardware control is unavailable | Read the page's reason. Driver, InputPlumber, adapter and firmware checks determine availability; installing Companion does not supply missing system interfaces. |
 | A preference is saved but not confirmed | Check the current hardware state and the error. Wait for recovery or use the offered retry. An unavailable reading is not treated as a confirmed on/off state. |
 | Extras is unavailable | Keep using the firmware range. Connect to the internet and use Retry Extras download; saved extended profiles are retained. |
+| Fan Control unavailable | Check the model, BIOS and EC versions against Requirements. Other variants stay blocked until their register mapping is validated. |
+| Fan Control blocked or External fan control | Stop the other fan/EC control tool and let it restore firmware automatic. Companion also blocks uncertain ownership; do not force-enable a second controller. |
+| Fan Control needs attention or Fan recovery pending | Read the reason, allow recovery to finish and resolve any sensor or ownership error. Review the saved curve before explicitly enabling it again. Keep custom control off if recovery cannot be confirmed. |
+| My fan curve is saved but Firmware automatic is shown | Saving does not enable custom control. Startup, reload, sleep, a fault or disabling the module requires you to enable Fan Control again. |
+| A fan graph point will not move further | Temperatures must stay ordered and speeds cannot decrease between points. The eighth point is fixed at 100°C/full speed; positive speeds below 1500 RPM are skipped. |
+| Fan RPM or APU shows a dash | The reading is unavailable or stale. Open Fan Control and read its status; another raw-port owner can prevent a safe read. A dash is not a confirmed stopped fan. |
 | Gyro test has data but the game does not react | Check that game's Steam Input layout and gyro/touchpad assignments. The passive test checks the input path. |
 | Battery is above 80% after protection is enabled | The firmware stops further charging according to its Long Life mode; it does not actively discharge an already charged battery. |
 | OLED controls are locked | Read the native-support or cleanup message. Use the requested restart; EDID correction remains separate. |
@@ -393,6 +486,7 @@ its own settings and verifies the interface it uses.
 | Area | System interface |
 |---|---|
 | TDP | Lenovo WMI in the firmware range; verified `ryzenadj` helper for Extras |
+| Fan Control | Restricted EC access on validated firmware; k10temp and amdgpu temperatures plus EC tachometer feedback |
 | CPU Boost / EPP | Kernel CPU policy controls under sysfs |
 | Package power | RAPL energy counters |
 | Haptics / joystick RGB | `hid-lenovo-go` sysfs controls |
@@ -427,6 +521,8 @@ checks, with backoff after failures.
 Page refreshes pause while Quick Access is hidden. Diagnostic readers close outside a
 test; controller battery sampling is a short read with a 15-second cache when requested.
 RGB animations run in firmware, and slider edits are grouped while a control is moving.
+Vibration also discards superseded queued values for the same field and profile while
+preserving the final accepted edit when its page closes.
 Actual overhead depends on enabled modules, display mode and the system build.
 
 Conflict detection checks plugin folders and manifests, including renamed copies. It
@@ -437,6 +533,62 @@ The update downloader accepts stable release plugin ZIPs with a SHA-256 digest. 
 version, size, digest and archive contents before completing the download. Failed
 downloads do not replace an existing ZIP. Source archives and development branches are
 not used as fallback downloads.
+
+</details>
+
+### Fan Control internals and limits
+
+<details>
+<summary><b>EC access, temperature readings and recovery</b></summary>
+
+Fan Control uses an independently implemented, restricted EC register interface on
+[the validated hardware](#requirements). The positive target range is **1500–4800 RPM**;
+unsupported positive values below 1500 snap to stop or the running minimum. Custom
+zero uses a distinct EC stop request; a zero override releases control to firmware.
+Firmware automatic can also naturally stop a cool fan.
+
+**4800 RPM is an observed operating plateau on the tested unit, not a manufacturer
+motor rating or a guarantee for every console.** Bounded trials through a 5200 RPM
+target produced no useful increase. The editor's finer target steps do not imply
+one-RPM motor accuracy. Starting from stop requests the curve's positive speed
+directly, without an artificial 4000 RPM kick; insufficient tach feedback causes
+withdrawal rather than repeated hidden boosts.
+
+Control and the displayed APU value use **max(CPU Tctl, GPU edge)** from k10temp and
+amdgpu. The tested system exposes no Tdie or verified separate whole-package sensor.
+The EC temperature is an additional consistency check with an unproven physical
+sensor identity. A live tachometer reading is never replaced by the requested RPM.
+
+A separate controller process and independent recovery process supervise fresh sensors,
+progress and ownership. Cooling rises quickly and falls more slowly to limit
+oscillation. Custom control continues above **85°C**; at **100°C**, the controller
+and backup can enforce full speed without the normal ramp. This high-temperature
+policy is tested with model inputs, not by heating the console to 100°C. Native
+thermal protections remain in place.
+
+Disable, unload, faults and normal sleep withdraw custom control and verify firmware
+automatic. Sleep preparation uses login1 delay inhibitors. Saved enabled state never
+automatically starts a new controller after startup/reload or a fault. Detected
+conflicting owners or unverifiable ownership block activation; a foreign raw-port
+reader can also block telemetry without proving an active fan override.
+
+Recovery requires a functioning kernel and EC transport. Recovery after a whole-system
+hang and a firmware-enforced lease have not been established. Userspace locks cannot
+exclude firmware/SMM or every non-cooperating EC writer. Do not run another fan or EC
+control tool alongside Companion's custom controller.
+
+With custom control off, there are no fan workers or sleep inhibitors and no background
+EC polling. Visible fan views request bounded passive readings; hiding them stops new
+requests. Active control uses its own telemetry independently of the menu.
+
+Settings migrations preserve the original ten-point and earlier eight-point curves,
+preset mappings and units in the saved data. Falling segments are raised to remove
+speed decreases while retaining the originals in archives. Migration keeps custom
+control off; optional TDP assignments remain dormant until explicitly enabled.
+Saving uses a revision check so an old editor cannot overwrite newer settings.
+
+See [SOURCE.md](SOURCE.md#fan-control-hardware-facts-and-independent-implementation)
+for protocol provenance, migration details and the limits of the hardware evidence.
 
 </details>
 
@@ -479,9 +631,12 @@ See [SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component pro
 - Andrii Dmytrenko ([@Antti](https://github.com/Antti)) - 8AHP2 / 83N1 joystick RGB support and owner testing in [PR #2](https://github.com/Rayekkk/LegionGo2Companion/pull/2)
 - Ally Vibe Control by [piyush-tyagi-13](https://github.com/piyush-tyagi-13/ally-vibe-control), with original per-game profile work by M4ttiA - inherited MIT-licensed vibration code
 - [HueSync](https://github.com/honjow/HueSync) by honjow and Steam Deck Homebrew - reference for the lighting interface and Go 2 sysfs controls
+- [Rodpad/LeGo2-Fan-Control](https://github.com/Rodpad/LeGo2-Fan-Control) - published fan protocol/register facts used by Companion's independent implementation; no reference implementation was copied or adapted
+- Armada Control - fan-editor UX reference; Companion's editor is independently designed and implemented, with no Armada code incorporated. See [SOURCE.md](SOURCE.md#fan-control-hardware-facts-and-independent-implementation)
 - [RyzenAdj](https://github.com/FlyGoat/RyzenAdj), [pyudev](https://github.com/pyudev/pyudev), [InputPlumber](https://github.com/ShadowBlip/InputPlumber) and [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) - the supporting tools and interfaces
 
-Full attribution and component licenses are recorded in [NOTICE](NOTICE).
+Component licenses are recorded in [NOTICE](NOTICE); implementation and hardware-reference
+provenance are described in [SOURCE.md](SOURCE.md).
 
 ---
 
