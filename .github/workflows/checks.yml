@@ -118,3 +118,9 @@ jobs:
                   assert source.is_file(), f'Unexpected archive file: {path}'
                   assert payload.read(member) == source.read_bytes(), f'Stale package file: {path}'
           print(f'Archive verified: {archive.name}')
+      - name: Upload verified plugin ZIP
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LegionGo2Companion
+          path: LegionGo2Companion-*.zip
+          if-no-files-found: error

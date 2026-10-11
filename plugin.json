@@ -7,5 +7,5 @@
   "api_version": 1,
   "main": "main.py",
   "bin": "dist/index.js",
-  "version": "2.0.0"
+  "version": "2.1.0"
 }
