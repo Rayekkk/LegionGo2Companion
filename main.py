@@ -24,6 +24,7 @@ if PLUGIN_DIR not in sys.path:
 import battery_backend
 import controller_backend
 import display_backend
+import fan_backend
 import remap_backend
 import rgb_backend
 import tdp_backend
@@ -34,11 +35,11 @@ from companion_updates import CompanionUpdates
 from safe_settings import atomic_write_json, load_json_object, SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 
-MODULE_NAMES = ('tdp', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
+MODULE_NAMES = ('tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
 UPDATE_RPCS = frozenset({'updates_check', 'updates_download'})
 
 def _rpc_module(name):
-    for prefix, module in (('vibe_', 'vibration'), ('display_', 'display'), ('wifi_', 'wifi'),
+    for prefix, module in (('fan_', 'fan'), ('vibe_', 'vibration'), ('display_', 'display'), ('wifi_', 'wifi'),
                            ('rgb_', 'rgb'), ('remap_', 'remap'), ('battery_', 'battery'), ('controller_', 'controller')):
         if name.startswith(prefix):
             return module
@@ -110,7 +111,7 @@ def _migrate_legacy_settings() -> None:
 def _reload_component_settings() -> None:
     """Refresh module-level SettingsManager instances after disk migration."""
     for module in (
-        tdp_backend, vibration_backend, display_backend, wifi_backend, rgb_backend,
+        tdp_backend, fan_backend, vibration_backend, display_backend, wifi_backend, rgb_backend,
         remap_backend, battery_backend, controller_backend,
     ):
         manager = getattr(module, "settings", None)
@@ -207,6 +208,7 @@ class Plugin:
             for name, value in self._module_state.items() if name in MODULE_NAMES}
         self._module_health = {}
         self._tdp = tdp_backend.Plugin()
+        self._fan = fan_backend.Plugin()
         self._vibration = vibration_backend.Plugin()
         self._display = display_backend.Plugin()
         self._wifi = wifi_backend.Plugin()
@@ -312,6 +314,9 @@ class Plugin:
     async def modules_set_enabled(self, name, enabled):
         if name not in MODULE_NAMES or type(enabled) is not bool:
             raise ValueError('Invalid module or enabled value.')
+        if name == 'fan' and not enabled:
+            # Fan safety takes precedence even if module-choice persistence fails.
+            await self._fan.set_enabled(False)
         previous = dict(self._module_state)
         component = getattr(self, '_' + name)
         resume = self._module_state.get(name, {}).get('resume', {})
@@ -372,6 +377,7 @@ class Plugin:
     async def _run_stage(self, stage: str) -> None:
         components = (
             ("tdp", self._tdp),
+            ("fan", self._fan),
             ("vibration", self._vibration),
             ("display", self._display),
             ("wifi", self._wifi),
@@ -667,6 +673,21 @@ class Plugin:
 
     async def get_tdp_info(self):
         return await self._tdp.get_tdp_info()
+
+    async def fan_get_state(self):
+        return await self._fan.get_state()
+
+    async def fan_set_enabled(self, enabled):
+        return await self._fan.set_enabled(enabled)
+
+    async def fan_save_curve(self, scope, curve, expected_revision):
+        return await self._fan.save_curve(scope, curve, expected_revision)
+
+    async def fan_save_unit(self, unit, expected_revision):
+        return await self._fan.save_unit(unit, expected_revision)
+
+    async def fan_save_assignment_mode(self, enabled, expected_revision):
+        return await self._fan.save_assignment_mode(enabled, expected_revision)
 
     async def apply_tdp(
         self,

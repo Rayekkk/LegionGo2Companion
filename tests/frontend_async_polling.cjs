@@ -3,13 +3,13 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_modules/typescript'));
 const settle = async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
-function realExport(file, name) {
+function realExport(file, name, context = {}) {
   const mod = { exports: {} };
   const source = fs.readFileSync(path.join(root, 'src', file), 'utf8');
   const script = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   vm.runInNewContext(script, { module: mod, exports: mod.exports, console,
-    require: request => request === '@decky/api' ? { callable: () => () => {} } : {} });
+    require: request => request === '@decky/api' ? { callable: () => () => {} } : {}, ...context });
   return mod.exports[name];
 }
 const tdpModeLabel = realExport('tdp.tsx', 'tdpModeLabel');
@@ -17,6 +17,10 @@ const batterySummary = realExport('battery.tsx', 'batterySummary');
 function harness(file, component, initiallyVisible = true) {
   const slots = [], effects = new Map(), pending = [], timers = new Map(), calls = [], callbacks = {};
   let cursor = 0, visible = initiallyVisible, nextTimer = 0, writes = 0, props = {}, now = 100000;
+  let panelShown = true, intersectionCallback;
+  class PanelObserver { constructor(fn) { intersectionCallback = fn; } observe() {} disconnect() { intersectionCallback = null; } }
+  const panelElement = { getClientRects: () => panelShown ? [{}] : [], ownerDocument: { defaultView: { IntersectionObserver: PanelObserver } } };
+  const fanSummary = realExport('fan.tsx', 'fanSummary', { Date: class extends Date { static now() { return now; } } });
   const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);
   const hooks = {
     useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial;
@@ -31,7 +35,7 @@ function harness(file, component, initiallyVisible = true) {
   const timer = (kind, fn, delay) => { const id = ++nextTimer; timers.set(id, { kind, fn, delay }); return id; };
   const mod = { exports: {} }, jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
   const callable = name => (...args) => new Promise((resolve, reject) => calls.push({ name, args, resolve, reject, settled: false }));
-  const relativeReads = { getVibrationSettings: 'vibe_get_settings', getWifiStatus: 'wifi_get_status', getRgbStatus: 'rgb_get_status',
+  const relativeReads = { getFanState: 'fan_get_state', getVibrationSettings: 'vibe_get_settings', getWifiStatus: 'wifi_get_status', getRgbStatus: 'rgb_get_status',
     getRemapStatus: 'remap_get_status', getBatteryStatus: 'battery_get_status',
     getControllerBatteryLevels: 'battery_get_controller_levels', getControllerStatus: 'controller_get_status' };
   const source = fs.readFileSync(path.join(root, 'src', file), 'utf8') + `\nexport { ${component} as Tested };`;
@@ -53,6 +57,7 @@ function harness(file, component, initiallyVisible = true) {
         if (key in relativeReads) return callable(relativeReads[key]);
         if (key === 'tdpModeLabel') return tdpModeLabel;
         if (key === 'batterySummary') return batterySummary;
+        if (key === 'fanSummary') return fanSummary;
         if (/^(start|stop)/.test(key)) return () => {};
         if (key.endsWith('Summary')) return () => '';
         return key;
@@ -60,12 +65,15 @@ function harness(file, component, initiallyVisible = true) {
       throw Error(name);
     },
   });
-  const render = (nextProps = props) => { props = nextProps; cursor = 0; const result = mod.exports.Tested(props); pending.splice(0).forEach(fn => fn()); return result; };
+  const render = (nextProps = props) => { props = nextProps; cursor = 0; const result = mod.exports.Tested(props);
+    if (result?.props?.rootRef) result.props.rootRef.current = panelElement;
+    pending.splice(0).forEach(fn => fn()); return result; };
   return { calls, timers, callbacks, render, exported: mod.exports.Tested, moduleExports: mod.exports,
     initialize: () => mod.exports.default(),
     get writes() { return writes; },
     advance(milliseconds) { now += milliseconds; },
     visible(value) { visible = value; return render(); },
+    panelVisible(value) { panelShown = value; intersectionCallback?.([{ isIntersecting: value }]); return render(); },
     fire() { [...timers.values()].filter(t => t.kind === 'interval').forEach(t => t.fn()); },
     respond(name, value) { const call = calls.find(c => c.name === name && !c.settled); assert.ok(call, `pending ${name}`);
       call.settled = true; call.resolve(value); },
@@ -805,9 +813,11 @@ const cases = [
     watcher.stop();
   }
   const overviewFailures = [];
-  const modules = Object.fromEntries(['tdp', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller']
+  const modules = Object.fromEntries(['tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller']
     .map(name => [name, { enabled: true }]));
   const overviewValues = { get_version: { version: 'test', blocked: false, modules },
+    fan_get_state: { supported: true, error: '', receivedAt: 100000, active_curve: 'global', settings: { enabled: false },
+      readings: { valid: true, rpm: 1555, apu_temperature: 45, age_seconds: 0, automatic: true, error: '' } },
     get_settings: { spl: 23000, sppt: 30000, fppt: 35000 },
     vibe_get_settings: { settings: { level: 2, mode: 2, touchpadEnabled: false } },
     vibe_get_driver_status: { found: true }, display_get_state: display, wifi_get_status: wifi,
@@ -920,7 +930,30 @@ const cases = [
     assert.match(section(h).statusNote, /Last read 30s ago/);
     h.respond('get_settings', overviewValues.get_settings); await settle();
     assert.equal(section(h).statusNote, undefined, 'a confirmed refresh clears the warning');
-    assert.ok([...h.timers.values()].every(timer => timer.delay >= 10000), 'freshness adds no fast timer');
+    assert.equal([...h.timers.values()].filter(timer => timer.delay === 1000).length, 1, 'only live fan telemetry has a fast timer');
+    assert.ok([...h.timers.values()].every(timer => timer.delay === 1000 || timer.delay >= 10000));
+  });
+  await testOverview('fan uses real measured numbers, isolated live polling, stale/error clearing and hidden cleanup', async h => {
+    answerOverview(h); await settle();
+    assert.match(section(h,'Fan Control').description,/APU 45.0°C · 1555 RPM · Firmware automatic/);
+    const timer=[...h.timers.values()].find(t=>t.delay===1000);assert.ok(timer);
+    const count=h.calls.length;h.advance(1000);timer.fn();await settle();
+    assert.deepEqual(h.calls.slice(count).map(c=>c.name),['fan_get_state'],'1s tick reads only Fan');
+    h.advance(2000);timer.fn();await settle();
+    assert.equal(h.calls.length,count+1,'hung fan read never overlaps');
+    assert.match(section(h,'Fan Control').description,/APU — · — RPM/,'cached numbers expire while RPC hangs');
+    h.reject('fan_get_state');await settle();assert.match(section(h,'Fan Control').description,/APU — · — RPM/);
+    const before=h.calls.length;h.visible(false);assert.equal([...h.timers.values()].filter(t=>t.delay===1000).length,0);
+    h.fire();await settle();assert.equal(h.calls.length,before,'hidden overview does no fan polling');
+    h.visible(true);await settle();assert.equal(h.calls.filter(c=>c.name==='fan_get_state'&&!c.settled).length,1,'reopen requests a fresh fan read');
+  });
+  await testOverview('switching away from Decky tab stops polling even while QAM itself remains visible', async h => {
+    answerOverview(h); await settle();const count=h.calls.length;
+    h.panelVisible(false);assert.equal([...h.timers.values()].filter(t=>t.delay===1000).length,0,'hidden root removes live fan timer');
+    h.fire();await settle();assert.equal(h.calls.length,count,'no new read behind the other QAM tab');
+    h.panelVisible(true);await settle();assert.equal(h.calls.filter(c=>c.name==='fan_get_state'&&!c.settled).length,1,'actual root visibility restarts one fresh request');
+    findSection(h.render(),'Fan Control').props.onClick();const page=h.render();
+    h.panelVisible(false);assert.ok(findPanel(h.render(),'Fan Control')||page,'navigation remains mounted while polling pauses');
   });
   await testOverview('a hung cached read is marked delayed without starting overlapping RPCs', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();

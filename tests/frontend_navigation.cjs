@@ -86,7 +86,7 @@ function find(node, predicate) {
 plugin = mod.exports.default();
 // Controls consume the compatibility snapshot already read by the parent.
 for (let i = 0; i < 16; i++) await Promise.resolve();
-for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyro & Touchpad', 'Battery', 'OLED Display', 'WiFi', 'About', 'Manage Modules']) {
+for (const title of ['TDP', 'Fan Control', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyro & Touchpad', 'Battery', 'OLED Display', 'WiFi', 'About', 'Manage Modules']) {
   const link = find(render(), n => n.props?.title === title && n.props?.onClick);
   assert.ok(link, `section link: ${title}`); link.props.onClick();
   for (let cycle = 0; cycle < 3; cycle++) {
@@ -100,7 +100,7 @@ for (const title of ['TDP', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyr
   const returned = find(render(), n => n.props?.title === title && n.props?.onClick);
   assert.ok(returned, 'explicit back works');
   assert.equal(returned.props.restoreFocus, true, 'back restores the selected native module row');
-  assert.equal(timers.size, 1, 'one overview poller after returning');
+  assert.equal(timers.size, 2, 'overview and isolated live fan pollers after returning');
 }
 find(render(), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
 assert.match(find(render(), n => n.props?.label === 'Author').props.description, /^Rayek/);
@@ -109,12 +109,12 @@ find(render(), n => n.props?.onBack).props.onBack();
 find(render(), n => n.props?.title === 'Battery' && n.props?.onClick).props.onClick();
 // Complete the earlier overview read before testing the next visibility cycle.
 for (let i = 0; i < 12; i++) await Promise.resolve();
-modules = Object.fromEntries(['tdp','vibration','rgb','remap','controller','battery','display','wifi'].map(k=>[k,{enabled:false}]));
+modules = Object.fromEntries(['tdp','fan','vibration','rgb','remap','controller','battery','display','wifi'].map(k=>[k,{enabled:false}]));
 rpcCalls.length = 0;
 const disabled = render();
 assert.deepEqual(rpcCalls, [], 'disabled modules are not polled and Controls does not duplicate the guard read');
 assert.ok(!find(disabled, n => n.props?.onBack), 'disabling an open module returns to the overview');
-for (const title of ['TDP','Vibration','RGB Lighting','Button Remapper','Gyro & Touchpad','Battery','OLED Display','WiFi']) {
+for (const title of ['TDP','Fan Control','Vibration','RGB Lighting','Button Remapper','Gyro & Touchpad','Battery','OLED Display','WiFi']) {
   assert.ok(!find(disabled, n => n.props?.title === title && n.props?.onClick), `${title} hidden when disabled`);
 }
 for (const title of ['About','Manage Modules']) assert.ok(find(disabled, n => n.props?.title === title && n.props?.onClick));

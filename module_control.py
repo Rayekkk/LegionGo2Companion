@@ -81,6 +81,11 @@ async def withdraw(name, component):
             with backend._mutation_lock:
                 check(backend._release_controls_locked())
         await asyncio.to_thread(restore)
+    elif name == 'fan':
+        # Pending withdrawal is retried before _main has loaded durable curves.
+        # Refresh them before clearing intent; never resume a custom override.
+        await module_runtime.offload('fan', component._load)
+        check(await component.set_enabled(False))
     elif name == 'vibration':
         import vibration_backend as backend
         if not await backend._offload(backend._apply_settings, dict(backend.DEFAULT_PROFILE), None, True):

@@ -90,7 +90,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                        'battery_get_controller_levels', 'controller_get_status']:
             with self.subTest(method=method), self.assertRaisesRegex(RuntimeError, 'disabled'):
                 await getattr(self.plugin, method)()
-        self.assertEqual(len(await self.plugin.modules_get_status()), 8)
+        self.assertEqual(len(await self.plugin.modules_get_status()), 9)
 
     async def test_uninstall_retries_pending_cleanup_without_starting_module(self):
         resume = {'source': 'right'}

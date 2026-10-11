@@ -13,6 +13,7 @@ import {
 import { FC, ReactNode, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
 import { TdpPage, startTdpWatcher, stopTdpWatcher, tdpModeLabel } from "./tdp";
+import { FanPage, getFanState, fanSummary, type FanState } from "./fan";
 import {
   VibrationPage,
   getVibrationSettings,
@@ -27,11 +28,11 @@ import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySumma
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 
-type ModuleKey = "tdp" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
+type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
 type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
-const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP & CPU", vibration: "Vibration", display: "OLED Display", wifi: "WiFi", rgb: "RGB Lighting", remap: "Button Remapper", battery: "Battery", controller: "Gyro & Touchpad"};
+const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP & CPU", fan: "Fan Control", vibration: "Vibration", display: "OLED Display", wifi: "WiFi", rgb: "RGB Lighting", remap: "Button Remapper", battery: "Battery", controller: "Gyro & Touchpad"};
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
 const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
@@ -71,6 +72,7 @@ interface Overview {
   version: string;
   reads?: Partial<Record<OverviewField, { unavailable: boolean; note?: string }>>;
   tdp?: TdpSettings;
+  fan?: FanState;
   vibration?: VibeSettingsResponse;
   driver?: DriverStatus;
   display?: DisplayState;
@@ -161,6 +163,8 @@ interface OverviewSource {
 }
 const overviewSources: OverviewSource[] = [
   { key: "tdp", module: "tdp", read: async () => ({ tdp: await getTdpSettings() }) },
+  { key: "fan", module: "fan", read: async () => ({ fan: await getFanState(() =>
+    frontendActive && !overviewPaused && !!overviewPollers.size && [...overviewViewChecks].some(check => check())) }) },
   { key: "vibration", module: "vibration", read: async () => ({ vibration: await getVibeSettings() }) },
   { key: "driver", module: "vibration", read: async () => ({ driver: await getDriverStatus() }) },
   { key: "display", module: "display", read: async () => ({ display: await getDisplayState() }) },
@@ -178,6 +182,7 @@ let overviewModules = EMPTY_MODULES;
 let overviewPaused = true;
 const overviewListeners = new Set<(overview: Overview) => void>();
 const overviewPollers = new Set<(overview: Overview) => void>();
+const overviewViewChecks = new Set<() => boolean>();
 let overviewVisibleStarted: number | null = null;
 let overviewVisibleSpent = 0;
 const overviewVisibleTime = () => overviewVisibleSpent + (overviewVisibleStarted === null
@@ -246,7 +251,12 @@ const readOverviewSource = (source: OverviewSource) => {
     source.pendingSince = null;
     // Hidden time and hidden failures are not evidence of a failing module.
     // Keep its last report, including any hardware warning returned with it.
-    if (overviewPollers.size) { source.failures += 1; publishOverview(); }
+    if (overviewPollers.size) {
+      source.failures += 1;
+      if (source.key === "fan" && overviewCache.fan) overviewCache = { ...overviewCache,
+        fan: { ...overviewCache.fan, readings: { valid: false, error: "Fresh fan reading unavailable." } } };
+      publishOverview();
+    }
   }).finally(() => {
     if (source.pending !== request) return;
     source.pending = null;
@@ -262,6 +272,7 @@ const refreshOverview = () => {
 };
 
 const overviewDescription = (overview: Overview, module: ModuleKey, description: string) => {
+  if (module === "fan") return description; // Keep measured numbers separate from fault status.
   const sources = overviewSources.filter(source => source.module === module);
   if (module === "display") {
     const display = overview.display;
@@ -288,8 +299,8 @@ const overviewDescription = (overview: Overview, module: ModuleKey, description:
 const overviewNote = (overview: Overview, module: ModuleKey) => overviewSources
   .filter(source => source.module === module).map(source => overview.reads?.[source.key]?.note).filter(Boolean).join(" · ") || undefined;
 
-const PageShell: FC<{ children: ReactNode }> = ({ children }) => (
-  <div style={{ width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden", boxSizing: "border-box" }}>
+const PageShell: FC<{ children: ReactNode; rootRef?: {current: HTMLDivElement | null} }> = ({ children, rootRef }) => (
+  <div ref={rootRef} data-companion-page style={{ width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden", boxSizing: "border-box" }}>
     {children}
   </div>
 );
@@ -305,6 +316,7 @@ const Chevron: FC = () => (
 // decorative icons inherit that same color, including its focused appearance.
 const sectionIconPaths: Record<SectionKey, ReactNode> = {
   tdp: <path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z" />,
+  fan: <><circle cx="12" cy="12" r="2" /><path d="M12 10C4 1 1 12 10 12M14 12c9-8-2-11-2-2M12 14c8 9 11-2 2-2M10 12c-9 8 2 11 2 2" /></>,
   vibration: <><rect x="7" y="5" width="10" height="14" rx="2" /><path d="m3 7-1 3 1 4-1 3m19-10 1 3-1 4 1 3" /></>,
   rgb: <><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-3.7 2 2 0 0 1 1-3.3h2a4 4 0 0 0 4-4c0-4-4-7-9-7Z" /><circle cx="7" cy="10" r=".8" /><circle cx="10" cy="7" r=".8" /><circle cx="15" cy="7" r=".8" /></>,
   remap: <><path d="M7 7h10a4 4 0 0 1 4 4l-1 7-5-3H9l-5 3-1-7a4 4 0 0 1 4-4Z" /><path d="M6 11h4m-2-2v4m7-2h.01m3 2h.01" /></>,
@@ -460,8 +472,22 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
 
 const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) => {
   const visible = useQuickAccessVisible();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [onScreen, setOnScreen] = useState(true);
+  const panelOnScreen = () => !panelRef.current || panelRef.current.getClientRects().length > 0;
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
   const [overview, setOverview] = useState<Overview>(overviewCache);
+  useEffect(() => {
+    const element = panelRef.current;
+    if (!element) return;
+    setOnScreen(panelOnScreen());
+    const Observer = (element.ownerDocument.defaultView as (Window & typeof globalThis) | null)?.IntersectionObserver;
+    if (!Observer) return;
+    // Steam can hide the Decky tab with display:none while QAM remains open.
+    const observer = new Observer(entries => setOnScreen(entries.some(entry => entry.isIntersecting)));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const lastOpenedSection = useRef<SectionKey | null>(null);
   const openSection = (section: SectionKey) => {
     lastOpenedSection.current = section;
@@ -492,25 +518,32 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     // Steam overlays can temporarily hide Quick Access. Visibility controls
     // polling only; section navigation belongs to the explicit links/back button.
     if (activeSection) { invalidateOverviewReads(); return; }
-    if (!visible) return;
+    if (!visible || !onScreen) return;
     if (!overviewPollers.size) overviewVisibleStarted = Date.now();
     overviewPollers.add(setOverview);
+    overviewViewChecks.add(panelOnScreen);
     setOverview(overviewCache);
     refreshOverview();
     const timer = setInterval(refreshOverview, 10000);
+    const fanSource = overviewSources.find(source => source.key === "fan")!;
+    const fanTimer = moduleEnabled(modules, "fan") ? setInterval(() => {
+      readOverviewSource(fanSource); publishOverview();
+    }, 1000) : undefined;
     return () => {
-      clearInterval(timer); overviewPollers.delete(setOverview);
+      clearInterval(timer); if (fanTimer !== undefined) clearInterval(fanTimer); overviewPollers.delete(setOverview);
+      overviewViewChecks.delete(panelOnScreen);
       if (!overviewPollers.size) { overviewVisibleSpent = overviewVisibleTime(); overviewVisibleStarted = null; }
     };
-  }, [activeSection, enabledModules, visible]);
+  }, [activeSection, enabledModules, visible, onScreen]);
 
   const summary = (module: ModuleKey, description: string) => ({
     description: overviewDescription(overview, module, description), statusNote: overviewNote(overview, module),
   });
 
-  if (!activeSection) return <PageShell>
+  if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
       {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title="TDP" {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}
+      {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title="Fan Control" {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}
       {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title="Vibration" {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}
       {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}
       {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}
@@ -537,6 +570,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
 
   const title = activeSection === "tdp"
     ? "TDP"
+    : activeSection === "fan" ? "Fan Control"
     : activeSection === "vibration"
       ? "Vibration"
       : activeSection === "display"
@@ -553,10 +587,11 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
         ? "Battery"
       : activeSection === "modules" ? "Manage Modules" : "About";
 
-  return <PageShell>
+  return <PageShell rootRef={panelRef}>
     <SectionHeader title={title} onBack={() => setActiveSection(null)} />
     {activeSection === "modules" && <ModulesPage modules={modules} />}
     {activeSection === "tdp" && <TdpPage />}
+    {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
     {activeSection === "vibration" && <VibrationPage />}
     {activeSection === "display" && <DisplayPage />}
     {activeSection === "wifi" && <WifiPage />}
@@ -570,7 +605,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
           <Field focusable label={`Version ${overview.version}`} description="All-in-one hardware controls for Decky Loader." />
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field focusable label="Included modules" description="LeGoTDP · LeGo Vibe Control · LeGo2 Brightness Fix · WiFi Optimizer Go 2 · RGB Lighting · Button Remapper · Gyro & Touchpad · Battery" />
+          <Field focusable label="Included modules" description="LeGoTDP · Fan Control · LeGo Vibe Control · LeGo2 Brightness Fix · WiFi Optimizer Go 2 · RGB Lighting · Button Remapper · Gyro & Touchpad · Battery" />
         </PanelSectionRow>
         <PanelSectionRow>
           <Field focusable label="Author" description="Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />

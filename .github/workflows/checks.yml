@@ -83,6 +83,7 @@ jobs:
               manifest['bin'], 'LICENSE', 'LICENSE.MIT', 'LICENSE.HUESYNC', 'NOTICE',
               'SOURCE.md', 'THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt',
               'display_native.py', 'active_app.py', 'LICENSE.DECKY-ROLLUP',
+              'fan_backend.py', 'fan_ec.py', 'fan_guardian.py', 'fan_policy.py', 'fan_sleep.py',
               'scripts/check-build.mjs', 'scripts/package.mjs',
               'THIRD_PARTY_SOURCES/decky-api-1.1.3/package.json',
           }
