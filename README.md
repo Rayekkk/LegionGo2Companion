@@ -109,6 +109,11 @@ Open Companion in Decky. **Hardware Controls** shows a short status beside each 
 select a row to open its page, and use **‹ All Controls** to return. Dropdown selections
 keep you on the current page.
 
+The screenshots below show Companion on a Legion Go 2 in Gaming Mode. Click any
+image to open the full 1920 × 1066 PNG.
+
+<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware Controls menu with module status summaries" width="760"></a>
+
 1. Open **Manage Modules** and leave enabled the modules you want to use.
 2. Open a module and check its status before changing a setting.
 3. For custom cooling, open **Fan Control**, review the curve and save any edits, then turn on **Enable Fan Control**. Leave it off to keep firmware automatic control.
@@ -126,6 +131,8 @@ Disabling a module stops its work, withdraws its hardware controls and hides its
 Its saved preferences remain available when you enable it again. This differs from
 turning off an individual setting: for example, **Joystick ring lights** can stay off
 while RGB control remains active to keep them off after wake.
+
+<a href="docs/screenshots/manage-modules.png"><img src="docs/screenshots/manage-modules.png" alt="Manage Modules switches in the Steam overlay" width="760"></a>
 
 Restoration depends on the module:
 
@@ -147,6 +154,8 @@ games)** ends the current gaming session, so save and close your games first.
 
 Use **Enable** to give Companion control of the power limits, then choose a preset.
 **CPU Boost** and **EPP** are independent controls in the same page.
+
+<a href="docs/screenshots/tdp.png"><img src="docs/screenshots/tdp.png" alt="TDP power limits and preset selection" width="760"></a>
 
 #### Presets and Custom
 
@@ -217,6 +226,8 @@ Open **Fan Control** directly below TDP. New settings start with the **Balanced*
 curve, **RPM** units and one **global curve**; custom control and preset assignments
 are off. Existing curves and display units are preserved.
 
+<a href="docs/screenshots/fan-control.png"><img src="docs/screenshots/fan-control.png" alt="Fan Control readings, enable switch and fan curve" width="760"></a>
+
 Review the graph, use **Save global curve** for any edits, then turn on **Enable Fan
 Control**. Saving while control is off does not start the fan controller. When it is
 already enabled, saving the active curve updates its target. Turn the switch off to
@@ -243,6 +254,8 @@ Drag a point, or focus the graph and use the controller:
 **Full screen curve editor** provides the same curve controls with more space.
 **Discard changes** returns to the saved curve. Unsaved drafts are kept while switching
 between curves and the full-screen editor; save them before leaving the page.
+
+<a href="docs/screenshots/fan-curve-editor.png"><img src="docs/screenshots/fan-curve-editor.png" alt="Full-screen fan curve editor with temperature and measured speed" width="760"></a>
 
 **Starting curve** offers **Silent**, **Balanced** and **Aggressive** as editable
 templates. Silent allows a stop at the cold end, Balanced starts with running cooling,
@@ -292,6 +305,8 @@ Set **Intensity** for both handles: Off, Low, Medium or High. **Mode** selects t
 vibration pattern; the choices come from the driver and can include FPS, Racing,
 Standard, SPG and RPG. **Touchpad vibration** and **Touchpad intensity** are separate.
 
+<a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration mode and touchpad feedback controls" width="760"></a>
+
 Changes save automatically. With a game running, **Per Game Profile** switches between
 that game's haptics and the global settings. Saved game profiles apply when their game
 starts, and global settings return when you leave it or turn its profile off.
@@ -315,6 +330,8 @@ on or off. Choose a **Lighting effect** and adjust the controls it uses:
 | Color cycle | Brightness and speed |
 | Rainbow | Brightness and speed |
 
+<a href="docs/screenshots/rgb-lighting.png"><img src="docs/screenshots/rgb-lighting.png" alt="RGB hue, saturation, brightness and power-button light controls" width="760"></a>
+
 The two previews show the selected colour for Solid and Breathing. Changes save
 automatically; the controller runs the animations. Saved settings, including lights off,
 are reapplied after startup and wake when the controller becomes available.
@@ -330,6 +347,8 @@ controller's **Desktop button** (upper extra button) and **Page button** (lower 
 button). Options include Steam menus, the on-screen keyboard, screenshots, window
 switching, navigation keys and F1–F12. **Disabled** makes a button produce no action.
 
+<a href="docs/screenshots/button-remapper.png"><img src="docs/screenshots/button-remapper.png" alt="Separate Desktop and Page button mappings" width="760"></a>
+
 **Default** restores that button's captured system mapping. **Restore Default Actions**
 restores both. Turning remapping off restores mappings Companion still owns while
 preserving unrelated mappings and changes made elsewhere. Actions are saved and
@@ -341,6 +360,8 @@ Choose **Controller motion source**: **Left controller**, **Right controller**,
 **Both controllers (average)** or **System default**. Selecting a controller enables its gyro reporting and routes its
 motion through InputPlumber. These sensors are in the removable handles; Both averages
 their readings. The page shows the current route separately from the saved choice.
+
+<a href="docs/screenshots/gyro-touchpad.png"><img src="docs/screenshots/gyro-touchpad.png" alt="Controller motion source and gyro reporting status" width="760"></a>
 
 **System default** or **Release Companion Control** restores the previous settings still
 owned by Companion. If an interrupted change is reported, use the release action to
@@ -364,6 +385,8 @@ uses Lenovo's Long Life mode to limit charging to **about 80%**. The percentage 
 by firmware. If the battery is already above the limit, enabling protection does not
 actively discharge it.
 
+<a href="docs/screenshots/battery.png"><img src="docs/screenshots/battery.png" alt="Battery charge and battery protection controls" width="760"></a>
+
 Turning protection off restores the previous normal charging mode, including **Fast**
 when it was active. **Release Companion Control** returns the captured state and stops
 maintaining a charging preference. If a change was interrupted, use **Recover and
@@ -377,6 +400,8 @@ Detached controllers are labelled separately, with a controller-reported level w
 
 The available controls depend on whether SteamOS already supplies the Legion Go 2
 OLED display profile.
+
+<a href="docs/screenshots/oled-display.png"><img src="docs/screenshots/oled-display.png" alt="Native OLED display support and EDID correction status" width="760"></a>
 
 **With native display support:** Companion retires its older brightness/display fix and
 removes its recognised user script. PQ, Gamma 2.2, Hybrid and brightness forwarding are
@@ -415,6 +440,8 @@ to initial setup; an incomplete reset stays paused and offers **Retry Display Re
 Check **Current WiFi connection** first: it shows the confirmed SSID, band/frequency and
 active backend (**iwd** or **WPA supplicant**). The available actions follow that backend
 and the supported Legion Go 2 MT7922 adapter using `mt7921e`.
+
+<a href="docs/screenshots/wifi.png"><img src="docs/screenshots/wifi.png" alt="WiFi band preference and one-time connection controls" width="760"></a>
 
 **Automatic WiFi** restores Companion's owned band settings and leaves selection to
 SteamOS. A saved policy is not proof of the current connection; check the live band and
