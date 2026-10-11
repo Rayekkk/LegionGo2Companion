@@ -75,6 +75,54 @@ const button = (tree, label) => find(tree, label, 'ButtonItem');
 const count = (h, name) => h.calls.filter(call => call.name === name).length;
 async function ready(h) { h.render(); await settle(); return h.render(); }
 (async () => {
+  // Gestures which outlive the debounce window must also coalesce while a
+  // previous hardware write is pending. Closing still commits the final edit.
+  for (const failed of [false, true]) {
+    const first = deferred(); let writes = 0;
+    const h = mount({ vibe_set_intensity: level => ++writes === 1 ? first.promise : { success: true, ...settings('0', level) } });
+    await ready(h);
+    for (const level of [0, 1, 2, 3, 1, 2, 0]) {
+      const slider = find(h.render(), 'Intensity'); assert.equal(slider.props.disabled, false);
+      slider.props.onChange(level); h.flush(); await settle();
+    }
+    find(h.render(), 'Intensity').props.onChange(3); h.unmount(); await settle();
+    assert.equal(writes, 1);
+    if (failed) first.reject(Error('old write failed')); else first.resolve({ success: true, ...settings('0', 0) });
+    for (let i = 0; i < 20; i++) await settle();
+    assert.deepEqual(h.calls.filter(c => c.name === 'vibe_set_intensity').map(c => c.args[0]), [0, 3]);
+    assert.equal(h.toasts.length, 0, 'An obsolete failure cannot replace the latest accepted edit.');
+  }
+  {
+    const first = deferred(), order = []; let writes = 0;
+    const h = mount({
+      vibe_set_intensity: level => { order.push(['level', level]); return ++writes === 1 ? first.promise : { success: true, ...settings('0', level) }; },
+      vibe_set_rumble_mode: mode => { order.push(['mode', mode]); return { success: true, settings: { ...values, mode } }; },
+      vibe_reset_to_default: () => { order.push(['reset']); return { success: true, settings: values }; },
+    });
+    await ready(h);
+    for (const [label, value] of [['Intensity', 0], ['Mode', 0], ['Intensity', 1], ['Mode', 1], ['Intensity', 3]]) {
+      find(h.render(), label).props.onChange(value); h.flush(); await settle();
+    }
+    const reset = button(h.render(), 'Reset to defaults').props.onClick(); await settle();
+    first.resolve({ success: true, ...settings('0', 0) }); await reset; await settle();
+    assert.deepEqual(order, [['level', 0], ['mode', 1], ['level', 3], ['reset']], 'Each field keeps its latest value before the reset barrier.');
+    find(h.render(), 'Intensity').props.onChange(1); h.flush(); await settle();
+    assert.deepEqual(order.at(-1), ['level', 1], 'A new edit after reset is applied normally.'); h.unmount();
+  }
+  {
+    const first = deferred(); let writes = 0;
+    const h = mount({ vibe_get_settings: settings('111', 2, true),
+      vibe_set_active_app: app => ({ success: true, changed: true, ...settings(app, 2, true) }),
+      vibe_set_intensity: level => ++writes === 1 ? first.promise : { success: true, settings: { ...values, level } },
+    }, 111);
+    await ready(h); h.startWatcher(); await settle();
+    for (const level of [0, 1]) { find(h.render(), 'Intensity').props.onChange(level); h.flush(); await settle(); }
+    await h.game(222); find(h.render(), 'Intensity').props.onChange(3); h.flush(); await settle();
+    first.resolve({ success: true, ...settings('111', 0, true) });
+    for (let i = 0; i < 10; i++) await settle();
+    assert.deepEqual(h.calls.filter(c => c.name === 'vibe_set_intensity').map(c => Array.from(c.args)),
+      [[0, '111', '111'], [1, '111', '111'], [3, '222', '222']], 'Coalescing never mixes different profile contexts.'); h.unmount();
+  }
   {
     const pending=deferred(),h=mount({vibe_set_intensity:()=>pending.promise});
     find(await ready(h),'Intensity').props.onChange(3);h.unmount();await settle();

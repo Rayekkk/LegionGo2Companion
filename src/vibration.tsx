@@ -474,6 +474,7 @@ const LGoVibeControl = () => {
   // is still the newest thing that happened, otherwise a slow sysfs write snaps
   // the slider back to a value the user has already moved off.
   const editSeq = useRef(0);
+  const latestFieldEdit = useRef<Record<string, number>>({});
 
   const adoptResponse = useCallback((res: SettingsResponse, readEpoch?: number) => {
     if (!mounted.current) return;
@@ -493,7 +494,7 @@ const LGoVibeControl = () => {
     setGameName(AppWatcher.displayName());
   }, []);
 
-  const enqueueMutation = useCallback((operation: () => Promise<ApplyResponse>) => {
+  const enqueueMutation = useCallback(<T,>(operation: () => Promise<T>) => {
     vibeReadEpoch += 1;
     mutationsPending.current += 1;
     vibeMutationsPending += 1;
@@ -623,12 +624,20 @@ const LGoVibeControl = () => {
       const revision = gameRevision.current;
       const expectedApp = appId;
       const expectedProfile = perGameOn ? appId : DEFAULT_APP;
+      const fieldScope = JSON.stringify([expectedApp, expectedProfile, key]);
+      latestFieldEdit.current[fieldScope] = seq;
       setSettings((prev) => ({ ...prev, ...optimistic }));
       debounce(key, () => {
         const isCurrent = () => mounted.current && revision === gameRevision.current && seq === editSeq.current;
-        const request = enqueueMutation(() => call(expectedApp, expectedProfile));
+        const request = enqueueMutation(async () => {
+          // Debouncing alone cannot coalesce gestures already waiting behind a
+          // slow write. Keep the latest accepted value for each field/profile,
+          // including when closing the page flushes its final gesture.
+          if (latestFieldEdit.current[fieldScope] !== seq) return;
+          return call(expectedApp, expectedProfile);
+        });
         request.then((res) => {
-            if (!isCurrent()) return;
+            if (!res || !isCurrent()) return;
             checkResult("Could not apply setting", res);
             if (res.app_id !== undefined && res.profile_id !== undefined && res.overwrite !== undefined)
               adoptResponse(res as SettingsResponse);
