@@ -3667,23 +3667,28 @@ class Plugin:
         runtime = journal.get("runtime_before") or {}
         iface = str(runtime.get("iface") or "")
         if runtime_mutation.get("planned") and iface:
+            active_uuid = self._get_active_connection_uuid(iface, require_connected=True)
+            if not active_uuid or not uuid:
+                conflicts.append("could not verify the active profile for runtime power-save recovery")
+                iface = ""
+            # Runtime power save belongs to this connection, not to the name
+            # wlan0 across reconnects. A different profile owns its own policy.
+            elif active_uuid != uuid:
+                iface = ""
+        if runtime_mutation.get("planned") and iface:
             current, current_result = self._get_runtime_power_save(iface)
             expected = str(runtime_mutation.get("expected") or "")
             before = str(runtime.get("power_save") or "")
             if not current_result.get("success") or current not in ("on", "off"):
                 conflicts.append("could not parse the runtime power-save state")
             elif current == expected:
-                restored = self._run_cmd(
-                    [
-                        "/usr/bin/iw",
-                        "dev",
-                        iface,
-                        "set",
-                        "power_save",
-                        before,
-                    ],
-                    timeout=4,
-                )
+                if self._get_active_connection_uuid(iface, require_connected=True) != uuid:
+                    restored = {"success": False, "stderr": "connection changed"}
+                else:
+                    restored = self._run_cmd(
+                        ["/usr/bin/iw", "dev", iface, "set", "power_save", before],
+                        timeout=4,
+                    )
                 if not restored.get("success"):
                     conflicts.append(
                         "runtime power-save restore failed: "
@@ -3694,6 +3699,7 @@ class Plugin:
                     if (
                         not verified_result.get("success")
                         or verified != before
+                        or self._get_active_connection_uuid(iface, require_connected=True) != uuid
                     ):
                         conflicts.append(
                             "runtime power-save restore could not be verified"
@@ -4005,11 +4011,15 @@ class Plugin:
                     )
 
             if runtime_active and runtime_before != runtime_target:
+                if self._get_active_connection_uuid(iface, require_connected=True) != profile_uuid:
+                    raise RuntimeError("The active WiFi profile changed before the runtime power-save write")
                 journal["mutations"]["runtime_power_save"] = {
                     "planned": True,
                     "expected": runtime_target,
                 }
                 self._save_power_save_journal(journal)
+                if self._get_active_connection_uuid(iface, require_connected=True) != profile_uuid:
+                    raise RuntimeError("The active WiFi profile changed while preparing the runtime power-save write")
                 changed = self._run_cmd(
                     [
                         "/usr/bin/iw",
@@ -4025,6 +4035,8 @@ class Plugin:
                     raise RuntimeError(
                         changed.get("stderr") or "iw rejected the power-save state"
                     )
+                if self._get_active_connection_uuid(iface, require_connected=True) != profile_uuid:
+                    raise RuntimeError("The active WiFi profile changed during the runtime power-save write")
                 verified_runtime, verified_result = self._get_runtime_power_save(
                     iface
                 )
@@ -4036,6 +4048,8 @@ class Plugin:
                         "Runtime power-save verification did not match the request"
                     )
 
+            if runtime_active and self._get_active_connection_uuid(iface, require_connected=True) != profile_uuid:
+                raise RuntimeError("The active WiFi profile changed before committing power-save settings")
             journal["settings_after"] = self._power_settings_fields(
                 settings_after
             )

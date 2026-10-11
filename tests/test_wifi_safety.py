@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
+from contextlib import ExitStack
 
 import test_integration  # Install isolated Decky stubs before backend imports.
 import wifi_backend as wifi
@@ -13,6 +14,89 @@ from safe_settings import CorruptSettings
 
 
 class WifiSafetyTests(unittest.TestCase):
+    def test_power_save_recovery_is_bound_to_the_original_connection(self):
+        for active, expected_success, expected_writes in (
+            ('original', True, 1), ('different', True, 0), (None, False, 0),
+        ):
+            with self.subTest(active=active), ExitStack() as stack:
+                plugin = wifi.Plugin()
+                journal = {'phase': 'applying', 'profile_before': {'uuid': 'original'},
+                           'runtime_before': {'iface': 'wlan0', 'power_save': 'on'},
+                           'mutations': {'runtime_power_save': {'planned': True, 'expected': 'off'}},
+                           'settings_before': {}}
+                stack.enter_context(patch.object(plugin, '_save_power_save_journal'))
+                stack.enter_context(patch.object(plugin, '_write_band_settings_fields'))
+                stack.enter_context(patch.object(plugin, '_get_active_connection_uuid', return_value=active))
+                read = stack.enter_context(patch.object(plugin, '_get_runtime_power_save',
+                    side_effect=[('off', {'success': True}), ('on', {'success': True})]))
+                write = stack.enter_context(patch.object(plugin, '_run_cmd', return_value={'success': True}))
+                result = plugin._restore_power_save_transaction(journal, 'interrupted operation')
+                self.assertEqual(result['success'], expected_success, result)
+                self.assertEqual(write.call_count, expected_writes)
+                if not expected_writes:
+                    read.assert_not_called()
+                if active is None:
+                    self.assertEqual(journal['phase'], 'rollback_failed')
+
+    def test_power_save_recovery_rechecks_profile_after_read(self):
+        plugin = wifi.Plugin()
+        journal = {'profile_before': {'uuid': 'original'},
+                   'runtime_before': {'iface': 'wlan0', 'power_save': 'on'},
+                   'mutations': {'runtime_power_save': {'planned': True, 'expected': 'off'}}}
+        with patch.object(plugin, '_save_power_save_journal'), \
+             patch.object(plugin, '_get_active_connection_uuid', side_effect=['original', 'different']), \
+             patch.object(plugin, '_get_runtime_power_save', return_value=('off', {'success': True})), \
+             patch.object(plugin, '_run_cmd') as write:
+            result = plugin._restore_power_save_transaction(journal, 'interrupted operation')
+        self.assertFalse(result['success'])
+        write.assert_not_called()
+
+    def test_power_save_apply_does_not_write_runtime_after_profile_switch(self):
+        for phase in ('profile_write', 'journal', 'readback'):
+            with self.subTest(phase=phase):
+                self._power_save_profile_switch(phase)
+
+    def _power_save_profile_switch(self, phase):
+        plugin = wifi.Plugin()
+        active = 'original'
+        nm_value = '3'
+        writes = []
+        def modify(_uuid, _key, value, **_kwargs):
+            nonlocal active, nm_value
+            nm_value = value
+            if phase == 'profile_write':
+                active = 'different'
+            return {'success': True}
+        def save(journal):
+            nonlocal active
+            if phase == 'journal' and journal['phase'] == 'applying' and 'runtime_power_save' in journal['mutations']:
+                active = 'different'
+        def read_runtime(*_args):
+            nonlocal active
+            if phase == 'readback' and writes:
+                active = 'different'
+                return 'off', {'success': True}
+            return 'on', {'success': True}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(plugin, '_save_power_save_journal', side_effect=save))
+            for name in ('_remove_power_save_journal', '_write_band_settings_fields'):
+                stack.enter_context(patch.object(plugin, name))
+            for name in ('_load_band_policy_journal', '_load_power_save_journal'):
+                stack.enter_context(patch.object(plugin, name, return_value=None))
+            stack.enter_context(patch.object(wifi, '_load_settings', return_value=dict(wifi.DEFAULT_SETTINGS)))
+            stack.enter_context(patch.object(plugin, '_get_wifi_interface', return_value='wlan0'))
+            stack.enter_context(patch.object(plugin, '_get_active_connection_uuid', side_effect=lambda *a, **k: active))
+            stack.enter_context(patch.object(plugin, '_nmcli_get', side_effect=lambda *a: (nm_value, {'success': True})))
+            stack.enter_context(patch.object(plugin, '_nmcli_modify', side_effect=modify))
+            stack.enter_context(patch.object(plugin, '_get_runtime_power_save', side_effect=read_runtime))
+            stack.enter_context(patch.object(plugin, '_run_cmd', side_effect=lambda args, **k: writes.append(args) or {'success': True}))
+            result = plugin._set_power_save_sync(True)
+        self.assertFalse(result['success'])
+        self.assertTrue(result['rolled_back'], result)
+        self.assertEqual(nm_value, '3', 'The original profile still rolls back its persisted change.')
+        self.assertEqual(len(writes), 1 if phase == 'readback' else 0,
+                         'No runtime write belongs to the new connection, including recovery.')
+
     def test_retired_wake_dispatcher_flag_is_migrated_without_losing_ownership(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / 'wifi_settings.json'
