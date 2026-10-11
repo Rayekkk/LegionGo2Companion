@@ -65,6 +65,41 @@ class DisplayResetTests(unittest.TestCase):
     def reset(self):
         return asyncio.run(self.plugin.reset_settings())
 
+    def test_invalid_public_modes_never_read_migrate_install_or_activate(self):
+        original = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        for native in (False, True):
+            self.state['native_support_detected'] = native
+            for method in (self.plugin.run_setup, self.plugin.set_panel_mode):
+                for invalid in ('typo', '', 'PQ', None, False, 0, [], {}, ['pq']):
+                    with self.subTest(native=native, method=method.__name__, value=invalid), \
+                         patch.object(display.Plugin, '_read_settings') as read, \
+                         patch.object(display.Plugin, '_refresh_native_support') as native_probe, \
+                         patch.object(display, '_install_script') as install, \
+                         patch.object(display.Plugin, '_activate_mode') as activate:
+                        with self.assertRaisesRegex(ValueError, 'Unknown display mode'):
+                            asyncio.run(method(invalid))
+                        read.assert_not_called()
+                        native_probe.assert_not_called()
+                        install.assert_not_called()
+                        activate.assert_not_called()
+                        self.assertEqual({p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}, original)
+                        self.assertEqual(self.state['panel_mode'], 'hybrid')
+                        self.assertEqual(self.atoms, [])
+                        self.assertEqual(self.nits, [])
+
+    def test_valid_public_modes_and_default_setup_keep_the_transaction_path(self):
+        for method in (self.plugin.run_setup, self.plugin.set_panel_mode):
+            for mode in display.MODES:
+                with self.subTest(method=method.__name__, mode=mode), \
+                     patch.object(display.Plugin, '_read_settings'), \
+                     patch.object(display.Plugin, '_apply_mode_locked', new_callable=AsyncMock, return_value={'panel_mode': mode}) as apply:
+                    self.assertEqual(asyncio.run(method(mode)), {'panel_mode': mode})
+                    apply.assert_awaited_once_with(mode)
+        with patch.object(display.Plugin, '_read_settings'), \
+             patch.object(display.Plugin, '_apply_mode_locked', new_callable=AsyncMock, return_value={'panel_mode': 'pq'}) as apply:
+            self.assertEqual(asyncio.run(self.plugin.run_setup()), {'panel_mode': 'pq'})
+            apply.assert_awaited_once_with('pq')
+
     def persisted(self):
         fresh = AtomicSettingsManager('display_settings', str(self.root / 'settings'))
         return fresh.settings

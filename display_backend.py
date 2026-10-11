@@ -1754,6 +1754,10 @@ class Plugin:
 
     @staticmethod
     async def _apply_mode(mode: str) -> dict:
+        # Persistence migration may normalize old values, but a malformed RPC
+        # must never select PQ or install a script on the caller's behalf.
+        if type(mode) is not str or mode not in MODES:
+            raise ValueError("Unknown display mode. Choose gamma22, pq or hybrid.")
         await _offload(Plugin._read_settings)
         # RPC calls can overlap even though the frontend normally disables its
         # buttons. BUNDLED_SCRIPT is process-global, so the whole transaction and
