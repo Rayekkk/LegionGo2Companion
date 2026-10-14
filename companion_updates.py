@@ -16,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from diagnostics import event
+from bounded_http import checked_url as _http_url, open_http
 
 REPOSITORY = "Rayekkk/LegionGo2Companion"
 PLUGIN_NAME = "Legion Go 2 Companion"
@@ -23,7 +25,8 @@ ARCHIVE_ROOT = "LegionGo2Companion"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASE_BASE = f"https://github.com/{REPOSITORY}/releases"
 MAX_METADATA = 1024 * 1024
-MAX_DOWNLOAD = 32 * 1024 * 1024
+# The native Qt runtime includes desktop tray support. Expansion remains bounded.
+MAX_DOWNLOAD = 48 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 1024
 REQUEST_TIMEOUT = 6
@@ -47,18 +50,7 @@ def _version(value):
 
 
 def _checked_url(url, initial_url, metadata=False):
-    if not isinstance(url, str) or len(url) > 8192 or any(ord(c) < 32 for c in url):
-        raise ValueError("Invalid release URL.")
-    parsed = urllib.parse.urlsplit(url)
-    if (parsed.scheme != "https" or parsed.username is not None or
-            parsed.password is not None or parsed.port not in (None, 443) or parsed.fragment):
-        raise ValueError("Release downloads require a verified HTTPS URL.")
-    if url == initial_url:
-        return url
-    if not metadata and parsed.hostname in {
-            "release-assets.githubusercontent.com", "objects.githubusercontent.com"}:
-        return url
-    raise ValueError("GitHub redirected the request outside the allowed release hosts.")
+    return _http_url(url, initial_url, "metadata" if metadata else "archive")
 
 
 class _ReleaseRedirect(urllib.request.HTTPRedirectHandler):
@@ -70,7 +62,12 @@ class _ReleaseRedirect(urllib.request.HTTPRedirectHandler):
         self.metadata = metadata
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _checked_url(newurl, self.initial_url, self.metadata)
+        try:
+            _checked_url(newurl, self.initial_url, self.metadata)
+        except Exception:
+            if fp is not None:
+                fp.close()
+            raise
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -113,10 +110,12 @@ class CompanionUpdates:
         self._release = None
         self._closed = threading.Event()
         self._publication_lock = threading.Lock()
+        self._download_stage = ''
 
     def close(self):
         # Synchronize only the final rename, never wait for the network worker.
         with self._publication_lock:
+            if not self._closed.is_set():event('updates','observer_closed')
             self._closed.set()
 
     def _ensure_open(self):
@@ -147,14 +146,14 @@ class CompanionUpdates:
     def _open(self, url, *, metadata):
         self._ensure_open()
         _checked_url(url, url, metadata)
-        opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=self._tls()), _ReleaseRedirect(url, metadata))
-        request = urllib.request.Request(url, headers={
+        response = open_http(url, headers={
             "User-Agent": "LegionGo2Companion-release-check",
             "Accept": "application/vnd.github+json" if metadata else "application/octet-stream",
             "X-GitHub-Api-Version": "2022-11-28",
-        })
-        response = opener.open(request, timeout=REQUEST_TIMEOUT)
+        }, context=self._tls(), timeout=REQUEST_TIMEOUT,
+            limit=MAX_METADATA if metadata else MAX_DOWNLOAD,
+            total_seconds=METADATA_SECONDS if metadata else DOWNLOAD_SECONDS,
+            policy="metadata" if metadata else "archive", cancel=self._ensure_open)
         try:
             _checked_url(response.geturl(), url, metadata)
             if response.status != 200:
@@ -218,6 +217,8 @@ class CompanionUpdates:
             return dict(self._cached)
         current = ""
         self._release = None
+        started = time.monotonic()
+        event('updates','release_check_started',source='github')
         try:
             current = self._current_version()
             try:
@@ -231,6 +232,8 @@ class CompanionUpdates:
             else:
                 result, self._release = self._parse_release(metadata, current)
         except Exception as error:
+            event('updates','release_check_failed',level='warning',error=error,stage='metadata',source='github',
+                duration_ms=int(max(0,time.monotonic()-started)*1000))
             if isinstance(error, urllib.error.HTTPError):
                 message = ("GitHub's request limit was reached. Try again later." if error.code in (403, 429)
                            else f"GitHub could not check releases (HTTP {error.code}). Try again later.")
@@ -241,6 +244,9 @@ class CompanionUpdates:
                 message = str(error) if isinstance(error, ValueError) else "Could not read the release metadata."
             result = {"success": False, "current_version": current, "update_available": False,
                       "download_available": False, "error": message}
+        if result['success']:
+            event('updates','release_check_finished',outcome='available' if result.get('download_available') else 'no_download',
+                version=result.get('latest_version',''),source='github',duration_ms=int(max(0,time.monotonic()-started)*1000))
         result["checked_at"] = time.time()
         self._cache_at = time.monotonic()
         self._cached = dict(result)
@@ -422,10 +428,13 @@ class CompanionUpdates:
 
     def _save(self, release):
         self._ensure_open()
+        self._download_stage = 'destination'
         directory_fd, path = self._open_downloads()
         temporary = None
         try:
+            self._download_stage = 'existing_archive'
             if self._existing_matches(directory_fd, release):
+                event('updates','archive_reused',version=release['version'],bytes=release['size'])
                 return path + "/" + release["name"]
             candidate = f".companion-download-{secrets.token_hex(16)}.part"
             fd = os.open(candidate, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -435,11 +444,13 @@ class CompanionUpdates:
                 digest = hashlib.sha256()
                 count = 0
                 deadline = time.monotonic() + DOWNLOAD_SECONDS
+                self._download_stage = 'network'
                 with self._open(release["url"], metadata=False) as response:
                     for chunk in _read_chunks(response, release["size"], deadline, self._ensure_open):
                         stream.write(chunk)
                         digest.update(chunk)
                         count += len(chunk)
+                self._download_stage = 'verification'
                 if count != release["size"] or digest.hexdigest() != release["sha256"]:
                     raise ValueError("The downloaded ZIP failed its size or SHA-256 verification.")
                 stream.flush()
@@ -447,10 +458,12 @@ class CompanionUpdates:
                 os.fchown(stream.fileno(), self.user_uid, self.user_gid)
                 os.fchmod(stream.fileno(), 0o644)
                 os.fsync(stream.fileno())
+                self._download_stage = 'publication'
                 with self._publication_lock:
                     self._ensure_open()
                     os.replace(temporary, release["name"], src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
                     temporary = None
+                self._download_stage = 'durability'
                 os.fsync(directory_fd)
             return path + "/" + release["name"]
         finally:
@@ -463,8 +476,11 @@ class CompanionUpdates:
 
     def download(self, expected_version: str) -> dict:
         with self._lock:
+            started = time.monotonic()
+            self._download_stage = 'release_check'
             try:
                 _version(expected_version)
+                event('updates','download_started',version=expected_version,source='github')
                 result = self._check_locked(click=True)
                 if not result["success"]:
                     raise ValueError(result.get("error", "Could not check the latest release."))
@@ -474,9 +490,13 @@ class CompanionUpdates:
                     raise ValueError(result.get("error", "There is no newer verified release ZIP to download."))
                 release = dict(self._release)
                 path = self._save(release)
+                event('updates','download_finished',version=release['version'],bytes=release['size'],
+                    duration_ms=int(max(0,time.monotonic()-started)*1000))
                 return {"success": True, "path": path, "version": release["version"],
                         "sha256": release["sha256"]}
             except Exception as error:
+                event('updates','download_failed',level='warning',error=error,stage=self._download_stage,
+                    duration_ms=int(max(0,time.monotonic()-started)*1000))
                 message = (str(error) if isinstance(error, ValueError) else
                            "The release ZIP could not be downloaded safely. Check the connection and Downloads folder.")
                 return {"success": False, "error": message}

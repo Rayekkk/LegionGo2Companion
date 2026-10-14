@@ -21,13 +21,16 @@ import companion_updates as updates
 
 CURRENT = "0.6.2"
 NEW = "0.6.3"
+# Release identity comes from the separately shipped manifest. A typo in the
+# updater's allowlist must not silently change its own supposedly valid fixture.
+PLUGIN_MANIFEST = json.loads((Path(__file__).resolve().parents[1] / "plugin.json").read_text(encoding="utf-8"))
 
 
 def package(version=NEW, extra=None, manifest=None):
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
         files = {
-            "plugin.json": json.dumps(manifest or {"name": updates.PLUGIN_NAME, "version": version}),
+            "plugin.json": json.dumps(manifest or {"name": PLUGIN_MANIFEST["name"], "version": version}),
             "package.json": json.dumps({"name": "legiongo2companion", "version": version}),
             "main.py": "# release payload\n", "dist/index.js": "export default {};\n",
         }
@@ -242,9 +245,8 @@ class UpdateChecks(_UpdateFixture):
 
     def test_final_response_url_is_rechecked_and_closed_on_escape(self):
         response = Response(b"bad", url="https://evil.test/file")
-        with patch("companion_updates.urllib.request.build_opener") as build, \
+        with patch("companion_updates.open_http", return_value=response), \
                 patch.object(self.updater, "_tls"):
-            build.return_value.open.return_value = response
             with self.assertRaises(ValueError):
                 self.updater._open(updates.API_URL, metadata=True)
         self.assertTrue(response.closed)
@@ -256,6 +258,15 @@ class ArchiveChecks(unittest.TestCase):
 
     def test_valid_payload(self):
         self.validate(package())
+
+    def test_checked_in_plugin_manifest_is_accepted_and_foreign_identity_is_rejected(self):
+        version = PLUGIN_MANIFEST["version"]
+        updates.CompanionUpdates._validate_archive(
+            io.BytesIO(package(version=version, manifest=PLUGIN_MANIFEST)), version)
+        foreign = {**PLUGIN_MANIFEST, "name": PLUGIN_MANIFEST["name"] + " (other plugin)"}
+        with self.assertRaises(ValueError):
+            updates.CompanionUpdates._validate_archive(
+                io.BytesIO(package(version=version, manifest=foreign)), version)
 
     def test_wrong_version_plugin_or_missing_payload_rejected(self):
         for payload in (package(version="0.6.4"), package(manifest={"version": NEW, "name": "Other"}),
@@ -285,7 +296,7 @@ class ArchiveChecks(unittest.TestCase):
     def test_wrong_entrypoint_rejected(self):
         for field, value in (("main", "evil.py"), ("bin", "evil.js")):
             with self.subTest(field=field), self.assertRaises(ValueError):
-                self.validate(package(manifest={"name": updates.PLUGIN_NAME, "version": NEW, field: value}))
+                self.validate(package(manifest={"name": PLUGIN_MANIFEST["name"], "version": NEW, field: value}))
 
     def test_symlink_rejected(self):
         info = zipfile.ZipInfo("LegionGo2Companion/link")

@@ -150,7 +150,7 @@ class ManualWpaTests(unittest.TestCase):
                 return {'success': True, 'stdout': UUID + '\n Network \nno'}
             return {'success': True, 'stdout':
                     'BSS ' + FIVE + '\n\tfreq: 5260\n\tsignal: -20 dBm\n\tSSID: Network\n'
-                    'BSS ' + SIX + '\n\tfreq: 6295\n\tsignal: -40 dBm\n\tSSID:  Network \n'}
+                    'BSS ' + SIX + '\n\tfreq: 6295\n\tsignal: -40 dBm\n\tSSID: \\x20Network\\x20\n'}
         with patch.object(plugin, '_run_cmd', side_effect=command):
             result = plugin._scan_high_band_candidates_for_active_ssid('wlan0', UUID)
         self.assertEqual(result['ssid'], ' Network ')

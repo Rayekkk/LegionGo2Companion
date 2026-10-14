@@ -18,6 +18,7 @@ import stat
 import threading
 import time
 from typing import Any
+from diagnostics import event, transition
 
 
 MAX_SETTINGS_BYTES = 1024 * 1024
@@ -32,16 +33,8 @@ class CorruptSettings(RuntimeError):
     """A settings file exists but does not contain a JSON object."""
 
 
-def _log(level: str, message: str) -> None:
-    try:
-        import decky
-
-        logger = getattr(decky, "logger", None)
-        writer = getattr(logger, level, None)
-        if callable(writer):
-            writer(f"[legiongo2companion-settings] {message}")
-    except Exception:
-        pass
+def _log(level: str, action: str, *, store: str, error=None) -> None:
+    event("settings", action, level=level, store=store, error=error, repeat=60)
 
 
 def _validate_leaf(name: str) -> str:
@@ -240,7 +233,8 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
             # The new primary is already visible and its bytes were fsynced.
             # Raising here would falsely restore the old in-memory settings
             # and invite callers to roll hardware back against the new file.
-            _log("warning", f"settings replaced but directory durability could not be confirmed: {exc}")
+            _log("warning", "directory_durability_unconfirmed",
+                 store=os.path.basename(path), error=exc)
     finally:
         if tmp_fd >= 0:
             os.close(tmp_fd)
@@ -270,6 +264,7 @@ class AtomicSettingsManager:
 
     def __init__(self, name: str, settings_directory: str) -> None:
         leaf = _validate_leaf(name) + ".json"
+        self._store_name = name
         self.directory = _validate_directory(settings_directory)
         self.path = os.path.join(self.directory, leaf)
         self.backup_path = self.path + ".bak"
@@ -288,7 +283,7 @@ class AtomicSettingsManager:
             # Keep the module importable so the other companion modules can run,
             # but fail every later access closed instead of touching the path.
             self._blocked_reason = str(exc)
-            _log("error", self._blocked_reason)
+            _log("error", "unsafe_storage", store=self._store_name, error=exc)
 
     def _ensure_safe(self) -> None:
         if self._blocked_reason:
@@ -309,7 +304,7 @@ class AtomicSettingsManager:
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = f"{self.path}.corrupt-{stamp}-{secrets.token_hex(3)}"
             os.replace(self.path, destination)
-            _log("warning", f"quarantined corrupt settings as {destination}")
+            _log("warning", "corrupt_primary_quarantined", store=self._store_name)
         except FileNotFoundError:
             pass
 
@@ -341,13 +336,13 @@ class AtomicSettingsManager:
                             # The primary data was read successfully. A read-only
                             # or full filesystem should not make the module
                             # disappear; retry later and report on the next write.
-                            _log("warning", f"could not harden settings storage: {exc}")
+                            _log("warning", "storage_hardening_failed", store=self._store_name, error=exc)
                     return
             except UnsafeSettingsPath:
                 raise
             except CorruptSettings as exc:
                 corrupt_copies.append(f"primary: {exc}")
-                _log("warning", f"primary settings are corrupt: {exc}")
+                _log("warning", "primary_corrupt", store=self._store_name, error=exc)
 
             try:
                 backup = load_json_object(self.backup_path, missing_ok=True)
@@ -355,7 +350,7 @@ class AtomicSettingsManager:
                 raise
             except CorruptSettings as exc:
                 corrupt_copies.append(f"backup: {exc}")
-                _log("warning", f"backup settings are corrupt: {exc}")
+                _log("warning", "backup_corrupt", store=self._store_name, error=exc)
                 backup = None
 
             if backup is None and corrupt_copies:
@@ -368,7 +363,7 @@ class AtomicSettingsManager:
             if backup is not None:
                 atomic_write_json(self.path, self.settings)
                 self._recovery_error = ""
-                _log("warning", "restored settings from the last good backup")
+                _log("warning", "backup_restored", store=self._store_name)
             self._committed_settings = copy.deepcopy(self.settings)
 
     def getSetting(self, key: str, default: Any = None) -> Any:
@@ -388,12 +383,13 @@ class AtomicSettingsManager:
             try:
                 encoded = _encode_json_object(snapshot)
                 _atomic_write_bytes(self.path, encoded)
-            except Exception:
+            except Exception as exc:
                 # A failed user operation must not remain visible through
                 # getSetting() when the durable file still holds the previous
                 # transaction.  This also makes a later unrelated commit unable
                 # to smuggle the rejected values onto disk.
                 self.settings = copy.deepcopy(self._committed_settings)
+                _log("error", "primary_commit_failed", store=self._store_name, error=exc)
                 raise
             # The snapshot already owns a deep copy, separate from live settings.
             self._committed_settings = snapshot
@@ -401,11 +397,14 @@ class AtomicSettingsManager:
             try:
                 _atomic_write_bytes(self.backup_path, encoded)
                 self._storage_hardened = True
+                transition("settings", "backup_refresh", True, store=self._store_name,
+                           outcome="confirmed")
             except Exception as exc:
                 # The primary transaction is already durable.  Reporting this as
                 # a failed user operation would invite a hardware rollback even
                 # though the requested value was committed successfully.
-                _log("warning", f"could not refresh settings backup: {exc}")
+                transition("settings", "backup_refresh", False, level="warning",
+                           store=self._store_name, error=exc, outcome="failed")
 
     def replace(self, payload: dict[str, Any]) -> None:
         """Atomically replace the complete object in one durable commit."""

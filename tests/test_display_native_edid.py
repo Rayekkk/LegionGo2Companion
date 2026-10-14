@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """EDID remains independent of legacy/native display setup, using real files."""
 import asyncio
+import builtins
 from contextlib import ExitStack
 import json
 from pathlib import Path
@@ -176,6 +177,74 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.assertFalse(result['edid_patched'])
         self.assertIn('changed', result['edid_reason'])
         self.assertFalse(self.persisted()['edid_fix'])
+
+    def test_removed_published_copy_does_not_block_release_or_recreate_the_file(self):
+        display.Plugin._edid_pass()
+        self.assert_patched()
+        self.edid.unlink()
+        self.assertTrue(display.Plugin._edid_restore())
+        self.assertFalse(self.edid.exists())
+        self.assertFalse(self.state['edid_patched'])
+        self.assertIn('disappeared', self.state['edid_reason'])
+        self.assertEqual(self.backup.read_bytes(), self.original)
+        self.assertEqual(display.Plugin._edid_original, self.original)
+
+    def test_access_error_and_nonregular_target_still_defer_edid_restoration(self):
+        display.Plugin._edid_pass()
+        self.assert_patched()
+        with patch.object(display.os, 'lstat', side_effect=PermissionError('not readable')):
+            self.assertFalse(display.Plugin._edid_restore())
+        self.assertEqual(self.edid.read_bytes(), self.expected)
+        self.edid.unlink()
+        self.edid.mkdir()
+        self.assertFalse(display.Plugin._edid_restore())
+        self.assertTrue(self.edid.is_dir())
+        self.assertEqual(self.backup.read_bytes(), self.original)
+
+    def test_open_and_read_errors_retain_patched_bytes_and_recovery_until_retry(self):
+        real_open = builtins.open
+        for failure in (PermissionError('read access denied'), OSError('read I/O failed')):
+            for phase in ('open', 'read'):
+                with self.subTest(failure=type(failure).__name__, phase=phase):
+                    self.configure({})
+                    display.Plugin._edid_pass()
+                    self.assert_patched()
+                    class FailedRead:
+                        def __init__(self, handle): self.handle = handle
+                        def __enter__(self): return self
+                        def __exit__(self, *_args): self.handle.close()
+                        def fileno(self): return self.handle.fileno()
+                        def read(self): raise failure
+                    def opened(path, mode='r', *args, **kwargs):
+                        if Path(path) == self.edid and mode == 'rb':
+                            if phase == 'open': raise failure
+                            return FailedRead(real_open(path, mode, *args, **kwargs))
+                        return real_open(path, mode, *args, **kwargs)
+                    with patch('builtins.open', side_effect=opened):
+                        self.assertFalse(display.Plugin._edid_restore())
+                    self.assertEqual(self.edid.read_bytes(), self.expected)
+                    self.assertEqual(self.backup.read_bytes(), self.original)
+                    self.assertEqual(display.Plugin._edid_original, self.original)
+                    self.assertTrue(self.state['edid_patched'])
+                    self.assertIn('retry', self.state['edid_reason'])
+                    self.assertTrue(display.Plugin._edid_restore())
+                    self.assertEqual(self.edid.read_bytes(), self.original)
+                    self.assertFalse(self.backup.exists())
+
+    def test_path_removed_between_validation_and_read_is_released_without_recreation(self):
+        display.Plugin._edid_pass()
+        self.assert_patched()
+        real_open = builtins.open
+        def opened(path, mode='r', *args, **kwargs):
+            if Path(path) == self.edid and mode == 'rb':
+                self.edid.unlink()
+                raise FileNotFoundError('compositor removed old copy')
+            return real_open(path, mode, *args, **kwargs)
+        with patch('builtins.open', side_effect=opened):
+            self.assertTrue(display.Plugin._edid_restore())
+        self.assertFalse(self.edid.exists())
+        self.assertFalse(self.state['edid_patched'])
+        self.assertEqual(self.backup.read_bytes(), self.original)
 
     def test_dock_and_undock_follow_new_published_paths_without_setup(self):
         self.configure({'native_support_detected': True, 'native_restart_pending': True})

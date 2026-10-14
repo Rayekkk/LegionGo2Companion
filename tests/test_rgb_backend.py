@@ -4,25 +4,13 @@ import asyncio
 import copy
 import hashlib
 import stat
-import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
-if "decky" not in sys.modules:
-    class _Logger:
-        def info(self, _message): pass
-        def warning(self, _message): pass
-        def error(self, _message): pass
-        def debug(self, _message): pass
-
-    decky = types.ModuleType("decky")
-    decky.logger = _Logger()
-    decky.DECKY_PLUGIN_SETTINGS_DIR = tempfile.mkdtemp(prefix="lego-rgb-settings-")
-    sys.modules["decky"] = decky
+import test_integration  # Shared Decky and Windows/POSIX compatibility fixture.
 
 import rgb_backend
 
@@ -71,6 +59,55 @@ class RgbBackendTests(unittest.TestCase):
     def setUp(self):
         rgb_backend._power_capability_cache = None
         rgb_backend._last_error = ""
+
+    def test_successful_write_allows_bounded_stale_readback_without_replaying_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder)/'effect').write_text('breathe')
+            with patch.object(rgb_backend, '_read_small', side_effect=['breathe','breathe','chroma']) as read, \
+                    patch.object(rgb_backend.time, 'sleep'), \
+                    patch.object(rgb_backend.os, 'write', wraps=rgb_backend.os.write) as write:
+                self.assertTrue(rgb_backend._write_attr(folder, 'effect', 'chroma'))
+            self.assertEqual(read.call_count, 3)
+            write.assert_called_once()
+
+    def test_persistent_mismatch_is_bounded_and_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder)/'effect').write_text('breathe')
+            with patch.object(rgb_backend, '_read_small', return_value='breathe') as read, \
+                    patch.object(rgb_backend.time, 'sleep'), \
+                    patch.object(rgb_backend.os, 'write', wraps=rgb_backend.os.write) as write:
+                self.assertFalse(rgb_backend._write_attr(folder, 'effect', 'chroma'))
+            self.assertLessEqual(read.call_count, 16)
+            write.assert_called_once()
+
+    def test_incomplete_snapshot_is_reread_without_using_partial_values(self):
+        with tempfile.TemporaryDirectory() as folder:
+            make_led(Path(folder))
+            reader = rgb_backend._read_small
+            attempts = []
+            def read(path):
+                if Path(path).name == 'multi_intensity':
+                    attempts.append(path)
+                    if len(attempts) == 1:
+                        return ''
+                return reader(path)
+            with patch.object(rgb_backend, '_read_small', side_effect=read), \
+                    patch.object(rgb_backend.time, 'sleep'), \
+                    patch.object(rgb_backend.os, 'write') as write:
+                result = rgb_backend._read_rgb_snapshot(folder)
+            self.assertEqual(result['rgb'], [0, 100, 100])
+            self.assertEqual(len(attempts), 2)
+            write.assert_not_called()
+
+    def test_persistent_invalid_snapshot_stays_unavailable_after_bounded_reads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            make_led(Path(folder))
+            (Path(folder)/'speed').write_text('invalid')
+            with patch.object(rgb_backend.time, 'sleep') as sleep, \
+                    patch.object(rgb_backend.os, 'write') as write:
+                self.assertIsNone(rgb_backend._read_rgb_snapshot(folder))
+            self.assertEqual(sleep.call_count, 2)
+            write.assert_not_called()
 
     def test_rgb_capability_accepts_both_go2_models_only_with_verified_interface(self):
         real = "/sys/devices/test/0003:17EF:61EB.0001/leds/go:rgb:joystick_rings"
@@ -290,6 +327,7 @@ class RgbBackendTests(unittest.TestCase):
         plugin._settle_until = 30.0
 
         async def advance(seconds):
+            self.assertGreater(seconds, 0, "the monitor must not busy-loop")
             now[0] += seconds
             if now[0] >= 105.0:
                 raise asyncio.CancelledError
@@ -307,7 +345,14 @@ class RgbBackendTests(unittest.TestCase):
         ):
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(plugin._drift_loop())
-        self.assertEqual(attempts, [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 100.0])
+        failed = [at for at in attempts if at < 40]
+        healthy = [at for at in attempts if at >= 40]
+        self.assertTrue(failed)
+        self.assertLessEqual(failed[0], 10)
+        self.assertLessEqual(len(failed), 10, "unavailable RGB must not be hammered")
+        self.assertGreaterEqual(len(healthy), 2, "retry must continue after initial settling")
+        self.assertLessEqual(healthy[0], 55, "controller return must be retried promptly")
+        self.assertTrue(all(45 <= b - a <= 75 for a, b in zip(healthy, healthy[1:])), healthy)
 
     def test_resume_retries_missing_controller_and_force_reapplies_saved_on_or_off(self):
         for enabled in (True, False):
@@ -537,6 +582,47 @@ class RgbBackendTests(unittest.TestCase):
                 identity["bios_version"] = "future"
                 supported, _ = rgb_backend._power_capability()
                 self.assertFalse(supported)
+
+    def test_transient_power_capability_failure_recovers_without_restart_after_bounded_retry(self):
+        for failure in ('dsdt_read','missing_mem','missing_identity'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as raw:
+                root=Path(raw);dsdt=root/'DSDT';devmem=root/'mem'
+                dsdt.write_bytes(b'audited dsdt');devmem.write_bytes(bytes(4096))
+                identity={'product_family':rgb_backend.EXPECTED_FAMILY,'product_name':rgb_backend.EXPECTED_PRODUCT,
+                          'board_name':rgb_backend.EXPECTED_BOARD,'bios_version':rgb_backend.AUDITED_BIOS}
+                original=dict(identity);digest=hashlib.sha256(dsdt.read_bytes()).hexdigest()
+                rgb_backend._power_capability_cache=None
+                if failure=='dsdt_read':dsdt.unlink()
+                elif failure=='missing_mem':devmem.unlink()
+                else:identity['bios_version']=''
+                with patch.object(rgb_backend,'_read_identity',return_value=identity), \
+                        patch.object(rgb_backend,'DSDT_PATH',str(dsdt)),patch.object(rgb_backend,'DEV_MEM_PATH',str(devmem)), \
+                        patch.object(rgb_backend,'AUDITED_DSDT_SHA256',{digest}), \
+                        patch.object(rgb_backend.time,'monotonic',return_value=100) as clock, \
+                        patch.object(rgb_backend,'_map_power_register') as mmio:
+                    self.assertFalse(rgb_backend._power_capability()[0])
+                    dsdt.write_bytes(b'audited dsdt');devmem.write_bytes(bytes(4096));identity.update(original)
+                    clock.return_value=101
+                    self.assertFalse(rgb_backend._power_capability()[0],'Do not retry every UI poll')
+                    clock.return_value=110
+                    self.assertEqual(rgb_backend._power_capability(),(True,''))
+                    mmio.assert_not_called()
+
+    def test_power_retry_does_not_accept_unknown_dsdt_or_model(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);dsdt=root/'DSDT';devmem=root/'mem'
+            dsdt.write_bytes(b'unqualified');devmem.write_bytes(bytes(4096))
+            identity={'product_family':rgb_backend.EXPECTED_FAMILY,'product_name':rgb_backend.EXPECTED_PRODUCT,
+                      'board_name':rgb_backend.EXPECTED_BOARD,'bios_version':rgb_backend.AUDITED_BIOS}
+            with patch.object(rgb_backend,'_read_identity',return_value=identity), \
+                    patch.object(rgb_backend,'DSDT_PATH',str(dsdt)),patch.object(rgb_backend,'DEV_MEM_PATH',str(devmem)), \
+                    patch.object(rgb_backend.time,'monotonic',return_value=100) as clock, \
+                    patch.object(rgb_backend,'_map_power_register') as mmio:
+                rgb_backend._power_capability_cache=None
+                self.assertFalse(rgb_backend._power_capability()[0])
+                clock.return_value=110
+                self.assertFalse(rgb_backend._power_capability()[0])
+                mmio.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 import decky
+from diagnostics import event, transition
 from system_process import system_env
 import module_runtime
 
@@ -719,15 +720,18 @@ def _repair_sync() -> bool:
         state = _load_state()
         if not state["enabled"]:
             _service_watch.clear()
+            transition("remap", "managed_profile", True, outcome="unmanaged")
             return True
         try:
             state, _ = _apply_state(state, adopt_external=True)
             _service_watch.capture(_json_value)
             _last_error = ""
+            transition("remap", "managed_profile", True, outcome="confirmed")
             return True
         except Exception as exc:
             _last_error = str(exc)
-            decky.logger.warning(f"[legiongo2companion-remap] reapply failed: {exc}")
+            transition("remap", "managed_profile", False, level="warning", error=exc,
+                       outcome="deferred", retryable=True)
             return False
 
 
@@ -759,6 +763,8 @@ async def _watch_loop() -> None:
     while True:
         try:
             await asyncio.sleep(RESUME_CHECK_S)
+            if module_runtime.is_paused('remap'):
+                continue
             resumed = _resume_detected()
             now = time.monotonic()
             if resumed:
@@ -784,7 +790,7 @@ async def _watch_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            decky.logger.warning(f"[legiongo2companion-remap] watchdog failed: {exc}")
+            event("remap", "watchdog", level="warning", error=exc, outcome="failed", repeat=60)
 
 
 class Plugin:
@@ -794,7 +800,7 @@ class Plugin:
         _service_watch.clear()
         await module_runtime.offload('remap', _repair_sync)
         if _watch_task is None or _watch_task.done():
-            _watch_task = asyncio.create_task(_watch_loop())
+            _watch_task = module_runtime.background_task(_watch_loop())
 
     async def _unload(self):
         global _watch_task
@@ -808,7 +814,7 @@ class Plugin:
         try:
             await module_runtime.offload('remap', _restore_current_if_owned)
         except Exception as exc:
-            decky.logger.warning(f"[legiongo2companion-remap] unload restore failed: {exc}")
+            event('remap','restore_failed',level='warning',error=exc,stage='unload',pending=True,restored=False)
         finally:
             _service_watch.clear()
 
@@ -816,7 +822,7 @@ class Plugin:
         try:
             await module_runtime.offload('remap', _restore_current_if_owned)
         except Exception as exc:
-            decky.logger.warning(f"[legiongo2companion-remap] uninstall restore failed: {exc}")
+            event('remap','restore_failed',level='warning',error=exc,stage='uninstall',pending=True,restored=False)
         finally:
             _service_watch.clear()
 

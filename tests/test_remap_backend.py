@@ -294,6 +294,12 @@ mapping:
         self.assertTrue(remap_backend._profile_matches(result, state))
         self.assertEqual(result.count("button: Keyboard"), 1)
         self.assertEqual(result.count("button: QuickAccess2"), 1)
+        # The matcher shares the action table with the builder. Check literal
+        # target events too, so a wrong action cannot validate its own output.
+        events = {remap_backend._source_for_block(block): remap_backend._events_for_block(block)
+                  for block in remap_backend._mapping_blocks(result)[1]}
+        self.assertEqual(events["Keyboard"], [("keyboard", "KeyEsc")])
+        self.assertEqual(events["QuickAccess2"], [])
 
     def test_default_restores_custom_baseline_and_preserves_unrelated_live_edits(self):
         baseline = BASE_PROFILE.replace(
@@ -459,12 +465,20 @@ mapping:
     def test_restart_hint_advances_repair_once_and_preserves_failure_backoff(self):
         for failure in (False, True):
             with self.subTest(failure=failure):
-                clock, calls = [0.0], []
+                clock, calls, hint = [0.0], [], [None]
 
-                async def sleep(_seconds):
-                    clock[0] += 5
+                async def sleep(seconds):
+                    self.assertGreater(seconds, 0, "the monitor must not busy-loop")
+                    self.assertLessEqual(seconds, 10, "restart detection must stay prompt")
+                    clock[0] += seconds
                     if clock[0] > 180:
                         raise asyncio.CancelledError
+
+                def consume_exit():
+                    if clock[0] >= 40 and hint[0] is None:
+                        hint[0] = clock[0]
+                        return True
+                    return False
 
                 async def repair(_module, _function):
                     calls.append(clock[0])
@@ -477,12 +491,28 @@ mapping:
                 with patch.object(remap_backend, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
                         patch.object(remap_backend.asyncio, "sleep", side_effect=sleep), \
                         patch.object(remap_backend, "_resume_detected", return_value=False), \
-                        patch.object(remap_backend._service_watch, "consume_exit", side_effect=lambda: clock[0] == 40), \
+                        patch.object(remap_backend._service_watch, "consume_exit", side_effect=consume_exit), \
                         patch.object(remap_backend.module_runtime, "offload", side_effect=repair), \
                         patch.object(remap_backend, "_json_value") as query:
                     asyncio.run(watch())
-                expected = [5, 10, 15, 20, 25] + ([40, 45, 55, 75, 115, 175] if failure else [40, 100, 160])
-                self.assertEqual(calls, expected)
+                boot = [at for at in calls if at < hint[0]]
+                recovery = [at for at in calls if at >= hint[0]]
+                self.assertTrue(boot, "initial discovery must not wait for a restart")
+                self.assertLessEqual(boot[0], 10)
+                self.assertLessEqual(len(boot), 7, "initial discovery must remain bounded")
+                self.assertGreaterEqual(len(recovery), 3)
+                self.assertLessEqual(recovery[0] - hint[0], 10)
+                gaps = [b - a for a, b in zip(recovery, recovery[1:])]
+                self.assertTrue(all(0 < gap <= 75 for gap in gaps), recovery)
+                if failure:
+                    self.assertLessEqual(len(recovery), 8)
+                    self.assertLessEqual(gaps[0], 15)
+                    # Permit bounded jitter while retaining a slow late retry
+                    # rate and the overall attempt budget above.
+                    self.assertGreaterEqual(sum(gaps[-2:]), 60, "late retries must remain low-frequency")
+                    self.assertGreaterEqual(gaps[-1], 30)
+                else:
+                    self.assertTrue(all(gap >= 45 for gap in gaps), recovery)
                 query.assert_not_called()
 
 

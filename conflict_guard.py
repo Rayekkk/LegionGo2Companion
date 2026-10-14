@@ -5,6 +5,7 @@
 import json
 import os
 import stat
+from diagnostics import event
 
 
 PLUGIN_NAMES = {
@@ -19,55 +20,59 @@ def _identity(value):
     return "".join(c for c in value.casefold() if c.isalnum()) if isinstance(value, str) else ""
 
 
-def installed_conflicts(plugin_dir):
-    """Inspect siblings, including renamed/symlinked installs, never settings dirs.
+def _manifest_name(entry):
+    try:
+        fd = os.open(os.path.join(entry.path, "plugin.json"),
+                     os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("A plugin manifest is not a regular file.")
+        with os.fdopen(fd, encoding="utf-8-sig") as source:
+            fd = None
+            text = source.read(65537)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if len(text) > 65536:
+        raise ValueError("A plugin manifest is too large to verify safely.")
+    try:
+        manifest = json.loads(text)
+    except RecursionError as exc:
+        raise ValueError("A plugin manifest is nested too deeply to verify safely.") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("A plugin manifest is not a JSON object.")
+    return PLUGIN_NAMES.get(_identity(manifest.get("name")), "")
 
-    A directory with the canonical name already counts during an incomplete install.
-    Unknown directories without a manifest do not. Unreadable/malformed manifests
-    fail closed: their identity cannot safely be ruled out while Decky is installing.
+
+def installed_conflicts(plugin_dir):
+    """Find the three known predecessors; unrelated metadata is not ownership.
+
+    Canonical directories count even during an incomplete installation. Valid
+    manifests also identify renamed copies. One malformed sibling is reported
+    locally and cannot shut down unrelated hardware modules. Failure to inspect
+    the plugin directory itself still propagates to the admission gate.
     """
     installed_path = os.path.abspath(plugin_dir)
     current = os.path.realpath(installed_path)
     result = set()
-    # A development install may link Companion to an external checkout. Its
-    # installed siblings are still in Decky's plugin directory, not next to
-    # the resolved checkout. Resolve only identities when excluding ourselves.
     with os.scandir(os.path.dirname(installed_path)) as entries:
         for entry in entries:
-            if os.path.realpath(entry.path) == current:
-                continue
-            name = PLUGIN_NAMES.get(_identity(entry.name))
-            if name and (entry.is_dir() or entry.is_symlink()):
-                result.add(name)
-                continue
-            if not entry.is_dir():
-                continue
             try:
-                fd = os.open(os.path.join(entry.path, "plugin.json"),
-                             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
-            except FileNotFoundError:
+                if os.path.realpath(entry.path) == current:
+                    continue
+                name = PLUGIN_NAMES.get(_identity(entry.name))
+                if name and (entry.is_symlink() or entry.is_dir()):
+                    result.add(name)
+                    continue
+                if not entry.is_dir():
+                    continue
+                name = _manifest_name(entry)
+            except (OSError, ValueError, TypeError) as exc:
+                event("plugin", "sibling_manifest_unreadable", level="warning", error=exc,
+                      scope=entry.name, outcome="skipped", repeat=60)
                 continue
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    raise ValueError("A plugin manifest is not a regular file.")
-                with os.fdopen(fd, encoding="utf-8-sig") as f:
-                    fd = None  # The file object owns this descriptor now.
-                    text = f.read(65537)
-            finally:
-                if fd is not None:
-                    os.close(fd)
-            if len(text) > 65536:
-                raise ValueError("A plugin manifest is too large to verify safely.")
-            try:
-                manifest = json.loads(text)
-            except RecursionError as exc:
-                # A bounded manifest can still exceed the decoder's nesting
-                # limit. Report an unverifiable identity to the admission gate
-                # instead of terminating its periodic watcher.
-                raise ValueError("A plugin manifest is nested too deeply to verify safely.") from exc
-            if not isinstance(manifest, dict):
-                raise ValueError("A plugin manifest is not a JSON object.")
-            name = PLUGIN_NAMES.get(_identity(manifest.get("name")))
             if name:
                 result.add(name)
     return sorted(result)

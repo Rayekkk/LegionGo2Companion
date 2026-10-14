@@ -3,6 +3,7 @@
 # https://github.com/Rayekkk/LeGoTDP
 
 import decky
+from diagnostics import event, transition
 from system_process import system_env
 import module_runtime
 from active_app import resolve_running_app, scan_proc_for_appid
@@ -181,9 +182,7 @@ def _wmi_only() -> bool:
         _wmi_only_cache = any(
             name in field for field in fields for name in WMI_ONLY_FAMILIES)
         if _wmi_only_cache:
-            decky.logger.info(
-                f"[legotdp] {_dmi('product_family') or _dmi('product_name')}: "
-                "firmware interface only, Extras range unavailable")
+            event('tdp','firmware_interface_only',supported=True)
     return _wmi_only_cache
 
 
@@ -668,13 +667,10 @@ def _migrate() -> None:
 
         if legacy_settings and settings.getSetting(SETTINGS_KEY_SETTINGS, None) is None:
             settings.setSetting(SETTINGS_KEY_SETTINGS, legacy_settings)
-            decky.logger.info(
-                f"[legotdp] migrated {LEGACY_SETTINGS_FILE} into the Decky settings store")
+            event('tdp','legacy_settings_imported',store='settings')
         if legacy_profiles and settings.getSetting(SETTINGS_KEY_GAME_PROFILES, None) is None:
             settings.setSetting(SETTINGS_KEY_GAME_PROFILES, legacy_profiles)
-            decky.logger.info(
-                f"[legotdp] migrated {len(legacy_profiles)} per-game profile(s) "
-                f"from {LEGACY_PROFILES_FILE}")
+            event('tdp','legacy_settings_imported',store='profiles',count=len(legacy_profiles))
 
         settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
         settings.commit()
@@ -731,7 +727,7 @@ def _download_ryzenadj(cancel=None) -> None:
             raise InterruptedError("RyzenAdj download was cancelled")
         os.replace(bin_tmp, BIN_PATH)
         bin_tmp = ""
-        decky.logger.info(f"[legotdp] ryzenadj installed at {BIN_PATH}")
+        event('tdp','helper_installed',source='ryzenadj',outcome='verified')
     finally:
         for path in (tmp_path, bin_tmp):
             if not path:
@@ -778,7 +774,7 @@ def _run_ryzenadj(args: list, timeout: float = 5.0) -> tuple[int, str, str]:
             proc.communicate(timeout=2.0)
         except subprocess.TimeoutExpired:
             decky.logger.warning("[legotdp] ryzenadj process could not be killed")
-        decky.logger.warning(f"[legotdp] ryzenadj timed out: {args}")
+        event('tdp','helper_timeout',level='warning',source='ryzenadj',stage='execution',count=len(args),repeat=60)
         return -1, "", "timeout"
 
 
@@ -874,7 +870,9 @@ def _write_profile(path: str, value: str) -> bool:
         with open(path, "w") as f:
             f.write(value)
         return True
-    except OSError:
+    except OSError as exc:
+        event("tdp", "attribute_write", level="warning", error=exc,
+              attribute="platform_profile", outcome="failed", repeat=60)
         return False
 
 
@@ -883,8 +881,9 @@ def _write_ppt(spl_w: int, sppt_w: int, fppt_w: int) -> None:
         try:
             with open(_wmi_path(key, "current_value"), "w") as f:
                 f.write(str(val))
-        except OSError:
-            pass
+        except OSError as exc:
+            event("tdp", "attribute_write", level="warning", error=exc,
+                  attribute=WMI_ATTRS[key], outcome="failed", repeat=60)
 
 
 def _ppt_matches(spl_w: int, sppt_w: int, fppt_w: int) -> bool:
@@ -1030,8 +1029,7 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
                 # installed here, so falling through to it would only turn a
                 # firmware refusal into a confusing "ryzenadj not found".
                 return result
-            decky.logger.warning(
-                f"[legotdp] WMI apply failed ({result['stderr']}), falling back to ryzenadj")
+            event('tdp','firmware_fallback',level='warning',source='wmi',reason='hardware_unconfirmed',returncode=result.get('returncode'),repeat=60)
         if _wmi_only():
             return {"success": False, "stdout": "",
                     "stderr": "requested limits are outside what the firmware accepts",
@@ -1063,36 +1061,39 @@ _WMI_VERIFY_EVERY_S = 30.0
 # uptime. Invisible on a dev box or a console that has been on for hours; CI
 # runs on a freshly booted runner and caught it immediately.
 _wmi_verified_at: float | None = None
+_wmi_live_limits: tuple = ()
 
 
-def _wmi_limits_overridden(want_w: tuple) -> bool:
+def _wmi_limits_overridden(want_w: tuple) -> bool | None:
     """True when a live read disagrees with what the firmware claims is set.
 
     Only SPPT and FPPT are compared. SPL cannot be read back through ryzenadj
     on this hardware (see _adopt_unreadable_spl), and the firmware's own
     reading of it is the thing under suspicion here.
     """
-    global _wmi_verified_at
+    # None means no fresh cross-check, not proof the hardware reached target.
+    global _wmi_verified_at, _wmi_live_limits
     if not _ryzenadj_available or not os.path.isfile(BIN_PATH):
-        return False
+        return None
     now = time.monotonic()
     if _wmi_verified_at is not None and now - _wmi_verified_at < _WMI_VERIFY_EVERY_S:
-        return False
+        return None
     _wmi_verified_at = now
 
     if not _ryzenadj_lock.acquire(timeout=2.0):
-        return False
+        return None
     try:
         rc, out, _ = _run_ryzenadj(["--info"], timeout=3.0)
     finally:
         _ryzenadj_lock.release()
     if rc != 0:
-        return False
+        return None
 
     live = _parse_ryzenadj_output(out)
     pairs = [(live.get("sppt_limit"), want_w[1]), (live.get("fppt_limit"), want_w[2])]
     if any(v is None for v, _ in pairs):
-        return False
+        return None
+    _wmi_live_limits = tuple(v for v, _ in pairs)
     return any(abs(v - w) > DRIFT_TOLERANCE_WMI_W for v, w in pairs)
 
 
@@ -1195,8 +1196,9 @@ def _refresh_info_cache() -> None:
     watts  = _rapl_watts()
     with _info_cache_lock:
         _info_cache_ts = time.monotonic()
+        # A failed/absent sensor read is not a new sample of the previous value.
+        _info_cache.clear()
         if values:
-            _info_cache.clear()
             _info_cache.update(values)
         if watts is not None:
             _info_cache["package_draw"] = round(watts, 1)
@@ -1294,9 +1296,7 @@ def _apply_and_record(spl: int, sppt: int, fppt: int, why: str) -> dict:
                 f"[legotdp] Applied {why}: "
                 f"{target[0] // 1000}/{target[1] // 1000}/{target[2] // 1000} W")
         else:
-            decky.logger.warning(
-                f"[legotdp] Failed to apply {why}: "
-                f"rc={result['returncode']} err={result['stderr']}")
+            event('tdp','limits_apply_failed',level='warning',returncode=result.get('returncode'),reason='hardware_unconfirmed',repeat=60)
         return result
 
 
@@ -1418,7 +1418,7 @@ def _check_and_enforce_locked() -> dict:
             else:
                 _cancel_ac_settle()
             result = _transition_apply(
-                target, f"game profile for app={appid} on {trigger} (ac={ac_now})",
+                target, f"game profile on {trigger} (ac={ac_now})",
                 (appid, ac_now, target))
             _current_game_id = appid if result.get("success") else "\x00"
             return events
@@ -1427,7 +1427,7 @@ def _check_and_enforce_locked() -> dict:
         # running. Skipping this would leave the enforce pass below defending a
         # stale active_* triplet left over from whatever ran last.
         if appid:
-            why = f"global TDP, app={appid} has no profile"
+            why = "global TDP, running game has no profile"
         elif prev:
             why = "global TDP, game exited"
         else:
@@ -1467,6 +1467,7 @@ DRIFT_MAX_ATTEMPTS = 3
 _drift_target:   tuple = ()
 _drift_settled:  tuple = ()
 _drift_attempts: int   = 0
+_drift_context: tuple = (False, ())
 
 
 def _enforce_target(want: tuple) -> None:
@@ -1477,10 +1478,11 @@ def _enforce_target(want: tuple) -> None:
     flooded the log. After a few failed attempts we accept whatever the hardware
     settled on, and only act again if it moves away from that.
     """
-    global _drift_target, _drift_settled, _drift_attempts
+    global _drift_target, _drift_settled, _drift_attempts, _drift_context
 
     if want != _drift_target:
         _drift_target, _drift_settled, _drift_attempts = want, (), 0
+        _drift_context = (False, ())
 
     # Only reuse the panel's cache if it was filled after the last apply. It is
     # refreshed on its own two-second cadence, so a pass running right after a
@@ -1497,7 +1499,6 @@ def _enforce_target(want: tuple) -> None:
         return
 
     want_w    = tuple(v / 1000 for v in want)
-    reference = _drift_settled or want_w
     tolerance = DRIFT_TOLERANCE_WMI_W if _last_source == "wmi" else DRIFT_TOLERANCE_RYZENADJ_W
     # The WMI attributes keep reporting the last value even after the profile leaves
     # 'custom', so a matching read is not proof the limit is actually enforced - force
@@ -1505,30 +1506,37 @@ def _enforce_target(want: tuple) -> None:
     # a matching read is no proof nobody else moved the limits, hence the live
     # cross-check; both make `cur` unreliable rather than merely stale.
     profile_lost = _wmi_profile_lost()
-    overridden = _last_source == "wmi" and _wmi_limits_overridden(want_w)
-    if not (profile_lost or overridden) \
-            and all(abs(c - r) <= tolerance for c, r in zip(cur, reference)):
+    overridden = _wmi_limits_overridden(want_w) if _last_source == "wmi" else False
+    context = (profile_lost, _wmi_live_limits if overridden is True else ())
+    if _drift_settled:
+        same_limits = all(abs(c - r) <= tolerance for c, r in zip(cur, _drift_settled))
+        same_live = (overridden is None or
+                     (len(context[1]) == len(_drift_context[1]) and
+                      all(abs(a-b) <= tolerance for a, b in zip(context[1], _drift_context[1]))))
+        same_cause = profile_lost == _drift_context[0] and same_live
+        if same_limits and same_cause:
+            return
+        # A genuinely different observed state gets a fresh recovery budget.
+        _drift_settled, _drift_attempts = (), 0
+    if not profile_lost and overridden is not True \
+            and all(abs(c - r) <= tolerance for c, r in zip(cur, want_w)):
         # The retry budget is for consecutive failures to reach a target, not
         # the lifetime count of unrelated drifts. A confirmed real target starts
         # the next recovery from a full budget.
-        if not _drift_settled:
+        # Unchecked WMI facade values cannot erase a known SMU disagreement.
+        if _last_source != "wmi" or overridden is False or not _drift_context[1]:
             _drift_attempts = 0
+            _drift_context = (False, ())
         return
 
     if profile_lost:
         decky.logger.info("[legotdp] platform profile left 'custom', re-asserting limits")
-        _drift_settled, _drift_attempts = (), 0
 
     if overridden:
         decky.logger.info(
             "[legotdp] a live read disagrees with the firmware attributes, "
             "something moved the limits behind us - re-asserting")
-        _drift_settled, _drift_attempts = (), 0
-
-    if _drift_settled:
-        # Moved off the value we had accepted, so something external changed it.
-        # Give the real target another go.
-        _drift_settled, _drift_attempts = (), 0
+    _drift_context = context
 
     if _drift_attempts >= DRIFT_MAX_ATTEMPTS:
         _drift_settled = cur
@@ -1542,18 +1550,18 @@ def _enforce_target(want: tuple) -> None:
         f"[legotdp] TDP drift {cur} -> {want_w}, re-applying (attempt {_drift_attempts})")
     result = _apply_limits_with_saved_cpu_power(_load_settings(), *want)
     if not result["success"]:
-        decky.logger.warning(
-            f"[legotdp] drift re-apply failed rc={result['returncode']} err={result['stderr']}")
+        event('tdp','drift_apply_failed',level='warning',returncode=result.get('returncode'),reason='hardware_unconfirmed',repeat=60)
 
 
 def _restore_defaults_locked() -> dict:
     """Hand control back to firmware. Caller must hold _mutation_lock."""
     global _last_source, _applied_mw, _applied_at
-    global _drift_target, _drift_settled, _drift_attempts
+    global _drift_target, _drift_settled, _drift_attempts, _drift_context
     if not _apply_lock.acquire(timeout=8.0):
         return {"success": False, "stdout": "", "stderr": "apply busy", "returncode": -1}
     try:
         _drift_target, _drift_settled, _drift_attempts = (), (), 0
+        _drift_context = (False, ())
         path = _profile_path()
         if path:
             if not _write_profile(path, "balanced") or _read_profile(path) != "balanced":
@@ -2148,8 +2156,10 @@ def _best_effort_reapply_saved_cpu_power_locked(
         errors = _reapply_saved_cpu_power_controls_locked(state)
     except Exception as exc:
         errors = [f"CPU power restore failed: {exc}"]
-    for error in errors:
-        decky.logger.warning(f"[legotdp] {context}: {error}")
+        event('tdp','cpu_power_restore_failed',level='warning',error=exc,stage='saved_cpu_controls',repeat=60)
+    else:
+        if errors:
+            event('tdp','cpu_power_restore_failed',level='warning',stage='saved_cpu_controls',count=len(errors),reason='hardware_unconfirmed',repeat=60)
     return errors
 
 
@@ -2204,7 +2214,9 @@ def _tdp_user_transaction():
                         before_cpu, "after failed TDP operation")
                 return (rollback.get("success", False)
                         and not rollback.get("cpu_power_errors"))
-            except Exception:
+            except Exception as exc:
+                event("tdp", "rollback", level="error", error=exc,
+                      restored=False, stage="hardware", repeat=60)
                 return False
 
         def failure_detail(restored: bool) -> str:
@@ -2267,7 +2279,7 @@ class Plugin:
                             operation_success=False, operation_error="invalid CPU profile context")
                     return _cpu_scoped_status(selected, ac_profile)
                 except Exception as exc:
-                    decky.logger.warning(f"[legotdp] CPU power status failed: {exc}")
+                    event('tdp','cpu_status_failed',level='warning',error=exc,repeat=60)
                     return _cpu_power_controls_error_status(
                         "CPU power controls unavailable", selected or "",
                         ac_profile if type(ac_profile) is bool else False)
@@ -2338,11 +2350,12 @@ class Plugin:
                         error = (self._cpu_power_persistence_failure(exc, transaction, equivalent)
                                  if transaction is not None else f"settings persist failed: {exc}")
                         return status(False, error)
-                    decky.logger.info(
-                        f"[legotdp] {field}={canonical} app={selected or 'global'} ac={ac_profile} active={active}")
+                    event("tdp", "cpu_profile_saved", attribute=field,
+                          scope=("game_ac" if ac_profile else "game") if selected else "global",
+                          outcome="applied" if active else "saved")
                     return status(True)
                 except Exception as exc:
-                    decky.logger.warning(f"[legotdp] CPU profile RPC failed: {exc}")
+                    event('tdp','cpu_profile_failed',level='warning',error=exc,attribute=field)
                     try:
                         return status(False, str(exc))
                     except Exception:
@@ -2383,10 +2396,15 @@ class Plugin:
                     self._helper_error = ""
                     _current_game_id = "\x00"
                     _transition_key = None
+                transition("tdp", "helper_ready", True, outcome="verified")
                 return {"success": True}
             except Exception as exc:
                 if not cancellation.is_set():
                     self._helper_error = str(exc)
+                    transition("tdp", "helper_ready", False, level="warning", error=exc,
+                               outcome="deferred", retryable=True)
+                else:
+                    event("tdp", "helper_job", outcome="cancelled", reason="module_shutdown")
                 return {"success": False, "error": str(exc)}
             finally:
                 self._extras_retry_busy = False
@@ -2541,8 +2559,7 @@ class Plugin:
 
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles})
-                decky.logger.info(
-                    f"[legotdp] Saved AC profile: app={app_id} separate={ac_separate}")
+                event("tdp", "ac_profile_saved", scope="game_ac", enabled=ac_separate)
                 return {"success": True, "stderr": "", "stdout": "", "returncode": 0}
         return await _offload(_do)
 
@@ -2568,8 +2585,9 @@ class Plugin:
                              SETTINGS_KEY_GAME_PROFILES: profiles})
                 return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
         result = await _offload(_do)
-        decky.logger.info(
-            f"[legotdp] Deleted game profile: app={app_id} success={result['success']}")
+        event("tdp", "profile_deleted", scope="game",
+              level="info" if result["success"] else "warning",
+              outcome="confirmed" if result["success"] else "failed")
         return result
 
     async def set_plugin_enabled(self, enabled: bool) -> dict:
@@ -2717,7 +2735,10 @@ class Plugin:
         if not self._ready:
             return {"success": False, "values": {}, "error": "not ready"}
         with _info_cache_lock:
-            return {"success": True, "values": dict(_info_cache)}
+            age = time.monotonic() - _info_cache_ts if _info_cache_ts > 0 else None
+            return {"success": True,
+                    "values": dict(_info_cache) if age is not None and 0 <= age <= 6 else {},
+                    "sample_age_seconds": age}
 
     async def apply_tdp(self, spl: int, sppt: int, fppt: int, app_id: str = "",
                         preset_name: str = "",
@@ -2735,7 +2756,7 @@ class Plugin:
         preset_name = _safe_label(preset_name)
 
         def _do() -> dict:
-            with _tdp_user_transaction() as restore_failed:
+            with _mutation_lock:
                 s = _load_settings()
                 if not s.get("enabled", True):
                     return {"success": False, "stderr": "plugin disabled",
@@ -2748,6 +2769,34 @@ class Plugin:
                     return {"success": False, "stderr": "game is no longer active",
                             "stdout": "", "returncode": -1}
 
+                if (not app_id and current_app_id
+                        and current_app_id in _load_profiles()):
+                    # The desktop editor can select Global while a game owns
+                    # the active limits. Save that future policy without
+                    # replacing the game's defended target or its AC ladder.
+                    requested = _target_for_preset(
+                        s, spl, sppt, fppt,
+                        preset_name or s.get("active_preset", ""))
+                    s["spl"], s["sppt"], s["fppt"] = requested
+                    # active_preset is the historical global preset key;
+                    # per-game labels live in their own profile entries.
+                    s["active_preset"] = preset_name or s.get("active_preset", "")
+                    try:
+                        _save_settings(s)
+                    except Exception as exc:
+                        return {"success": False, "stdout": "", "returncode": -1,
+                                "stderr": f"Could not save global TDP settings: {exc}",
+                                "applied": False, "saved_only": False}
+                    return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
+                            "applied": False, "saved_only": True,
+                            "message": "Global TDP settings saved. They will apply when no game profile is active."}
+
+                return _apply_current(s)
+
+        def _apply_current(s: dict) -> dict:
+            # _do retains the mutation lock across validation, hardware and
+            # persistence, including the inactive-global save above.
+            with _tdp_user_transaction() as restore_failed:
                 profiles: dict = {}
                 existing: dict = {}
                 if app_id:
@@ -2785,7 +2834,7 @@ class Plugin:
                     if preset_name:
                         existing["preset"] = preset_name
                     profiles[app_id] = existing
-                    decky.logger.info(f"[legotdp] Saved game profile: app={app_id}")
+                    event("tdp", "profile_saved", scope="game", outcome="confirmed")
                 else:
                     s["spl"], s["sppt"], s["fppt"] = requested
                     s["active_preset"] = effective_preset
@@ -2795,6 +2844,7 @@ class Plugin:
                     values[SETTINGS_KEY_GAME_PROFILES] = profiles
                 _write_keys(values)
                 _cancel_ac_settle()
+                result.update(applied=True, saved_only=False)
                 return restore_failed(result)
         return await _offload(_do)
 
@@ -2819,9 +2869,10 @@ class Plugin:
         while True:
             await asyncio.sleep(2)
             try:
-                await self._push_info()
+                published = await self._push_info()
+                if published:transition('tdp','info_stream','available',outcome='published')
             except Exception as e:
-                decky.logger.warning(f"[legotdp] info loop error: {e}")
+                transition('tdp','info_stream','unavailable',level='warning',error=e,outcome='unavailable')
 
     async def _resettle_after_ac(self, generation: int):
         """Put the limits back over the seconds after a charger transition.
@@ -2836,7 +2887,7 @@ class Plugin:
             try:
                 settled = await _offload(_reapply_current_target, generation)
             except Exception as e:
-                decky.logger.warning(f"[legotdp] AC re-settle failed: {e}")
+                event('tdp','ac_settle_failed',level='warning',error=e,repeat=60)
                 return
             if settled:
                 return
@@ -2856,8 +2907,9 @@ class Plugin:
                         lambda done: self._tasks.remove(done) if done in self._tasks else None)
                 for event, payload in events.items():
                     await decky.emit(event, payload)
+                transition('tdp','enforcement_loop','running',outcome='cycle_complete')
             except Exception as e:
-                decky.logger.warning(f"[legotdp] enforce iteration failed: {e}")
+                transition('tdp','enforcement_loop','unavailable',level='warning',error=e,outcome='unavailable')
 
     async def _migration(self):
         """Fold the pre-1.5.0 files into Decky's store, before anything reads it.
@@ -2883,7 +2935,7 @@ class Plugin:
             await _offload(_migrate)
         except Exception as e:
             Plugin._setup_error = f"settings migration failed: {e}"
-            decky.logger.error(f"[legotdp] migration failed: {e}")
+            event('tdp','migration_failed',level='error',error=e)
 
     async def _main(self):
         self._helper_cancel = threading.Event()
@@ -2912,8 +2964,7 @@ class Plugin:
             except Exception as e:
                 _ryzenadj_available = False
                 self._helper_error = str(e)
-                decky.logger.warning(
-                    f"[legotdp] ryzenadj unavailable ({e}); Extras range disabled")
+                transition('tdp','helper_ready',False,level='warning',error=e,outcome='deferred',retryable=True)
             def _apply_saved() -> dict:
                 global _current_game_id, _last_cpu_power_check
                 with _mutation_lock:
@@ -2930,6 +2981,7 @@ class Plugin:
                         except Exception as exc:
                             cpu_power_errors = [
                                 f"CPU power restore failed: {exc}"]
+                            event('tdp','cpu_power_restore_failed',level='warning',error=exc,stage='startup',repeat=60)
                         return {"success": True, "skipped": True,
                                 "cpu_power_errors": cpu_power_errors}
                     result = _apply_limits_with_saved_cpu_power(s, *target)
@@ -2939,17 +2991,14 @@ class Plugin:
                         _current_game_id = app_id
                         decky.logger.info(
                             "[legotdp] startup target: "
-                            + (f"profile app={app_id}" if using_profile
+                            + ("game profile" if using_profile
                                else "global profile"))
                     return result
             startup_apply = await _offload(_apply_saved)
             if not startup_apply.get("success", False):
-                decky.logger.warning(
-                    f"[legotdp] saved TDP did not apply at startup: "
-                    f"{startup_apply.get('stderr', 'unknown error')}")
-            for error in startup_apply.get("cpu_power_errors", []):
-                decky.logger.warning(
-                    f"[legotdp] saved CPU control did not apply at startup: {error}")
+                event('tdp','startup_limits_unconfirmed',level='warning',reason='hardware_unconfirmed',returncode=startup_apply.get('returncode'))
+            if startup_apply.get('cpu_power_errors'):
+                event('tdp','startup_cpu_unconfirmed',level='warning',reason='hardware_unconfirmed',count=len(startup_apply['cpu_power_errors']))
 
             Plugin._ready = True
             # Keep references - a bare create_task() may be garbage-collected mid-run.
@@ -2966,7 +3015,7 @@ class Plugin:
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")
         except Exception as e:
             Plugin._setup_error = str(e)
-            decky.logger.error(f"[legotdp] setup failed: {e}")
+            event('tdp','startup_failed',level='error',error=e)
             raise
 
     async def _unload(self):

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 if "decky" not in sys.modules:
     _settings_temp = tempfile.TemporaryDirectory(prefix="companion-battery-tests-")
+    unittest.addModuleCleanup(_settings_temp.cleanup)
     _decky = types.ModuleType("decky")
     _decky.DECKY_PLUGIN_SETTINGS_DIR = _settings_temp.name
     _decky.logger = types.SimpleNamespace(**{
@@ -273,14 +274,22 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.set_enabled(True)
         await self.plugin._main()
         self.externally_select("Standard")
+        repaired = asyncio.Event()
+        repair_once = self.plugin._repair
+        def observed_repair():
+            repair_once()
+            # _repair executes in a worker thread. Signal its actual completion
+            # instead of assuming a loaded CI runner gives us four 10 ms ticks.
+            loop.call_soon_threadsafe(repaired.set)
+        loop = asyncio.get_running_loop()
         with patch.object(battery, "RESUME_CHECK_S", 0.01), \
              patch.object(battery, "_suspend_offset", side_effect=itertools.chain([0, 0], itertools.repeat(2))), \
-             patch.object(self.plugin, "_repair", wraps=self.plugin._repair) as repair:
+             patch.object(self.plugin, "_repair", side_effect=observed_repair) as repair:
             # Replace the just-created watcher before its first tick.
             await self.plugin._unload()
             self.plugin._running = True
             self.plugin._task = asyncio.create_task(self.plugin._watch())
-            await asyncio.sleep(0.045)
+            await asyncio.wait_for(repaired.wait(), timeout=3)
             await self.plugin._unload()
             self.assertEqual(repair.call_count, 1)
         self.assertEqual(self.current(), "Long_Life")
@@ -321,7 +330,10 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             return detect()
         with patch.object(battery, '_detect', side_effect=temporarily_missing):
             await self.run_watch_clock(80)
-        self.assertEqual(checks, [5, 10, 70])
+        self.assertGreaterEqual(len(checks), 3)
+        self.assertLessEqual(checks[0], 10)
+        self.assertLessEqual(checks[1] - checks[0], 15)
+        self.assertTrue(all(45 <= b - a <= 75 for a, b in zip(checks[1:], checks[2:])), checks)
         self.assertEqual(self.current(), 'Long_Life')
         self.assertEqual(self.plugin._load()['baseline'], 'Fast')
         self.assertEqual(self.plugin._error, '')
@@ -346,8 +358,13 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             await self.run_watch_clock(200)
         self.assertLessEqual(len(checks), 8)
         self.assertGreater(len(checks), 4)
-        self.assertEqual(checks[1] - checks[0], 5)
-        self.assertEqual(checks[-1] - checks[-2], 60)
+        gaps = [b - a for a, b in zip(checks, checks[1:])]
+        self.assertLessEqual(gaps[0], 15)
+        # Bounded jitter may shorten one retry without making failure polling
+        # aggressive. Keep the aggregate rate and late recovery budget bounded.
+        self.assertGreaterEqual(sum(gaps[-2:]), 90, "late retries must remain low-frequency")
+        self.assertTrue(all(0 < gap <= 75 for gap in gaps), checks)
+        self.assertGreaterEqual(gaps[-1], 45)
         self.assertIn('Invalid argument', self.plugin._error)
 
     async def test_missing_or_ambiguous_system_battery_disables_controls(self):
@@ -521,7 +538,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.current(), "Long_Life")
         self.assertEqual(self.writes, [])
 
-    async def test_cancelling_rpc_waits_for_transaction_to_complete(self):
+    async def test_repeated_cancellation_waits_for_transaction_to_complete(self):
         entered = threading.Event()
         finish = threading.Event()
         def delayed(path, mode):
@@ -531,13 +548,17 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             self.write_mode(path, mode)
         self.writer.side_effect = delayed
         task = asyncio.create_task(self.plugin.set_enabled(True))
-        await asyncio.to_thread(entered.wait, 2)
-        task.cancel()
-        await asyncio.sleep(0)
-        self.assertFalse(task.done())
-        finish.set()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
+        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+        try:
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertFalse(task.done(), "A cancelled RPC must retain its in-flight hardware transaction")
+        finally:
+            finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
         self.assertEqual(self.current(), "Long_Life")
         self.assertTrue(self.plugin._load()["managed"])
 

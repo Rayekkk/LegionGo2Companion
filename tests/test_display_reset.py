@@ -2,6 +2,7 @@
 """Display reset uses real files/JSON while isolating Gamescope atom writes."""
 import asyncio
 from contextlib import ExitStack
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -64,6 +65,20 @@ class DisplayResetTests(unittest.TestCase):
 
     def reset(self):
         return asyncio.run(self.plugin.reset_settings())
+
+    def test_unknown_partial_edid_keeps_recovery_bytes_and_blocks_reset_completion(self):
+        self.edid.write_bytes(b'partial-edid')
+        info = self.edid.stat()
+        pending = dict(schema=1, path=str(self.edid), device=info.st_dev, inode=info.st_ino,
+                       partial_sha256=None, original_sha256=hashlib.sha256(b'original-edid').hexdigest())
+        self.store.replace({**self.saved, 'edid_write_pending': pending})
+        result = self.reset()
+        self.assertIn('original display EDID', result['reset_error'])
+        self.assertTrue(result['reset_in_progress'])
+        self.assertEqual(self.persisted()['edid_write_pending'], pending)
+        self.assertEqual(self.edid_backup.read_bytes(), b'original-edid')
+        self.assertEqual(self.edid.read_bytes(), b'partial-edid')
+        self.assertTrue(self.script.exists())
 
     def test_invalid_public_modes_never_read_migrate_install_or_activate(self):
         original = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
@@ -189,7 +204,12 @@ class DisplayResetTests(unittest.TestCase):
         self.assertEqual(self.edid.read_bytes(), b'original-edid')
 
     def test_final_commit_failure_can_retry_after_script_and_edid_are_restored(self):
-        with patch.object(self.store, 'replace', side_effect=OSError('final commit failure')):
+        replace = self.store.replace
+        def final_commit(payload):
+            if payload.get('panel_mode') is None:
+                raise OSError('final commit failure')
+            return replace(payload)
+        with patch.object(self.store, 'replace', side_effect=final_commit):
             result = self.reset()
         self.assertIn('final commit failure', result['reset_error'])
         self.assert_paused()

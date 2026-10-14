@@ -22,6 +22,7 @@ import time
 from typing import Any, Callable
 
 import decky
+from diagnostics import event, transition
 import module_runtime
 
 from safe_settings import SettingsManager
@@ -100,6 +101,8 @@ _drift_task: asyncio.Task | None = None
 _last_suspend_offset: float | None = None
 _last_error = ""
 _power_capability_cache: tuple[bool, str] | None = None
+_power_capability_retry_at = 0.0
+POWER_CAPABILITY_RETRY_S = 5.0
 
 
 def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
@@ -222,12 +225,30 @@ def _write_attr(path: str, attr: str, value: str, *, force: bool = False) -> boo
         fd = os.open(target, flags)
         try:
             payload = (value.strip() + "\n").encode("ascii")
-            if os.write(fd, payload) != len(payload):
+            written = os.write(fd, payload)
+            if written != len(payload):
+                event("rgb", "attribute_write", level="warning", attribute=attr,
+                      reason="short_write", bytes=written, repeat=60)
                 return False
         finally:
             os.close(fd)
-        return _normalise_attr(attr, _read_small(target)) == expected
-    except (OSError, UnicodeError, ValueError):
+        # MCU-backed sysfs reads can briefly report the preceding configuration.
+        # Wait only for readback of this successful write; never replay it or
+        # accept an unconfirmed target. Normal immediate readback adds no delay.
+        deadline = time.monotonic() + 0.25
+        for _ in range(14):
+            actual = _normalise_attr(attr, _read_small(target))
+            if actual == expected:
+                return True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        event("rgb", "attribute_write", level="warning", attribute=attr,
+              reason="readback_unconfirmed", repeat=60)
+        return False
+    except (OSError, UnicodeError, ValueError) as exc:
+        event("rgb", "attribute_write", level="warning", error=exc,
+              attribute=attr, outcome="failed", repeat=60)
         return False
 
 
@@ -260,6 +281,19 @@ def _read_rgb_snapshot(path: str | None = None) -> dict[str, Any] | None:
         path, _ = _rgb_capability()
     if path is None:
         return None
+    # A controller reply may be temporarily incomplete during a profile/effect
+    # transition. Retry the whole read, never merge partial snapshots or issue
+    # writes. A persistent failure remains unavailable to the transaction.
+    for attempt in range(3):
+        snapshot = _read_rgb_snapshot_once(path)
+        if snapshot is not None:
+            return snapshot
+        if attempt < 2:
+            time.sleep(0.02)
+    return None
+
+
+def _read_rgb_snapshot_once(path: str) -> dict[str, Any] | None:
     try:
         maxima = _rgb_channel_maxima(path)
         rgb = _parse_triplet(_read_small(os.path.join(path, "multi_intensity")))
@@ -525,9 +559,14 @@ def _rgb_matches(state: dict[str, Any], current: dict[str, Any], path: str) -> b
 
 
 def _power_capability() -> tuple[bool, str]:
-    global _power_capability_cache
-    if _power_capability_cache is not None:
+    global _power_capability_cache, _power_capability_retry_at
+    if _power_capability_cache is not None and (
+            _power_capability_cache[0] or time.monotonic() < _power_capability_retry_at):
         return _power_capability_cache
+    # A transient DMI/DSDT/interface read failure is not a permanent hardware
+    # classification. Retry finitely without requiring a Decky process restart.
+    # Every retry still proves the same exact BIOS and DSDT before MMIO access.
+    _power_capability_retry_at = time.monotonic() + POWER_CAPABILITY_RETRY_S
     identity = _read_identity()
     expected = {
         "product_family": EXPECTED_FAMILY,
@@ -575,14 +614,29 @@ def _power_capability() -> tuple[bool, str]:
 
 
 def _with_power_lock(operation: Callable[[], Any]) -> Any:
-    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     lock_fd = os.open(POWER_LOCK_PATH, lock_flags, 0o600)
+    locked = False
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or info.st_mode & 0o077):
+            raise ValueError('Unsafe power-button LED lock.')
+        deadline = time.monotonic() + 0.5
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Power-button LED is busy; retry shortly.') from None
+                time.sleep(0.01)
         return operation()
     finally:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            if locked:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
 
@@ -620,7 +674,9 @@ def _read_power_led() -> bool | None:
             lambda: _map_power_register(False, lambda mapped, offset: mapped[offset])
         )
         return (value & POWER_LED_MASK) == 0
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        event("rgb", "power_led_access", level="warning", error=exc,
+              stage="read", attribute="power_led", repeat=60)
         return None
 
 
@@ -651,8 +707,14 @@ def _write_power_led(enabled: bool) -> bool:
         return _map_power_register(True, _mapped)
 
     try:
-        return bool(_with_power_lock(_write))
-    except (OSError, ValueError):
+        confirmed = bool(_with_power_lock(_write))
+        if not confirmed:
+            event("rgb", "power_led_access", level="warning", stage="write",
+                  attribute="power_led", reason="readback_unconfirmed", repeat=60)
+        return confirmed
+    except (OSError, ValueError) as exc:
+        event("rgb", "power_led_access", level="warning", error=exc,
+              stage="write", attribute="power_led", repeat=60)
         return False
 
 
@@ -675,8 +737,14 @@ def _recover_pending() -> bool:
     pending = state.get("pending")
     if not pending:
         return True
-    decky.logger.warning("[lego-rgb] recovering an interrupted lighting transaction")
-    return _restore_transaction(pending)
+    try:
+        restored = _restore_transaction(pending)
+    except Exception as exc:
+        transition("rgb", "transaction_recovery", False, level="warning", error=exc, pending=True)
+        raise
+    transition("rgb", "transaction_recovery", restored,
+               level="info" if restored else "warning", restored=restored, pending=not restored)
+    return restored
 
 
 def _transaction(
@@ -718,11 +786,15 @@ def _transaction(
         detail = "The hardware did not confirm the complete change."
 
     pending = staged["pending"]
+    rollback_error = None
     try:
         rolled_back = _restore_transaction(pending)
-    except Exception:
+    except Exception as exc:
         rolled_back = False
+        rollback_error = exc
     if not rolled_back:
+        event("rgb", "rollback", level="error" if rollback_error else "warning",
+              error=rollback_error, reason="recovery_unconfirmed", restored=False, pending=True, repeat=60)
         return False, detail + " Automatic recovery still needs to finish."
     return False, detail
 
@@ -779,14 +851,18 @@ def _reconcile(*, force: bool = False) -> bool:
     with _apply_lock:
         if not _recover_pending():
             _last_error = "An interrupted lighting change still requires recovery."
+            transition("rgb", "reconcile", "recovery_pending", level="warning", pending=True,
+                       reason="recovery_pending")
             return False
         state = _load_state()
         ok = True
+        failure = ""
         if state["control_enabled"]:
             path, reason = _rgb_capability()
             current = _read_rgb_snapshot(path) if path else None
             if path is None or current is None:
                 ok = False
+                failure = "ring_unavailable"
                 _last_error = reason or "The joystick-ring state could not be read."
             else:
                 try:
@@ -796,16 +872,24 @@ def _reconcile(*, force: bool = False) -> bool:
                 if force or drifted:
                     if not _apply_rgb_target(state, force=force):
                         ok = False
+                        failure = "ring_write_unconfirmed"
                         _last_error = "The joystick-ring settings could not be applied."
         if state["power_led_managed"]:
             current_power = _read_power_led()
             if current_power is None:
                 ok = False
+                failure = "power_unavailable"
                 _last_error = _power_capability()[1] or "Power-button state is unavailable."
             elif force or current_power != state["power_led_enabled"]:
-                ok = _write_power_led(state["power_led_enabled"]) and ok
+                power_ok = _write_power_led(state["power_led_enabled"])
+                if not power_ok:
+                    failure = "power_write_unconfirmed"
+                ok = power_ok and ok
         if ok:
             _last_error = ""
+        transition("rgb", "reconcile", "confirmed" if ok else failure,
+                   level="info" if ok else "warning",
+                   reason="confirmed" if ok else (failure or "hardware_unconfirmed"))
         return ok
 
 
@@ -842,6 +926,8 @@ class Plugin:
         retry_delay = RESUME_CHECK_S
         while True:
             await asyncio.sleep(RESUME_CHECK_S)
+            if module_runtime.is_paused('rgb'):
+                continue
             try:
                 if _resume_detected():
                     decky.logger.info("[lego-rgb] backend detected resume from suspend")
@@ -864,7 +950,7 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                decky.logger.warning(f"[lego-rgb] drift verification failed: {exc}")
+                event('rgb','drift_verification_failed',level='warning',error=exc,repeat=60)
 
     async def _main(self) -> None:
         global _drift_task, _last_suspend_offset
@@ -877,11 +963,11 @@ class Plugin:
             self._settle_until = time.monotonic() + STARTUP_SETTLE_S
             if not await _offload(_reconcile):
                 decky.logger.warning("[lego-rgb] startup state not yet confirmed; retrying during controller initialization")
-            _drift_task = asyncio.create_task(self._drift_loop())
+            _drift_task = module_runtime.background_task(self._drift_loop())
             decky.logger.info("[lego-rgb] lighting module ready")
         except Exception as exc:
             Plugin._setup_error = str(exc)
-            decky.logger.error(f"[lego-rgb] setup failed: {exc}")
+            event('rgb','startup_failed',level='error',error=exc)
             raise
 
     async def _unload(self) -> None:
@@ -893,10 +979,10 @@ class Plugin:
         decky.logger.info("[lego-rgb] unloaded")
 
     async def _uninstall(self) -> None:
-        def _restore() -> None:
+        def _restore() -> bool:
             with _apply_lock:
                 if not _recover_pending():
-                    return
+                    return False
                 state = _load_state()
                 ok = True
                 original = state.get("original_rgb")
@@ -920,8 +1006,11 @@ class Plugin:
                         "speed": state["speed"],
                     })
                     _save_state(restored)
-        await _offload(_restore)
-        decky.logger.info("[lego-rgb] uninstall restoration finished")
+                return ok
+        restored = await _offload(_restore)
+        event("rgb", "restore", level="info" if restored else "warning",
+              stage="uninstall", restored=bool(restored),
+              outcome="confirmed" if restored else "unconfirmed")
 
     async def get_status(self) -> dict[str, Any]:
         return await _offload(_status)
@@ -1117,6 +1206,7 @@ class Plugin:
         success, error = await _offload(_restore)
         return {"success": success, "error": error, "status": await self.get_status()}
 
+    @module_runtime.controller_operation('rgb')
     async def reapply(self) -> dict[str, Any]:
         self._settle_until = time.monotonic() + STARTUP_SETTLE_S
         deadline = time.monotonic() + REAPPLY_WAIT_S

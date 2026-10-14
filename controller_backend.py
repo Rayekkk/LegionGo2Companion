@@ -31,10 +31,16 @@ from pathlib import Path
 from typing import Any
 
 import decky
+from diagnostics import event, transition
 from safe_settings import SettingsManager
 from remap_backend import SERVICE, INTERFACE, DEVICE_PATH_RE, _json_value, _run_busctl
 from inputplumber_process import ProcessWatch
 import controller_imu
+import module_runtime
+
+
+async def _offload(function, *args, **kwargs):
+    return await module_runtime.offload('controller', function, *args, **kwargs)
 
 
 settings = SettingsManager("controller_settings", decky.DECKY_PLUGIN_SETTINGS_DIR)
@@ -429,6 +435,7 @@ class Plugin:
                         result = self._battery_result(sample)
                         break
             except Exception as exc:
+                event('controller', 'battery_read_failed', level='warning', error=exc, repeat=60)
                 result = self._battery_result(reason=str(exc))
             finally:
                 if fd is not None:
@@ -438,7 +445,7 @@ class Plugin:
             return result
 
     async def get_battery_levels(self) -> dict:
-        return await asyncio.to_thread(self._controller_batteries)
+        return await _offload(self._controller_batteries)
 
     def _status(self, fresh: bool = False) -> dict:
         with self._operation:
@@ -480,7 +487,7 @@ class Plugin:
             return result
 
     async def get_status(self) -> dict:
-        return await asyncio.to_thread(self._status)
+        return await _offload(self._status)
 
     def _select(self, source: str, *, reconcile: bool = False) -> None:
         with self._operation:
@@ -677,13 +684,13 @@ class Plugin:
         if not isinstance(source, str) or source not in SOURCES:
             raise ValueError("Unknown motion source.")
         try:
-            await asyncio.to_thread(self._select, source)
+            await _offload(self._select, source)
         except Exception as exc:
             self._error = str(exc)
             self._status_cache = None
             raise
         self._ensure_watch()
-        return await asyncio.to_thread(self._status, True)
+        return await _offload(self._status, True)
 
     async def release_control(self) -> dict:
         return await self.set_gyro_source("system")
@@ -726,11 +733,15 @@ class Plugin:
             for kind, record in zip(("physical", "virtual"), records):
                 if not record:
                     capture[kind]["error"] = "The controller report endpoint is unavailable."
+                    event("controller", "diagnostics_stream", level="warning", source=kind,
+                          reason="endpoint_unavailable", repeat=60)
                     continue
                 try:
                     readers[_open_reader(record)] = kind
                 except Exception as exc:
                     capture[kind]["error"] = str(exc)
+                    event("controller", "diagnostics_stream", level="warning", error=exc,
+                          source=kind, stage="open", repeat=60)
             while readers and not stop.is_set():
                 now = _capture_time()
                 with self._capture_lock:
@@ -749,6 +760,8 @@ class Plugin:
                     except OSError as exc:
                         with self._capture_lock:
                             capture[kind]["error"] = str(exc)
+                        event("controller", "diagnostics_stream", level="warning", error=exc,
+                              source=kind, stage="read", repeat=60)
                         os.close(fd)
                         del readers[fd]
                         continue
@@ -770,6 +783,8 @@ class Plugin:
         except Exception as exc:
             with self._capture_lock:
                 capture["reason"] = str(exc)
+            event("controller", "diagnostics_worker", level="warning", error=exc,
+                  outcome="failed", repeat=60)
         finally:
             for fd in readers:
                 os.close(fd)
@@ -777,6 +792,10 @@ class Plugin:
                 capture["active"] = False
                 capture["ended"] = _capture_time()
                 capture["reason"] = capture["reason"] or "stopped"
+                reason = capture["reason"] if capture["reason"] in {
+                    "completed", "lease_expired", "stopped", "unavailable"} else "failed"
+                count = sum(capture[kind]["reports"] for kind in ("physical", "virtual"))
+            event("controller", "diagnostics_complete", reason=reason, count=count)
 
     def _stop_capture(self) -> None:
         with self._operation:
@@ -813,7 +832,7 @@ class Plugin:
             return self._snapshot(capture["token"])
 
     async def start_diagnostics(self) -> dict:
-        return await asyncio.to_thread(self._start_capture)
+        return await _offload(self._start_capture)
 
     async def get_diagnostics(self, token: str) -> dict:
         return self._snapshot(token, renew=True)
@@ -824,11 +843,20 @@ class Plugin:
                 self._snapshot(token)
                 self._stop_capture_locked()
                 return self._snapshot(token)
-        return await asyncio.to_thread(stop_token)
+        return await _offload(stop_token)
 
     def _ensure_watch(self) -> None:
         if not self._closed and (self._watch_task is None or self._watch_task.done()):
-            self._watch_task = asyncio.create_task(self._watch())
+            self._watch_task = module_runtime.background_task(self._watch())
+
+    @module_runtime.controller_operation('controller')
+    async def _watch_check(self, resumed):
+        if resumed:
+            await _offload(self._stop_capture)
+            self._generation = None
+        source = (await _offload(_state))["gyro_source"]
+        if source != "system":
+            await _offload(self._select, source, reconcile=True)
 
     async def _watch(self) -> None:
         now, offset = time.monotonic(), _suspend_offset()
@@ -839,6 +867,8 @@ class Plugin:
         next_check = now + (retry_delay if self._error and not self._conflict else CHECK_SECONDS)
         while not self._closed:
             await asyncio.sleep(5)
+            if module_runtime.is_paused('controller'):
+                continue
             now, new_offset = time.monotonic(), _suspend_offset()
             resumed = new_offset - offset > 1
             offset = new_offset
@@ -847,22 +877,20 @@ class Plugin:
                 # Only advance the schedule. _select still verifies the actual
                 # HID/D-Bus generation and exact ownership before changing it.
                 retry_delay = RECOVERY_RETRY_SECONDS
-            if resumed:
-                await asyncio.to_thread(self._stop_capture)
-                self._generation = None
-                retry_delay = RECOVERY_RETRY_SECONDS
             if not resumed and not service_exited and now < next_check:
                 continue
             next_check = now + CHECK_SECONDS
             try:
-                source = (await asyncio.to_thread(_state))["gyro_source"]
-                if source == "system":
-                    retry_delay = RECOVERY_RETRY_SECONDS
-                    continue
-                await asyncio.to_thread(self._select, source, reconcile=True)
+                await self._watch_check(resumed)
+                transition("controller", "managed_profile", True, outcome="confirmed")
                 retry_delay = RECOVERY_RETRY_SECONDS
+            except module_runtime.ControllerPaused:
+                continue
             except Exception as exc:
                 self._error = str(exc)
+                transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
+                           level="warning", error=exc,
+                           outcome="deferred", pending=not self._conflict)
                 if not self._conflict:
                     next_check = now + retry_delay
                     retry_delay = min(CHECK_SECONDS, retry_delay * 2)
@@ -870,7 +898,7 @@ class Plugin:
 
     async def _main(self) -> None:
         try:
-            source = (await asyncio.to_thread(_state))["gyro_source"]
+            source = (await _offload(_state))["gyro_source"]
         except Exception as exc:
             self._error = str(exc)
             raise
@@ -881,9 +909,13 @@ class Plugin:
         self._status_cache = None
         try:
             if source != "system":
-                await asyncio.to_thread(self._select, source, reconcile=True)
+                await _offload(self._select, source, reconcile=True)
+                transition("controller", "managed_profile", True, outcome="confirmed")
         except Exception as exc:
             self._error = str(exc)
+            transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
+                       level="warning", error=exc,
+                       outcome="deferred", pending=not self._conflict)
         self._ensure_watch()
 
     async def _unload(self) -> None:
@@ -895,21 +927,23 @@ class Plugin:
                 await task
             except asyncio.CancelledError:
                 pass
-        await asyncio.to_thread(self._stop_capture)
+        # Closing our own read-only observers is permitted during maintenance;
+        # this path never restores hardware or user intent.
+        await module_runtime.complete(asyncio.to_thread(self._stop_capture))
         try:
-            await asyncio.to_thread(self._release, persist=False)
+            await _offload(self._release, persist=False)
         except Exception as exc:
             self._error = str(exc)
-            decky.logger.warning(f"Controller restoration remains pending: {exc}")
+            event('controller','restore_failed',level='warning',error=exc,stage='unload',pending=True,restored=False)
         finally:
             self._service_watch.clear()
 
     async def _uninstall(self) -> None:
         await self._unload()
         try:
-            await asyncio.to_thread(self._release, persist=True)
+            await _offload(self._release, persist=True)
         except Exception as exc:
-            decky.logger.warning(f"Controller restoration remains pending: {exc}")
+            event('controller','restore_failed',level='warning',error=exc,stage='uninstall',pending=True,restored=False)
 
     async def _migration(self) -> None:
         pass

@@ -53,7 +53,14 @@ class DisplayDiscoveryTests(unittest.TestCase):
                  patch.object(display.Plugin, "_forward_nits", side_effect=lambda value: writes.append(value)):
                 with self.assertRaises(asyncio.CancelledError):
                     asyncio.run(display.Plugin()._loop(""))
-            self.assertEqual(scans, [2.0, 12.0])
+            self.assertTrue(scans)
+            self.assertLessEqual(scans[0], 4, "initial missing hardware should be probed promptly")
+            recovered = [at for at in scans if at >= 12]
+            self.assertTrue(recovered, "late panel discovery must remain retryable")
+            self.assertLessEqual(recovered[0], 22, "available hardware must be found within a bounded retry")
+            self.assertLessEqual(len(scans), 5, "missing hardware should not trigger continuous scans")
+            self.assertFalse(any(at > recovered[0] for at in scans),
+                             "a healthy panel must leave the discovery retry loop")
             self.assertTrue(writes, "brightness must recover without restarting Decky")
             self.assertEqual(state["backlight"], "amdgpu_bl1")
             self.assertEqual(state["max_nits"], 471.0)

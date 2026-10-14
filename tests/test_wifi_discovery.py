@@ -287,7 +287,7 @@ class ReselectionTests(unittest.TestCase):
     def test_directed_ssid_spaces_are_preserved(self):
         before = link()
         before["ssid"] = " target with spaces "
-        self.scan.return_value["stdout"] = "BSS aa:bb:cc:dd:ee:ff\n freq: 6295\n SSID:  target with spaces \n"
+        self.scan.return_value["stdout"] = "BSS aa:bb:cc:dd:ee:ff\n freq: 6295\n SSID: \\x20target with spaces\\x20\n"
         self.plugin._reselect_discovered_high_band(before, threading.Event())
         self.reconnect.assert_called_once()
         self.assertEqual(self.scan.call_args.args[1], before["ssid"])

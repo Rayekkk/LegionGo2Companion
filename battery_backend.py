@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import decky
+import module_runtime
+from diagnostics import event, transition
 from safe_settings import SettingsManager
 
 
@@ -323,6 +325,10 @@ class Plugin:
                 settings.settings = copy.deepcopy(rollback_snapshot)
                 failures.append(f"Settings rollback failed: {rollback}")
             suffix = " " + " ".join(failures) if failures else " Previous settings were restored."
+            event("battery", "transaction_recovery", level="error" if failures else "info",
+                  stage="rollback", restored=hardware_restored and not failures,
+                  pending=not hardware_restored or bool(failures),
+                  error=exc if failures else None)
             raise BatteryError(f"Battery setting failed: {exc}.{suffix}") from exc
 
     def _set(self, enabled: bool) -> dict[str, Any]:
@@ -363,6 +369,7 @@ class Plugin:
                 state = self._load()
                 if not state["managed"]:
                     self._error = ""
+                    transition("battery", "managed_profile", True, outcome="unmanaged")
                     return
                 device = _detect()
                 target = "Long_Life" if state["requested_enabled"] else state["normal_mode"]
@@ -370,20 +377,17 @@ class Plugin:
                     state["last_applied"] = target
                     self._transact(device, target, state)
                 self._error = ""
+                transition("battery", "managed_profile", True, outcome="confirmed")
             except Exception as exc:
                 message = str(exc)
-                if message != self._error:
-                    decky.logger.warning(f"[companion-battery] Saved setting could not be applied: {message}")
+                transition("battery", "managed_profile", False, level="warning", error=exc,
+                           outcome="deferred", retryable=True)
                 self._error = message
 
     async def _thread(self, fn, *args):
-        # Cancellation cannot abandon an in-flight sysfs/settings transaction.
-        task = asyncio.create_task(asyncio.to_thread(fn, *args))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        # Repeated RPC/lifecycle cancellation must retain the underlying
+        # sysfs/settings transaction until its write or rollback completes.
+        return await module_runtime.complete(module_runtime.offload('battery', fn, *args))
 
     async def _watch(self):
         last_check = time.monotonic()
@@ -436,7 +440,7 @@ class Plugin:
         await self._unload()
         result = await self.release_control()
         if not result["success"]:
-            decky.logger.warning(f"[companion-battery] Uninstall restore failed: {result['error']}")
+            event('battery','restore_failed',level='warning',stage='uninstall',reason='operation_unconfirmed',pending=True,restored=False)
 
     async def get_status(self):
         result = await self._thread(self._status)

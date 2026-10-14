@@ -5,6 +5,7 @@
 
 import decky
 import module_runtime
+from diagnostics import event, transition
 from active_app import resolve_running_app, scan_proc_for_appid
 import copy
 import os
@@ -31,12 +32,12 @@ try:
     _udev_ctx = _pyudev.Context()
     _PYUDEV = True
 except ImportError as _e:
-    decky.logger.warning(f"[lego-vibe] pyudev import failed: {_e}")
+    decky.logger.warning("[lego-vibe] pyudev import failed")
     _pyudev = None
     _udev_ctx = None
     _PYUDEV = False
 except Exception as _e:
-    decky.logger.warning(f"[lego-vibe] pyudev init failed (libudev?): {_e}")
+    decky.logger.warning("[lego-vibe] pyudev initialization failed")
     _pyudev = None
     _udev_ctx = None
     _PYUDEV = False
@@ -145,12 +146,14 @@ def _discover() -> tuple[str | None, str | None]:
             found_any = True
             candidate = os.path.join(dev.sys_path, _SIGNATURE_ATTR)
             if os.path.exists(candidate):
-                decky.logger.info(f"[lego-vibe] found via pyudev: {dev.sys_path}")
+                event("vibration", "device_discovered", source="pyudev", supported=True)
                 return dev.sys_path, "pyudev"
         if not found_any:
-            decky.logger.warning("[lego-vibe] pyudev returned no HID devices at all")
+            event("vibration", "device_discovery", level="warning", source="pyudev",
+                  reason="no_hid_devices", repeat=60)
         else:
-            decky.logger.warning("[lego-vibe] pyudev: no HID device has rumble_intensity")
+            event("vibration", "device_discovery", level="warning", source="pyudev",
+                  reason="compatible_device_missing", repeat=60)
 
     # Glob fallback - driver-name-agnostic, searches all HID drivers.
     # Path structure: /sys/bus/hid/drivers/<driver>/<device_id>/rumble_intensity
@@ -161,10 +164,11 @@ def _discover() -> tuple[str | None, str | None]:
     for pattern, method in patterns:
         for match in glob.glob(pattern):
             path = os.path.dirname(match)
-            decky.logger.info(f"[lego-vibe] found via {method} ({pattern}): {path}")
+            event("vibration", "device_discovered", source=method, supported=True)
             return path, method
 
-    decky.logger.warning("[lego-vibe] device not found (pyudev and glob both failed)")
+    event("vibration", "device_discovery", level="warning", source="all",
+          reason="compatible_device_missing", repeat=60)
     return None, None
 
 
@@ -180,12 +184,13 @@ def _get_device_path() -> str | None:
 
 def _forget_device() -> None:
     """Drop the cached device path and everything derived from it."""
-    global _device_path, _discovery_method
+    global _device_path, _discovery_method, _last_applied_values
     if _device_path is not None:
         _invalidate_cache(_device_path)
         _capabilities_cache.pop(_device_path, None)
     _device_path = None
     _discovery_method = None
+    _last_applied_values = None
     _ff_device_cache["node"] = None
 
 
@@ -229,7 +234,7 @@ def _capabilities(sys_path: str) -> dict[str, list[str]]:
             "tp_intensity": _read_enum(sys_path, 'touchpad/vibration_intensity', LEVEL_NAMES),
         }
         _capabilities_cache[sys_path] = caps
-        decky.logger.info(f"[lego-vibe] capabilities: {caps}")
+        event("vibration", "capabilities_read", level="debug", count=len(caps))
     return caps
 
 
@@ -246,6 +251,9 @@ def _enum_at(values: list[str], index: int) -> str:
 # Anything that may have reset the hardware (hotplug, resume from suspend)
 # must invalidate this, otherwise writes get skipped as no-ops.
 _attr_cache: dict[tuple[str, str], str] = {}
+# The complete profile last confirmed by every driver attribute. Unlike a
+# frontend heartbeat flag, this also follows background fallback/hotplug applies.
+_last_applied_values: dict | None = None
 
 
 def _invalidate_cache(sys_path: str | None = None) -> None:
@@ -279,11 +287,12 @@ def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False) -
                 raise OSError("The controller did not confirm the requested value")
             time.sleep(_READBACK_DELAY_S)
         _attr_cache[key] = value
-        decky.logger.info(f"[lego-vibe] {rel_path} = '{value}'")
+        event("vibration", "attribute_write", level="debug", attribute=rel_path, outcome="confirmed")
         return True
     except (OSError, UnicodeError) as exc:
         _attr_cache.pop(key, None)
-        decky.logger.error(f"[lego-vibe] write {path}: {exc}")
+        event("vibration", "attribute_write", level="error", error=exc,
+              attribute=rel_path, outcome="failed", repeat=60)
         return False
 
 
@@ -306,6 +315,7 @@ async def _offload(fn, *args):
 def _apply_settings(values: dict, sys_path: str | None = None,
                     force: bool = False) -> bool:
     """Write a full profile to the hardware. Every attribute is attempted."""
+    global _last_applied_values
     # Explicit withdrawal/uninstall can reach this with driver defaults rather
     # than a loaded profile. They must also preserve unrecoverable user state.
     with _settings_lock:
@@ -313,6 +323,7 @@ def _apply_settings(values: dict, sys_path: str | None = None,
     with _apply_lock:
         p = sys_path or _get_device_path()
         if p is None:
+            _last_applied_values = None
             return False
         caps = _capabilities(p)
         mode = _enum_at(caps["mode"], values[PKEY_MODE])
@@ -326,7 +337,9 @@ def _apply_settings(values: dict, sys_path: str | None = None,
             _write_attr(p, 'touchpad/vibration_enabled',
                         "true" if values[PKEY_TP_EN] else "false", force),
         ]
-        return all(results)
+        success = all(results)
+        _last_applied_values = copy.deepcopy(values) if success else None
+        return success
 
 
 # ── Profile store - the single source of truth for settings ────────────────────
@@ -468,8 +481,7 @@ def _migrate() -> None:
             }
             profiles[DEFAULT_APP] = {"overwrite": False,
                                      "settings": _coerce_profile(legacy)}
-            decky.logger.info(
-                f"[lego-vibe] migrated legacy settings into the global profile: {legacy}")
+            event("vibration", "settings_migrated", scope="global", version=str(CURRENT_SCHEMA))
         settings.setSetting(SETTINGS_KEY_GAME_PROFILES, profiles)
         settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
         settings.commit()
@@ -496,10 +508,6 @@ def _settings_payload() -> dict:
 def _device_status() -> dict:
     p = _get_device_path()
     ids = _device_ids(p) if p else None
-    decky.logger.debug(
-        f"[lego-vibe] driver status -> path={p!r} "
-        f"pyudev={_PYUDEV} method={_discovery_method!r}"
-    )
     return {
         "found":  p is not None,
         "paths":  [p] if p else [],
@@ -525,7 +533,7 @@ async def _emit_device_status() -> None:
     try:
         await decky.emit("device", await _offload(_device_status))
     except Exception as exc:
-        decky.logger.warning(f"[lego-vibe] could not emit device status: {exc}")
+        event('vibration','device_status_notification_failed',level='warning',error=exc,repeat=60)
 
 
 def _suspend_offset() -> float | None:
@@ -593,7 +601,7 @@ def _has_rumble(node: str) -> bool:
             fcntl.ioctl(fh.fileno(), _EVIOCGBIT_FF, bits)
             return bool(bits[_FF_RUMBLE // 8] & (1 << (_FF_RUMBLE % 8)))
     except OSError as exc:
-        decky.logger.debug(f"[lego-vibe] FF probe {node}: {exc}")
+        event('vibration','ff_probe_failed',level='debug',error=exc,source='evdev')
         return False
 
 
@@ -613,7 +621,7 @@ def _find_ff_device() -> str | None:
         # Most input endpoints are keyboards or unrelated pads. Reject their
         # IDs before opening them for the more expensive capability ioctl.
         if _node_ids(node) == want and _has_rumble(node):
-            decky.logger.info(f"[lego-vibe] FF device: {node} (matched {want[0]}:{want[1]})")
+            event("vibration", "ff_device_discovered", source="evdev", supported=True)
             _ff_device_cache["node"] = node
             return node
     return None
@@ -691,8 +699,13 @@ async def _monitor_hotplug() -> None:
     try:
         while True:
             action, sys_path = await queue.get()
+            if module_runtime.is_paused('vibration'):
+                continue
             if action in _HOTPLUG_ACTIONS:
-                await _handle_device_added(sys_path, action)
+                try:
+                    await _handle_device_added(sys_path, action)
+                except module_runtime.ControllerPaused:
+                    continue
             elif action in ('remove', 'unbind') and sys_path == _device_path:
                 # Events can arrive out of order: an unbind/rebind cycle
                 # delivers the removal after the device is already back. Trust
@@ -715,8 +728,11 @@ async def _monitor_hotplug() -> None:
             pass
 
 
+@module_runtime.controller_operation('vibration')
 async def _handle_device_added(sys_path: str, action: str) -> None:
     global _device_path, _discovery_method
+    if module_runtime.is_paused('vibration'):
+        return
     attribute = os.path.join(sys_path, _SIGNATURE_ATTR)
     if not os.path.exists(attribute):
         # Only 'add' and 'bind' can race the driver's probe. A 'change' on a
@@ -734,7 +750,11 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
 
     # A 'change' on the device we already own is not skipped: it still means
     # the firmware may have reset, so we fall through and force a re-apply.
-    decky.logger.info(f"[lego-vibe] device available via '{action}': {sys_path}")
+    try:
+        module_runtime.require_available('vibration')
+    except module_runtime.ControllerPaused:
+        return
+    event("vibration", "hotplug", source=action, supported=True)
     _device_path = sys_path
     _discovery_method = f"udev-{action}"
     _ff_device_cache["node"] = None
@@ -744,8 +764,14 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
         _capabilities_cache.pop(sys_path, None)
         return _apply_settings(_active_values(), sys_path=sys_path, force=True)
 
-    ok = await _offload(_apply)
-    decky.logger.info(f"[lego-vibe] re-applied profile after '{action}': success={ok}")
+    try:
+        ok = await _offload(_apply)
+    except module_runtime.ControllerPaused:
+        # A pause can arrive during the preceding discovery wait. Keep the
+        # hotplug consumer alive; the paused gate forbids this reapply.
+        return
+    transition("vibration", "profile_apply", ok, source=action,
+               level="info" if ok else "warning", outcome="confirmed" if ok else "deferred")
     await _emit_device_status()
 
 
@@ -761,6 +787,8 @@ class Plugin:
         last_check = time.monotonic()
         while True:
             await asyncio.sleep(_RESUME_CHECK_S)
+            if module_runtime.is_paused('vibration'):
+                continue
             try:
                 if _resume_detected():
                     decky.logger.info(
@@ -778,15 +806,14 @@ class Plugin:
                     return _apply_settings(_active_values())
 
                 ok = await _offload(_verify)
-                if not ok:
-                    decky.logger.warning(
-                        "[lego-vibe] periodic driver-state verification failed")
+                transition("vibration", "profile_apply", ok, stage="periodic",
+                           level="info" if ok else "warning", outcome="confirmed" if ok else "deferred")
                 last_check = now
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                decky.logger.warning(
-                    f"[lego-vibe] drift verification failed: {exc}")
+                event("vibration", "drift_verification", level="warning", error=exc,
+                      outcome="failed", repeat=60)
 
     async def _migration(self):
         """Fold the pre-1.5.0 flat keys into profile '0', before anything reads
@@ -812,28 +839,29 @@ class Plugin:
         except Exception as exc:
             Plugin._setup_error = f"settings migration failed: {exc}"
             self._migration_error = Plugin._setup_error
-            decky.logger.error(f"[lego-vibe] migration failed: {exc}")
+            event('vibration','migration_failed',level='error',error=exc)
 
     async def _main(self):
         Plugin._setup_error = getattr(self, '_migration_error', None)
         global _monitor_task, _drift_task, _last_suspend_offset
-        decky.logger.info(
-            f"[lego-vibe] startup pyudev={_PYUDEV}")
+        event("vibration", "startup", supported=_PYUDEV, source="pyudev")
         try:
-            def _start() -> None:
+            def _start() -> bool:
                 global _last_suspend_offset
                 _last_suspend_offset = _suspend_offset()
                 values = _active_values()
-                decky.logger.info(f"[lego-vibe] applying active profile: {values}")
-                _apply_settings(values, force=True)
-            await _offload(_start)
-            _monitor_task = asyncio.create_task(_monitor_hotplug())
-            _drift_task = asyncio.create_task(self._drift_loop())
+                return _apply_settings(values, force=True)
+            confirmed = await _offload(_start)
+            transition("vibration", "profile_apply", bool(confirmed),
+                       level="info" if confirmed else "warning", stage="startup",
+                       outcome="confirmed" if confirmed else "deferred")
+            _monitor_task = module_runtime.background_task(_monitor_hotplug())
+            _drift_task = module_runtime.background_task(self._drift_loop())
             # Preserve migration failures, while a successful retry clears a
             # transient startup failure from the previous attempt.
         except Exception as exc:
             Plugin._setup_error = str(exc)
-            decky.logger.error(f"[lego-vibe] setup failed: {exc}")
+            event('vibration','startup_failed',level='error',error=exc)
             raise
 
     async def _unload(self):
@@ -866,8 +894,10 @@ class Plugin:
         _apply_lock, so the two cannot interleave and leave the hardware holding
         half of each profile.
         """
-        await _offload(_apply_settings, dict(DEFAULT_PROFILE), None, True)
-        decky.logger.info("[lego-vibe] uninstalled, restored default vibration settings")
+        restored = await _offload(_apply_settings, dict(DEFAULT_PROFILE), None, True)
+        event("vibration", "restore", level="info" if restored else "warning",
+              stage="uninstall", restored=bool(restored),
+              outcome="confirmed" if restored else "unconfirmed")
 
     # ---- RPC surface ------------------------------------------------ #
 
@@ -898,16 +928,19 @@ class Plugin:
                     "error": "invalid app id", **(await _offload(_settings_payload))}
         def _do() -> dict:
             global _active_app_id, _active_app_ts
-            changed = app_id != _running_app_id()
+            changed = app_id != _active_app_id or app_id != _running_app_id()
             _active_app_id = app_id
             _active_app_ts = time.monotonic()
-            if not changed and getattr(self, "_active_applied", False):
-                return {"success": True, "changed": False, **_settings_payload()}
-            values = _active_values()
-            decky.logger.info(f"[lego-vibe] active app -> {app_id}, applying {values}")
+            _profiles, payload = _profile_context()
+            values = payload["settings"]
+            if (not changed and getattr(self, "_active_applied", False)
+                    and _last_applied_values == values):
+                return {"success": True, "changed": False, **payload}
+            event("vibration", "foreground_profile", level="debug",
+                  scope="global" if payload["profile_id"] == DEFAULT_APP else "game")
             ok = _apply_settings(values)
             self._active_applied = ok
-            return {"success": ok, "changed": changed, **_settings_payload()}
+            return {"success": ok, "changed": changed, **payload}
         return await _offload(_do)
 
     async def _set_field(self, field: str, value, expected_app_id=None, expected_profile_id=None) -> dict:
@@ -961,6 +994,7 @@ class Plugin:
             return {"success": ok, **payload, "settings": entry["settings"]}
         return await _offload(_do)
 
+    @module_runtime.controller_operation('vibration')
     async def reapply(self) -> dict:
         """
         Force every attribute back onto the hardware. Used after resume from
@@ -988,9 +1022,9 @@ class Plugin:
         while True:
             result = await _offload(_do)
             if result["success"] or time.monotonic() >= deadline:
-                decky.logger.info(
-                    f"[lego-vibe] reapply: success={result['success']} "
-                    f"values={result['settings']}")
+                transition("vibration", "profile_apply", result["success"],
+                           level="info" if result["success"] else "warning",
+                           stage="resume", outcome="confirmed" if result["success"] else "deferred")
                 return result
             await asyncio.sleep(_REAPPLY_STEP_S)
 
@@ -1029,8 +1063,6 @@ class Plugin:
             profile_id = _resolve_app_id(profiles, running)
             values = _active_values(profiles, running)
             ok = _apply_settings(values)
-            decky.logger.info(
-                f"[lego-vibe] per-game profile {app_id} overwrite={enabled}, applied {values}")
             return {"success": ok, "settings": values, "app_id": running,
                     "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
         return await _offload(_do)
@@ -1047,7 +1079,6 @@ class Plugin:
             _save_profiles(profiles)
             values = _active_values(profiles)
             ok = _apply_settings(values)
-            decky.logger.info(f"[lego-vibe] deleted profile {app_id}")
             return {"success": ok, "settings": values}
         return await _offload(_do)
 
@@ -1087,14 +1118,11 @@ class Plugin:
                 return {"success": False, "error": "No matching Legion controller rumble input was found. Reconnect the controller and retry."}
 
             await module_runtime.complete(_offload(_play_rumble, ff_path, duration, magnitude))
-            decky.logger.info(
-                f"[lego-vibe] test_vibration: level={level} ({intensity_pct}%) "
-                f"mag={magnitude:#06x} duration={duration}ms via {ff_path}"
-            )
+            event("vibration", "test_complete", duration_ms=duration, outcome="confirmed")
             return {"success": True}
         except Exception as exc:
             _ff_device_cache["node"] = None
-            decky.logger.error(f"[lego-vibe] test_vibration failed: {exc}")
+            event('vibration', 'test_failed', level='warning', error=exc)
             return {"success": False, "error": str(exc)}
         finally:
             _ff_busy = False

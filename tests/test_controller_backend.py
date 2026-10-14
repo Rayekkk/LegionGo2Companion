@@ -41,6 +41,13 @@ class MemorySettings:
 PHYSICAL = {"path": "/dev/hidraw1", "identity": "/sys/devices/usb/1-1:1.2",
             "sysfs": "/sys/devices/usb/1-1:1.2/0003:17EF:61EB.0002", "pid": "61eb"}
 SOURCE = "hidraw://hidraw1"
+# Independent InputPlumber routing oracle: filter the other two sources while
+# allowing the selected one. Do not derive expected behavior from _desired_filters.
+FILTERS = {
+    "combined": ["Accelerometer:Left", "Accelerometer:Right", "Gyroscope:Left", "Gyroscope:Right"],
+    "left": ["Accelerometer:Center", "Accelerometer:Right", "Gyroscope:Center", "Gyroscope:Right"],
+    "right": ["Accelerometer:Center", "Accelerometer:Left", "Gyroscope:Center", "Gyroscope:Left"],
+}
 DEVICE = {"path": "/org/shadowblip/InputPlumber/CompositeDevice0", "source": SOURCE,
           "identity": PHYSICAL["identity"], "generation": PHYSICAL["sysfs"]}
 
@@ -92,7 +99,7 @@ class FilterTests(unittest.TestCase):
     def setUp(self):
         self.store = MemorySettings()
         self.backend = module.Plugin()
-        self.current = {SOURCE: module._desired_filters("combined") + ["Mouse:Wheel"],
+        self.current = {SOURCE: list(FILTERS["combined"]) + ["Mouse:Wheel"],
                         "evdev://event7": ["Keyboard:KeyA"]}
         self.writes = []
         self.imu = {"left": False, "right": False}
@@ -184,7 +191,7 @@ class FilterTests(unittest.TestCase):
         baseline = copy.deepcopy(self.current)
         self.backend._select("left")
         self.assertEqual(self.imu, {"left": True, "right": False})
-        self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("left"))
+        self.assertEqual(module._imu_values(self.current, SOURCE), list(FILTERS["left"]))
         self.assertIn("Mouse:Wheel", self.current[SOURCE])
         self.assertEqual(self.current["evdev://event7"], ["Keyboard:KeyA"])
         self.current["evdev://event9"] = ["Keyboard:KeyB"]
@@ -330,7 +337,7 @@ class FilterTests(unittest.TestCase):
         with patch.object(module.controller_imu, "apply", side_effect=SystemExit("process killed")):
             with self.assertRaises(SystemExit):
                 self.backend._release(persist=False)
-        self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("combined"))
+        self.assertEqual(module._imu_values(self.current, SOURCE), list(FILTERS["combined"]))
         self.backend = module.Plugin()
         self.backend._select("right", reconcile=True)
         self.assertEqual(self.current, original)
@@ -350,12 +357,12 @@ class FilterTests(unittest.TestCase):
 
     def test_service_restart_without_hidraw_change_reapplies_saved_source(self):
         self.backend._select("right")
-        self.current[SOURCE] = module._desired_filters("combined")
+        self.current[SOURCE] = list(FILTERS["combined"])
         def restarted(physical, *, require_exclusive=True):
             return {**self.discover(physical), "generation": PHYSICAL["sysfs"] + "|new-dbus-owner"}
         with patch.object(module, "_discover", side_effect=restarted):
             self.backend._select("right", reconcile=True)
-        self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("right"))
+        self.assertEqual(module._imu_values(self.current, SOURCE), list(FILTERS["right"]))
 
     def test_process_watch_is_captured_only_after_success_and_is_not_refreshed_by_status(self):
         with patch.object(self.backend._service_watch, "capture") as capture, \
@@ -378,7 +385,7 @@ class FilterTests(unittest.TestCase):
 
     def test_process_exit_hint_cannot_authorize_overwriting_same_generation_external_filters(self):
         self.backend._select("left")
-        self.current[SOURCE] = module._desired_filters("combined")
+        self.current[SOURCE] = list(FILTERS["combined"])
         original = copy.deepcopy(self.current)
         clock = [0.0]
 
@@ -409,7 +416,7 @@ class FilterTests(unittest.TestCase):
             return self.discover(physical, require_exclusive=False)
         with patch.object(module, "_discover", side_effect=with_other_sensor):
             self.backend._release(persist=True)
-        self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("combined"))
+        self.assertEqual(module._imu_values(self.current, SOURCE), list(FILTERS["combined"]))
         self.assertEqual(self.current["iio://device4"], ["Accelerometer:Center"])
         self.assertEqual(self.imu, {"left": False, "right": False})
         self.assertEqual(module._state()["gyro_source"], "system")
@@ -445,11 +452,11 @@ class FilterTests(unittest.TestCase):
     def test_hotplug_rediscovers_changed_hidraw_and_preserves_other_devices(self):
         self.backend._select("left")
         new_physical = {**PHYSICAL, "path": "/dev/hidraw9", "sysfs": PHYSICAL["sysfs"] + "new"}
-        self.current = {"hidraw://hidraw9": module._desired_filters("combined"),
+        self.current = {"hidraw://hidraw9": list(FILTERS["combined"]),
                         "evdev://event7": ["Keyboard:KeyA"]}
         with patch.object(module, "_hid_inventory", return_value=(new_physical, None)):
             self.backend._select("left", reconcile=True)
-        self.assertEqual(module._imu_values(self.current, "hidraw://hidraw9"), module._desired_filters("left"))
+        self.assertEqual(module._imu_values(self.current, "hidraw://hidraw9"), list(FILTERS["left"]))
         self.assertEqual(self.current["evdev://event7"], ["Keyboard:KeyA"])
 
     def test_resume_retries_missing_controller_at_next_poll_then_returns_to_normal_interval(self):
@@ -463,11 +470,15 @@ class FilterTests(unittest.TestCase):
             calls.append(clock[0])
             return select(*args, **kwargs)
 
-        async def sleep(_seconds):
-            clock[0] += 5
-            if clock[0] == 5:
-                self.current[SOURCE] = module._desired_filters("combined") + ["Mouse:Wheel"]
-            if clock[0] > 70:
+        resumed = [False]
+        async def sleep(seconds):
+            self.assertGreater(seconds, 0, "the watcher must yield instead of busy-looping")
+            self.assertLessEqual(seconds, 10, "resume detection must stay prompt")
+            clock[0] += seconds
+            if clock[0] >= 5 and not resumed[0]:
+                resumed[0] = True
+                self.current[SOURCE] = list(FILTERS["combined"]) + ["Mouse:Wheel"]
+            if clock[0] > 90:
                 raise asyncio.CancelledError
 
         async def watch():
@@ -480,8 +491,14 @@ class FilterTests(unittest.TestCase):
                 patch.object(module, "_hid_inventory", side_effect=lambda: (None, None) if clock[0] < 10 else (new_physical, None)), \
                 patch.object(self.backend, "_select", side_effect=observed_select):
             asyncio.run(watch())
-        self.assertEqual(calls, [5, 10, 70])
-        self.assertEqual(module._imu_values(self.current, SOURCE), module._desired_filters("left"))
+        # Recovery must be prompt, then stop probing at the wake retry rate.
+        # Exact timestamps depend on harmless changes to tick/backoff cadence.
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertLessEqual(calls[0], 10)
+        self.assertLessEqual(calls[1] - calls[0], 15)
+        self.assertGreaterEqual(calls[2] - calls[1], 45)
+        self.assertLessEqual(calls[2] - calls[1], 75)
+        self.assertEqual(module._imu_values(self.current, SOURCE), list(FILTERS["left"]))
         self.assertIn("Mouse:Wheel", self.current[SOURCE])
         self.assertEqual(self.current["evdev://event7"], ["Keyboard:KeyA"])
         self.assertEqual(self.imu, {"left": True, "right": False})
@@ -492,30 +509,38 @@ class FilterTests(unittest.TestCase):
 class WatchScheduleTests(unittest.TestCase):
     def test_recovery_backoff_and_healthy_polling_are_bounded(self):
         cases = (
-            ("healthy", False, "", 120, [60, 120]),
-            ("persistent_failure", True, "", 145, [5, 10, 20, 40, 80, 140]),
-            ("startup_retry", False, "controller unavailable", 70, [5, 10, 70]),
-            ("external_conflict", True, "", 70, [5, 65]),
-            ("service_restart", False, "", 70, [5, 65]),
-            ("service_failure", False, "", 145, [5, 10, 20, 40, 80, 140]),
+            ("healthy", False, ""),
+            ("persistent_failure", True, ""),
+            ("startup_retry", False, "controller unavailable"),
+            ("external_conflict", True, ""),
+            ("service_restart", False, ""),
+            ("service_failure", False, ""),
         )
-        for kind, resume, initial_error, end, expected in cases:
+        for kind, resume, initial_error in cases:
             with self.subTest(kind=kind):
                 backend = module.Plugin()
                 backend._error = initial_error
-                clock, calls = [0.0], []
+                clock, calls, service_hint = [0.0], [], [False]
 
-                async def sleep(_seconds):
-                    clock[0] += 5
-                    if clock[0] > end:
+                async def sleep(seconds):
+                    self.assertGreater(seconds, 0, "the watcher must yield instead of busy-looping")
+                    self.assertLessEqual(seconds, 10, "recovery hints must be checked promptly")
+                    clock[0] += seconds
+                    if clock[0] > 160:
                         raise asyncio.CancelledError
+
+                def consume_exit():
+                    if kind.startswith("service_") and clock[0] >= 5 and not service_hint[0]:
+                        service_hint[0] = True
+                        return True
+                    return False
 
                 def select(*_args, **_kwargs):
                     calls.append(clock[0])
                     if kind == "external_conflict":
                         backend._conflict = True
                         raise module.ControllerError("An external filter changed")
-                    if kind in {"persistent_failure", "service_failure"} or (kind == "startup_retry" and clock[0] < 10):
+                    if kind in {"persistent_failure", "service_failure"} or (kind == "startup_retry" and len(calls) == 1):
                         raise module.ControllerError("The controller is unavailable")
                     backend._error = ""
 
@@ -527,11 +552,37 @@ class WatchScheduleTests(unittest.TestCase):
                         patch.object(module, "_suspend_offset", side_effect=lambda: 2.0 if resume and clock[0] >= 5 else 0.0), \
                         patch.object(module.asyncio, "sleep", side_effect=sleep), \
                         patch.object(module, "_state", return_value={"gyro_source": "left"}), \
-                        patch.object(backend._service_watch, "consume_exit", side_effect=lambda: kind.startswith("service_") and clock[0] == 5), \
+                        patch.object(backend._service_watch, "consume_exit", side_effect=consume_exit), \
                         patch.object(module, "_json_value") as query, \
                         patch.object(backend, "_select", side_effect=select):
                     asyncio.run(watch())
-                self.assertEqual(calls, expected)
+                # Assert recovery/idle budgets, not the current doubling formula.
+                # A 6 s initial retry or a slightly different bounded tick is
+                # valid; continuous retries, long stalls and busy loops are not.
+                self.assertGreaterEqual(len(calls), 2)
+                gaps = [later - earlier for earlier, later in zip(calls, calls[1:])]
+                self.assertTrue(all(0 < gap <= 75 for gap in gaps), calls)
+                if kind in {"persistent_failure", "service_failure"}:
+                    self.assertLessEqual(calls[0], 10)
+                    self.assertGreaterEqual(len(calls), 4)
+                    self.assertLessEqual(len(calls), 12)
+                    self.assertLessEqual(gaps[0], 15)
+                    # Backoff can include bounded jitter; the last two gaps
+                    # still need a low aggregate retry rate.
+                    self.assertGreaterEqual(sum(gaps[-2:]), 60, "late retries must remain low-frequency")
+                    self.assertGreaterEqual(gaps[-1], 30, "failure polling must settle down")
+                elif kind == "startup_retry":
+                    self.assertLessEqual(calls[0], 10)
+                    self.assertGreaterEqual(len(calls), 3)
+                    self.assertLessEqual(gaps[0], 15)
+                    self.assertTrue(all(gap >= 45 for gap in gaps[1:]), calls)
+                else:
+                    self.assertTrue(all(gap >= 45 for gap in gaps), calls)
+                    if kind == "healthy":
+                        self.assertGreaterEqual(calls[0], 45)
+                        self.assertLessEqual(calls[0], 75)
+                    else:
+                        self.assertLessEqual(calls[0], 10)
                 query.assert_not_called()
 
 
@@ -650,6 +701,18 @@ class CaptureTests(unittest.TestCase):
                 self.assertEqual(expired[kind]["reports"], 4100)
             self.assertEqual(allocate.call_count, 2)
         self.assertEqual(reader.call_count, 8202)
+
+    def test_ordinary_report_rate_tracks_the_last_second_without_losing_total_count(self):
+        capture = self.capture()
+        for kind in ("physical", "virtual"):
+            capture[kind].update(reports=100, last=100.995,
+                times=module.deque((100.005 + index / 100 for index in range(100))))
+        for now, expected_rate in ((101.0, 100.0), (101.5, 50.0), (102.0, 0.0)):
+            with self.subTest(now=now), patch.object(module, "_capture_time", return_value=now):
+                result = self.backend._snapshot("test-token")
+            for kind in ("physical", "virtual"):
+                self.assertEqual(result[kind]["rate_hz"], expected_rate)
+                self.assertEqual(result[kind]["reports"], 100)
 
     def test_battery_read_uses_one_native_report_closes_and_caches(self):
         report = bytearray(b"\x04\x3c\x74" + bytes(61))

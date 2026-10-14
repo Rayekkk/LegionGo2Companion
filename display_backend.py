@@ -48,6 +48,8 @@ The proper fix belongs in DXVK. This is a stopgap for as long as that is stale.
 """
 
 import asyncio
+import copy
+from diagnostics import event as diagnostic_event, transition as diagnostic_transition
 import glob
 import hashlib
 import math
@@ -272,6 +274,7 @@ DEFAULT_SETTINGS = {
     "native_cleanup": None,
     "native_restart_session": None,
     "native_cleanup_note": "",
+    "edid_write_pending": None,
 }
 
 settings = SettingsManager(
@@ -628,7 +631,7 @@ async def _watch_properties() -> None:
                 env=_xprop_env(display),
                 start_new_session=os.name == "posix",
             )
-            decky.logger.info(f"{LOG} watching gamescope properties on {display}")
+            diagnostic_event('display', 'property_watcher_started', repeat=60)
             if process.stdout is None:
                 raise RuntimeError("xprop watcher has no stdout")
             while True:
@@ -636,11 +639,11 @@ async def _watch_properties() -> None:
                 if not raw:
                     break
                 _update_prop_cache(raw.decode("utf-8", errors="replace").strip(), display)
-            decky.logger.info(f"{LOG} gamescope property watcher disconnected")
+            diagnostic_event('display', 'property_watcher_disconnected', level='warning', repeat=60)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            decky.logger.warning(f"{LOG} gamescope property watcher: {exc}")
+            diagnostic_event('display', 'property_watcher_failed', level='warning', error=exc, repeat=60)
         finally:
             await _terminate_prop_process(process)
             if display is not None:
@@ -853,6 +856,7 @@ def _install_script() -> tuple:
     try:
         os.makedirs(SCRIPT_DIR, exist_ok=True)
     except OSError as e:
+        diagnostic_event('display', 'script_install_failed', level='error', error=e, stage='directory', repeat=60)
         return False, f"could not create {SCRIPT_DIR}: {e}"
 
     existing = _read_script_bytes(INSTALLED_SCRIPT)
@@ -1049,10 +1053,14 @@ def _restart_session() -> tuple:
             r = subprocess.run(session_command(argv), capture_output=True, text=True,
                                timeout=20, env=env)
         except (OSError, subprocess.SubprocessError) as e:
+            diagnostic_event('display', 'session_restart_attempt_failed', level='error',
+                             error=e, operation=name, repeat=60)
             failures.append(f"{name}: {e}")
             continue
         if r.returncode == 0:
             return True, f"restarting via {name}"
+        diagnostic_event('display', 'session_restart_attempt_failed', level='error',
+                         operation=name, returncode=r.returncode, repeat=60)
         tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:]
         failures.append(f"{name}: {tail[0] if tail else 'exited %d' % r.returncode}")
 
@@ -1122,8 +1130,21 @@ def _published_edid_is_safe(path: str, opened_stat=None) -> bool:
     return owner != 0 if euid == 0 else owner == euid
 
 
+def _clear_edid_write_pending() -> bool:
+    if settings.getSetting("edid_write_pending", None) is None:
+        return True
+    try:
+        Plugin._store_settings({"edid_write_pending": None}, required=True)
+        diagnostic_transition('display', 'edid_recovery_store', 'ready', store='display_settings', pending=False)
+        return True
+    except Exception as exc:
+        diagnostic_transition('display', 'edid_recovery_store', 'deferred', level='warning',
+                              error=exc, store='display_settings', stage='clear', pending=True)
+        return False  # Keep the durable recovery intent until a later retry.
+
+
 def _rewrite_file_if_unchanged(path: str, expected: bytes,
-                               replacement: bytes) -> str:
+                               replacement: bytes, expected_identity=None) -> str:
     """Rewrite the verified inode without ever replacing a newer connector.
 
     gamescope publishes connector changes with an atomic rename. Keeping the
@@ -1137,6 +1158,8 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                 return "changed"
 
             opened = os.fstat(f.fileno())
+            if expected_identity is not None and (opened.st_dev, opened.st_ino) != expected_identity:
+                return "changed"
             if not _published_edid_is_safe(path, opened):
                 return "failed"
             published = os.stat(path)
@@ -1144,6 +1167,19 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                     != (published.st_dev, published.st_ino)):
                 return "changed"
 
+            previous_pending = copy.deepcopy(settings.getSetting("edid_write_pending", None))
+            pending = dict(schema=1, path=os.path.abspath(path), device=opened.st_dev,
+                           inode=opened.st_ino, partial_sha256=None,
+                           original_sha256=hashlib.sha256(Plugin._edid_original or expected).hexdigest())
+            # A failed write can also prevent rollback. Publish recovery intent
+            # before touching data so a reload cannot mistake our partial write
+            # for a new connector and discard the only original bytes.
+            try:
+                Plugin._store_settings({"edid_write_pending": pending}, required=True)
+            except Exception as exc:
+                diagnostic_transition('display', 'edid_recovery_store', 'deferred', level='warning',
+                                      error=exc, stage='intent', store='display_settings', pending=True)
+                return "failed"
             try:
                 f.seek(0)
                 view = memoryview(replacement)
@@ -1155,16 +1191,48 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                 f.truncate()
                 f.flush()
                 os.fsync(f.fileno())
-            except OSError:
+            except OSError as exc:
                 # A failed in-place update may have written a prefix. Restore the
                 # verified bytes on the same inode before admitting failure.
                 try:
                     f.seek(0)
-                    f.write(expected)
+                    view = memoryview(expected)
+                    while view:
+                        written = f.write(view)
+                        if not written:
+                            raise OSError("short rollback write")
+                        view = view[written:]
                     f.truncate()
                     f.flush()
                     os.fsync(f.fileno())
+                    f.seek(0)
+                    if f.read() == expected:
+                        # Rollback returns to the entry state, which can itself
+                        # be an owned partial write under recovery. Preserve its
+                        # proof instead of declaring that original bytes won.
+                        try:
+                            Plugin._store_settings({"edid_write_pending": previous_pending}, required=True)
+                        except Exception as proof_error:
+                            diagnostic_transition('display', 'edid_recovery_store', 'deferred', level='warning',
+                                                  error=proof_error, stage='rollback_proof', store='display_settings', pending=True)
+                            pass  # The newer intent without proof stays deferred.
+                        diagnostic_event('display', 'edid_write_rolled_back', level='warning', error=exc, repeat=60,
+                                         restored=expected == Plugin._edid_original,
+                                         pending=settings.getSetting('edid_write_pending', None) is not None)
+                        return "failed"
                 except OSError:
+                    pass
+                # Capture partial contents through the same verified descriptor.
+                # If this commit also fails (e.g. full settings disk), the older
+                # intent without a digest remains, requiring deferred recovery.
+                try:
+                    f.seek(0)
+                    pending["partial_sha256"] = hashlib.sha256(f.read()).hexdigest()
+                    Plugin._store_settings({"edid_write_pending": pending}, required=True)
+                    diagnostic_transition('display', 'edid_recovery', 'partial_recorded', level='warning', pending=True)
+                except Exception as proof_error:
+                    diagnostic_transition('display', 'edid_recovery', 'unverified_partial', level='error',
+                                          error=proof_error, stage='partial_proof', pending=True)
                     pass
                 return "failed"
 
@@ -1174,9 +1242,13 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
             published = os.stat(path)
             if ((opened.st_dev, opened.st_ino)
                     != (published.st_dev, published.st_ino)):
+                _clear_edid_write_pending()
                 return "changed"
+            _clear_edid_write_pending()
+            diagnostic_event('display', 'edid_rewrite', outcome='written', bytes=len(replacement))
             return "written"
-    except OSError:
+    except OSError as exc:
+        diagnostic_transition('display', 'edid_recovery', 'io_failed', level='warning', error=exc, stage='rewrite', pending=True)
         return "failed"
 
 
@@ -1397,6 +1469,9 @@ class Plugin:
                     Plugin._native_probe_session = session
                     decky.logger.debug(f"{LOG} native display probe: {Plugin._native_detection.get('reason', '')}")
                 detection = Plugin._native_detection
+                diagnostic_transition('display', 'native_support', detection.get('status', 'unknown'),
+                                      supported=detection.get('supported') is True,
+                                      reason=detection.get('reason', 'unknown'))
                 journal = settings.getSetting("native_cleanup", None)
                 retired = settings.getSetting("native_retired", False) is True
                 supported = detection.get("supported") is True
@@ -1481,7 +1556,10 @@ class Plugin:
                 Plugin._state["active_mode"] = None
                 Plugin._state["active"] = False
                 Plugin._state["setup_done"] = False
+                diagnostic_transition('display', 'native_cleanup', 'ready', pending=False)
             except Exception as error:
+                diagnostic_transition('display', 'native_cleanup', 'deferred', level='warning', error=error,
+                                      stage='handoff', pending=True)
                 # Native ownership withdrawal must never stop the independent
                 # EDID pass or permit legacy writers to resume after a failure.
                 if Plugin.native_display_active() or settings.getSetting("native_cleanup", None) is not None:
@@ -1526,8 +1604,7 @@ class Plugin:
         except Exception as e:
             if required:
                 raise RuntimeError(f"Could not save display recovery state: {e}") from e
-            decky.logger.warning(
-                f"{LOG} could not save {', '.join(values.keys())}: {e}")
+            diagnostic_event('display', 'store_settings_failed', level='warning', error=e, repeat=60)
 
     @staticmethod
     def _store_setting(name, value) -> None:
@@ -1749,7 +1826,7 @@ class Plugin:
                 Plugin._state["reset_error"] = str(error)
                 if pending:
                     Plugin._state["setup_done"] = False
-                decky.logger.warning(f"{LOG} reset incomplete: {error}")
+                diagnostic_event('display', 'reset_settings_locked_failed', level='warning', error=error, repeat=60)
             return dict(Plugin._state)
 
     @staticmethod
@@ -1809,6 +1886,8 @@ class Plugin:
             except Exception as e:
                 rollback_ok = _rollback_files()
                 _select_mode(previous if previous in MODES else MODE_PQ)
+                diagnostic_event('display', 'script_install_failed', level='error', error=e,
+                                 stage='install', restored=rollback_ok)
                 rollback = ("previous script restored" if rollback_ok else
                             "script rollback failed")
                 return False, f"display script installation failed: {e}; {rollback}"
@@ -1825,6 +1904,8 @@ class Plugin:
             except Exception as e:
                 rollback_ok = _rollback_files()
                 _select_mode(previous if previous in MODES else MODE_PQ)
+                diagnostic_event('display', 'script_install_failed', level='error', error=e,
+                                 stage='settings', restored=rollback_ok)
                 try:
                     with _settings_lock:
                         settings.setSetting("panel_mode", previous)
@@ -1847,7 +1928,7 @@ class Plugin:
                 return dict(Plugin._state)
             Plugin._state["setup_error"] = note
             Plugin._state["setup_note"] = note
-            decky.logger.error(f"{LOG} setup failed: {note}")
+            diagnostic_event('display', 'setup_failed', level='error', reason='backend_reported_failure')
             return dict(Plugin._state)
 
         Plugin._state["panel_mode"] = mode
@@ -1872,16 +1953,16 @@ class Plugin:
         return dict(Plugin._state)
 
     async def restart_session(self) -> dict:
-        decky.logger.info(f"{LOG} restarting Game Mode at the user's request")
+        diagnostic_event('display', 'session_restart_requested')
         Plugin._state["restart_error"] = ""
         ok, note = await _offload(_restart_session)
         if ok:
-            decky.logger.info(f"{LOG} {note}")
+            diagnostic_event('display', 'session_restart_returned', outcome='requested')
         else:
             # The session going down would take this process with it, so if we
             # are still here to report, it genuinely did not work.
             Plugin._state["restart_error"] = note
-            decky.logger.error(f"{LOG} restart failed: {note}")
+            diagnostic_event('display', 'session_restart_returned', level='error', outcome='failed')
         return dict(Plugin._state)
 
     async def set_enabled(self, enabled: bool) -> dict:
@@ -1964,9 +2045,7 @@ class Plugin:
         target = (Plugin._baseline if Plugin._baseline is not None
                   else FALLBACK_BASELINE_NITS)
         if not _write_nits(target):
-            decky.logger.error(
-                f"{LOG} could not release brightness ownership; "
-                f"restoring {target:.2f} nits failed")
+            diagnostic_event('display', 'brightness_restore_failed', level='warning', repeat=60, pending=True)
             return False
         Plugin._last_written = None
         Plugin._state["active"] = False
@@ -2600,7 +2679,7 @@ class Plugin:
                 "could not clear HDR support for the external display"
                 if external == 1 else
                 "could not verify which display should receive HDR control")
-            decky.logger.error(f"{LOG} hybrid: display hand-back deferred")
+            diagnostic_event('display', 'hybrid_restore_failed', level='warning', repeat=60, stage='display_handoff', pending=True)
             return False
 
         if next_mode == MODE_PQ:
@@ -2645,10 +2724,8 @@ class Plugin:
         else:
             # Worth saying out loud: the panel is now in whatever state the
             # failed write left it, and nothing is left running to correct it.
-            decky.logger.error(
-                f"{LOG} hybrid: could not hand the panel back "
-                f"(flag={'ok' if dropped else 'failed'}, "
-                f"mode={'ok' if restored else 'failed'})")
+            diagnostic_event('display', 'hybrid_restore_failed', level='warning', repeat=60, stage='panel_handoff',
+                             reason='support_flag' if not dropped else 'output_mode', pending=True)
             Plugin._state["hybrid_reason"] = "could not hand HDR control back"
             return False
 
@@ -2669,35 +2746,76 @@ class Plugin:
         """
         original = Plugin._edid_original
         path = Plugin._edid_path
+        pending = settings.getSetting("edid_write_pending", None)
+        if pending is not None:
+            if (not isinstance(pending, dict) or pending.get("schema") != 1
+                    or pending.get("path") != os.path.abspath(path or "")
+                    or type(pending.get("device")) is not int or type(pending.get("inode")) is not int
+                    or not original or pending.get("original_sha256") != hashlib.sha256(original).hexdigest()):
+                Plugin._state["edid_reason"] = "EDID write recovery is pending; original bytes were preserved"
+                diagnostic_transition('display', 'edid_recovery', 'invalid_proof', level='warning', pending=True)
+                return False
         if not original or not path:
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "turned off"
             return True
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            # A compositor can remove its published copy between sessions.
+            # There is no inode left to restore and none should be recreated.
+            Plugin._state["edid_patched"] = False
+            Plugin._state["edid_reason"] = "turned off, EDID path disappeared"
+            return _clear_edid_write_pending()
+        except OSError:
+            pass  # Access errors still go through the fail-closed path below.
         if not _published_edid_is_safe(path):
             Plugin._state["edid_reason"] = \
                 "refusing an unsafe EDID path; original not restored"
-            decky.logger.error(f"{LOG} refusing unsafe EDID path {path!r}")
+            diagnostic_transition('display', 'edid_recovery', 'unsafe_path', level='warning', pending=True)
             return False
 
-        current = _read_bytes(path)
-        patched = _strip_displayid(original)
-        if current is None:
+        try:
+            with open(path, "rb") as handle:
+                current_info = os.fstat(handle.fileno())
+                if not _published_edid_is_safe(path, current_info):
+                    return False
+                current = handle.read()
+        except FileNotFoundError:
             decky.logger.info(f"{LOG} EDID path disappeared, not recreating it")
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "turned off, EDID path disappeared"
-            return True
-        if current == original:
+            return _clear_edid_write_pending()
+        except OSError as exc:
+            Plugin._state["edid_reason"] = "could not read the published EDID; restoration will retry"
+            diagnostic_transition('display', 'edid_recovery', 'read_failed', level='warning', error=exc, pending=True)
+            return False
+        patched = _strip_displayid(original)
+        identity = (current_info.st_dev, current_info.st_ino)
+        if pending and identity != (pending["device"], pending["inode"]):
+            # A new connector owns a different inode, even if its bytes happen
+            # to equal the interrupted partial write. Never restore over it.
+            result = "changed"
+        elif current == original:
             result = "written"
         elif current == patched:
             result = _rewrite_file_if_unchanged(path, current, original)
+        elif pending:
+            if pending.get("partial_sha256") != hashlib.sha256(current).hexdigest():
+                Plugin._state["edid_reason"] = "Partial EDID ownership is unverified; original bytes were preserved"
+                diagnostic_transition('display', 'edid_recovery', 'ownership_unverified', level='warning', pending=True)
+                return False
+            result = _rewrite_file_if_unchanged(path, current, original, expected_identity=identity)
         else:
-            decky.logger.info(
-                f"{LOG} EDID on disk is not the one we patched, leaving it")
+            diagnostic_transition('display', 'edid_recovery', 'foreign', pending=False)
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "turned off, display EDID changed"
             return True
 
         if result == "written":
+            if not _clear_edid_write_pending():
+                Plugin._state["edid_reason"] = "EDID restored; recovery metadata cleanup will retry"
+                return False
             decky.logger.info(f"{LOG} EDID restored")
             try:
                 os.unlink(EDID_BACKUP)
@@ -2706,15 +2824,18 @@ class Plugin:
             Plugin._edid_original = None
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "turned off"
+            diagnostic_transition('display', 'edid_recovery', 'restored', restored=True, pending=False)
             return True
         if result == "changed":
+            if not _clear_edid_write_pending():
+                return False
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "EDID changed while it was being restored"
             return True
 
         Plugin._state["edid_patched"] = True
         Plugin._state["edid_reason"] = "could not restore the original EDID; retrying"
-        decky.logger.error(f"{LOG} could not restore the original EDID")
+        diagnostic_transition('display', 'edid_recovery', 'restore_failed', level='warning', pending=True)
         return False
 
     @staticmethod
@@ -2740,6 +2861,10 @@ class Plugin:
         # the independent EDID workaround, including after connector changes.
         Plugin._session_props([])
 
+        if settings.getSetting("edid_write_pending", None) is not None:
+            if not Plugin._edid_restore_locked():
+                return  # Never replace the sole backup of an interrupted write.
+
         path = Plugin._edid_path
         if not path:
             Plugin._state["edid_reason"] = "gamescope publishes no EDID path"
@@ -2747,14 +2872,15 @@ class Plugin:
         Plugin._edid_path = path
         if not _published_edid_is_safe(path):
             Plugin._state["edid_reason"] = "refusing an unsafe EDID path"
-            decky.logger.error(f"{LOG} refusing unsafe EDID path {path!r}")
+            diagnostic_transition('display', 'edid_recovery', 'unsafe_path', level='warning', pending=True)
             return
 
         try:
             with open(path, "rb") as f:
                 data = f.read()
-        except OSError:
+        except OSError as exc:
             Plugin._state["edid_reason"] = "EDID file unreadable"
+            diagnostic_transition('display', 'edid_recovery', 'read_failed', level='warning', error=exc, pending=True)
             return
 
         if not _has_displayid(data):
@@ -2770,6 +2896,7 @@ class Plugin:
                 if data == ours else
                 "nothing to fix on this display"
             )
+            diagnostic_transition('display', 'edid_recovery', 'applied' if data == ours else 'unnecessary', pending=False)
             return
 
         # There is a DisplayID block. Only act if the CTA block still carries the
@@ -2798,6 +2925,7 @@ class Plugin:
         Plugin._edid_original = data
         if not _write_file_atomically(EDID_BACKUP, data):
             Plugin._state["edid_reason"] = "could not save the original EDID"
+            diagnostic_transition('display', 'edid_recovery', 'backup_failed', level='warning', stage='backup', pending=True)
             Plugin._edid_original = None
             return
 
@@ -2810,6 +2938,7 @@ class Plugin:
                 f"{LOG} EDID: dropped DisplayID block, "
                 f"{len(data)} -> {len(patched)} bytes, games now see {nits:.1f} nits"
             )
+            diagnostic_transition('display', 'edid_recovery', 'applied', pending=False)
         elif result == "changed":
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "EDID changed while it was being written"
@@ -2917,7 +3046,7 @@ class Plugin:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # never let one bad pass kill the loop
-                    decky.logger.error(f"{LOG} loop error: {e}")
+                    diagnostic_event('display', 'loop_failed', level='error', error=e, repeat=60)
                     await asyncio.sleep(0.5)
         finally:
             if notify is not None:
@@ -2932,7 +3061,7 @@ class Plugin:
             message = f"Display settings are unavailable; the module was not started. {error}"
             Plugin._state["settings_error"] = message
             Plugin._state["setup_error"] = message
-            decky.logger.error(f"{LOG} {message}")
+            diagnostic_event('display', 'settings_unavailable', level='error', error=error)
             raise
         if previous_settings_error and Plugin._state.get("setup_error") == previous_settings_error:
             Plugin._state["setup_error"] = ""
@@ -3042,15 +3171,15 @@ class Plugin:
         # whatever level we last forwarded.
         try:
             await _offload(Plugin._release)
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='brightness', pending=True)
         # Hybrid holds the panel in gamma 2.2 between HDR games. Leaving it there
         # with nothing left to switch it back would cost the user their HDR.
         if Plugin._state.get("active_mode") == MODE_HYBRID:
             try:
                 await _offload(Plugin._hybrid_release)
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='hybrid', pending=True)
         if uninstalling:
             # Removing the script only affects the next gamescope process. Put
             # the current internal session into gamma 2.2 now, so uninstalling
@@ -3069,12 +3198,12 @@ class Plugin:
                         if _as_int(props.get(ATOM_IS_EXTERNAL)) == 0:
                             _write_atom_int(ATOM_HDR_ENABLED, 0)
                 await _offload(release_legacy_atoms)
-            except Exception:
-                pass
+            except Exception as exc:
+                diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='legacy_atoms', pending=True)
         try:
             await _offload(Plugin._edid_restore)
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='edid', pending=True)
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
@@ -3089,6 +3218,6 @@ class Plugin:
             if note is None:
                 await self.cleanup_native_display()
                 return
-            decky.logger.info(f"{LOG} uninstall: {note}")
+            diagnostic_event('display', 'legacy_cleanup_returned')
         except Exception as e:
-            decky.logger.error(f"{LOG} uninstall: {e}")
+            diagnostic_event('display', 'uninstall_failed', level='error', error=e, repeat=60)

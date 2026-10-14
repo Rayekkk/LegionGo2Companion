@@ -30,7 +30,7 @@ class AtomicSettingsTests(unittest.TestCase):
         manager.setSetting("second", {"value": 2})
         self.assertFalse(Path(manager.path).exists())
 
-        with patch.object(safe_settings.json, "dumps", wraps=json.dumps) as encode:
+        with patch.object(safe_settings, "_encode_json_object", wraps=safe_settings._encode_json_object) as encode:
             manager.commit()
         self.assertEqual(encode.call_count, 1)
         self.assertEqual(Path(manager.path).read_bytes(), Path(manager.backup_path).read_bytes())
@@ -113,13 +113,15 @@ class AtomicSettingsTests(unittest.TestCase):
                 raise OSError("backup unavailable")
             return write_bytes(path, payload)
         with patch.object(safe_settings, "_atomic_write_bytes", side_effect=fail_backup), \
-             patch.object(safe_settings, "_log") as log:
+             patch.object(safe_settings, "transition") as log:
             manager.replace({"value": "new"})
         self.assertEqual(manager.getSetting("value"), "new")
         self.assertEqual(self.manager().getSetting("value"), "new")
         self.assertEqual(json.loads(Path(manager.backup_path).read_text(encoding="utf-8")), {"value": "old"})
-        self.assertTrue(any("could not refresh settings backup" in call.args[1]
-                            for call in log.call_args_list))
+        log.assert_called_once()
+        self.assertEqual(log.call_args.args, ("settings", "backup_refresh", False))
+        self.assertEqual(log.call_args.kwargs["store"], "module")
+        self.assertEqual(log.call_args.kwargs["level"], "warning")
         manager.commit()
         self.assertEqual(Path(manager.path).read_bytes(), Path(manager.backup_path).read_bytes())
 
@@ -138,7 +140,8 @@ class AtomicSettingsTests(unittest.TestCase):
         self.assertEqual(manager.getSetting("value"), "new")
         self.assertEqual(json.loads(Path(manager.path).read_text(encoding="utf-8")),
                          {"value": "new"})
-        self.assertTrue(any("durability could not be confirmed" in call.args[1]
+        self.assertTrue(any(call.args == ("warning", "directory_durability_unconfirmed")
+                            and call.kwargs.get("store") == "module.json"
                             for call in log.call_args_list))
 
     def test_existing_primary_gets_a_recovery_backup_on_first_read(self):
@@ -221,11 +224,13 @@ class AtomicSettingsTests(unittest.TestCase):
         path = self.root / "module.json"
         path.write_text("{}", encoding="utf-8")
         original_fdopen = safe_settings.os.fdopen
-        reads = []
+        reads, consumed = [], []
         class GrowingFile(io.BytesIO):
             def read(self, size=-1):
                 reads.append(size)
-                return super().read(size)
+                chunk = super().read(size)
+                consumed.append(len(chunk))
+                return chunk
         def grown_after_stat(fd, *args, **kwargs):
             # Close the real local descriptor and emulate content appended
             # after its bounded fstat. No shared or device paths are touched.
@@ -235,7 +240,9 @@ class AtomicSettingsTests(unittest.TestCase):
         with patch.object(safe_settings.os, "fdopen", side_effect=grown_after_stat):
             with self.assertRaises(safe_settings.CorruptSettings):
                 safe_settings.load_json_object(str(path))
-        self.assertEqual(reads, [safe_settings.MAX_SETTINGS_BYTES + 1])
+        self.assertTrue(reads)
+        self.assertTrue(all(0 < size <= safe_settings.MAX_SETTINGS_BYTES + 1 for size in reads), reads)
+        self.assertLessEqual(sum(consumed), safe_settings.MAX_SETTINGS_BYTES + 1)
 
     def test_symlink_target_is_blocked_without_touching_its_destination(self):
         victim = Path(self.temp.name) / "victim"

@@ -11,6 +11,7 @@ import os
 import json
 import time
 import asyncio
+from diagnostics import configure_worker, event as diagnostic_event, transition as diagnostic_transition
 from system_process import system_env
 import subprocess
 import re
@@ -273,7 +274,8 @@ class Plugin:
 
     # ---- Helpers ----
 
-    def _run_cmd(self, cmd: list[str], timeout: int = 5, clean_env: bool = False) -> dict:
+    def _run_cmd(self, cmd: list[str], timeout: int = 5, clean_env: bool = False,
+                 preserve_stdout: bool = False) -> dict:
         """Run a subprocess and return a result dict.
 
         All commands use system libraries, independent of the legacy clean_env
@@ -286,7 +288,7 @@ class Plugin:
             )
             return {
                 "success": result.returncode == 0,
-                "stdout": result.stdout.strip(),
+                "stdout": result.stdout if preserve_stdout else result.stdout.strip(),
                 "stderr": result.stderr.strip(),
                 "returncode": result.returncode,
             }
@@ -491,16 +493,23 @@ class Plugin:
                 ["/usr/bin/iw", "dev", iface, "scan", "ssid", ssid],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=system_env(LC_ALL="C"),
             )
-        except OSError:
+        except OSError as exc:
+            diagnostic_event('wifi', 'discovery_scan_failed', level='warning', repeat=60,
+                             stage='spawn', code=type(exc).__name__, errno=exc.errno)
             return {"success": False}
         deadline = time.monotonic() + 8
         try:
             while not stop.is_set() and time.monotonic() < deadline:
                 try:
                     stdout, _stderr = process.communicate(timeout=0.2)
+                    diagnostic_transition('wifi', 'discovery_scan', 'ready' if process.returncode == 0 else 'failed',
+                                          level='info' if process.returncode == 0 else 'warning',
+                                          stage='completed', returncode=process.returncode)
                     return {"success": process.returncode == 0, "stdout": stdout}
                 except subprocess.TimeoutExpired:
                     pass
+            if not stop.is_set():
+                diagnostic_event('wifi', 'discovery_scan_failed', level='warning', repeat=60, stage='timeout')
             return {"success": False}
         finally:
             if process.poll() is None:
@@ -526,7 +535,7 @@ class Plugin:
         for block in re.split(r"(?m)^BSS ", scan.get("stdout", ""))[1:]:
             name = re.search(r"(?m)^[ \t]*SSID: ?(.*)$", block)
             freq = re.search(r"(?m)^\s*freq:\s*(\d+)", block)
-            if name and freq and name.group(1) == ssid:
+            if name and freq and self._iw_ssid(name.group(1)) == ssid:
                 frequencies.append(int(freq.group(1)))
         fallback.update(directed_scan_success=True, candidate_frequencies=sorted(set(frequencies)))
         better = any(5925 <= freq < 7125 or (link["frequency"] < 4900 and 4900 <= freq < 5925)
@@ -683,7 +692,11 @@ class Plugin:
                                         # for 6 GHz without a third reconnect.
                                         probe_limit = 3
                                     self._high_band_discovery_result = result
-                                    decky.logger.info(f"WiFi automatic band discovery: {result}")
+                                    diagnostic_event('wifi', 'automatic_discovery',
+                                                     level='info' if result.get('success') else 'warning',
+                                                     outcome='ready' if result.get('success') else 'failed',
+                                                     restored=result.get('rolled_back'),
+                                                     reason=result.get('error', ''), stage='completed')
                                 finally:
                                     self._high_band_discovery_pending = False
                         finally:
@@ -705,7 +718,7 @@ class Plugin:
         def completed(done):
             if not done.cancelled() and done.exception() is not None:
                 self._high_band_discovery_result = {"success": False, "error": "monitor_stopped"}
-                decky.logger.error(f"WiFi automatic band discovery stopped: {done.exception()}")
+                diagnostic_event('wifi', 'automatic_discovery_stopped', level='error', code=type(done.exception()).__name__)
         task.add_done_callback(completed)
 
     async def _stop_high_band_monitor(self):
@@ -729,7 +742,7 @@ class Plugin:
             except Exception as exc:
                 # Background discovery must not replace a transaction result
                 # or start scanning with unreadable ownership settings.
-                decky.logger.error(f"WiFi automatic band discovery could not restart: {exc}")
+                diagnostic_event('wifi', 'automatic_discovery_restart_failed', level='warning', repeat=60, code=type(exc).__name__)
 
     def _acquire_band_policy_file_lock(self, nonblocking: bool = False):
         """Fence the worker, startup recovery, and systemd watchdog."""
@@ -899,6 +912,50 @@ class Plugin:
     @staticmethod
     def _nmcli_unescape(value: str) -> str:
         return re.sub(r"\\(.)", r"\1", value)
+
+    @staticmethod
+    def _iw_ssid(value: str) -> str | None:
+        """Decode iw print_ssid_escaped once, as UTF-8 bytes rather than text escapes."""
+        try:
+            raw = re.sub(rb"\\x([0-9a-fA-F]{2})",
+                         lambda match: bytes([int(match.group(1), 16)]), value.encode("utf-8"))
+            return raw.decode("utf-8") if 1 <= len(raw) <= 32 else None
+        except UnicodeError:
+            return None
+
+    @staticmethod
+    def _nmcli_fields(value: str) -> list[str]:
+        """Split terse nmcli rows while decoding escaped colons/backslashes."""
+        fields = [""]
+        escaped = False
+        for character in value:
+            if escaped:
+                fields[-1] += character
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == ":":
+                fields.append("")
+            else:
+                fields[-1] += character
+        return [] if escaped else fields
+
+    def _get_profile_ssid(self, uuid: str) -> str | None:
+        # Nonempty surrounding fields protect significant SSID whitespace
+        # from the command runner's outer stdout trimming.
+        metadata = self._run_cmd([
+            "/usr/bin/nmcli", "-g", "connection.uuid,802-11-wireless.ssid,802-11-wireless.hidden",
+            "con", "show", "uuid", uuid,
+        ], timeout=3)
+        # nmcli records use ASCII LF. Valid UTF-8 SSIDs may themselves contain
+        # Unicode line separators, which Python's splitlines() also splits.
+        fields = metadata.get("stdout", "").split("\n")
+        if (not metadata.get("success") or len(fields) != 3 or fields[0] != uuid
+                or fields[2] not in ("yes", "no")):
+            return None
+        ssid = self._nmcli_unescape(fields[1])
+        return ssid if (1 <= len(ssid.encode("utf-8")) <= 32
+                        and "\r" not in ssid and "\n" not in ssid) else None
 
     @staticmethod
     def _normalize_bssid(value: str | None) -> str:
@@ -1242,18 +1299,8 @@ class Plugin:
         }
         if not iface or not uuid:
             return result
-        # Surround the SSID with nonempty fields: the command runner trims
-        # its outer whitespace, while spaces inside an SSID are significant.
-        metadata = self._run_cmd([
-            "/usr/bin/nmcli", "-g", "connection.uuid,802-11-wireless.ssid,802-11-wireless.hidden",
-            "con", "show", "uuid", uuid,
-        ], timeout=3)
-        fields = metadata.get("stdout", "").splitlines()
-        if (not metadata.get("success") or len(fields) != 3 or fields[0] != uuid
-                or fields[2] not in ("yes", "no")):
-            return result
-        ssid = self._nmcli_unescape(fields[1])
-        if not 1 <= len(ssid.encode("utf-8")) <= 32:
+        ssid = self._get_profile_ssid(uuid)
+        if ssid is None:
             return result
         result["ssid"] = ssid
         candidates: dict[str, dict] = {}
@@ -1264,9 +1311,13 @@ class Plugin:
                 r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", bssid or "", re.IGNORECASE
             ):
                 return
+            frequency_match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:MHz)?\s*",
+                                          str(frequency or ""), re.IGNORECASE)
+            if not frequency_match:
+                return
             try:
-                freq = int(float(str(frequency).strip()))
-            except (TypeError, ValueError):
+                freq = int(float(frequency_match.group(1)))
+            except (TypeError, ValueError, OverflowError):
                 return
             if not minimum_frequency <= freq < 7125:
                 return
@@ -1285,7 +1336,7 @@ class Plugin:
                 candidates[normalized] = candidate
 
         def add_iw_scan(command: list[str], source: str) -> bool:
-            scan = self._run_cmd(command, timeout=10)
+            scan = self._run_cmd(command, timeout=10, preserve_stdout=True)
             if not scan.get("success"):
                 return False
             result["scan_ok"] = True
@@ -1315,7 +1366,7 @@ class Plugin:
                     visible_ssid = line.split(":", 1)[1]
                     if visible_ssid.startswith(" "):
                         visible_ssid = visible_ssid[1:]
-                    if visible_ssid == ssid:
+                    if self._iw_ssid(visible_ssid) == ssid:
                         add_candidate(bssid, frequency, signal)
             return True
 
@@ -1352,10 +1403,8 @@ class Plugin:
                     "-t",
                     "--escape",
                     "yes",
-                    "--separator",
-                    "\t",
                     "-f",
-                    "SSID,BSSID,FREQ,SIGNAL",
+                    "BSSID,SSID,FREQ,SIGNAL",
                     "dev",
                     "wifi",
                     "list",
@@ -1369,12 +1418,12 @@ class Plugin:
             if nm_scan.get("success"):
                 result["scan_ok"] = True
                 sources.append("nmcli")
-                for line in nm_scan.get("stdout", "").splitlines():
-                    fields = line.split("\t")
+                for line in nm_scan.get("stdout", "").split("\n"):
+                    fields = self._nmcli_fields(line)
                     if len(fields) != 4:
                         continue
-                    raw_ssid, bssid, frequency, signal = fields
-                    if self._nmcli_unescape(raw_ssid) == ssid:
+                    bssid, visible_ssid, frequency, signal = fields
+                    if visible_ssid == ssid:
                         add_candidate(bssid, frequency, signal)
 
         result["candidates"] = sorted(
@@ -1407,10 +1456,9 @@ class Plugin:
         }
         if not iface or not uuid:
             return bands
-        ssid, ssid_result = self._nmcli_get(uuid, "802-11-wireless.ssid")
-        if not ssid_result.get("success") or not ssid:
+        ssid = self._get_profile_ssid(uuid)
+        if ssid is None:
             return bands
-        ssid = self._nmcli_unescape(ssid)
 
         # A recheck in the UI is immediately followed by a separate backend
         # preflight when the user applies a mode. Wireless scans are snapshots
@@ -1461,7 +1509,7 @@ class Plugin:
         # SSID exposes its separate 2.4, 5 and 6 GHz BSS records without fixing
         # a BSSID or changing the saved connection profile.
         def add_direct_scan(command: list[str], source: str) -> bool:
-            direct_result = self._run_cmd(command, timeout=15)
+            direct_result = self._run_cmd(command, timeout=15, preserve_stdout=True)
             if not direct_result.get("success"):
                 return False
             bands["scan_ok"] = True
@@ -1475,8 +1523,10 @@ class Plugin:
                 elif line.startswith("freq:"):
                     current_frequency = line.split(":", 1)[1].strip()
                 elif line.startswith("SSID:"):
-                    visible_ssid = line.split(":", 1)[1].strip()
-                    if visible_ssid == ssid:
+                    visible_ssid = line.split(":", 1)[1]
+                    if visible_ssid.startswith(" "):
+                        visible_ssid = visible_ssid[1:]
+                    if self._iw_ssid(visible_ssid) == ssid:
                         add_frequency(current_frequency, fresh=True)
             return True
 
@@ -1548,7 +1598,7 @@ class Plugin:
                 "--escape",
                 "yes",
                 "-f",
-                "SSID,FREQ",
+                "FREQ,SSID,SIGNAL",
                 "dev",
                 "wifi",
                 "list",
@@ -1563,11 +1613,12 @@ class Plugin:
             bands["scan_ok"] = True
             sources.append("nmcli")
             nmcli_result_is_fresh = bool(rescan and not direct_scan_ok)
-            for line in nm_result.get("stdout", "").splitlines():
-                if ":" not in line:
+            for line in nm_result.get("stdout", "").split("\n"):
+                fields = self._nmcli_fields(line)
+                if len(fields) != 3:
                     continue
-                raw_ssid, raw_freq = line.rsplit(":", 1)
-                if self._nmcli_unescape(raw_ssid) == ssid:
+                raw_freq, visible_ssid, _signal = fields
+                if visible_ssid == ssid:
                     add_frequency(raw_freq, fresh=nmcli_result_is_fresh)
 
         fresh_high_band = bands["five_ghz"] > 0 or bands["six_ghz"] > 0
@@ -1817,7 +1868,9 @@ class Plugin:
             # A present but unreadable recovery journal is materially
             # different from no journal. Return a fail-closed marker so every
             # mutating path remains locked until the file is inspected.
-            decky.logger.error(f"Unsafe recovery journal {target}: {exc}")
+            diagnostic_transition('wifi', 'recovery_journal', 'unreadable', level='error',
+                                  code=type(exc).__name__, errno=getattr(exc, 'errno', None),
+                                  store='power_save' if target == POWER_SAVE_JOURNAL_FILE else 'band_policy')
             return {
                 "schema": 0,
                 "phase": "unreadable",
@@ -1835,6 +1888,17 @@ class Plugin:
             raise UnsafeSettingsPath("Recovery directory has an unexpected owner")
         os.chmod(directory, 0o700)
         self._atomic_write_json(target, journal)
+        phase = journal.get('phase')
+        known_phases = {'pending', 'applying', 'verified', 'committed', 'rolling_back', 'rolled_back', 'rollback_failed'}
+        phase = phase if isinstance(phase, str) and phase in known_phases else 'unknown'
+        store = 'power_save' if target == POWER_SAVE_JOURNAL_FILE else 'band_policy'
+        operation = journal.get('operation')
+        operation = operation if isinstance(operation, str) and operation in {'manual_high_band_reconnect', 'automatic_high_band_reconnect'} else store
+        diagnostic_transition('wifi', 'transaction', operation + ':' + phase,
+                              level='warning' if phase == 'rollback_failed' else 'info',
+                              operation=operation, phase=phase, store=store,
+                              pending=phase not in {'committed', 'rolled_back'},
+                              restored=phase == 'rolled_back')
 
     def _remove_band_policy_journal(self, path: str | None = None):
         try:
@@ -2012,7 +2076,7 @@ class Plugin:
         metadata = self._run_cmd(args, timeout=6)
         if not metadata.get("success"):
             return unavailable
-        lines = metadata.get("stdout", "").splitlines()
+        lines = metadata.get("stdout", "").split("\n")
         profiles = {}
         index = 0
         while index < len(lines):
@@ -2025,6 +2089,8 @@ class Plugin:
             if saved_uuid not in uuids or saved_uuid in profiles or kind != "802-11-wireless":
                 return unavailable
             if auto not in ("yes", "no") or hidden not in ("yes", "no"):
+                return unavailable
+            if "\r" in ssid:
                 return unavailable
             profiles[saved_uuid] = (self._nmcli_unescape(ssid), security, auto == "yes", hidden == "yes")
             index += 6
@@ -2508,7 +2574,7 @@ class Plugin:
                 "message": "Reconnected on 5/6 GHz; the temporary AP selection was cleared.",
             }
         except Exception as exc:
-            decky.logger.error(f"manual high-band reconnect failed: {exc}")
+            diagnostic_event('wifi', 'manual_reconnect_failed', level='error', stage='apply', code=type(exc).__name__)
             rollback = self._restore_band_policy_transaction(journal, str(exc))
             if rollback.get("success"):
                 self._cancel_band_policy_rollback(journal)
@@ -2552,7 +2618,7 @@ class Plugin:
                         return await self._worker_complete(self._rescan_and_reconnect_sync)
                     return await self._worker_complete(self._rescan_and_reconnect_sync, target_band)
             except Exception as exc:
-                decky.logger.error(f"rescan_and_reconnect error: {exc}")
+                diagnostic_event('wifi', 'manual_reconnect_failed', level='error', stage='admission', code=type(exc).__name__)
                 return self._unexpected_response(exc)
             finally:
                 self._release_band_policy_file_lock(file_lock)
@@ -2832,10 +2898,8 @@ class Plugin:
                 journal, "interrupted operation"
             )
             if not result.get("success"):
-                decky.logger.error(
-                    "Band policy recovery needs manual intervention: "
-                    + "; ".join(result.get("conflicts", []))
-                )
+                diagnostic_transition('wifi', 'band_recovery', 'deferred', level='error',
+                                      stage='interrupted', count=len(result.get('conflicts', [])), pending=True)
                 return {
                     "success": False,
                     "error": "band_policy_recovery_required",
@@ -2850,9 +2914,8 @@ class Plugin:
             self._save_band_policy_journal(journal)
         elif phase == "rollback_failed":
             if not self._band_policy_rollback_retryable(journal):
-                decky.logger.error(
-                    "Previous band policy rollback is incomplete; preserving journal"
-                )
+                diagnostic_transition('wifi', 'band_recovery', 'deferred', level='error',
+                                      stage='incomplete', pending=True)
                 return {
                     "success": False,
                     "error": "band_policy_recovery_required",
@@ -2862,19 +2925,15 @@ class Plugin:
                 journal, "retrying incomplete rollback"
             )
             if not result.get("success"):
-                decky.logger.error(
-                    "Band policy rollback retry needs manual intervention: "
-                    + "; ".join(result.get("conflicts", []))
-                )
+                diagnostic_transition('wifi', 'band_recovery', 'deferred', level='error',
+                                      stage='retry', count=len(result.get('conflicts', [])), pending=True)
                 return {
                     "success": False,
                     "error": "band_policy_recovery_required",
                     "conflicts": result.get("conflicts", []),
                 }
         elif phase not in ("committed", "rolled_back"):
-            decky.logger.error(
-                f"Unknown band policy journal phase '{phase}'; preserving journal"
-            )
+            diagnostic_transition('wifi', 'band_recovery', 'deferred', level='error', stage='unknown_phase', pending=True)
             return {
                 "success": False,
                 "error": "band_policy_recovery_required",
@@ -2883,6 +2942,9 @@ class Plugin:
 
         self._cancel_band_policy_rollback(journal)
         self._remove_band_policy_journal()
+        restored = journal.get('phase') == 'rolled_back'
+        diagnostic_transition('wifi', 'band_recovery', 'ready', pending=False,
+                              restored=restored, outcome='restored' if restored else 'completed')
         return {"success": True, "recovered": True}
 
     def _band_policy_ownership_error(self, settings: dict, *, allow_restored_iwd: bool = False) -> str:
@@ -3101,15 +3163,15 @@ class Plugin:
         except FileNotFoundError:
             return {"success": True}
         except Exception as e:
-            decky.logger.error(f"Failed to remove dispatcher: {e}")
+            diagnostic_event('wifi', 'remove_dispatcher_failed', level='error', error=e, repeat=60)
             return {"success": False, "error": "write_failed", "message": str(e)}
 
     def _rotate_logs(self, keep: int = 10):
         """Prune old log files on plugin startup. Decky does not rotate plugin
         logs automatically; each plugin load creates a new timestamped file in
         DECKY_PLUGIN_LOG_DIR, so without pruning they accumulate forever.
-        Keep the newest `keep` files (typical size ~2-3 KB each, so bounded at
-        roughly 30 KB total).
+        Keep the newest `keep` timestamped files. This bounds file count only;
+        structured diagnostics have separate size-based rotation.
         """
         try:
             log_dir = getattr(decky, "DECKY_PLUGIN_LOG_DIR", None)
@@ -3137,7 +3199,7 @@ class Plugin:
             if removed:
                 decky.logger.info(f"Rotated logs: removed {removed} old file(s), kept {keep} newest")
         except Exception as e:
-            decky.logger.error(f"Log rotation error: {e}")
+            diagnostic_event('wifi', 'rotate_logs_failed', level='error', error=e, repeat=60)
 
     # ---- Lifecycle ----
 
@@ -3197,9 +3259,11 @@ class Plugin:
                 )
             elif iface and settings.get("power_save_disabled"):
                 try:
-                    await self.set_power_save(True)
+                    applied = await self.set_power_save(True)
+                    if not applied.get('success'):
+                        diagnostic_event('wifi', 'saved_power_policy_not_applied', level='warning', stage='startup')
                 except Exception as e:
-                    decky.logger.error(f"Startup power save failed: {e}")
+                    diagnostic_event('wifi', 'main_failed', level='error', error=e, repeat=60)
 
             # Read-only sanity check. The fork never switches NetworkManager's
             # WiFi backend; it merely refuses restricted modes unless iwd is live.
@@ -3232,7 +3296,7 @@ class Plugin:
             self._start_high_band_monitor(settings)
             return {"success": True}
         except Exception as e:
-            decky.logger.error(f"WiFi Optimizer Go 2 _main error: {e}")
+            diagnostic_event('wifi', 'main_failed', level='error', error=e, repeat=60)
             return {"success": False, "error": str(e)}
 
     async def _unload(self):
@@ -3245,7 +3309,7 @@ class Plugin:
                 pass
             decky.logger.info("WiFi Optimizer Go 2 unloading")
         except Exception as e:
-            decky.logger.error(f"_unload error: {e}")
+            diagnostic_event('wifi', 'unload_failed', level='error', error=e, repeat=60)
 
     async def _uninstall(self):
         try:
@@ -3259,23 +3323,11 @@ class Plugin:
                 and bssid_cleanup.get("success")
             )
             if not band_cleanup.get("success"):
-                decky.logger.error(
-                    "Band policy could not be restored during uninstall; "
-                    "preserving settings/journal for manual recovery: "
-                    + band_cleanup.get("message", "unknown error")
-                )
+                diagnostic_event('wifi', 'uninstall_restore_unconfirmed', level='error', stage='band_policy', pending=True)
             if not power_cleanup.get("success"):
-                decky.logger.error(
-                    "Power-save policy could not be restored during uninstall; "
-                    "preserving settings for manual recovery: "
-                    + power_cleanup.get("message", "unknown error")
-                )
+                diagnostic_event('wifi', 'uninstall_restore_unconfirmed', level='error', stage='power_save', pending=True)
             if not bssid_cleanup.get("success"):
-                decky.logger.error(
-                    "Legacy BSSID lock could not be restored during uninstall; "
-                    "preserving settings for manual recovery: "
-                    + bssid_cleanup.get("message", "unknown error")
-                )
+                diagnostic_event('wifi', 'uninstall_restore_unconfirmed', level='error', stage='legacy_bssid', pending=True)
             await self._worker_complete(self._remove_dispatcher)
             cleanup_paths = [ENFORCED_FILE]
             if not preserve_recovery:
@@ -3293,7 +3345,7 @@ class Plugin:
                 except FileNotFoundError:
                     pass
         except Exception as e:
-            decky.logger.error(f"_uninstall error: {e}")
+            diagnostic_event('wifi', 'uninstall_failed', level='error', error=e, repeat=60)
 
     async def _migration(self):
         pass
@@ -3380,7 +3432,7 @@ class Plugin:
                 "supports_6ghz": supports_6ghz,
             }
         except Exception as e:
-            decky.logger.error(f"get_device_info error: {e}")
+            diagnostic_event('wifi', 'get_device_info_sync_failed', level='error', error=e, repeat=60)
             return {
                 "success": True,
                 "model": "unknown",
@@ -3498,7 +3550,9 @@ class Plugin:
             link_out = link_result.get("stdout", "")
             ssid = re.search(r"(?m)^[ \t]*SSID: ?(.*)$", link_out)
             if ssid:
-                status["live"]["ssid"] = ssid.group(1)
+                decoded_ssid = self._iw_ssid(ssid.group(1))
+                if decoded_ssid is not None:
+                    status["live"]["ssid"] = decoded_ssid
             for line in link_out.split("\n"):
                 line = line.strip()
                 if line.startswith("signal:"):
@@ -3565,7 +3619,7 @@ class Plugin:
 
             return status
         except Exception as e:
-            decky.logger.error(f"get_status error: {e}")
+            diagnostic_event('wifi', 'status_failed', level='warning', repeat=60, code=type(e).__name__)
             return self._unexpected_response(e)
 
     # ---- Power-save transaction helpers ------------------------------------
@@ -3734,34 +3788,31 @@ class Plugin:
                 journal, "interrupted power-save operation"
             )
             if not result.get("success"):
-                decky.logger.error(
-                    "Power-save recovery needs manual intervention: "
-                    + "; ".join(result.get("conflicts", []))
-                )
+                diagnostic_transition('wifi', 'power_recovery', 'deferred', level='error',
+                                      stage='interrupted', count=len(result.get('conflicts', [])), pending=True)
                 return {
                     "success": False,
                     "error": "power_save_recovery_required",
                     "conflicts": result.get("conflicts", []),
                 }
         elif phase == "rollback_failed":
-            decky.logger.error(
-                "Previous power-save rollback failed; preserving journal"
-            )
+            diagnostic_transition('wifi', 'power_recovery', 'deferred', level='error', stage='incomplete', pending=True)
             return {
                 "success": False,
                 "error": "power_save_recovery_required",
                 "conflicts": journal.get("rollback_conflicts", []),
             }
         elif phase not in ("committed", "rolled_back"):
-            decky.logger.error(
-                f"Unknown power-save journal phase '{phase}'; preserving journal"
-            )
+            diagnostic_transition('wifi', 'power_recovery', 'deferred', level='error', stage='unknown_phase', pending=True)
             return {
                 "success": False,
                 "error": "power_save_recovery_required",
                 "conflicts": [f"unknown journal phase: {phase}"],
             }
         self._remove_power_save_journal()
+        restored = journal.get('phase') == 'rolled_back'
+        diagnostic_transition('wifi', 'power_recovery', 'ready', pending=False,
+                              restored=restored, outcome='restored' if restored else 'completed')
         return {"success": True, "recovered": True}
 
     # ---- Optimization setters ----
@@ -4065,13 +4116,11 @@ class Plugin:
                 "rolled_back": False,
             }
         except Exception as e:
-            decky.logger.error(f"set_power_save apply error: {e}")
+            diagnostic_event('wifi', 'power_save_failed', level='error', stage='apply', code=type(e).__name__)
             try:
                 rollback = self._restore_power_save_transaction(journal, str(e))
             except Exception as rollback_error:
-                decky.logger.error(
-                    f"power-save rollback infrastructure failed: {rollback_error}"
-                )
+                diagnostic_event('wifi', 'power_save_recovery_failed', level='error', stage='rollback', code=type(rollback_error).__name__, pending=True)
                 return {
                     "success": False,
                     "error": "power_save_apply_failed",
@@ -4107,7 +4156,7 @@ class Plugin:
                     cancelled_cleanup=self._release_band_policy_file_lock
                 )
             except Exception as e:
-                decky.logger.error(f"band policy lock error: {e}")
+                diagnostic_event('wifi', 'band_policy_failed', level='error', stage='lock', code=type(e).__name__)
                 await self._restart_high_band_monitor()
                 return {
                     "success": False,
@@ -4754,7 +4803,7 @@ class Plugin:
                                 if inactive_iwd_cleanup else "Band policy applied and verified."),
                 }
             except Exception as e:
-                decky.logger.error(f"set_band_policy apply error: {e}")
+                diagnostic_event('wifi', 'band_policy_failed', level='error', stage='apply', code=type(e).__name__)
                 if watchdog_owns_transaction:
                     # The systemd service may be between restoring the iwd
                     # file and restarting/reconnecting. Never replay a stale
@@ -4873,11 +4922,24 @@ class Plugin:
             decky.logger.info("Settings reset to defaults")
             return {"success": True, "message": "Settings reset to defaults"}
         except Exception as e:
-            decky.logger.error(f"reset_settings error: {e}")
+            diagnostic_event('wifi', 'reset_settings_failed', level='error', error=e, repeat=60)
             return self._unexpected_response(e)
 
 
 def _run_band_policy_rollback_cli(journal_path: str) -> int:
+    diagnostic_event('wifi', 'watchdog_recovery_started', operation='rollback')
+    try:
+        result = _run_band_policy_rollback_cli_impl(journal_path)
+    except Exception as exc:
+        diagnostic_event('wifi', 'watchdog_recovery_failed', level='error',
+                         code=type(exc).__name__, errno=getattr(exc, 'errno', None), pending=True)
+        raise
+    diagnostic_event('wifi', 'watchdog_recovery_finished', level='info' if result == 0 else 'error',
+                     returncode=result, pending=result != 0, outcome='complete' if result == 0 else 'deferred')
+    return result
+
+
+def _run_band_policy_rollback_cli_impl(journal_path: str) -> int:
     """Entry point used only by the root-owned transient systemd watchdog."""
     path = os.path.realpath(os.path.abspath(journal_path))
     if os.path.basename(path) != "band-policy-transaction.json":
@@ -4931,6 +4993,7 @@ def _run_band_policy_rollback_cli(journal_path: str) -> int:
 
 
 if __name__ == "__main__":
+    configure_worker('wifi')
     if len(sys.argv) == 3 and sys.argv[1] == "--rollback-band-policy":
         raise SystemExit(_run_band_policy_rollback_cli(sys.argv[2]))
     raise SystemExit(2)

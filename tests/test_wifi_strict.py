@@ -251,8 +251,10 @@ class ReconnectPacingTests(unittest.TestCase):
         plugin = wifi.Plugin()
         clock = [0.0]
         budgets = []
+        activation_starts = []
         def command(argv, **kwargs):
             if argv[:3] == ['/usr/bin/nmcli', 'con', 'up']:
+                activation_starts.append(clock[0])
                 budgets.append(kwargs['timeout'])
                 clock[0] += kwargs['timeout']
                 return {'success': False, 'stderr': 'Secrets were required, but not provided'}
@@ -266,7 +268,10 @@ class ReconnectPacingTests(unittest.TestCase):
              patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
             result = plugin._reconnect_profile(UUID, cycle=False)
         self.assertTrue(result['success'], result)
-        self.assertEqual(budgets, [14.0])
+        self.assertTrue(budgets, 'the slow activation failure must be exercised')
+        self.assertTrue(all(0 < budget < 25 - started
+                            for started, budget in zip(activation_starts, budgets)), budgets)
+        self.assertGreaterEqual(clock[0], 23, 'success must wait for the verified native link')
         self.assertLessEqual(clock[0], 25)
 
     def test_verified_link_at_deadline_wins_over_earlier_cli_failure(self):
@@ -293,6 +298,7 @@ class ReconnectPacingTests(unittest.TestCase):
         clock = [0.0]
         activations = []
         checks = []
+        radio_checks = []
 
         def run_cmd(argv, **_kwargs):
             if argv[:3] == ["/usr/bin/nmcli", "con", "up"]:
@@ -307,19 +313,32 @@ class ReconnectPacingTests(unittest.TestCase):
         def sleep(seconds):
             clock[0] += seconds
 
+        def frequency():
+            radio_checks.append(clock[0])
+            return 5320
+
         with patch.object(plugin, "_run_cmd", side_effect=run_cmd), \
              patch.object(plugin, "_get_wifi_interface", return_value="wlan0"), \
-             patch.object(plugin, "_get_link_frequency", return_value=5320), \
+             patch.object(plugin, "_get_link_frequency", side_effect=frequency), \
              patch.object(plugin, "_profile_is_active", side_effect=is_active), \
              patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(wifi.time, "sleep", side_effect=sleep):
             result = plugin._reconnect_profile(UUID, cycle=False)
 
         self.assertTrue(result["success"], result)
-        self.assertEqual(len(activations), 2)
+        self.assertTrue(result["reconnected"])
+        # Recovery at 13 s can precede a second retry with a safe slower
+        # backoff. Bound churn and verify the live result, not an exact count.
+        self.assertGreaterEqual(len(activations), 1)
+        self.assertLessEqual(len(activations), 4)
         self.assertGreaterEqual(activations[0], 8.0)
-        self.assertGreaterEqual(activations[1] - activations[0], 3.0)
+        self.assertTrue(all(b - a >= 3.0 for a, b in zip(activations, activations[1:])), activations)
+        self.assertTrue(all(at < 13.0 for at in activations), activations)
         self.assertGreater(len(checks), len(activations))
+        self.assertGreaterEqual(checks[-1], 13.0)
+        self.assertTrue(radio_checks)
+        self.assertGreaterEqual(radio_checks[-1], 13.0)
+        self.assertLessEqual(clock[0], 14.0, "native recovery must be observed promptly")
 
     def test_iwd_autoconnect_before_manual_activation_is_left_alone(self):
         plugin = wifi.Plugin()

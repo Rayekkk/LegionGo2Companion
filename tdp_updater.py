@@ -9,19 +9,15 @@ import json
 import os
 import ssl
 import time
+from diagnostics import event
+from bounded_http import GITHUB_HOSTS, checked_url as _http_url, open_http
 
 import urllib.parse
 import urllib.request
 
-ALLOWED_HOSTS = frozenset({
-    "api.github.com",
-    "github.com",
-    "codeload.github.com",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-})
+ALLOWED_HOSTS = GITHUB_HOSTS
 
-MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 48 * 1024 * 1024
 MAX_DOWNLOAD_SECONDS = 120
 READ_TIMEOUT_SECONDS = 3
 
@@ -34,20 +30,19 @@ CA_BUNDLES = (
 
 def checked_url(url: str) -> str:
     """Reject anything that is not an https URL on a known GitHub host."""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError(f"refusing non-https URL scheme '{parsed.scheme}'")
-    if (parsed.hostname or "").lower() not in ALLOWED_HOSTS:
-        raise ValueError(f"refusing download from untrusted host '{parsed.hostname}'")
-    if parsed.username is not None or parsed.password is not None or parsed.port not in (None, 443):
-        raise ValueError("refusing download URL credentials or a non-HTTPS port")
-    return url
+    return _http_url(url, url, "helper")
 
 class _HelperRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Check each hop before urllib opens it, including an intermediate
         # downgrade which a final-response check would see only afterwards.
-        checked_url(newurl)
+        try:
+            checked_url(newurl)
+        except Exception:
+            # urllib only closes the preceding response after this hook returns.
+            if fp is not None:
+                fp.close()
+            raise
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 class Updater:
@@ -76,7 +71,7 @@ class Updater:
 
         ctx = ssl.create_default_context()
         if ctx.cert_store_stats().get("x509_ca"):
-            self._info("TLS: using the default trust store")
+            event('updates', 'tls_ready', scope='default_trust_store')
             self._ssl_ctx = ctx
             return ctx
 
@@ -96,30 +91,27 @@ class Updater:
                     continue
                 ctx.load_verify_locations(cafile=path)
                 if ctx.cert_store_stats().get("x509_ca"):
-                    self._info(
-                        f"TLS: default store was empty, loaded CA bundle {path} "
-                        f"({ctx.cert_store_stats()['x509_ca']} certs)")
+                    event('updates', 'tls_ready', scope='fallback_trust_store', count=ctx.cert_store_stats()['x509_ca'])
                     self._ssl_ctx = ctx
                     return ctx
             except OSError as exc:
-                self._warning(f"TLS: cannot load {path}: {exc}")
+                event('updates', 'tls_bundle_failed', level='warning', error=exc, repeat=60)
 
         # Verification stays on. Failing loudly beats silently trusting
         # anything, since this runs as root and what comes back is installed
         # or executed.
-        self._error("TLS: no usable CA bundle found, downloads will fail to verify")
+        event('updates', 'tls_unavailable', level='error')
         self._ssl_ctx = ctx
         return ctx
 
-    def open_url(self, url: str, timeout: int, headers: dict | None = None):
-        """urlopen with certificate verification left on and the host checked."""
-        request = urllib.request.Request(
-            checked_url(url),
-            headers=headers or {"User-Agent": self.user_agent},
-        )
-        opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=self.ssl_context()), _HelperRedirect())
-        response = opener.open(request, timeout=timeout)
+    def open_url(self, url: str, timeout: int, headers: dict | None = None, *, cancel=None, deadline=None):
+        """Verified HTTPS with a parent deadline that also covers OS DNS."""
+        checked_url(url)
+        remaining = MAX_DOWNLOAD_SECONDS if deadline is None else deadline-time.monotonic()
+        if remaining <= 0: raise TimeoutError("RyzenAdj download exceeded its total time limit")
+        response = open_http(url, headers=headers or {"User-Agent": self.user_agent},
+            context=self.ssl_context(), timeout=timeout, limit=MAX_DOWNLOAD_BYTES,
+            total_seconds=min(MAX_DOWNLOAD_SECONDS, remaining), policy="helper", cancel=cancel)
         try:
             # Retain a final-response check alongside the pre-request hop guard.
             checked_url(response.geturl())
@@ -143,7 +135,7 @@ class Updater:
             if time.monotonic() >= deadline:
                 raise TimeoutError("RyzenAdj download exceeded its total time limit")
         check()
-        with self.open_url(url, timeout=min(timeout, READ_TIMEOUT_SECONDS)) as resp:
+        with self.open_url(url, timeout=min(timeout, READ_TIMEOUT_SECONDS), cancel=cancel, deadline=deadline) as resp:
             reader = getattr(resp, "read1", resp.read)
             while True:
                 check()
