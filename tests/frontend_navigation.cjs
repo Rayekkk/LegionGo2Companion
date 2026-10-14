@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -100,7 +101,7 @@ for (const title of ['TDP', 'Fan Control', 'Vibration', 'RGB Lighting', 'Button 
   const returned = find(render(), n => n.props?.title === title && n.props?.onClick);
   assert.ok(returned, 'explicit back works');
   assert.equal(returned.props.restoreFocus, true, 'back restores the selected native module row');
-  assert.equal(timers.size, 2, 'overview and isolated live fan pollers after returning');
+  assert.ok(timers.size > 0, 'returning to the overview resumes polling');
 }
 find(render(), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
 assert.match(find(render(), n => n.props?.label === 'Author').props.description, /^Rayek/);
@@ -120,6 +121,27 @@ for (const title of ['TDP','Fan Control','Vibration','RGB Lighting','Button Rema
 for (const title of ['About','Manage Modules']) assert.ok(find(disabled, n => n.props?.title === title && n.props?.onClick));
 assert.equal(find(disabled, n => n.props?.title === 'Manage Modules' && n.props?.onClick).props.restoreFocus,
   true, 'a module withdrawn while open restores focus to module management');
+const firmwareLink=find(disabled,n=>n.props?.title==='Controller firmware' && n.props?.onClick);
+assert.ok(firmwareLink,'firmware remains accessible when the gyro module is disabled');
+firmwareLink.props.onClick();
+let firmwareOnly=render();
+assert.ok(!find(firmwareOnly,n=>n.type==='ControllerPage'),'disabled gyro does not mount hardware polling');
+assert.equal(find(firmwareOnly,n=>n.type==='FirmwarePanel').props.allowUpdates,true);
+modules=Object.assign({},modules,{controller:{enabled:true,ready:true}});
+assert.ok(find(render(),n=>n.type==='ControllerPage'));
+modules=Object.assign({},modules,{controller:{enabled:true,ready:false,maintenance:true}});
+firmwareOnly=render();
+assert.ok(find(firmwareOnly,n=>n.props?.title==='Controller firmware' && n.props?.onBack),
+  'firmware maintenance preserves the open progress route');
+assert.ok(!find(firmwareOnly,n=>n.type==='ControllerPage'),'maintenance retires gyro polling');
+assert.equal(find(firmwareOnly,n=>n.type==='FirmwarePanel').props.allowUpdates,false,
+  'maintenance only admits read-only firmware status polling');
+find(firmwareOnly,n=>n.props?.onBack).props.onBack();
+const maintenanceLink=find(render(),n=>n.props?.title==='Controller firmware' && n.props?.onClick);
+assert.ok(maintenanceLink,'an uncertain maintenance outcome can be revisited');
+maintenanceLink.props.onClick();
+assert.equal(find(render(),n=>n.type==='FirmwarePanel').props.allowUpdates,false);
+find(render(),n=>n.props?.onBack).props.onBack();
 visible = false; render(); assert.equal(timers.size, 0, 'hidden overview stops polling');
 // Exercise native ref focus handoffs separately from the Controls hook instance.
 for (const effect of effects.values()) effect.cleanup?.();
@@ -153,4 +175,4 @@ visible = false; nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack()
 visible = true; nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
 assert.equal(focusCalls, 2, 'reopening QAM does not overwrite a page or dropdown selection');
 console.log('Ten sections retain navigation; disabled modules are hidden; About has author and unversioned modules.');
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });

@@ -176,7 +176,11 @@ class RemapScalarTests(unittest.TestCase):
         def load(_path, profile):
             current[0] = profile
             return profile
+        watcher = remap.ProcessWatch()
         with patch.object(remap, 'settings', store), \
+                patch.object(remap, '_service_watch', watcher), \
+                patch.object(watcher, 'capture'), \
+                patch.object(remap, '_inputplumber_version', return_value='fixture'), \
                 patch.object(remap, '_find_device', return_value=('/fixture', 'Legion Go 2')), \
                 patch.object(remap, '_get_profile', side_effect=lambda _: current[0]), \
                 patch.object(remap, '_load_profile', side_effect=load):

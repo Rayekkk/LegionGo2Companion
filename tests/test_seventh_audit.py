@@ -137,6 +137,13 @@ class VibrationEndpointTests(unittest.TestCase):
 
 
 class VibrationDescriptorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # These cases mock os.open/close for a force-feedback descriptor. The
+        # independent POSIX maintenance check must not consume that fake FD.
+        fence = patch.object(module_runtime, 'maintenance_present', return_value=False)
+        fence.start()
+        self.addCleanup(fence.stop)
+
     async def asyncTearDown(self):
         await module_runtime.drain('vibration')
 

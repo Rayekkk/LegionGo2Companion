@@ -18,18 +18,27 @@ const PLUGIN_DIR_NAME = "LegionGo2Companion";
 const version = manifest.version;
 const buildDir = join(repoRoot, "build");
 const stageDir = join(buildDir, PLUGIN_DIR_NAME);
-const zipPath = join(repoRoot, `${PLUGIN_DIR_NAME}-${version}.zip`);
+const outputIndex = process.argv.indexOf('--output');
+if (outputIndex !== -1 && !process.argv[outputIndex + 1]) throw new Error('--output requires a path');
+const zipPath = outputIndex === -1 ? join(repoRoot, `${PLUGIN_DIR_NAME}-${version}.zip`) : resolve(process.argv[outputIndex + 1]);
 
 const CONTENTS = [
   "active_app.py",
   "main.py",
+  "diagnostics.py",
+  "diagnostics_reader.py",
+  "desktop_bridge.py",
+  "desktop_install.py",
+  "desktop",
   "module_control.py",
   "module_runtime.py",
+  "controller_maintenance.py",
   "conflict_guard.py",
   "safe_settings.py",
   "system_process.py",
   "inputplumber_process.py",
   "companion_updates.py",
+  "bounded_http.py",
   "tdp_backend.py",
   "fan_backend.py",
   "fan_ec.py",
@@ -44,6 +53,20 @@ const CONTENTS = [
   "remap_backend.py",
   "battery_backend.py",
   "controller_backend.py",
+  "controller_firmware.py",
+  "controller_firmware_catalog.py",
+  "controller_firmware_protocol.py",
+  "controller_firmware_transfer.py",
+  "controller_firmware_journal.py",
+  "controller_firmware_worker.py",
+  "controller_firmware_process.py",
+  "controller_firmware_stage.py",
+  "controller_firmware_sleep.py",
+  "controller_firmware_usb.py",
+  "controller_firmware_usb_linux.py",
+  "controller_firmware_ota.py",
+  "controller_firmware_install.py",
+  "controller_firmware_input.py",
   "controller_imu.py",
   "tdp_updater.py",
   "plugin.json",
@@ -52,6 +75,9 @@ const CONTENTS = [
   "rollup.config.js",
   "tsconfig.json",
   "README.md",
+  "docs/DESKTOP_UI.md",
+  "docs/CONTROLLER_FIRMWARE.md",
+  "docs/LOGGING.md",
   "CHANGELOG.md",
   "SOURCE.md",
   "LICENSE",
@@ -62,6 +88,13 @@ const CONTENTS = [
   "requirements.txt",
   "src",
   "scripts/check-build.mjs",
+  "scripts/check-desktop-build.mjs",
+  "scripts/desktop-contract.mjs",
+  "scripts/build-native.py",
+  "scripts/build-native-cross.py",
+  "scripts/bundle-native.py",
+  "scripts/prepare-native-licenses.py",
+  "scripts/verify-package.py",
   "scripts/package.mjs",
   "gamescope",
   "pyudev",
@@ -74,6 +107,7 @@ function fail(message) {
 }
 
 function validatePayload() {
+  execFileSync(process.execPath, [join(repoRoot, 'scripts/check-desktop-build.mjs'), '--runtime'], {stdio: 'inherit'});
   for (const entry of CONTENTS) {
     if (!existsSync(join(repoRoot, entry))) fail(`required file missing: ${entry}`);
   }
@@ -95,7 +129,7 @@ function stagePayload(destination) {
   for (const entry of CONTENTS) {
     cpSync(join(repoRoot, entry), join(destination, entry), {
       recursive: true,
-      filter: (src) => !/(__pycache__|\.pyc$|\.DS_Store|node_modules)/.test(src),
+      filter: (src) => !/(__pycache__|\.pyc$|\.DS_Store|node_modules|[\\/]tests(?:[\\/]|$))/.test(src),
     });
   }
 
@@ -130,6 +164,8 @@ function checkStaging() {
 }
 
 function packagePlugin() {
+  if (outputIndex !== -1 && existsSync(zipPath)) fail('experimental output already exists; choose a fresh file');
+  mkdirSync(dirname(zipPath), {recursive: true});
   rmSync(buildDir, { recursive: true, force: true });
   rmSync(zipPath, { force: true });
   stagePayload(stageDir);
@@ -153,7 +189,7 @@ function packagePlugin() {
       : `no zip tool found: ${error.message}`);
   }
   rmSync(buildDir, { recursive: true, force: true });
-  console.log(`packaged v${version} -> ${zipPath}`);
+  console.log(`packaged manifest v${version} -> ${zipPath}`);
 }
 
 validatePayload();

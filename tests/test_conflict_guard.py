@@ -7,7 +7,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_integration  # Install the Decky/settings stubs before importing main.
 import main
@@ -66,21 +66,49 @@ class DetectionTests(unittest.TestCase):
             with patch("conflict_guard.os.path.realpath", side_effect=resolve_link):
                 self.assertEqual(installed_conflicts(current), ["LeGoTDP"])
 
-    def test_unreadable_or_incomplete_identity_is_not_treated_as_safe(self):
+    def test_incomplete_unrelated_manifest_is_diagnostic_not_global_conflict(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
             other = root / "renamed"; other.mkdir()
             (other / "plugin.json").write_text('{"name":')
-            with self.assertRaises(ValueError): installed_conflicts(current)
+            with patch('conflict_guard.event',create=True) as log:
+                self.assertEqual(installed_conflicts(current),[])
+            log.assert_called_once()
+            # An unrelated failure must not hide a confirmed renamed predecessor.
+            known=root/'renamed-predecessor';known.mkdir()
+            (known/'plugin.json').write_text(json.dumps({'name':'LeGoTDP'}))
+            self.assertEqual(installed_conflicts(current),['LeGoTDP'])
 
-    def test_deep_manifest_is_reported_as_an_unverifiable_identity(self):
+    def test_deep_unrelated_manifest_does_not_certify_a_hardware_conflict(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
             other = root / "unrelated-plugin"; other.mkdir()
             text = '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}'
             (other / "plugin.json").write_text(text)
-            with decoder_nesting_failure(text), self.assertRaisesRegex(ValueError, "manifest"):
-                installed_conflicts(current)
+            with decoder_nesting_failure(text), patch('conflict_guard.event',create=True) as log:
+                self.assertEqual(installed_conflicts(current),[])
+            log.assert_called_once()
+
+    def test_bad_manifest_does_not_stop_scan_before_a_canonical_conflict(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);current=root/'Companion';current.mkdir()
+            unrelated=root/'unrelated';unrelated.mkdir()
+            (unrelated/'plugin.json').write_text('not JSON')
+            (root/'LeGoTDP').mkdir()
+            self.assertEqual(installed_conflicts(current),['LeGoTDP'])
+
+    def test_permission_error_of_unrelated_manifest_is_local_and_logged(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=Path(raw);current=root/'Companion';current.mkdir()
+            unrelated=root/'unrelated';unrelated.mkdir()
+            (unrelated/'plugin.json').write_text('{}')
+            real_open=os.open
+            def read(path,*args,**kwargs):
+                if Path(path)==unrelated/'plugin.json':raise PermissionError('temporary access denied')
+                return real_open(path,*args,**kwargs)
+            with patch('conflict_guard.os.open',side_effect=read),patch('conflict_guard.event',create=True) as log:
+                self.assertEqual(installed_conflicts(current),[])
+            log.assert_called_once()
 
 
 class GateTests(unittest.IsolatedAsyncioTestCase):
@@ -93,7 +121,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             setattr(plugin, "_" + name, component); self.components.append(component)
         return plugin
 
-    async def test_deep_manifest_stops_live_modules_without_killing_the_guard(self):
+    async def test_deep_unrelated_manifest_keeps_healthy_modules_and_rpcs_running(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
             other = root / "unrelated-plugin"; other.mkdir()
@@ -110,19 +138,19 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     manifest.write_text(text)
                     with decoder_nesting_failure(text):
                         await plugin._check_guard()
-                    self.assertTrue(plugin._guard_blocked)
-                    self.assertIn("manifest", plugin._guard_error)
-                    self.assertFalse(plugin._modules_started)
+                    self.assertFalse(plugin._guard_blocked)
+                    self.assertEqual(plugin._guard_error,"")
+                    self.assertTrue(plugin._modules_started)
                     for component in self.components:
-                        component._unload.assert_awaited_once()
-                    with decoder_nesting_failure(text), self.assertRaisesRegex(RuntimeError, "could not be verified"):
-                        await plugin.rgb_set_brightness(20)
-                    # The watcher uses this same check. Repairing the file must
-                    # still produce a snapshot rather than an escaped decoder error.
+                        component._unload.assert_not_awaited()
+                    plugin._rgb.set_brightness=AsyncMock(return_value={"success":True})
+                    with decoder_nesting_failure(text):
+                        self.assertEqual(await plugin.rgb_set_brightness(20),{"success":True})
+                    plugin._rgb.set_brightness.assert_awaited_once_with(20)
                     manifest.write_text(json.dumps({"name": "OtherPlugin"}))
                     status = await plugin.get_version()
-                    self.assertTrue(status["blocked"])
-                    self.assertTrue(status["restart_required"])
+                    self.assertFalse(status["blocked"])
+                    self.assertFalse(status["restart_required"])
                 finally:
                     await plugin._unload()
 
@@ -173,18 +201,24 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             for stage in ("_main", "_migration", "_unload", "_uninstall"):
                 getattr(c, stage).assert_not_awaited()
 
-    async def test_every_component_rpc_is_rejected_before_delegation(self):
+    async def test_every_control_rpc_is_rejected_but_firmware_outcome_remains_visible(self):
         plugin = self.make_plugin(); checked = []
+        plugin._firmware = Mock(status=Mock(return_value={'job': {'phase': 'installing'}}))
         with patch.object(main, "_installed_standalone_plugins", return_value=["LeGo Vibe Control"]):
             for name, fn in vars(main.Plugin).items():
                 if name.startswith("_") or name == "get_version" or not inspect.iscoroutinefunction(fn):
                     continue
                 required = [p for p in inspect.signature(fn).parameters.values()
                             if p.name != "self" and p.default is inspect.Parameter.empty]
+                if name == 'firmware_get_status':
+                    self.assertEqual(await getattr(plugin, name)(), {'job': {'phase': 'installing'}})
+                    continue
                 with self.assertRaisesRegex(RuntimeError, "All Companion modules are paused"):
                     await getattr(plugin, name)(*[None for _ in required])
                 checked.append(name)
         self.assertGreater(len(checked), 50)
+        plugin._firmware.status.assert_called_once()
+        plugin._firmware.check_updates.assert_not_called()
 
     async def test_live_conflict_stops_all_modules_and_latches_until_process_restart(self):
         plugin = self.make_plugin(); conflicts = []

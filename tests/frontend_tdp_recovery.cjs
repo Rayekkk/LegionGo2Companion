@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 // Exercise the real TDP page with delayed responses and game/visibility changes.
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const assert = require('node:assert/strict');
@@ -361,4 +362,4 @@ async function test(name, fn) { await fn(); tests++; console.log(`TDP recovery: 
     assert.ok(field(view, 'SPL (TDP) - 15 W')); assert.ok(cpu(view)); h.unmount();
   });
   console.log(`Passed ${tests} TDP recovery regressions.`);
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });

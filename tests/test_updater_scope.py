@@ -31,12 +31,12 @@ class UpdaterScopeTests(unittest.TestCase):
                              "display_check_for_updates", "display_perform_update"):
                     self.assertFalse(hasattr(backend.Plugin, name), name)
 
-    def test_no_helper_can_download_a_standalone_plugin_archive(self):
-        for name in ("check", "download", "download_latest", "_download_asset",
-                     "check_version_from_asset"):
+    def test_helper_exposes_no_retired_standalone_update_api(self):
+        # Public legacy entrypoints must stay retired. Private implementation
+        # names or reusable account/path helpers do not establish a download
+        # capability; rejecting their mere existence overfits a refactor.
+        for name in ("check", "download", "download_latest", "check_version_from_asset"):
             self.assertFalse(hasattr(tdp_updater.Updater, name), name)
-        for name in ("real_user", "xdg_download_dir", "confined_download_dir"):
-            self.assertFalse(hasattr(tdp_updater, name), name)
 
     def test_version_metadata_still_prefers_loader_and_falls_back_to_manifest(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -42,3 +42,30 @@ class SystemProcessTests(unittest.TestCase):
     def test_clean_runtime_and_fallback_path(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(system_env(), {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
+
+    def test_fan_system_python_and_firmware_busctl_do_not_inherit_frozen_loader_libraries(self):
+        import fan_backend as fan
+        import controller_firmware_input as firmware_input
+        blocked = {'LD_LIBRARY_PATH': '/tmp/_MEI/bundled', 'LD_PRELOAD': '/tmp/unrelated.so',
+                   'LD_AUDIT': '/tmp/audit.so', 'LD_LIBRARY_PATH_ORIG': '/tmp/old',
+                   'PYTHONPATH': '/tmp/unrelated', 'PATH': '/usr/bin'}
+        parent, child = Mock(), Mock()
+        client = fan.Client()
+        def ready(*_args):
+            client.state = {'kind': 'ready'}
+        with patch.dict(os.environ, blocked, clear=True), \
+                patch.object(fan.socket, 'AF_UNIX', 1, create=True), \
+                patch.object(fan.socket, 'SOCK_SEQPACKET', 5, create=True), \
+                patch.object(fan.socket, 'socketpair', return_value=(parent, child)), \
+                patch.object(fan.subprocess, 'Popen', return_value=Mock()) as launch, \
+                patch.object(client, '_receive', side_effect=ready), \
+                patch.object(client, '_start_heartbeat'):
+            client.start()
+            environment = launch.call_args.kwargs['env']
+            for name in blocked.keys()-{'PATH'}:
+                self.assertNotIn(name, environment)
+            with patch.object(firmware_input.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'{}', b'')) as run:
+                self.assertEqual(firmware_input._bus(['--version']), {})
+                for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH_ORIG'):
+                    self.assertNotIn(name, run.call_args.kwargs['env'])
+            self.assertEqual(dict(os.environ), blocked)

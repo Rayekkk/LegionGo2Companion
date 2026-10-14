@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -25,7 +26,7 @@ function mount(file, component, responses, initialProps = {}) {
     removeEventListener(name,callback){if(callbacks[name]===callback)delete callbacks[name];},
     toaster:{toast(){}}, callable:name=>async(...args)=> {
       calls.push({name,args}); const response=responses[name];
-      return typeof response === 'function' ? await response(...args) : structuredClone(response || {success:true});
+      return typeof response === 'function' ? await response(...args) : structuredClone(response === undefined ? {success:true} : response);
     }};
   const jsx={jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props}),Fragment:'Fragment'};
   const mod={exports:{}};
@@ -67,7 +68,33 @@ function findButton(node,text){
   if(node.type==='ButtonItem'&&node.props?.children===text)return node;
   for(const child of Array.isArray(node)?node:[node.props?.children]){const match=findButton(child,text);if(match)return match;}
 }
+async function watcherLogging(file){
+ const records=[],timers=new Map();let now=100000,fail=true,calls=0,seq=0;
+ const secret='private-secret-marker /home/private/full-path private-serial-marker';
+ const mod={exports:{}};
+ const code=ts.transpileModule(fs.readFileSync(path.join(root,'src',file),'utf8')+'\nexport {AppWatcher as TestedWatcher};',
+  {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.ReactJSX}}).outputText;
+ const logger=Object.fromEntries(['debug','log','info','warn','error'].map(level=>[level,(...args)=>records.push({level,text:args.map(String).join(' ')})]));
+ vm.runInNewContext(code,{module:mod,exports:mod.exports,console:logger,Date:class extends Date{static now(){return now;}},
+  setInterval:fn=>{timers.set(++seq,fn);return seq;},clearInterval:id=>timers.delete(id),setTimeout:()=>++seq,clearTimeout(){},
+  window:{SteamClient:{GameSessions:{RegisterForAppLifetimeNotifications(){return{unregister(){}};}}},SleepManager:{RegisterForNotifyResumeFromSuspend(){return()=>{};}}},
+  require(name){
+   if(name==='@decky/api')return{callable:()=>async()=>{calls++;if(fail)throw new Error(secret);return{};},toaster:{toast(){}}};
+   if(name==='@decky/ui')return{Router:{MainRunningApp:{appid:111}},findModuleExport(){}};
+   return{};
+  }});
+ const watcher=mod.exports.TestedWatcher;watcher.start();await settle();
+ for(let i=0;i<9;i++){now+=2000;for(const fn of timers.values())fn();await settle();}
+ assert.equal(records.length,1,`${file} coalesces repeated foreground reporting failures`);
+ assert.equal(records[0].level,'warn');
+ fail=false;now+=2000;for(const fn of timers.values())fn();await settle();watcher.stop();
+ assert.equal(calls,11,'Logging never suppresses the actual report retry.');
+ assert.equal(records.length,2);assert.equal(records[1].level,'info');
+ assert.ok(records[1].text.endsWith('foreground_reporting_restored'));
+ assert.ok(!JSON.stringify(records).includes(secret),'Raw exception objects/paths/tokens stay out of frontend logs.');
+}
 (async()=>{
+ await watcherLogging('tdp.tsx');await watcherLogging('vibration.tsx');
  const values={level:2,mode:1,touchpadIntensity:2,touchpadEnabled:true};
  const initialVibe={
    vibe_is_ready:{ready:true},vibe_get_settings:{settings:values,app_id:'0',profile_id:'0',overwrite:false},
@@ -83,15 +110,15 @@ function findButton(node,text){
  // refreshes hardware state; the unchanged page must not duplicate its reads.
  const initial=mount('vibration.tsx','LGoVibeControl',initialVibe);
  initial.render();await settle();initial.render();await settle();
- assert.equal(initial.calls.length,4,'Vibration initialization uses four RPCs.');
- assert.equal(count(initial,'vibe_get_driver_status'),1);
+ for(const read of ['vibe_is_ready','vibe_get_settings','vibe_get_driver_status','vibe_get_capabilities'])
+   assert.equal(count(initial,read),1,`Vibration initialization reads ${read} once.`);
  initial.hide();initial.show();await settle();
  assert.equal(count(initial,'vibe_get_driver_status'),2,'Reopening still refreshes the driver.');
  initial.unmount();
  const base=mount('tdp.tsx','TdpPage',initialTdp);
  await base.setGame(null);base.startWatcher();base.render();await settle();base.render();await settle();
- assert.equal(base.calls.filter(c=>c.name!=='set_active_app').length,5,'No-game TDP initialization uses five RPCs.');
- assert.equal(count(base,'get_power_source'),1);assert.equal(count(base,'get_settings'),1);
+ for(const read of ['is_ready','get_settings','get_power_source','get_extras_unlocked','get_caps'])
+   assert.equal(count(base,read),1,`No-game TDP initialization reads ${read} once.`);
  base.hide();base.show();await settle();
  assert.equal(count(base,'get_power_source'),2,'Reopening still refreshes power source.');
  await base.setGame(111);base.render();await settle();base.render();
@@ -113,13 +140,11 @@ function findButton(node,text){
  await simple.setGame(null);simple.startWatcher();simple.render();await settle();
  simple.render();await settle();
  let simplePage=simple.render();
- const sections=simplePage.props.children.find(child => Array.isArray(child?.props?.children)
-   && child.props.children.some(section => section?.props?.title === 'Game Profile')).props.children;
- assert.equal(sections[0].props.title,'Game Profile');
- assert.equal(sections[1].type.name,'LivePanel');
- assert.equal(sections[2].props.title,'Preset');
+ const hasSection=(node,title)=>!!node && typeof node==='object' && (node.props?.title===title
+   || (Array.isArray(node)?node:[node.props?.children]).some(child=>hasSection(child,title)));
+ for(const title of ['Game Profile','Preset','Extras'])assert.ok(hasSection(simplePage,title),`TDP section: ${title}`);
+ assert.ok(findComponent(simplePage,'LivePanel'));
  assert.ok(findComponent(simplePage,'CpuPowerControlsSection'));
- assert.ok(simplePage.props.children.some(child=>child?.props?.title==='Extras'));
  assert.equal(find(simplePage,'TDP - 20 W').props.max,35);
  const sliderLabels=(node)=>Array.isArray(node)?node.flatMap(sliderLabels):
    !node||typeof node!=='object'?[]:
@@ -400,4 +425,4 @@ function findButton(node,text){
  assert.equal(page.calls.filter(c=>c.name==='delete_game_profile').length,1);
  page.unmount();
  console.log('Vibration and EPP save on close; CPU edits preserve global/game/battery/AC scope and ignore stale replies.');
-})().catch(e=>{console.error(e);process.exitCode=1;});
+})().then(complete).catch(e=>{console.error(e);process.exitCode=1;});

@@ -167,8 +167,9 @@ with no Tdie channel or verified separate package-temperature channel. Linux
 [k10temp documentation](https://docs.kernel.org/hwmon/k10temp.html) distinguishes
 Tctl (thermal-control value) from optional Tdie. The
 [amdgpu documentation](https://docs.kernel.org/gpu/amdgpu/thermal.html) describes
-GPU on-die channels. EC C307 is retained as a consistency check; its physical
-sensor identity is unproven. Display/control use max(Tctl, GPU edge), explicitly
+GPU on-die channels. EC C307 is retained as supplementary telemetry with range validation; its physical
+sensor identity is unproven. An instantaneous EC/APU temperature difference is not
+a freshness check and does not withdraw custom control. Display/control use max(Tctl, GPU edge), explicitly
 labelled as that aggregate rather than a newly claimed physical APU sensor.
 
 The detached EC owner and independent recovery process use persistent port/sensor
@@ -207,3 +208,70 @@ firmware, not a guarantee for every rotor, temperature or firmware revision.
 The twelve-second startup/underperformance bound, lease, independent backup,
 100°C maximum and automatic release remain in place; absent or insufficient
 tach releases control rather than applying repeated hidden kicks.
+
+## Experimental Desktop frontend
+
+`desktop/native/` contains the independent C++17 / Qt Quick / QML application.
+It presents the same nine modules through the existing guarded Python RPCs.
+The ordinary Decky build and its `src/*.tsx` panel source are preserved.
+`scripts/desktop-contract.mjs` derives the explicit RPC contract from those
+panels, excluding Steam foreground-app hint setters. The UI has no EC/HID
+transport and owns no hardware. No web engine or browser frontend is included.
+
+The Linux x86-64 payload in `dist/desktop/` dynamically links Qt 6.11.2 and ICU
+73.2. Exact file hashes and system library dependencies are recorded in
+`native-manifest.json`; matching license texts, upstream source references and
+SDK inventories accompany the bundle. Source builds use CMake/Ninja and the
+matching Qt SDK. See `scripts/build-native.py` and `scripts/bundle-native.py`.
+The optional Windows-to-Linux cross-builder is an experimental fallback;
+its successful ELF build is not proof of SteamOS execution. A future public
+binary release must also publish the corresponding Qt source/build material
+alongside its download; this local experiment has not been published.
+
+`desktop_bridge.py` calls the same guarded Plugin RPCs; `desktop_install.py` and
+`desktop/launch.py` register and execute the native UI as the desktop user. They introduce no second
+hardware controller or settings store. The design follows the Desktop analysis
+recorded in the Automat (2) chat. Implementation and local/SteamOS validation
+boundaries are documented in [docs/DESKTOP_UI.md](docs/DESKTOP_UI.md).
+
+## Controller firmware updater
+
+Both UI panels use one `firmware_check_updates` action and shared
+`firmware_get_status`. `controller_firmware_catalog.py` queries the official
+Lenovo 8ASP2 model/component feed. `controller_firmware.py` authenticates
+original signed bytes with an independently pinned RSA-3072/PSS key, signed
+component footer and JLFS CRC checks. Future release versions and official
+filenames are selected dynamically; the reference snapshot is not a release
+whitelist. Authenticated size/hash/version/URL are frozen per job.
+
+`controller_firmware_protocol.py` is a pure codec reconstructed from
+LegionSpace 1.4.4.31 static evidence. `controller_firmware_transfer.py` schedules
+serial exact-write/reply phases, bounded progress checkpoints and fresh final
+version confirmation. `controller_firmware_journal.py` stores a private atomic
+transaction record; recovery is display-only, never command replay.
+
+`controller_firmware_install.py` coordinates the complete update through one
+independent frozen systemd worker, libusb ownership, fresh preflight, a login1
+sleep/shutdown inhibitor, post-update version queries and input restoration.
+`controller_firmware_process.py` and `controller_firmware_stage.py` capture and
+verify bounded source/image bytes outside the plugin before worker import.
+`controller_firmware_ota.py` is the independently written C0/A0 transport.
+The experimental installer is enabled for explicit user actions. No startup,
+poll or UI close starts or cancels a flash. No physical flash was performed in
+the qualification rounds when the installed versions equalled Lenovo's feed.
+Test-only transports are excluded from packages.
+
+`controller_maintenance.py` fences cooperating Companion operations;
+`module_runtime.py` drains operations and invalidates stale generations.
+The actual libusb claim and foreign-consumer checks protect transport ownership.
+`controller_firmware_usb.py` follows https://libusb.sourceforge.io/api-1.0/ with
+an independently written ctypes binding; no copied driver/vendor implementation.
+
+Primary vendor artifacts: Lenovo LegionSpace 26.07.10.01 and original S3
+controller images. JLFS/SFC format reference:
+https://github.com/kagaimiq/jl-misctools (firmware/fwunpack_newfw.py and cipher.py).
+The format/protocol implementation is independently written; no reference source
+is included. fwupd legion-hid was compared but uses a different UART path; its
+code was not incorporated. The signed footer is not a model/version certificate;
+model/target selection depends on the official TLS feed and fresh device checks.
+See [controller firmware boundaries](docs/CONTROLLER_FIRMWARE.md).

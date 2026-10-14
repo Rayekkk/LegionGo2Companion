@@ -118,13 +118,13 @@ const notify = (title: string, body: string) => {
   try {
     toaster.toast({ title, body, duration: 4000 });
   } catch {
-    console.error(`[lego-vibe] ${title}: ${body}`);
+    console.error("[legiongo2companion] vibration.notification_failed");
   }
 };
 
 const notifyFailure = (title: string, err: unknown) => {
   const body = err instanceof Error ? err.message : String(err ?? "Unknown error");
-  console.error(`[lego-vibe] ${title}`, err);
+  console.error("[legiongo2companion] vibration.operation_failed");
   notify(title, body);
 };
 
@@ -167,7 +167,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
     const unsub = asUnsub(mgr?.RegisterForNotifyResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
-    console.warn("[lego-vibe] SleepManager lookup failed", e);
+    console.warn("[legiongo2companion] vibration.resume_lookup_failed");
   }
 
   try {
@@ -175,7 +175,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
       (window as any).SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
-    console.warn("[lego-vibe] legacy resume registration failed", e);
+    console.warn("[legiongo2companion] vibration.legacy_resume_registration_failed");
   }
 
   // Said out loud rather than swallowed: this going quiet again is exactly how
@@ -207,6 +207,7 @@ class AppWatcher {
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
+  private static reportFailed = false;
   private static generation = 0;
   private static delayedChecks = new Set<ReturnType<typeof setTimeout>>();
 
@@ -254,7 +255,7 @@ class AppWatcher {
       });
       if (reg?.unregister) this.unsubs.push(() => reg.unregister());
     } catch (e) {
-      console.warn("[lego-vibe] app lifetime notifications unavailable", e);
+      console.warn("[legiongo2companion] vibration.app_notifications_unavailable");
     }
 
     // The controller comes back at its firmware defaults, and the backend's
@@ -263,9 +264,9 @@ class AppWatcher {
       if (!this.started || generation !== this.generation) return;
       void reapply()
         .then((res) => {
-          if (!res.success) console.warn("[lego-vibe] reapply after resume failed");
+          if (!res.success) console.warn("[legiongo2companion] vibration.resume_reapply_failed");
         })
-        .catch((e) => console.error("[lego-vibe] reapply after resume threw", e));
+        .catch(() => console.error("[legiongo2companion] vibration.resume_reapply_failed"));
     });
     if (offResume) this.unsubs.push(offResume);
 
@@ -294,6 +295,7 @@ class AppWatcher {
     this.listeners = [];
     this.currentId = DEFAULT_APP;
     this.lastPush = 0;
+    this.reportFailed = false;
     this.started = false;
   }
 
@@ -310,6 +312,8 @@ class AppWatcher {
       const res = await setActiveApp(id);
       if (!this.started || generation !== this.generation) return;
       if (this.activeId() !== id) return;
+      if (this.reportFailed) console.info("[legiongo2companion] vibration.foreground_reporting_restored");
+      this.reportFailed = false;
       // Committed only once the backend has it. Recording the id before the
       // call meant a single failed RPC - the loader restarting, say - left
       // every later tick thinking there was nothing to send, so the hardware
@@ -318,7 +322,10 @@ class AppWatcher {
       this.lastPush = now;
       this.listeners.forEach((fn) => fn(res, readEpoch));
     } catch (e) {
-      console.error("[lego-vibe] setActiveApp failed, will retry", e);
+      if (this.started && generation === this.generation && !this.reportFailed) {
+        this.reportFailed = true;
+        console.warn("[legiongo2companion] vibration.foreground_reporting_unavailable");
+      }
     } finally {
       if (generation === this.generation) {
         this.busy = false;
@@ -515,7 +522,6 @@ const LGoVibeControl = () => {
       const status = await getDriverStatus();
       if (mounted.current && revision === driverRevisionRef.current) setDriver(status);
     } catch (e) {
-      console.error("[lego-vibe] getDriverStatus failed", e);
     }
   }, []);
 

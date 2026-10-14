@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 // Run the actual components with controllable RPC completion order.
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const assert = require('node:assert/strict');
@@ -130,6 +131,13 @@ const cases = [
   ['wifi.tsx', 'WifiPage', 'wifi_get_status', wifi],
 ];
 (async () => {
+  const leasePanel=harness('tdp.tsx','LivePanel');
+  leasePanel.render();
+  leasePanel.reject('set_panel_active');leasePanel.respond('get_tdp_info',{success:true});await settle();
+  leasePanel.fire();leasePanel.reject('set_panel_active');await settle();
+  leasePanel.unmount();leasePanel.reject('set_panel_active');await settle();
+  assert.equal(leasePanel.calls.filter(call=>call.name==='set_panel_active').length,3,
+    'mount, renewal and cleanup tolerate a lost Decky connection');
   {
     const h=harness('battery.tsx','BatteryPage'),initial={success:true,supported:true,enabled:false,managed:false},
       final={success:true,supported:true,enabled:true,managed:true};
@@ -952,8 +960,10 @@ const cases = [
     h.panelVisible(false);assert.equal([...h.timers.values()].filter(t=>t.delay===1000).length,0,'hidden root removes live fan timer');
     h.fire();await settle();assert.equal(h.calls.length,count,'no new read behind the other QAM tab');
     h.panelVisible(true);await settle();assert.equal(h.calls.filter(c=>c.name==='fan_get_state'&&!c.settled).length,1,'actual root visibility restarts one fresh request');
-    findSection(h.render(),'Fan Control').props.onClick();const page=h.render();
-    h.panelVisible(false);assert.ok(findPanel(h.render(),'Fan Control')||page,'navigation remains mounted while polling pauses');
+    findSection(h.render(),'Fan Control').props.onClick();h.render();
+    h.panelVisible(false);
+    assert.ok(findSection(h.render(),'Fan Control','onBack'),
+      'The current page, not a previously captured tree, remains mounted while polling pauses');
   });
   await testOverview('a hung cached read is marked delayed without starting overlapping RPCs', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
@@ -1123,4 +1133,4 @@ const cases = [
   if (overviewFailures.length) throw new AggregateError(overviewFailures, 'Overview loading regressions');
   console.log('OLED/RGB/remap/WiFi polling is bounded; stale reads and stopped watchers cannot overwrite current state; hidden dropdown choices still save.');
   console.log('Overview survives equivalent props, slow WiFi, visibility changes and remounts without losing confirmed summaries.');
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });

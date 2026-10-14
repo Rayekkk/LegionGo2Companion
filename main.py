@@ -13,7 +13,10 @@ import json
 import functools
 import inspect
 import os
+import platform
 import sys
+import time
+from pathlib import Path
 
 import decky
 
@@ -31,12 +34,65 @@ import tdp_backend
 import vibration_backend
 import wifi_backend
 import module_runtime
+import diagnostics
 from companion_updates import CompanionUpdates
+from controller_firmware import FirmwarePreparation
+from controller_maintenance import ControllerUpdaterGate
 from safe_settings import atomic_write_json, load_json_object, SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
+from desktop_bridge import DesktopBridge
+from desktop_install import DesktopInstall
 
 MODULE_NAMES = ('tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
-UPDATE_RPCS = frozenset({'updates_check', 'updates_download'})
+FIRMWARE_RPCS = frozenset({'firmware_get_status', 'firmware_check_updates'})
+UPDATE_RPCS = frozenset({'updates_check', 'updates_download'}) | FIRMWARE_RPCS
+_ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_active_app',
+                           'fan_set_visible', 'controller_get_diagnostics'})
+
+
+def _logged_rpc(function, name):
+    """Observe the existing boundary; never retry, cancel or change its result."""
+    read = name.startswith(('get_', 'is_')) or '_get_' in name or name.endswith('_is_ready')
+    quiet = read or name in _ADVISORY_RPCS
+    component = _rpc_module(name) or ('firmware' if name.startswith('firmware_') else 'plugin')
+    @functools.wraps(function)
+    async def logged(self, *args, **kwargs):
+        with diagnostics.operation(name=name):
+            started = time.monotonic()
+            if not quiet:
+                diagnostics.event(component, 'rpc_started', operation=name)
+            try:
+                result = await function(self, *args, **kwargs)
+            except asyncio.CancelledError:
+                # The underlying admitted transaction may still be draining.
+                diagnostics.event(component, 'rpc_waiter_cancelled', level='warning',
+                                  operation=name, outcome='refresh_required', repeat=60)
+                raise
+            except Exception as exc:
+                if quiet:
+                    diagnostics.transition(component, 'rpc_health', 'failed', level='warning', operation=name, error=exc)
+                else:
+                    diagnostics.event(component, 'rpc_failed', level='warning', operation=name,
+                                      error=exc, outcome='not_confirmed', duration_ms=round((time.monotonic()-started)*1000, 1))
+                raise
+            failed = isinstance(result, dict) and (result.get('success') is False or bool(result.get('restart_error')))
+            duration = round((time.monotonic() - started) * 1000, 1)
+            if failed:
+                reporter = diagnostics.transition if quiet else diagnostics.event
+                extra = {} if quiet else {'outcome': 'not_confirmed'}
+                position = (component, 'rpc_health', 'failed') if quiet else (component, 'rpc_failed')
+                reporter(*position, level='warning', operation=name,
+                    reason='backend_reported_failure',
+                    returncode=result.get('returncode') if type(result.get('returncode')) is int else None,
+                    duration_ms=duration, **extra)
+            else:
+                if quiet:
+                    diagnostics.transition(component, 'rpc_health', 'ok', operation=name)
+                else:
+                    diagnostics.event(component, 'rpc_completed', operation=name,
+                        outcome='succeeded' if isinstance(result, dict) and result.get('success') is True else 'returned', duration_ms=duration)
+            return result
+    return logged
 
 def _rpc_module(name):
     for prefix, module in (('fan_', 'fan'), ('vibe_', 'vibration'), ('display_', 'display'), ('wifi_', 'wifi'),
@@ -58,7 +114,8 @@ LEGACY_SETTINGS = {
 def _plugin_version() -> str:
     try:
         with open(os.path.join(PLUGIN_DIR, "plugin.json"), encoding="utf-8") as handle:
-            value = json.load(handle).get("version")
+            metadata = json.load(handle)
+            value = metadata.get("version") if isinstance(metadata, dict) else None
         return str(value or "0.0.0")
     except (OSError, ValueError, TypeError):
         return "0.0.0"
@@ -99,13 +156,9 @@ def _migrate_legacy_settings() -> None:
             if payload == current_payload:
                 continue
             atomic_write_json(destination, payload)
-            decky.logger.info(
-                f"[legiongo2companion] imported missing settings from {source}"
-            )
+            diagnostics.event('settings', 'legacy_settings_imported', store=destination_name)
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
-            decky.logger.warning(
-                f"[legiongo2companion] could not import {source}: {exc}"
-            )
+            diagnostics.event('settings', 'legacy_settings_import_failed', level='warning', store=destination_name, error=exc)
 
 
 def _reload_component_settings() -> None:
@@ -120,9 +173,7 @@ def _reload_component_settings() -> None:
             try:
                 reader()
             except Exception as exc:
-                decky.logger.error(
-                    f"[legiongo2companion] settings reload failed: {exc}"
-                )
+                diagnostics.event('settings', 'reload_failed', level='error', scope=module.__name__, error=exc)
 
 
 def _guard_component_calls(cls):
@@ -134,6 +185,10 @@ def _guard_component_calls(cls):
             @functools.wraps(fn)
             async def guarded(self, *args, **kwargs):
                 await self._check_guard()
+                if fn.__name__ == 'firmware_get_status':
+                    # A paused hardware module cannot hide the independent
+                    # update outcome. This snapshot never opens a controller.
+                    return await fn(self, *args, **kwargs)
                 if fn.__name__ == 'modules_get_status':
                     # This read-only snapshot must remain available while a
                     # slow RPC or pending restoration holds the mutation gate.
@@ -144,6 +199,18 @@ def _guard_component_calls(cls):
                     if self._guard_blocked or self._closing:
                         raise RuntimeError(self._guard_message())
                     module = _rpc_module(fn.__name__)
+                    resource = 'controller' if fn.__name__ == 'battery_get_controller_levels' else module
+                    # A private backend restoration scope never authorizes a
+                    # public RPC, even when accidentally invoked by its owner.
+                    if module_runtime.is_paused(resource):
+                        raise module_runtime.ControllerPaused('Controller operations are paused for firmware maintenance.')
+                    module_runtime.require_available(resource)
+                    module_change = (args[0] if args else kwargs.get('name')) if fn.__name__ == 'modules_set_enabled' else None
+                    unaffected_change = fn.__name__ == 'modules_set_enabled' and module_change in MODULE_NAMES and module_change not in module_runtime.CONTROLLER_MODULES
+                    if module is None and fn.__name__ not in FIRMWARE_RPCS and not unaffected_change and module_runtime.is_paused('controller'):
+                        # Lifecycle/update admission must not tear down paused
+                        # consumers or mutate module choices during a handoff.
+                        raise module_runtime.ControllerPaused('Controller operations are paused for firmware maintenance.')
                     if module and not self._module_enabled(module):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
                     if module and self._module_health.get(module, {}).get('ready') is False:
@@ -151,7 +218,7 @@ def _guard_component_calls(cls):
                     if fn.__name__ in UPDATE_RPCS or fn.__name__ == 'retry_extras':
                         # Register download work before releasing the admission
                         # gate, but never hold hardware controls behind networking.
-                        if fn.__name__ in UPDATE_RPCS:
+                        if fn.__name__ in UPDATE_RPCS and fn.__name__ not in FIRMWARE_RPCS:
                             self._ensure_updates()
                         task = asyncio.create_task(fn(self, *args, **kwargs))
                         self._update_jobs.add(task)
@@ -162,11 +229,14 @@ def _guard_component_calls(cls):
                         task = asyncio.create_task(self._run_rpc(module, fn, args, kwargs))
                         self._rpc_jobs.add(task)
                         task.add_done_callback(self._rpc_jobs.discard)
+                        if resource in module_runtime.CONTROLLER_MODULES:
+                            self._controller_rpc_jobs.add(task)
+                            task.add_done_callback(self._controller_rpc_jobs.discard)
                     else:
                         await module_runtime.complete(self._drain_rpc_jobs())
                         return await module_runtime.complete(fn(self, *args, **kwargs))
                 return await module_runtime.complete(task)
-            return guarded
+            return _logged_rpc(guarded, fn.__name__)
         setattr(cls, name, wrap(method))
     return cls
 
@@ -181,6 +251,7 @@ class Plugin:
         # These calls share InputPlumber filters, profiles and HID diagnostics.
         self._rpc_locks['remap'] = self._rpc_locks['controller']
         self._rpc_jobs = set()
+        self._controller_rpc_jobs = set()
         self._guard_scan = None
         self._guard_task = None
         self._guard_blocked = False
@@ -189,7 +260,16 @@ class Plugin:
         self._modules_started = False
         self._ever_started = False
         self._closing = False
+        self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
         self._updates = None
+        from controller_firmware_install import OTA_ENABLED, IndependentInstaller
+        self._firmware = FirmwarePreparation(installer=IndependentInstaller(PLUGIN_DIR) if OTA_ENABLED else None)
+        self._desktop = None
+        self._desktop_install = None
+        self._desktop_lock = asyncio.Lock()
+        self._diagnostics_read = None
+        self._desktop_panel_deadline = 0.0
+        self._qam_panel_deadline = 0.0
         self._update_jobs = set()
         self._module_store = SettingsManager('module_settings', decky.DECKY_PLUGIN_SETTINGS_DIR)
         self._module_state = self._module_store.getSetting('modules', {})
@@ -216,6 +296,104 @@ class Plugin:
         self._remap = remap_backend.Plugin()
         self._battery = battery_backend.Plugin()
         self._controller = controller_backend.Plugin()
+        self._controller_hold = None
+        self._controller_updater_gate = None
+        self._controller_usb_baseline = None
+
+    async def _begin_controller_maintenance(self):
+        """Internal local quiescence only; no RPC, USB claim or flash launch.
+
+        A durable cross-process claim and independent restoration remain
+        prerequisites before wiring this gate to a real transport.
+        """
+        async with self._guard_lock:
+            if self._closing or self._guard_blocked:
+                raise RuntimeError(self._guard_message())
+            hold = module_runtime.pause_controller()
+            self._controller_hold = hold
+        await self._drain_controller_maintenance(hold)
+        return hold
+
+    async def _drain_controller_maintenance(self, hold):
+        if self._closing or hold is None or hold is not self._controller_hold:
+            raise module_runtime.ControllerPaused('The controller maintenance owner does not match.')
+        await module_runtime.drain_controller(hold)
+        # RPCs can be asleep between retries with no executor worker registered.
+        # Retire those admitted continuations before reporting quiescence.
+        jobs = tuple(self._controller_rpc_jobs)
+        if jobs:
+            work = asyncio.gather(*jobs, return_exceptions=True)
+            await module_runtime.complete(asyncio.wait_for(asyncio.shield(work), 5.0))
+            self._controller_rpc_jobs.difference_update(job for job in jobs if job.done())
+        # This is our own read-only observer shutdown, never hardware release.
+        await module_runtime.complete(asyncio.to_thread(self._controller._stop_capture))
+        module_runtime.confirm_controller_quiescent(hold)
+
+    def _finish_controller_maintenance(self, hold, *, restored):
+        if self._closing or hold is not self._controller_hold:
+            raise module_runtime.ControllerPaused('The controller maintenance owner does not match.')
+        module_runtime.resume_controller(hold, restored=restored)
+        self._controller_hold = None
+
+    async def _updater_pause(self):
+        from controller_firmware_usb_linux import observe_command_interface
+        if self._controller_hold is not None:
+            raise module_runtime.ControllerPaused('Controller maintenance is already in progress.')
+        # Reject unsupported hardware before closing an otherwise healthy gate.
+        baseline = await asyncio.to_thread(observe_command_interface)
+        if baseline.driver != '/sys/bus/usb/drivers/usbhid':
+            raise RuntimeError('Controller USB is already owned outside its HID driver.')
+        # Preserve the pre-pause identity even when draining or the final
+        # observation fails before the gate can publish a durable claim.
+        self._controller_usb_baseline = baseline
+        hold = await self._begin_controller_maintenance()
+        fresh = await asyncio.to_thread(observe_command_interface)
+        if not baseline.same_attachment(fresh) or baseline.driver != fresh.driver:
+            raise RuntimeError('The controller changed while draining Companion.')
+        return hold
+
+    async def _updater_resume(self, hold):
+        from controller_firmware_usb_linux import observe_command_interface, HID_REPORT
+        from controller_firmware_install import stable_binding
+        unclaimed = hold is None
+        if unclaimed:
+            from controller_maintenance import maintenance_present
+            # The no-claim lane belongs only to our own failed pause callback.
+            # A persistent/foreign claim still requires its exact gate owner.
+            hold = self._controller_hold
+            if hold is None or maintenance_present():
+                raise RuntimeError('No unclaimed controller pause can be recovered.')
+            await self._drain_controller_maintenance(hold)
+        fresh = await asyncio.to_thread(observe_command_interface)
+        baseline = self._controller_usb_baseline
+        if (baseline is None or stable_binding(baseline) != stable_binding(fresh)
+                or fresh.driver != '/sys/bus/usb/drivers/usbhid'
+                or fresh.hid_report_sha256 != HID_REPORT):
+            raise RuntimeError('The original controller binding was not restored.')
+        if unclaimed and maintenance_present():
+            raise RuntimeError('A persistent controller claim appeared during recovery.')
+        # The root worker already restored and read back the actual input
+        # profile/filters and attributes. Retire caches of the old HID child;
+        # do not rewrite preferences or adopt a default InputPlumber profile.
+        self._controller._status_cache = None
+        vibration_backend._forget_device()
+        self._finish_controller_maintenance(hold, restored=True)
+        self._controller_usb_baseline = None
+
+    async def _start_controller_updater_gate(self):
+        if self._controller_updater_gate is not None or self._closing or self._guard_blocked:
+            return
+        # Standalone tools/tests must not publish an installed-backend endpoint.
+        # Only Decky's actual plugin instance may coordinate a root worker.
+        if getattr(decky, 'DECKY_PLUGIN_DIR', None) != PLUGIN_DIR:
+            return
+        gate = ControllerUpdaterGate(self._updater_pause, self._updater_resume)
+        try:
+            await gate.start()
+            self._controller_updater_gate = gate
+        except Exception as exc:
+            await gate.close()
+            diagnostics.event('firmware', 'coordination_unavailable', level='warning', error=exc)
 
     def _ensure_updates(self):
         if self._updates is not None:
@@ -237,7 +415,9 @@ class Plugin:
             # A queued call may have been admitted before a conflict or shutdown.
             if self._guard_blocked or self._closing:
                 raise RuntimeError(self._guard_message())
-            return await function(self, *args, **kwargs)
+            module_runtime.require_available(resource)
+            with module_runtime.controller_scope(resource):
+                return await function(self, *args, **kwargs)
 
     async def _drain_rpc_jobs(self):
         while self._rpc_jobs:
@@ -254,6 +434,7 @@ class Plugin:
         finally:
             # Monitor cancellation cannot cancel a thread's hardware operation.
             await module_runtime.drain(name)
+        diagnostics.event(name, 'module_stopped')
 
     def _module_enabled(self, name):
         value = self._module_state.get(name, {})
@@ -271,6 +452,10 @@ class Plugin:
                                  or self._module_health.get(name, {}).get('error', '')),
                        'note': self._module_state.get(name, {}).get('note', '')}
                 for name in MODULE_NAMES}
+        for name, entry in result.items():
+            if entry['enabled'] and module_runtime.is_paused(name):
+                entry.update(ready=False, maintenance=True,
+                    note='Controller operations are paused for firmware maintenance.')
         display = self._module_state.get('display', {})
         if display.get('session') is not None:
             current = display_backend._gamescope_start_time()
@@ -281,7 +466,8 @@ class Plugin:
     async def _start_module(self, name):
         component = getattr(self, '_' + name)
         try:
-            if self._module_health.get(name, {}).get('ready') is False:
+            if (self._module_health.get(name, {}).get('ready') is False
+                    and not self._module_health.get(name, {}).get('deferred')):
                 # A failed startup may have partially created workers. Finish
                 # their cleanup before retrying the saved user choice.
                 await self._stop_component(name)
@@ -290,7 +476,9 @@ class Plugin:
             if isinstance(result, dict) and result.get('success') is False:
                 raise RuntimeError(result.get('error') or result.get('message') or 'Module startup failed.')
             self._module_health[name] = {'ready': True}
+            diagnostics.event(name, 'module_ready')
         except Exception as exc:
+            diagnostics.event(name, 'module_start_failed', level='error', error=exc)
             self._module_health[name] = {'ready': False, 'error': str(exc)}
             try:
                 await self._stop_component(name)
@@ -302,7 +490,7 @@ class Plugin:
         try:
             await decky.emit('companion_guard', await asyncio.to_thread(self._guard_status))
         except Exception as exc:
-            decky.logger.warning(f'Module status notification failed: {exc}')
+            diagnostics.event('plugin', 'module_status_notification_failed', level='warning', error=exc, repeat=60)
 
     async def modules_get_status(self):
         return await asyncio.to_thread(self._module_status)
@@ -386,10 +574,18 @@ class Plugin:
             ("battery", self._battery),
             ("controller", self._controller),
         )
+        if stage == '_main':
+            for name, _ in components:
+                if self._module_enabled(name) and module_runtime.is_paused(name):
+                    # A new backend did not start this module. Removing the
+                    # marker must not fabricate readiness or auto-start it.
+                    self._module_health[name] = {'ready': False, 'deferred': True,
+                        'error': 'Controller maintenance deferred startup. Retry this module after restoration.'}
         runnable = tuple(
             (name, component)
             for name, component in components
             if (self._module_enabled(name) or (stage == '_unload' and self._module_state.get(name, {}).get('pending')))
+            and (stage == '_unload' or not module_runtime.is_paused(name))
             and callable(getattr(component, stage, None))
         )
         results = await asyncio.gather(
@@ -399,9 +595,7 @@ class Plugin:
         )
         for (name, _), result in zip(runnable, results):
             if isinstance(result, BaseException):
-                decky.logger.error(
-                    f"[legiongo2companion] {name} {stage} failed: {result}"
-                )
+                diagnostics.event(name, 'module_stage_failed', level='error', stage=stage, error=result)
 
     def _guard_message(self):
         if self._guard_error:
@@ -437,23 +631,37 @@ class Plugin:
         # Only these fields can change during a conflict scan. Building the
         # full status also reads version metadata and probes the display session.
         before = (self._guard_blocked, tuple(self._guard_conflicts), self._guard_error)
-        try:
-            self._guard_conflicts = await asyncio.to_thread(_installed_standalone_plugins)
-            self._guard_error = ""
-        except (OSError, ValueError, TypeError) as exc:
-            self._guard_error = str(exc)
+        # ZIP extraction can briefly expose an incomplete manifest. Admission
+        # waits for a bounded fresh check before withdrawing healthy modules.
+        # Actual conflicts stop immediately; persistent unknown identity still
+        # fails closed. No successful scan is cached.
+        for attempt in range(3):
+            try:
+                self._guard_conflicts = await asyncio.to_thread(_installed_standalone_plugins)
+                self._guard_error = ""
+                break
+            except (OSError, ValueError, TypeError) as exc:
+                if attempt == 2:
+                    self._guard_error = str(exc)
+                    diagnostics.event('plugin', 'guard_inspection_failed', level='error', error=exc, repeat=60)
+                else:
+                    await asyncio.sleep(0.1)
         if self._guard_conflicts or self._guard_error:
             # Latched until a fresh process starts. Reusing partially unloaded
             # module globals would risk duplicate workers or lost restoration state.
             self._guard_blocked = True
             if self._updates is not None:
                 await module_runtime.complete(asyncio.to_thread(self._updates.close))
+            try:
+                await module_runtime.complete(asyncio.to_thread(self._firmware.close))
+            except Exception as exc:
+                diagnostics.event('firmware', 'observer_cleanup_failed', level='warning', stage='guard_withdrawal', error=exc)
         if before != (self._guard_blocked, tuple(self._guard_conflicts), self._guard_error):
-            decky.logger.warning("[legiongo2companion] " + self._guard_message())
+            diagnostics.transition('plugin', 'guard', 'blocked' if self._guard_blocked else 'clear', level='warning' if self._guard_blocked else 'info', count=len(self._guard_conflicts), reason='inspection_unavailable' if self._guard_error else 'conflict_scan')
             try:
                 await decky.emit("companion_guard", await asyncio.to_thread(self._guard_status))
             except Exception as exc:
-                decky.logger.warning(f"[legiongo2companion] guard event unavailable: {exc}")
+                diagnostics.event('plugin', 'guard_notification_failed', level='warning', error=exc, repeat=60)
 
     async def _check_guard(self):
         await self._inspect_guard()
@@ -464,6 +672,7 @@ class Plugin:
                     decky.logger.warning("[legiongo2companion] all module workers stopped by conflict guard")
 
     async def _stop_modules(self):
+        self._withdraw_fan_lease()
         async def stop():
             await self._drain_rpc_jobs()
             await self._run_stage("_unload")
@@ -493,11 +702,11 @@ class Plugin:
             await module_runtime.complete(asyncio.to_thread(self._save_modules))
         except Exception as exc:
             self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
-            decky.logger.error(f'Module {name} recovery failed: {exc}')
+            diagnostics.event(name, 'module_recovery_failed', level='error', error=exc)
             try:
                 await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception as save_error:
-                decky.logger.error(f'Module {name} recovery could not be saved: {save_error}')
+                diagnostics.event(name, 'module_recovery_persist_failed', level='error', error=save_error)
 
     async def _migration(self):
         await self._check_guard()
@@ -510,12 +719,18 @@ class Plugin:
             await self._run_stage("_migration")
 
     async def _main(self):
+        directory = getattr(decky, 'DECKY_PLUGIN_LOG_DIR', None)
+        await asyncio.to_thread(diagnostics.configure, Path(directory)/'diagnostics' if isinstance(directory, (str, os.PathLike)) else None, decky.logger)
+        diagnostics.event('plugin', 'startup', version=_plugin_version(), source='backend')
+        diagnostics.event('plugin', 'runtime', source='backend', kernel=platform.release(),
+                          python=platform.python_version(), architecture=platform.machine())
         decky.logger.info(f"[legiongo2companion] startup v{_plugin_version()}")
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._watch_conflicts())
         await self._check_guard()
         if self._guard_blocked:
-            decky.logger.warning("[legiongo2companion] " + self._guard_message())
+            diagnostics.transition('plugin', 'guard', 'blocked' if self._guard_blocked else 'clear', level='warning' if self._guard_blocked else 'info', count=len(self._guard_conflicts), reason='inspection_unavailable' if self._guard_error else 'conflict_scan')
+            await self._start_desktop()
             return
         async with self._guard_lock:
             if self._modules_started or self._guard_blocked or self._closing:
@@ -528,11 +743,13 @@ class Plugin:
                 return
             self._modules_started = self._ever_started = True
             for name in MODULE_NAMES:
-                await self._recover_pending_module(name)
+                if not module_runtime.is_paused(name):
+                    await self._recover_pending_module(name)
             await self._run_stage("_main")
             for name in MODULE_NAMES:
                 entry = self._module_state.get(name, {})
                 if (self._module_enabled(name) and self._module_health.get(name, {}).get('ready', True)
+                        and not module_runtime.is_paused(name)
                         and entry.get('resume')):
                     try:
                         await restore_intent(name, getattr(self, '_' + name), entry['resume'])
@@ -544,22 +761,128 @@ class Plugin:
                         try:
                             await module_runtime.complete(asyncio.to_thread(self._save_modules))
                         except Exception as save_error:
-                            decky.logger.error(f'Module {name} recovery could not be saved: {save_error}')
+                            diagnostics.event(name, 'module_recovery_persist_failed', level='error', error=save_error)
                         try:
                             await self._stop_component(name)
                         except Exception as stop_error:
-                            decky.logger.error(f'Module {name} recovery could not stop: {stop_error}')
+                            diagnostics.event(name, 'module_recovery_stop_failed', level='error', error=stop_error)
         await self._publish_modules()
         await self._check_guard()
+        await self._start_desktop()
+
+        await self._start_controller_updater_gate()
+
+    async def _desktop_get_logs(self):
+        # Read-only diagnostics remain available when hardware modules are
+        # disabled or gated. Concurrent viewers share one bounded collection.
+        if self._closing:
+            raise RuntimeError('Companion is stopping. Reconnect after startup.')
+        task = self._diagnostics_read
+        if task is None or task.done():
+            from diagnostics_reader import read_events
+            directory = getattr(decky, 'DECKY_PLUGIN_LOG_DIR', None)
+            task = module_runtime.background_task(asyncio.to_thread(read_events, directory))
+            self._diagnostics_read = task
+        return await asyncio.shield(task)
+
+    async def _desktop_context(self):
+        await self._check_guard()
+        # Read-only context. Never set frontend app hints from an application that
+        # cannot observe Steam's authoritative foreground app.
+        app_id = '' if self._guard_blocked else await asyncio.to_thread(tdp_backend._get_running_appid)
+        session = await asyncio.to_thread(display_backend._gamescope_start_time)
+        return {'app_id': app_id, 'gamescope': session is not None}
+
+    async def _start_desktop(self):
+        async with self._desktop_lock:
+            # Root publication in a worker must finish before unload can remove
+            # the session, even when startup's caller is cancelled.
+            await module_runtime.complete(self._start_desktop_locked())
+
+    async def _start_desktop_locked(self):
+        if self._desktop is not None or self._closing:
+            return
+        bridge = None
+        try:
+            assets = Path(PLUGIN_DIR) / 'dist' / 'desktop'
+            methods = json.loads((assets / 'rpc-methods.json').read_text(encoding='utf-8'))
+            if not isinstance(methods, list) or not all(isinstance(name, str) for name in methods):
+                raise ValueError('Invalid Desktop RPC contract')
+            bridge = DesktopBridge(self, assets, methods, self._desktop_context, {
+                'set_panel_active': self._desktop_panel_active,
+                'display_restart_session': self._desktop_display_restart,
+                'modules_restart_session': self._desktop_modules_restart,
+            }, read_logs=self._desktop_get_logs)
+            await bridge.start()
+            self._desktop = bridge
+            installer = DesktopInstall.for_decky(Path(PLUGIN_DIR) / 'desktop', decky)
+            if installer is not None:
+                self._desktop_install = installer
+                await asyncio.to_thread(installer.install, bridge.origin, bridge.token)
+            decky.logger.info('[legiongo2companion] Desktop frontend ready')
+        except Exception as exc:
+            if bridge is not None:
+                await bridge.close()
+            self._desktop = None
+            diagnostics.event('desktop', 'frontend_unavailable', level='warning', error=exc)
+
+    async def _desktop_panel_active(self, active):
+        if type(active) is not bool:
+            raise ValueError('active must be a boolean')
+        now = time.monotonic()
+        self._desktop_panel_deadline = now + 90 if active else 0
+        return await self._tdp.set_panel_active(now < max(self._desktop_panel_deadline, self._qam_panel_deadline))
+
+    async def _desktop_display_restart(self):
+        if await asyncio.to_thread(display_backend._gamescope_start_time) is None:
+            state = await self.display_get_state()
+            return dict(state, restart_error='Switch to Gaming Mode to apply OLED session changes. Desktop session was not restarted.')
+        return await self.display_restart_session()
+
+    async def _desktop_modules_restart(self):
+        if await asyncio.to_thread(display_backend._gamescope_start_time) is None:
+            return {'success': False, 'error': 'Switch to Gaming Mode to apply OLED session changes. Desktop session was not restarted.'}
+        return await self.modules_restart_session()
 
     async def _unload(self):
+        diagnostics.event('plugin', 'shutdown_started', source='backend')
         self._closing = True
+        self._withdraw_fan_lease()
         async def cleanup():
+            # A Desktop RPC can own a download while bridge.close() waits for
+            # admitted operations. Withdraw their existing network leases first;
+            # otherwise DNS/TLS would delay this very signal until after drain.
+            helper_cancel = getattr(self._tdp, '_helper_cancel', None)
+            if helper_cancel is not None:
+                helper_cancel.set()
+            if self._updates is not None:
+                # Preserve the final publication barrier without blocking Decky's
+                # loop. Hardware/settings transactions still finish below.
+                await asyncio.to_thread(self._updates.close)
+            gate, self._controller_updater_gate = self._controller_updater_gate, None
+            if gate is not None:
+                try:
+                    await gate.close()
+                except Exception as exc:
+                    # A stale/unremovable IPC path must stay diagnosable, but
+                    # cannot skip withdrawal of unrelated hardware modules.
+                    diagnostics.event('firmware', 'endpoint_cleanup_failed', level='warning', error=exc)
             try:
-                if self._updates is not None:
-                    # close waits for a root Downloads rename already in
-                    # progress. Keep that filesystem barrier off the event loop.
-                    await asyncio.to_thread(self._updates.close)
+                async with self._desktop_lock:
+                    bridge, self._desktop = self._desktop, None
+                    if bridge is not None:
+                        await bridge.close()
+                    if self._desktop_install is not None:
+                        try:
+                            await asyncio.to_thread(self._desktop_install.remove)
+                        except Exception as exc:
+                            diagnostics.event('desktop', 'session_cleanup_failed', level='warning', error=exc)
+                try:
+                    await asyncio.to_thread(self._firmware.close)
+                except Exception as exc:
+                    # Firmware outcome stays in its independent worker/journal;
+                    # observer failure cannot skip fan and other module cleanup.
+                    diagnostics.event('firmware', 'observer_cleanup_failed', level='warning', stage='shutdown', error=exc)
                 task, self._guard_task = self._guard_task, None
                 if task is not None:
                     task.cancel()
@@ -577,14 +900,35 @@ class Plugin:
                     self._guard_scan = None
                 if self._update_jobs:
                     await asyncio.gather(*tuple(self._update_jobs), return_exceptions=True)
-        await module_runtime.complete(cleanup())
+                if self._diagnostics_read is not None:
+                    await asyncio.gather(self._diagnostics_read, return_exceptions=True)
+                    self._diagnostics_read = None
+        try:
+            await module_runtime.complete(cleanup())
+        except BaseException as exc:
+            diagnostics.event('plugin', 'shutdown_waiter_cancelled' if isinstance(exc, asyncio.CancelledError) else 'shutdown_failed',
+                              level='warning', error=exc, source='backend')
+            raise
         decky.logger.info("[legiongo2companion] unloaded")
+        diagnostics.event('plugin', 'shutdown_completed', source='backend')
+        if not self._uninstalling:
+            await asyncio.to_thread(diagnostics.close)
+
+    def _withdraw_fan_lease(self):
+        withdraw_lease = getattr(self._fan, '_withdraw_lease', None)
+        if callable(withdraw_lease):
+            withdraw_lease()
 
     async def _uninstall(self):
         # A blocked instance that never owned hardware must not run restoration
         # hooks against the standalone plugin's live state.
         async def cleanup():
             await self._unload()
+            if self._desktop_install is not None:
+                try:
+                    await asyncio.to_thread(self._desktop_install.remove, True)
+                except Exception as exc:
+                    diagnostics.event('desktop', 'shortcut_cleanup_failed', level='warning', error=exc)
             if self._ever_started and not self._guard_blocked:
                 # Start every independent restoration immediately. A pending
                 # device/reconnect must not delay other modules before Decky's
@@ -593,7 +937,20 @@ class Plugin:
                     self._run_stage("_uninstall"),
                     *(self._recover_pending_module(name) for name in MODULE_NAMES),
                 )
-        await module_runtime.complete(cleanup())
+        self._uninstalling = True
+        diagnostics.ensure_fallback()
+        with diagnostics.source_context('backend'):
+            diagnostics.event('plugin', 'uninstall_started')
+            try:
+                await module_runtime.complete(cleanup())
+            except BaseException as exc:
+                diagnostics.event('plugin', 'uninstall_not_confirmed', level='warning', error=exc)
+                raise
+            else:
+                diagnostics.event('plugin', 'uninstall_completed')
+            finally:
+                self._uninstalling = False
+                await asyncio.to_thread(diagnostics.close)
         decky.logger.info("[legiongo2companion] uninstalled")
 
     # Updates are explicit user actions, independent of hardware module toggles.
@@ -603,6 +960,12 @@ class Plugin:
 
     async def updates_download(self, expected_version: str):
         return await asyncio.to_thread(self._updates.download, expected_version)
+
+    async def firmware_get_status(self):
+        return await asyncio.to_thread(self._firmware.status)
+
+    async def firmware_check_updates(self):
+        return await asyncio.to_thread(self._firmware.check_updates)
 
     # TDP / CPU -----------------------------------------------------------------
 
@@ -663,7 +1026,11 @@ class Plugin:
         return await self._tdp.restore_defaults()
 
     async def set_panel_active(self, active):
-        return await self._tdp.set_panel_active(active)
+        if type(active) is not bool:
+            raise ValueError('active must be a boolean')
+        now = time.monotonic()
+        self._qam_panel_deadline = now + 90 if active else 0
+        return await self._tdp.set_panel_active(now < max(self._desktop_panel_deadline, self._qam_panel_deadline))
 
     async def reapply(self):
         return await self._tdp.reapply()

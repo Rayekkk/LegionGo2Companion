@@ -4,6 +4,7 @@
 import { callable } from "@decky/api";
 import { ButtonItem, DropdownItem, DropdownOption, Field, PanelSection, PanelSectionRow, Spinner } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { FirmwarePanel } from "./firmware";
 
 export type GyroSource = "system" | "combined" | "left" | "right";
 type Vector = { x: number | null; y: number | null; z: number | null };
@@ -291,10 +292,10 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
     await queued;
   }, []);
 
-  if (!status) return <PanelSection title="Controller">
+  if (!status) return <><PanelSection title="Controller">
     <PanelSectionRow>{error ? <Field focusable label="Status unavailable" description={error} /> : <Spinner />}</PanelSectionRow>
     {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Check Again</ButtonItem></PanelSectionRow>}
-  </PanelSection>;
+  </PanelSection><FirmwarePanel visible={visible} /></>;
 
   const testing = starting || stopping || !!diagnostics?.active;
   const blocked = busy || testing;
@@ -388,5 +389,6 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
         <Field focusable label={busy ? "Updating the gyro source" : error || status.error ? "Controller status" : "Preference confirmed"} description={busy ? "Waiting for the controller to confirm the change." : error || status.error || notice} />
       </PanelSectionRow>
     </PanelSection>}
+    <FirmwarePanel visible={visible} />
   </>;
 };

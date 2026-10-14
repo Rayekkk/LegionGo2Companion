@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_modules/typescript'));
@@ -188,4 +189,4 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
   h.setVisible(true);await settle();h.render();assert.equal(count(h,'battery_get_status'),initialReads+1);
   h.unmount();assert.equal(h.timers.size,0);
   console.log('Battery UI keeps actual/saved states distinct, reports rollback/recovery, prevents stale saves, and stops hidden polling.');
-})().catch(error=>{console.error(error);process.exitCode=1;});
+})().then(complete).catch(error=>{console.error(error);process.exitCode=1;});

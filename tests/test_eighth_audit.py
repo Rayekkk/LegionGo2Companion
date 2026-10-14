@@ -81,6 +81,40 @@ class DisplayWithdrawalTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HelperRedirectTests(unittest.TestCase):
+    def open_offline(self, helper, transport, contexts):
+        # Execute the worker's real urllib opener/redirect policy in-process;
+        # replace only its HTTPS transport and the parent process boundary.
+        # These guards prevent a stale mock from making a real request again.
+        import bounded_http
+        import ssl
+        real_build = urllib.request.build_opener
+        def build(*handlers):
+            context = next(value._context for value in handlers
+                           if isinstance(value, urllib.request.HTTPSHandler))
+            contexts.append(context)
+            return real_build(transport, *handlers[1:])
+        def fetch(url, **options):
+            context = options['context']
+            configuration = dict(url=url, headers=options['headers'], policy=options['policy'],
+                timeout=options['timeout'], limit=options['limit'], total_seconds=options['total_seconds'],
+                ca=''.join(ssl.DER_cert_to_PEM_cert(cert) for cert in context.get_ca_certs(binary_form=True)),
+                verify_flags=int(context.verify_flags), minimum_version=int(context.minimum_version),
+                maximum_version=int(context.maximum_version))
+            body = io.BytesIO()
+            try:
+                result = bounded_http._fetch(configuration, body)
+                body.seek(0)
+                return bounded_http.Response(body, result['url'])
+            except BaseException:
+                body.close()
+                raise
+        with patch.object(tdp_updater, 'open_http', side_effect=fetch), \
+                patch.object(bounded_http.urllib.request, 'build_opener', side_effect=build), \
+                patch.object(bounded_http.subprocess, 'Popen', side_effect=AssertionError('Unexpected helper process')), \
+                patch('socket.getaddrinfo', side_effect=AssertionError('Unexpected network DNS')), \
+                patch('socket.create_connection', side_effect=AssertionError('Unexpected network connection')):
+            return helper.open_url('https://github.com/test/asset', 3)
+
     def test_intermediate_foreign_redirect_is_never_opened(self):
         opened = []
         class OfflineHttps(urllib.request.HTTPSHandler):
@@ -91,45 +125,56 @@ class HelperRedirectTests(unittest.TestCase):
                 response = urllib.response.addinfourl(io.BytesIO(b''), headers, request.full_url, 302)
                 response.msg = 'Found'
                 return response
-        transport = OfflineHttps()
-        real_build = urllib.request.build_opener
         helper = tdp_updater.Updater(user_agent='test', log_prefix='test', plugin_dir='.', logger=Mock())
-        def build(*handlers):
-            return real_build(transport, *handlers[1:])
-        with patch.object(tdp_updater.urllib.request, 'build_opener', side_effect=build):
-            with self.assertRaises(ValueError):
-                helper.open_url('https://github.com/test/asset', 3)
+        with self.assertRaises(ValueError):
+            self.open_offline(helper, OfflineHttps(), [])
         self.assertEqual(opened, ['https://github.com/test/asset'])
 
     def test_redirect_boundary_is_checked_before_followup_request(self):
+        import bounded_http
+        import ssl
         helper = tdp_updater.Updater(user_agent='test', log_prefix='test', plugin_dir='.', logger=Mock())
-        opener = Mock()
-        response = opener.open.return_value
-        response.geturl.return_value = 'https://github.com/test/asset'
-        with patch.object(tdp_updater.urllib.request, 'build_opener', return_value=opener) as build, \
-                patch.object(tdp_updater.urllib.request, 'urlopen', return_value=response) as unsafe:
-            self.assertIs(helper.open_url('https://github.com/test/asset', 3), response)
-        unsafe.assert_not_called()
-        handler = next(value for value in build.call_args.args
-                       if isinstance(value, urllib.request.HTTPRedirectHandler))
+        allowed = 'https://release-assets.githubusercontent.com/asset?token=fixture'
+        opened, contexts = [], []
+        class OfflineHttps(urllib.request.HTTPSHandler):
+            def https_open(self, request):
+                opened.append(request.full_url)
+                headers = Message()
+                if request.full_url == allowed:
+                    response = urllib.response.addinfourl(io.BytesIO(b'verified-test-body'), headers, allowed, 200)
+                    response.msg = 'OK'
+                else:
+                    headers['Location'] = allowed
+                    response = urllib.response.addinfourl(io.BytesIO(b''), headers, request.full_url, 302)
+                    response.msg = 'Found'
+                return response
+        with self.open_offline(helper, OfflineHttps(), contexts) as response:
+            self.assertEqual(response.geturl(), allowed)
+            self.assertEqual(response.read(), b'verified-test-body')
+        self.assertEqual(opened, ['https://github.com/test/asset', allowed])
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(contexts[0].check_hostname)
+        self.assertSetEqual(set(contexts[0].get_ca_certs(binary_form=True)),
+                            set(helper.ssl_context().get_ca_certs(binary_form=True)))
+        handler = bounded_http._Redirect('https://github.com/test/asset', 'helper')
         request = urllib.request.Request('https://github.com/test/asset')
         for url in ('http://github.com/test/asset', 'https://example.org/asset',
                     'https://user:password@github.com/asset', 'https://github.com:8443/asset'):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 handler.redirect_request(request, None, 302, 'Found', {}, url)
-        allowed = 'https://release-assets.githubusercontent.com/asset?token=fixture'
         self.assertEqual(handler.redirect_request(request, None, 302, 'Found', {}, allowed).full_url, allowed)
 
     def test_final_response_boundary_still_closes_invalid_endpoint(self):
+        import bounded_http
         helper = tdp_updater.Updater(user_agent='test', log_prefix='test', plugin_dir='.', logger=Mock())
-        opener = Mock()
-        response = opener.open.return_value
-        response.geturl.return_value = 'https://example.org/asset'
-        with patch.object(tdp_updater.urllib.request, 'build_opener', return_value=opener), \
-                patch.object(tdp_updater.urllib.request, 'urlopen', return_value=response), \
+        response = bounded_http.Response(io.BytesIO(b'untrusted'), 'https://example.org/asset')
+        with patch.object(tdp_updater, 'open_http', return_value=response), \
+                patch.object(bounded_http.subprocess, 'Popen', side_effect=AssertionError('Unexpected helper process')), \
+                patch('socket.getaddrinfo', side_effect=AssertionError('Unexpected network DNS')), \
                 self.assertRaises(ValueError):
             helper.open_url('https://github.com/test/asset', 3)
-        response.close.assert_called_once()
+        self.assertTrue(response.closed)
 
 
 class WifiConnectionIdentityTests(unittest.TestCase):
@@ -215,8 +260,9 @@ class NonblockingMetadataTests(unittest.TestCase):
                     patch.object(conflict_guard.os, 'fdopen', return_value=handle), \
                     patch.object(conflict_guard.os, 'close') as closed, \
                     patch.object(conflict_guard.os, 'fstat', return_value=types.SimpleNamespace(st_mode=stat.S_IFIFO)):
-                with self.assertRaisesRegex(ValueError, 'regular file'):
-                    conflict_guard.installed_conflicts(str(root / 'Companion'))
+                with patch.object(conflict_guard,'event') as warning:
+                    self.assertEqual(conflict_guard.installed_conflicts(str(root / 'Companion')),[])
+                warning.assert_called_once()
             self.assertTrue(opened.call_args.args[1] & 0x800)
             closed.assert_called_once_with(42)
             stream.read.assert_not_called()

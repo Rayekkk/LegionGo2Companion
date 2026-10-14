@@ -27,10 +27,11 @@ import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySumma
   type BatteryStatus, type ControllerBatteryStatus } from "./battery";
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
+import { FirmwarePanel } from "./firmware";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
-type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; error?: string; note?: string}>>;
+type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
 const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP & CPU", fan: "Fan Control", vibration: "Vibration", display: "OLED Display", wifi: "WiFi", rgb: "RGB Lighting", remap: "Button Remapper", battery: "Battery", controller: "Gyro & Touchpad"};
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
@@ -100,14 +101,26 @@ let tdpWatcherEnabled = false;
 let vibeWatcherEnabled = false;
 let frontendActive = false;
 let guardRead: Promise<GuardStatus> | null = null;
+let guardUnavailable = false;
 let guardRevision = 0;
+const validGuard = (status: GuardStatus) => !!status && typeof status === "object" && !Array.isArray(status) && typeof status.blocked === "boolean";
+const pauseUnavailableGuard = () => {
+  if (!guardUnavailable) console.warn("[legiongo2companion] frontend.connection_unavailable");
+  guardUnavailable = true;
+  // A missing/malformed reply is transient, not a latched plugin conflict.
+  tdpWatcherEnabled = vibeWatcherEnabled = false;
+  stopTdpWatcher(); stopVibrationWatcher();
+  overviewPaused = true;
+  clearOverview();
+  guardListeners.forEach(listener => listener({version: "2.1.0", blocked: true,
+    guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
+};
 const updateGuard = (status: GuardStatus) => {
   if (!frontendActive) return;
   guardRevision += 1;
+  if (!validGuard(status)) { pauseUnavailableGuard(); return; }
   // A late successful response must never unlock a latched conflict in this load.
   if (guardStatus?.blocked && !status.blocked) return;
-  if (typeof status.blocked !== "boolean") status = { ...status, blocked: true,
-    guard_error: "The backend has not provided its compatibility status. Restart Decky and try again." };
   guardStatus = status;
   overviewPaused = status.blocked;
   if (status.blocked) clearOverview();
@@ -128,18 +141,16 @@ const refreshGuard = async () => {
   guardRead = request;
   try {
     const next = await request;
-    if (frontendActive && revision === guardRevision) updateGuard(next);
+    if (frontendActive && revision === guardRevision) {
+      if (!validGuard(next)) throw new Error("Compatibility status is unavailable.");
+      if (guardUnavailable) console.info("[legiongo2companion] frontend.connection_restored");
+      guardUnavailable = false;
+      updateGuard(next);
+    }
   }
   catch {
     if (!frontendActive || revision !== guardRevision) return;
-    // A connection failure hides controls and stops reports, but is not a
-    // conflict latch: the user can retry once Decky responds again.
-    tdpWatcherEnabled = vibeWatcherEnabled = false;
-    stopTdpWatcher(); stopVibrationWatcher();
-    overviewPaused = true;
-    clearOverview();
-    guardListeners.forEach(listener => listener({version: "2.1.0", blocked: true,
-      guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
+    pauseUnavailableGuard();
   } finally { if (guardRead === request) guardRead = null; }
 };
 const getTdpSettings = callable<[], TdpSettings>("get_settings");
@@ -458,11 +469,11 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
   return <PanelSection title="Manage Modules">
     <PanelSectionRow><Field focusable label="Choose your modules" description="Disabling stops the module, withdraws its hardware controls and hides its page. Saved preferences return when you enable it again. OLED can require a Gaming Mode restart." /></PanelSectionRow>
     {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
-      <ToggleField label={moduleLabels[name]} checked={moduleEnabled(modules, name)} disabled={busy !== null || !!modules[name]?.pending}
+      <ToggleField label={moduleLabels[name]} checked={modules[name]?.maintenance ? modules[name]?.enabled === true : moduleEnabled(modules, name)} disabled={busy !== null || !!modules[name]?.pending || !!modules[name]?.maintenance}
         description={busy === name ? "Applying and verifying the change…" : modules[name]?.error || modules[name]?.note || (moduleEnabled(modules, name) ? "Enabled" : "Disabled — hidden from the main menu")}
         onChange={enabled => void change(name, enabled)} />
-      {modules[name]?.pending && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} Cleanup</ButtonItem>}
-      {modules[name]?.enabled && modules[name]?.ready === false && !modules[name]?.pending &&
+      {modules[name]?.pending && !modules[name]?.maintenance && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} Cleanup</ButtonItem>}
+      {modules[name]?.enabled && modules[name]?.ready === false && !modules[name]?.pending && !modules[name]?.maintenance &&
         <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, true)}>Retry {moduleLabels[name]} Start</ButtonItem>}
     </PanelSectionRow>)}
     {error && <PanelSectionRow><Field focusable label="Could not confirm" description={error} /></PanelSectionRow>}
@@ -494,7 +505,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     setActiveSection(section);
   };
   const focusSection = lastOpenedSection.current && lastOpenedSection.current in moduleLabels
-    && !moduleEnabled(modules, lastOpenedSection.current as ModuleKey)
+    && lastOpenedSection.current !== "controller" && !moduleEnabled(modules, lastOpenedSection.current as ModuleKey)
     ? "modules" : lastOpenedSection.current;
   useEffect(() => {
     // An already-running read may finish while QAM is hidden. Keep the mounted
@@ -511,7 +522,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     setOverview(overviewCache);
   }, [enabledModules]);
   useEffect(() => {
-    if (activeSection && activeSection in moduleLabels && !moduleEnabled(modules, activeSection as ModuleKey)) setActiveSection(null);
+    if (activeSection && activeSection !== "controller" && activeSection in moduleLabels && !moduleEnabled(modules, activeSection as ModuleKey)) setActiveSection(null);
   }, [modules, activeSection]);
 
   useEffect(() => {
@@ -542,12 +553,17 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
 
   if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
+      {Object.values(modules).some(state => state?.maintenance) && <PanelSectionRow><Field focusable label="Controller controls paused" description="Firmware maintenance is in progress. Saved controller settings have not been changed." /></PanelSectionRow>}
       {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title="TDP" {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}
       {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title="Fan Control" {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}
       {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title="Vibration" {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}
       {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}
       {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}
-      {moduleEnabled(modules, "controller") && <SectionLink section="controller" restoreFocus={focusSection === "controller"} title="Gyro & Touchpad" {...summary("controller", controllerSummary(overview.controller))} onClick={() => openSection("controller")} />}
+      <SectionLink section="controller" restoreFocus={focusSection === "controller"}
+        title={moduleEnabled(modules, "controller") ? "Gyro & Touchpad" : "Controller firmware"}
+        {...(moduleEnabled(modules, "controller") ? summary("controller", controllerSummary(overview.controller))
+          : { description: "Controller update status and Lenovo firmware updates" })}
+        onClick={() => openSection("controller")} />
       {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title="Battery" {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}
       {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title="OLED Display" {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}
       {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title="WiFi" {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}
@@ -582,7 +598,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
       : activeSection === "remap"
         ? "Button Remapper"
       : activeSection === "controller"
-        ? "Gyro & Touchpad"
+        ? moduleEnabled(modules, "controller") ? "Gyro & Touchpad" : "Controller firmware"
       : activeSection === "battery"
         ? "Battery"
       : activeSection === "modules" ? "Manage Modules" : "About";
@@ -597,7 +613,8 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     {activeSection === "wifi" && <WifiPage />}
     {activeSection === "rgb" && <RgbPage />}
     {activeSection === "remap" && <RemapPage />}
-    {activeSection === "controller" && <ControllerPage visible={visible} />}
+    {activeSection === "controller" && (moduleEnabled(modules, "controller") ? <ControllerPage visible={visible} />
+      : <FirmwarePanel visible={visible} allowUpdates={!Object.values(modules).some(state => state?.maintenance)} />)}
     {activeSection === "battery" && <BatteryPage />}
     {activeSection === "about" && <>
       <PanelSection title="Legion Go 2 Companion">
@@ -647,6 +664,7 @@ const Content: FC = () => {
       <PanelSectionRow><Field focusable label="Your settings are kept" description="This safeguard does not erase Companion profiles or the standalone settings available for import." /></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" onClick={() => void refreshGuard()}>Check again</ButtonItem></PanelSectionRow>
     </PanelSection>
+    <FirmwarePanel visible={visible} allowUpdates={false} />
   </PageShell>;
   return <Controls modules={status.modules} />;
 };

@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 // Exercise the actual update UI with deferred RPCs and page/plugin lifecycles.
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const assert = require('node:assert/strict');
@@ -5,8 +6,8 @@ const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_m
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
 function harness() {
-  const slots = [], effects = new Map(), pending = [], calls = [];
-  let cursor = 0, writes = 0;
+  const slots = [], effects = new Map(), pending = [], calls = [], timers = new Map();
+  let cursor = 0, writes = 0, nextTimer = 0;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => value === b[i]);
   const hooks = {
     useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial;
@@ -17,13 +18,14 @@ function harness() {
   };
   const mod = { exports: {} };
   const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
-  const forbiddenTimer = () => { throw Error('Update UI must not create background timers.'); };
+  const timer=(kind,fn)=>{const id=++nextTimer;timers.set(id,{kind,fn});return id;};
   const source = ts.transpileModule(fs.readFileSync(path.join(root, 'src/updates.tsx'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   vm.runInNewContext(source, {
     module: mod, exports: mod.exports, console, Error,
-    setTimeout: forbiddenTimer, setInterval: forbiddenTimer,
+    setTimeout: fn=>timer('timeout',fn),clearTimeout:id=>timers.delete(id),
+    setInterval: fn=>timer('interval',fn),clearInterval:id=>timers.delete(id),
     require(name) {
       if (name === 'react') return hooks;
       if (name === 'react/jsx-runtime') return jsx;
@@ -36,7 +38,7 @@ function harness() {
   const next = name => { const call = calls.find(call => call.name === name && !call.settled); assert.ok(call, `Pending ${name}`); call.settled = true; return call; };
   mod.exports.startUpdates();
   return {
-    calls, render, get writes() { return writes; },
+    calls, render, fireTimers(){for(const [id,entry] of [...timers]){if(entry.kind==='timeout')timers.delete(id);entry.fn();}}, get writes() { return writes; },
     respond(name, value) { next(name).resolve(value); },
     reject(name) { next(name).reject(new Error('Network unavailable')); },
     unmount() { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); },
@@ -74,7 +76,8 @@ const downloaded = { success: true, version: '0.6.3', path: '/home/deck/Download
   let tree = h.render();
   assert.ok(field(tree, 'GitHub releases'));
   h.unmount(); tree = h.remount(); await settle();
-  assert.equal(h.calls.length, 0, 'Mounting and remounting never check automatically');
+  h.fireTimers();await settle();
+  assert.equal(h.calls.length, 0, 'Mounting, remounting and scheduled callbacks never check automatically');
   const initial = button(tree, 'Check for Updates');
   initial.props.onClick(); initial.props.onClick();
   assert.equal(h.calls.length, 1, 'Synchronous repeated clicks create one RPC');
@@ -166,4 +169,4 @@ const downloaded = { success: true, version: '0.6.3', path: '/home/deck/Download
   invalid.stop(); button(invalid.render(), 'Check for Updates').props.onClick();
   assert.equal(invalid.calls.length, 2, 'Stopped plugin cannot start another request');
   console.log('Frontend updates: manual requests, retries, concurrent clicks, cached remounts and lifecycle isolation passed.');
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });

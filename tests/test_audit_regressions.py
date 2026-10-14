@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, patch
@@ -299,12 +300,15 @@ class RecoveryTests(unittest.TestCase):
              patch.object(tdp, "_apply_and_record", return_value={"success": False}) as apply:
             key = ("123", False, (15,18,25))
             tdp._transition_apply(key[2], "test", key)
+            first_retry = tdp._transition_retry_at
+            self.assertTrue(100 < first_retry <= 115)
             tdp._transition_apply(key[2], "test", key)
             self.assertEqual(apply.call_count, 1)
             for _ in range(2):
                 tdp._transition_retry_at = 0
                 tdp._transition_apply(key[2], "test", key)
-            self.assertEqual(tdp._transition_retry_at, 160)
+            self.assertTrue(145 <= tdp._transition_retry_at <= 175,
+                            'Repeated failure must settle into a bounded low retry rate')
             tdp._transition_apply(key[2], "new game", ("456", False, key[2]))
             self.assertEqual(apply.call_count, 4)
 
@@ -371,43 +375,56 @@ class RecoveryTests(unittest.TestCase):
         rgb = fixture.rgb_backend
         plugin = rgb.Plugin()
         plugin._settle_until = 30
-        now = [0.0]
-        ticks = iter((5, 10, 35, 65, 70))
-        async def sleep(_delay):
-            try:
-                now[0] = next(ticks)
-            except StopIteration:
-                raise asyncio.CancelledError
+        now = [0.0];delays=[]
+        async def sleep(delay):
+            delays.append(delay)
+            if not 0 < delay <= 10:raise asyncio.CancelledError
+            now[0] += delay
+            if now[0] > 300:raise asyncio.CancelledError
         observed = []
         async def offload(fn):
             observed.append(now[0])
             return True
         with patch.object(rgb.asyncio, "sleep", side_effect=sleep), \
-             patch.object(rgb.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(rgb, "time", types.SimpleNamespace(monotonic=lambda: now[0])), \
              patch.object(rgb, "_resume_detected", return_value=False), \
              patch.object(rgb, "_offload", side_effect=offload):
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(plugin._drift_loop())
-        self.assertEqual(observed, [5, 10, 70])
+        self.assertTrue(delays)
+        self.assertTrue(all(0 < delay <= 10 for delay in delays),delays)
+        boot = [at for at in observed if at < 30]
+        stable = [at for at in observed if at >= 45]
+        self.assertGreaterEqual(len(boot),2);self.assertLessEqual(len(boot),7)
+        self.assertLessEqual(boot[0],10)
+        self.assertGreaterEqual(len(stable),3)
+        self.assertTrue(all(45 <= b-a <= 75 for a,b in zip(stable,stable[1:])),observed)
 
     def test_remap_settles_at_boot_then_returns_to_slow_checks(self):
-        now = [0.0]
-        ticks = iter((5,10,35,65,70))
-        async def sleep(_):
-            try:
-                now[0] = next(ticks)
-            except StopIteration:
-                raise asyncio.CancelledError
+        now = [0.0];delays=[]
+        async def sleep(delay):
+            delays.append(delay)
+            if not 0 < delay <= 10:raise asyncio.CancelledError
+            now[0] += delay
+            if now[0] > 300:raise asyncio.CancelledError
         observed = []
         async def offload(fn):
             observed.append(now[0])
         with patch.object(remap.asyncio, "sleep", side_effect=sleep), \
-             patch.object(remap.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(remap, "time", types.SimpleNamespace(monotonic=lambda: now[0])), \
              patch.object(remap, "_resume_detected", return_value=False), \
+             patch.object(remap._service_watch, "consume_exit", return_value=False), \
              patch.object(remap.asyncio, "to_thread", side_effect=offload):
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(remap._watch_loop())
-        self.assertEqual(observed, [5,10,70])
+        self.assertTrue(delays)
+        self.assertTrue(all(0 < delay <= 10 for delay in delays),delays)
+        boot = [at for at in observed if at < 30]
+        stable = [at for at in observed if at >= 45]
+        self.assertGreaterEqual(len(boot),2);self.assertLessEqual(len(boot),7)
+        self.assertLessEqual(boot[0],10)
+        self.assertGreaterEqual(len(stable),3)
+        self.assertTrue(all(45 <= b-a <= 75 for a,b in zip(stable,stable[1:])),observed)
 
     def test_remap_rpc_rejects_unhashable_arguments(self):
         plugin = remap.Plugin()

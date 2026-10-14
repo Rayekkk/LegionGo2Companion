@@ -402,6 +402,15 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(plugin["main"], "main.py")
         self.assertEqual(plugin["bin"], "dist/index.js")
 
+    def test_plugin_version_falls_back_for_non_object_manifest(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(main,"PLUGIN_DIR",folder):
+            for raw in ('null','[]','"text"','42','true'):
+                with self.subTest(raw=raw):
+                    (Path(folder)/"plugin.json").write_text(raw,encoding="utf-8")
+                    self.assertEqual(main._plugin_version(),"0.0.0")
+            (Path(folder)/"plugin.json").write_text('{"version":"2.1.0"}',encoding="utf-8")
+            self.assertEqual(main._plugin_version(),"2.1.0")
+
     def test_get_version_reports_standalone_conflicts(self):
         response = asyncio.run(main.Plugin().get_version())
         self.assertEqual(response["version"], json.loads((ROOT / "plugin.json").read_text())["version"])

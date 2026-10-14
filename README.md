@@ -77,6 +77,8 @@ Normal use needs no terminal commands. If you build your own ZIP, follow the
 > **LeGo2 Brightness Fix** is installed. Uninstall the named plugins in Decky Settings,
 > keep their settings, then restart Decky or the console. Disabling them is not enough.
 > **Check again** confirms that the conflict is gone; a restart is still required.
+> An unreadable manifest belonging to an unrelated plugin is logged and does not
+> pause Companion. Failure to inspect the plugin directory itself still blocks controls.
 
 ### Moving from standalone plugins
 
@@ -479,7 +481,7 @@ download path remain available if you leave and return to About during the opera
 
 | What you see | What to do |
 |---|---|
-| All modules paused | Uninstall the conflicting standalone plugins, keep their settings, then restart Decky or the console. Renamed copies still count; keep backups outside Decky's plugin directory. If verification failed, repair the unreadable/incomplete installation. |
+| All modules paused | Uninstall the conflicting standalone plugins, keep their settings, then restart Decky or the console. Renamed copies still count; keep backups outside Decky's plugin directory. If the plugin directory cannot be inspected, restore access to it before retrying. |
 | A module is missing from the overview | Check Manage Modules. A disabled module is hidden; a failed start or pending cleanup has a retry action there. |
 | A hardware control is unavailable | Read the page's reason. Driver, InputPlumber, adapter and firmware checks determine availability; installing Companion does not supply missing system interfaces. |
 | A preference is saved but not confirmed | Check the current hardware state and the error. Wait for recovery or use the offered retry. An unavailable reading is not treated as a confirmed on/off state. |
@@ -487,6 +489,7 @@ download path remain available if you leave and return to About during the opera
 | Fan Control unavailable | Check the model, BIOS and EC versions against Requirements. Other variants stay blocked until their register mapping is validated. |
 | Fan Control blocked or External fan control | Stop the other fan/EC control tool and let it restore firmware automatic. Companion also blocks uncertain ownership; do not force-enable a second controller. |
 | Fan Control needs attention or Fan recovery pending | Read the reason, allow recovery to finish and resolve any sensor or ownership error. Review the saved curve before explicitly enabling it again. Keep custom control off if recovery cannot be confirmed. |
+| Fan Control reports a watchdog connection failure | This is communication between local processes. A fault still returns control to firmware automatic. Include the displayed reason and, before rebooting, the output of `sudo cat /run/legiongo2companion-fan/last-fault.json` in a report if that file exists. It retains the latest failed session; a healthy later session does not erase it. |
 | My fan curve is saved but Firmware automatic is shown | Saving does not enable custom control. Startup, reload, sleep, a fault or disabling the module requires you to enable Fan Control again. |
 | A fan graph point will not move further | Temperatures must stay ordered and speeds cannot decrease between points. The eighth point is fixed at 100°C/full speed; positive speeds below 1500 RPM are skipped. |
 | Fan RPM or APU shows a dash | The reading is unavailable or stale. Open Fan Control and read its status; another raw-port owner can prevent a safe read. A dash is not a confirmed stopped fan. |
@@ -500,7 +503,10 @@ download path remain available if you leave and return to About during the opera
 | Update check/download failed | Read the error and retry. You can also download the plugin ZIP from Releases and install it manually. |
 
 When reporting a problem, include the plugin version, SteamOS build/kernel, console model
-and the affected page's status/error. [CHANGELOG.md](CHANGELOG.md) lists changes by version.
+and the affected page's status/error, the time and action that triggered it, and the relevant
+[diagnostic logs](docs/LOGGING.md). Backend operations, desktop connection faults and independent
+worker recovery have separate, bounded records; the logging guide explains how to collect them.
+[CHANGELOG.md](CHANGELOG.md) lists changes by version.
 
 ## How it works
 
@@ -583,8 +589,9 @@ withdrawal rather than repeated hidden boosts.
 
 Control and the displayed APU value use **max(CPU Tctl, GPU edge)** from k10temp and
 amdgpu. The tested system exposes no Tdie or verified separate whole-package sensor.
-The EC temperature is an additional consistency check with an unproven physical
-sensor identity. A live tachometer reading is never replaced by the requested RPM.
+The EC temperature is supplementary telemetry with an unproven physical
+sensor identity. Its instantaneous difference from Tctl/GPU edge is not a fault;
+invalid or slow sensor reads still withdraw control. A live tachometer reading is never replaced by the requested RPM.
 
 A separate controller process and independent recovery process supervise fresh sensors,
 progress and ownership. Cooling rises quickly and falls more slowly to limit
@@ -621,11 +628,22 @@ for protocol provenance, migration details and the limits of the hardware eviden
 
 ## Development
 
+**Local 2.2 experiment:** an automatically registered **Legion Go Companion**
+Desktop Mode app uses **C++ and Qt Quick/QML**, presents the same nine modules,
+and calls the shared Decky backend and settings. The Decky menu stays unchanged.
+The native app has been built locally, deployed on the Legion and checked in
+Desktop and Gaming Mode, including shared settings and backend access. These
+checks do not establish physical controller firmware flashing or recovery.
+The manifest remains 2.1.0; this experimental work is not a new release.
+See [Desktop UI development notes](docs/DESKTOP_UI.md) for architecture, tests,
+pending SteamOS checks and the 2.2/2.3/3.0 roadmap.
+
 <details>
 <summary><b>Build, test and package from source</b></summary>
 
-Requires Node.js 18+ and a ZIP tool (`zip` on Linux or 7-Zip on Windows). Backend tests
-require Python 3.10+.
+Requires Node.js 24 and a ZIP tool (`zip` on Linux or 7-Zip on Windows). Backend tests
+require Python 3.10+. The experimental native Desktop build additionally requires
+CMake, Ninja, a C++17 compiler and Qt 6.11.2; see the Desktop notes.
 
 ```bash
 npm ci
@@ -633,6 +651,9 @@ npm run typecheck      # frontend types
 npm run test:frontend  # frontend regression suites
 npm test              # Python backend tests
 npm run build         # compile and validate the frontend
+python scripts/build-native.py --qt /path/to/Qt/6.11.2/gcc_64 --build /tmp/companion-native --test
+# Bundle the matching Linux runtime as described in docs/DESKTOP_UI.md.
+npm run test:desktop  # native API/source contract; Qt tests run in the command above
 npm run package       # create LegionGo2Companion-<version>.zip
 ```
 

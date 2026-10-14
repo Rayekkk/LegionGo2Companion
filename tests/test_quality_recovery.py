@@ -69,6 +69,7 @@ class GameLeaseTests(unittest.TestCase):
         with patch.object(vibe, '_active_app_id', '111'), patch.object(vibe, '_active_app_ts', 100), \
                 patch.object(vibe.time, 'monotonic', side_effect=lambda: clock[0]), \
                 patch.object(vibe, '_load_profiles', return_value=self.profiles()), \
+                patch.object(vibe, '_last_applied_values', self.profiles()['111']['settings']), \
                 patch.object(vibe, '_apply_settings') as apply, \
                 patch.object(vibe, 'scan_proc_for_appid', return_value='') as process:
             result = asyncio.run(plugin.set_active_app('111'))
@@ -176,7 +177,8 @@ class HelperDownloadTests(unittest.TestCase):
                 patch.object(tdp_updater.time, 'monotonic', side_effect=lambda: clock[0]):
             with self.assertRaisesRegex(TimeoutError, 'total time limit'):
                 helper.download_to(tdp.RYZENADJ_URL, output, timeout=30)
-        opened.assert_called_once_with(tdp.RYZENADJ_URL, timeout=tdp_updater.READ_TIMEOUT_SECONDS)
+        opened.assert_called_once_with(tdp.RYZENADJ_URL, timeout=tdp_updater.READ_TIMEOUT_SECONDS,
+                                       cancel=None, deadline=tdp_updater.MAX_DOWNLOAD_SECONDS)
         self.assertEqual(output.getvalue(), b'xxxx')
         self.assertTrue(response.closed)
 

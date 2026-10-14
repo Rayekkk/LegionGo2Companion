@@ -251,13 +251,13 @@ const notify = (title: string, body: string) => {
   try {
     toaster.toast({ title, body, duration: 4000 });
   } catch {
-    console.error(`[legotdp] ${title}: ${body}`);
+    console.error("[legiongo2companion] tdp.notification_failed");
   }
 };
 
 const notifyFailure = (title: string, err: unknown) => {
   const body = err instanceof Error ? err.message : String(err ?? "Unknown error");
-  console.error(`[legotdp] ${title}`, err);
+  console.error("[legiongo2companion] tdp.operation_failed");
   notify(title, body);
 };
 
@@ -331,7 +331,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
     const unsub = asUnsub(mgr?.RegisterForNotifyResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
-    console.warn("[legotdp] SleepManager lookup failed", e);
+    console.warn("[legiongo2companion] tdp.resume_lookup_failed");
   }
 
   try {
@@ -339,7 +339,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
       (window as any).SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
-    console.warn("[legotdp] legacy resume registration failed", e);
+    console.warn("[legiongo2companion] tdp.legacy_resume_registration_failed");
   }
 
   // Said out loud rather than swallowed: this going quiet again is exactly how
@@ -379,6 +379,7 @@ class AppWatcher {
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
+  private static reportFailed = false;
   private static generation = 0;
   private static delayedChecks = new Set<ReturnType<typeof setTimeout>>();
 
@@ -423,7 +424,7 @@ class AppWatcher {
       });
       if (reg?.unregister) this.unsubs.push(() => reg.unregister());
     } catch (e) {
-      console.warn("[legotdp] app lifetime notifications unavailable", e);
+      console.warn("[legiongo2companion] tdp.app_notifications_unavailable");
     }
 
     // The SMU comes back at firmware defaults after sleep. Decky has no backend
@@ -434,9 +435,9 @@ class AppWatcher {
       if (!this.started || generation !== this.generation) return;
       void reapply()
         .then((res) => {
-          if (!res.success) console.warn("[legotdp] reapply after resume failed", res.stderr);
+          if (!res.success) console.warn("[legiongo2companion] tdp.resume_reapply_failed");
         })
-        .catch((e) => console.error("[legotdp] reapply after resume threw", e));
+        .catch(() => console.error("[legiongo2companion] tdp.resume_reapply_failed"));
     });
     if (offResume) this.unsubs.push(offResume);
 
@@ -466,6 +467,7 @@ class AppWatcher {
     this.current = null;
     this.started = false;
     this.lastPush = 0;
+    this.reportFailed = false;
   }
 
   private static async check() {
@@ -484,9 +486,14 @@ class AppWatcher {
       try {
         await setActiveApp(game?.appId ?? "");
         if (!this.started || generation !== this.generation) return;
+        if (this.reportFailed) console.info("[legiongo2companion] tdp.foreground_reporting_restored");
+        this.reportFailed = false;
         this.lastPush = now;
       } catch (e) {
-        console.error("[legotdp] setActiveApp failed", e);
+        if (this.started && generation === this.generation && !this.reportFailed) {
+          this.reportFailed = true;
+          console.warn("[legiongo2companion] tdp.foreground_reporting_unavailable");
+        }
       } finally {
         if (generation === this.generation) this.busy = false;
       }
@@ -522,8 +529,11 @@ const LivePanel: FC = () => {
   useEffect(() => {
     if (!visible) return;
     let active = true;
-    setPanelActive(true);
-    const lease = setInterval(() => setPanelActive(true), PANEL_LEASE_MS);
+    // This advisory lease can expire when Decky disconnects or withdraws the
+    // module. A failed renewal/cleanup must not escape as an unhandled promise.
+    const updateLease = (value: boolean) => { void setPanelActive(value).catch(() => undefined); };
+    updateLease(true);
+    const lease = setInterval(() => updateLease(true), PANEL_LEASE_MS);
     const onInfo = (next: TdpInfo) => { if (active) setInfo(next); };
     addEventListener<[TdpInfo]>("tdp_info", onInfo);
     // Seed it: the first push is a full interval away, and the panel would
@@ -533,7 +543,7 @@ const LivePanel: FC = () => {
       active = false;
       clearInterval(lease);
       removeEventListener<[TdpInfo]>("tdp_info", onInfo);
-      setPanelActive(false);
+      updateLease(false);
     };
   }, [visible]);
 
@@ -799,7 +809,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
       if (!mountedRef.current || !visibleRef.current ||
           readId !== readSequenceRef.current || mutationEpoch !== mutationEpochRef.current ||
           actionRef.current) return;
-      console.warn("[legotdp] CPU power controls RPC unavailable", error);
+      console.warn("[legiongo2companion] tdp.cpu_controls_unavailable");
       const message = "CPU power controls are unavailable in this backend build.";
       acceptControls(unavailableCpuPowerControls(message));
       setRequestError(message);

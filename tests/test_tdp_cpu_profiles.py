@@ -341,6 +341,102 @@ class CpuProfileTests(unittest.TestCase):
         self.assertEqual(tuple(profile[key] for key in ('spl', 'sppt', 'fppt')), (25000, 28000, 35000))
         self.assert_hardware(True, '204')
 
+    def test_global_tdp_edit_saves_future_policy_without_displacing_game_or_ac(self):
+        for ac_online in (False, True):
+            with self.subTest(ac_online=ac_online):
+                game = self.game(preset='custom', ac_separate=True,
+                                 ac_spl=20000, ac_sppt=27000, ac_fppt=32000,
+                                 ac_preset='custom', ac_cpu_boost_enabled=False, ac_epp='26')
+                self.seed({'111': game}, active_preset='custom')
+                self.app = '111'; self.ac = ac_online
+                tdp._current_game_id = ''; tdp._transition_key = None
+                tdp._check_and_enforce()
+                target = tuple(self.limits)
+                generation = tdp._arm_ac_settle(target)
+                applies_before = len(self.applies)
+                result = self.rpc('apply_tdp', 35000, 37000, 45000, '', 'max', '111')
+                self.assertTrue(result['saved_only'])
+                self.assertFalse(result['applied'])
+                self.assertIn('saved', result['message'])
+                self.assertEqual(tuple(self.limits), target)
+                self.assertEqual(len(self.applies), applies_before)
+                self.assertEqual((tdp._ac_generation, tdp._ac_target), (generation, target))
+                saved = self.payload()
+                self.assertEqual(saved['game_profiles']['111'], game)
+                self.assertEqual(tuple(saved['settings'][key] for key in ('spl', 'sppt', 'fppt')),
+                                 (35000, 37000, 45000))
+                self.assertEqual(saved['settings']['active_preset'], 'max')
+                self.assertEqual(tuple(saved['settings']['active_' + key] for key in ('spl', 'sppt', 'fppt')),
+                                 target)
+                self.assert_hardware(not ac_online, '26' if ac_online else '204')
+                tdp._check_and_enforce()
+                self.assertEqual(tuple(self.limits), target)
+                self.app = ''
+                tdp._check_and_enforce()
+                self.assertEqual(self.limits, [35000, 37000, 45000])
+                self.assert_hardware(False, '77')
+
+    def test_global_tdp_edit_applies_without_a_game_override(self):
+        for running in ('', '111'):
+            with self.subTest(running=running):
+                self.seed({})
+                self.app = running
+                result = self.rpc('apply_tdp', 30000, 32000, 40000, '', 'custom', running)
+                self.assertTrue(result['applied'])
+                self.assertFalse(result['saved_only'])
+                self.assertEqual(self.limits, [30000, 32000, 40000])
+                self.assertEqual(tuple(self.payload()['settings']['active_' + key]
+                                       for key in ('spl', 'sppt', 'fppt')), (30000, 32000, 40000))
+
+    def test_failed_inactive_global_save_preserves_store_hardware_and_ac_ladder(self):
+        import safe_settings
+        self.seed({'111': self.game()})
+        self.app = '111'
+        tdp._check_and_enforce()
+        target = tuple(self.limits)
+        generation = tdp._arm_ac_settle(target)
+        before = self.payload()
+        applies_before = len(self.applies)
+        with patch.object(safe_settings, '_atomic_write_bytes', side_effect=OSError('disk full')):
+            result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', '111'))
+        self.assertFalse(result['success'])
+        self.assertFalse(result['applied'])
+        self.assertIn('disk full', result['stderr'])
+        self.assertEqual(self.payload(), before)
+        self.assertEqual(tuple(self.limits), target)
+        self.assertEqual(len(self.applies), applies_before, 'A save-only failure must not write hardware during rollback')
+        self.assertEqual((tdp._ac_generation, tdp._ac_target), (generation, target))
+        self.assert_hardware(True, '204')
+
+    def test_inactive_global_edit_rejects_stale_foreground_before_saving(self):
+        self.seed({'111': self.game(), '222': self.game(False, '26')})
+        self.app = '222'
+        before = self.payload()
+        result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', '111'))
+        self.assertFalse(result['success'])
+        self.assertEqual(result['stderr'], 'foreground game changed')
+        self.assertEqual(self.payload(), before)
+        self.assertEqual(self.applies, [])
+
+    def test_active_global_hardware_failure_still_restores_prior_limits(self):
+        before = self.payload()
+        apply = tdp._apply_limits
+        first = True
+        def refused(*values):
+            nonlocal first
+            result = apply(*values)
+            if first:
+                first = False
+                return {'success': False, 'returncode': -1, 'stdout': '', 'stderr': 'firmware refused'}
+            return result
+        with patch.object(tdp, '_apply_limits', side_effect=refused):
+            result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', ''))
+        self.assertFalse(result['success'])
+        self.assertIn('previous target restored', result['stderr'])
+        self.assertEqual(self.payload(), before)
+        self.assertEqual(self.limits, [25000, 28000, 35000])
+        self.assert_hardware(False, '77')
+
     def test_game_exit_other_game_and_profile_deletion_restore_global_cpu(self):
         for destination in ('', '222', 'delete'):
             with self.subTest(destination=destination):

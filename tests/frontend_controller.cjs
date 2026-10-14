@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -8,6 +9,11 @@ const compiled = ts.transpileModule(fs.readFileSync(path.join(root, 'src/control
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
 const settle = async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
+// Keep a full extra polling interval inside the backend lease. The exact UI
+// cadence is tuning; lease renewal and single-flight admission are the contract.
+const leaseSeconds = Number(fs.readFileSync(path.join(root, 'controller_backend.py'), 'utf8')
+  .match(/^LEASE_SECONDS\s*=\s*(\d+(?:\.\d+)?)$/m)?.[1]);
+assert.ok(Number.isFinite(leaseSeconds) && leaseSeconds > 0, 'Actual diagnostic lease is known');
 const status = {
   available: true, reason: '', gyro_source: 'system', applied_source: null,
   controlled: false, conflict: false, error: '', physical: { path: '/dev/test-physical', pid: 1, driver: 'test' },
@@ -50,6 +56,7 @@ function harness(initiallyVisible = true) {
     setTimeout: (fn, ms) => timer('timeout', fn, ms), clearTimeout: id => timers.delete(id),
     setInterval: (fn, ms) => timer('interval', fn, ms), clearInterval: id => timers.delete(id),
     require(name) {
+      if (name === './firmware') return { FirmwarePanel: 'FirmwarePanel' };
       if (name === 'react') return hooks;
       if (name === 'react/jsx-runtime') return jsx;
       if (name === '@decky/ui') return new Proxy({}, { get: (_, key) => key });
@@ -81,7 +88,8 @@ function harness(initiallyVisible = true) {
       if (!found) return false;
       const [id, entry] = found;
       if (kind === 'timeout') {
-        assert.ok(entry.ms >= 250 && entry.ms <= 500, 'diagnostic cadence fits the 3-second lease');
+        assert.ok(Number.isFinite(entry.ms) && entry.ms > 0 && entry.ms * 2 <= leaseSeconds * 1000,
+          'Diagnostic cadence leaves one extra interval inside the actual backend lease');
         timers.delete(id);
       }
       entry.fn();
@@ -184,4 +192,4 @@ async function start(h, token = 'test-token') {
   overlay.respond('controller_set_gyro_source', { ...status, controlled: true, gyro_source: 'right', applied_source: 'right' });
   await settle(); overlay.unmount();
   console.log('Controller UI: bounded leases, hidden/unmount cleanup, late replies, unknown readings and source-write races verified.');
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });

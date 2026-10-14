@@ -117,6 +117,7 @@ export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }
       }
     } catch (error) {
       if (active && requestGeneration === generation) {
+        console.warn(`[legiongo2companion] updates.${kind}_failed`);
         publish({ ...state, error: errorMessage(error, "The request failed. Try again.") });
       }
     } finally {

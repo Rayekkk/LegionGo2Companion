@@ -27,6 +27,8 @@ class FakeClient:
     def snapshot(self): return copy.deepcopy(self.state)
     def close(self): self.socket=None;self.state.update(active=False,automatic=True)
     def pump(self): return self.snapshot()
+    def check(self): return self.snapshot()
+    def stop_heartbeat(self): pass
 
 
 class FanBackendTests(unittest.IsolatedAsyncioTestCase):
@@ -191,6 +193,17 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.p._client.snapshot()['automatic'])
         self.assertEqual(len(self.p._client.calls),1)
 
+    async def test_disable_after_lost_command_still_confirms_auto_and_persists_off(self):
+        self.p._load();self.p._state['enabled']=True
+        self.p._client.state.update(active=True,automatic=False)
+        with patch.object(self.p._client,'configure',side_effect=RuntimeError('Channel lost')):
+            result=await self.p.set_enabled(False)
+        self.assertFalse(result['settings']['enabled'])
+        self.assertTrue(result['telemetry']['automatic'])
+        self.assertIsNone(self.p._client.socket)
+        self.assertFalse(fan.settings.getSetting('state')['enabled'])
+        self.assertIn('Channel lost',result['error'])
+
     async def test_corrupt_or_newer_schema_is_not_silently_enabled(self):
         fan.settings.setSetting('state',dict(defaults(),schema=99,enabled=True));fan.settings.commit()
         self.p._load();self.assertFalse(self.p._state['enabled']);self.assertIn('schema',self.p._error)
@@ -282,23 +295,54 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         state=await fresh.get_state();self.assertEqual(state['settings']['revision'],7)
 
 
+    async def test_cancelled_settings_write_holds_revision_lock_until_commit_finishes(self):
+        self.p._load();entered=threading.Event();release=threading.Event()
+        original=self.p._save
+        def delayed(value):
+            entered.set();release.wait(2);original(value)
+        with patch.object(self.p,'_save',side_effect=delayed):
+            request=asyncio.create_task(self.p.save_unit('percent',0))
+            while not entered.is_set():await asyncio.sleep(.005)
+            request.cancel();await asyncio.sleep(.01)
+            self.assertTrue(self.p._mutation.locked())
+            later=asyncio.create_task(self.p.save_unit('rpm',0))
+            try:
+                await asyncio.sleep(.01);self.assertFalse(later.done())
+            finally:release.set()
+            with self.assertRaises(asyncio.CancelledError):await request
+            with self.assertRaisesRegex(ValueError,'changed elsewhere'):await later
+        self.assertEqual(self.p._state['display_unit'],'percent')
+        self.assertEqual(self.p._state['revision'],1)
+
+
 class ClientRecoveryTests(unittest.TestCase):
     def test_snapshot_remains_responsive_while_an_io_thread_waits_for_recovery(self):
         client=fan.Client()
         client.state=dict(active=False,automatic=False,error='Recovery pending')
-        entered=threading.Event();release=threading.Event()
+        entered=threading.Event();release=threading.Event();finished=threading.Event()
+        states=[];errors=[]
         def recovering():
             with client.lock:
-                entered.set();release.wait(1)
+                entered.set();release.wait()
+        def read_snapshot():
+            try:states.append(client.snapshot())
+            except BaseException as exc:errors.append(exc)
+            finally:finished.set()
         worker=threading.Thread(target=recovering);worker.start()
-        self.assertTrue(entered.wait(1))
+        reader=threading.Thread(target=read_snapshot)
         try:
-            started=time.monotonic();state=client.snapshot();elapsed=time.monotonic()-started
-            self.assertEqual(state['error'],'Recovery pending')
-            self.assertLess(elapsed,.1,'A status read must not wait for EC recovery I/O')
+            self.assertTrue(entered.wait(5))
+            reader.start()
+            # Prove independence from the I/O lock, not a 100 ms scheduling SLA.
+            # Recovery cannot finish until cleanup explicitly releases it.
+            self.assertTrue(finished.wait(5),'A status read must not wait for EC recovery I/O')
+            self.assertEqual(errors,[])
+            self.assertEqual(states[0]['error'],'Recovery pending')
+            self.assertFalse(release.is_set())
         finally:
-            release.set();worker.join(2)
-        self.assertFalse(worker.is_alive())
+            release.set();worker.join(5)
+            if reader.ident is not None:reader.join(5)
+        self.assertFalse(worker.is_alive());self.assertFalse(reader.is_alive())
 
     def test_backup_automatic_readback_clears_old_custom_stop_verification(self):
         client=fan.Client()
@@ -340,7 +384,9 @@ class PassiveTelemetryTests(unittest.TestCase):
             reading=fan.read_automatic()
         self.assertTrue(reading['valid']);self.assertEqual(reading['rpm'],1733)
         self.assertEqual(reading['apu_temperature'],45);self.assertTrue(reading['automatic'])
-        self.assertEqual(events,['port closed','sensor closed','owner closed'])
+        self.assertCountEqual(events,['port closed','sensor closed','owner closed'])
+        self.assertLess(events.index('port closed'),events.index('owner closed'),
+                        'Raw EC access must close before another owner can acquire it')
         ec.set_target.assert_not_called();ec.release.assert_not_called()
 
     def test_sensor_failure_and_foreign_owner_fail_closed_without_cached_numbers(self):
@@ -493,10 +539,48 @@ class SafetyInputTests(unittest.TestCase):
                 for raw in ['NaN','-1','105001','', '45000\n45000']:
                     path.write_text(raw)
                     with self.assertRaises((RuntimeError,ValueError)): s.read()
+                    self.assertEqual(s.last_sample['code'], 'sensor_range' if raw in ('-1','105001') else 'sensor_value_format')
+                    self.assertEqual(s.last_sample['sensor_name'],'k10temp')
+                    if raw=='105001':self.assertEqual(s.last_sample['cpu_temperature'],105.001)
+                    self.assertIn('sensor_finished_at',s.last_sample)
                 path.write_text('45000')
                 with patch.object(guard.time,'monotonic',side_effect=[0,1]):
                     with self.assertRaisesRegex(RuntimeError,'Stale'): s.read()
+                self.assertEqual(s.last_sample['code'],'sensor_acquisition_timeout')
+                self.assertEqual(s.last_sample['acquisition_ms'],1000)
+                self.assertEqual(s.last_sample['cpu_temperature'],45)
+                self.assertEqual(s.read(),{'k10temp':45})
+                self.assertNotIn('code',s.last_sample,'A later healthy acquisition must not inherit an old fault')
             finally:s.close()
+
+    def test_fault_snapshot_log_survives_desktop_filter_and_keeps_original_sample(self):
+        import diagnostics
+        import diagnostics_reader
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);root.chmod(0o700)
+            # Permission checks are POSIX-specific and exercised by process tests.
+            with patch.object(guard.os,'geteuid',return_value=root.stat().st_uid,create=True), \
+                    patch.object(guard,'diagnostic_event') as log:
+                guard.record_fault(root,'session-sample','Invalid EC temperature reading.','ec_readback',
+                                   sensor_sample=dict(cpu_temperature=72.25,gpu_temperature=47,
+                                       ec_temperature=255,ec_started_at=12,ec_finished_at=12.01,
+                                       code='ec_temperature_range',password='not-allowed'))
+            if not log.called:
+                self.skipTest('POSIX private-directory mode is required')
+            args,context=log.call_args
+            self.assertEqual(args,('fan','fault_sample'))
+            self.assertIn('ec_temperature=255',context['reason'])
+            self.assertIn('cpu_temperature=72.25',context['reason'])
+            records=[]
+            with patch.object(diagnostics,'_sink',lambda text,level:records.append(json.loads(text))):
+                diagnostics.event(*args,**context)
+            normalized=diagnostics_reader.normalize_event(records[0],'fan')
+            self.assertEqual(normalized['context']['code'],'ec_temperature_range')
+            self.assertIn('ec_temperature=255',normalized['context']['reason'])
+            record=json.loads((root/'last-fault.json').read_text())
+            self.assertNotIn('password',record['sensor_sample'])
+            self.assertNotIn('not-allowed',json.dumps(record))
 
     def test_suspend_gap_releases_but_normal_clock_jitter_does_not(self):
         with patch.object(guard.time,'CLOCK_BOOTTIME',7,create=True), \
@@ -504,6 +588,19 @@ class SafetyInputTests(unittest.TestCase):
                 patch.object(guard.time,'monotonic',return_value=95):
             self.assertEqual(guard.boot_gap(5.1),5)
             with self.assertRaisesRegex(RuntimeError,'Suspend'): guard.boot_gap(3)
+
+    def test_conflicting_kernel_modules_are_matched_by_exact_module_name(self):
+        from pathlib import Path
+        for modules,blocked in [('legion_laptop 4096 0 - Live 0x0',True),
+                                ('gpd_fan 4096 0 - Live 0x0',True),
+                                ('unrelated_legion_laptop_monitor 4096 0 - Live 0x0',False),
+                                ('gpd_fan_telemetry 4096 0 - Live 0x0',False)]:
+            with self.subTest(modules=modules), \
+                    patch.object(Path,'read_text',lambda p:modules if p.name=='modules' else ''), \
+                    patch.object(Path,'glob',return_value=[]):
+                if blocked:
+                    with self.assertRaisesRegex(RuntimeError,'Conflicting fan driver'):guard.check_owners()
+                else:guard.check_owners()
 
     def test_pci_aperture_is_not_claimant_but_real_ec_port_driver_blocks(self):
         from pathlib import Path

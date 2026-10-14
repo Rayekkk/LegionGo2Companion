@@ -68,6 +68,19 @@ in SOURCE.md.
 
 The display module shells out to xprop from SteamOS. xprop is not redistributed.
 
+Qt 6.11.2 (Qt Base, Declarative/Quick/Controls, SVG and Wayland)
+Copyright The Qt Company Ltd. and respective Qt contributors
+https://www.qt.io/ ; https://code.qt.io/
+The experimental native Desktop app dynamically links the LGPLv3 Qt runtime.
+License texts, corresponding upstream source locations and upstream SDK license
+inventories are under dist/desktop/licenses. The inventories describe the full
+upstream SDK; optional SDK components are not all bundled in this application.
+Application C++/QML source and build scripts are included, and compatible Qt
+shared libraries can be replaced without rebuilding the plugin backend.
+ICU 73.2 is included with its Unicode license in the same directory.
+Desktop uses no bundled React, browser engine or Python GUI framework.
+The unchanged Decky frontend continues using Steam's React runtime.
+
 InputPlumber 0.78.0 (external SteamOS service)
 Copyright (C) ShadowBlip contributors
 https://github.com/ShadowBlip/InputPlumber
@@ -82,3 +95,8 @@ documented by that project. No InputPlumber source is incorporated in the plugin
 Battery and IMU controls use the existing Linux kernel power-supply and
 hid-lenovo-go interfaces. These external kernel drivers are not bundled or
 modified. See SOURCE.md for interface references.
+
+OpenSSL (external system executable, not bundled)
+https://www.openssl.org/
+Experimental controller firmware preparation calls the system OpenSSL verifier
+for RSA-PSS signatures. No OpenSSL binary or library is redistributed here.

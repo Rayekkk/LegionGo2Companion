@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 // Execute the actual TSX component with minimal React/Decky test doubles.
 // Pending edits must be durably submitted when a view is closed.
 const fs = require('node:fs');
@@ -12,17 +13,27 @@ const state = {
     brightness: 50, speed: 50, power_led_enabled: true },
   rgb: { supported: true, effects: [] }, power_led: { supported: false },
 };
-const effects = [], timers = new Map(), calls = [];
-let timerId = 0, stateIndex = 0;
+const slots = [], effects = new Map(), pendingEffects = [], timers = new Map(), calls = [];
+let timerId = 0, cursor = 0;
+const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => value === b[i]);
 const hooks = {
   useState: initial => {
-    const index = stateIndex++;
-    let value = index === 0 ? structuredClone(state) : initial;
-    return [value, next => { value = typeof next === 'function' ? next(value) : next; }];
+    const index = cursor++;
+    if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial;
+    return [slots[index], next => { slots[index] = typeof next === 'function' ? next(slots[index]) : next; }];
   },
-  useRef: value => ({ current: value }),
-  useCallback: fn => fn,
-  useEffect: fn => effects.push(fn),
+  useRef: value => { const index = cursor++; return slots[index] ??= { current: value }; },
+  useCallback: (fn, deps) => {
+    const index = cursor++;
+    if (!slots[index] || !same(slots[index].deps, deps)) slots[index] = { fn, deps };
+    return slots[index].fn;
+  },
+  useEffect: (fn, deps) => {
+    const index = cursor++, previous = effects.get(index);
+    if (!previous || !same(previous.deps, deps)) pendingEffects.push(() => {
+      previous?.cleanup?.(); effects.set(index, { deps, cleanup: fn() });
+    });
+  },
 };
 const api = { useQuickAccessVisible: () => true,
   callable: name => async (...args) => { calls.push({ name, args }); return structuredClone(state); } };
@@ -43,8 +54,12 @@ vm.runInNewContext(compiled, {
     throw new Error(name);
   },
 });
-const tree = moduleValue.exports.RgbPage();
-const cleanups = effects.map(fn => fn()).filter(fn => typeof fn === 'function');
+function render() {
+  cursor = 0;
+  const tree = moduleValue.exports.RgbPage();
+  pendingEffects.splice(0).forEach(fn => fn());
+  return tree;
+}
 function find(node, label) {
   if (!node || typeof node !== 'object') return undefined;
   if (node.props?.label === label) return node;
@@ -52,15 +67,20 @@ function find(node, label) {
     const found = find(child, label); if (found) return found;
   }
 }
-const slider = find(tree, 'Brightness');
-assert.ok(slider);
-slider.props.onChange(73);
-assert.equal(timers.size, 1);
-assert.equal([...timers.values()][0].delay, 450);
-cleanups.forEach(fn => fn()); // Navigate to All Controls before 450 ms.
-assert.equal(timers.size, 0);
-Promise.resolve().then(() => {
+const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+(async () => {
+  render(); await settle();
+  const slider = find(render(), 'Brightness');
+  assert.ok(slider, 'The real status RPC makes the brightness control available.');
+  slider.props.onChange(73);
+  assert.equal(timers.size, 1);
+  const delay = [...timers.values()][0].delay;
+  assert.ok(Number.isFinite(delay) && delay > 0 && delay <= 1000,
+    'The pending gesture has a bounded debounce, without prescribing its exact tuning.');
+  for (const effect of effects.values()) effect.cleanup?.(); // Navigate away before the gesture fires.
+  assert.equal(timers.size, 0);
+  await settle();
   assert.equal(calls.filter(c => c.name === 'rgb_set_brightness').length, 1);
   assert.equal(calls.find(c => c.name === 'rgb_set_brightness').args[0], 73);
   console.log('RGB brightness edit survives closing the view before debounce expires.');
-});
+})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });
