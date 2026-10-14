@@ -176,7 +176,11 @@ ExportResult writeExport(const QString &directory,const QByteArray &bytes,const 
     const int dir=::open(QFile::encodeName(directory).constData(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
     struct stat info {};
     if(dir<0 || ::fstat(dir,&info) || info.st_uid!=::getuid()) {
-        if(dir>=0)::close(dir);result.error="Desktop folder is unavailable.";return result;
+        if(dir>=0) {
+            ::close(dir);
+        }
+        result.error="Desktop folder is unavailable.";
+        return result;
     }
 #else
     const QFileInfo info(directory);

@@ -71,8 +71,9 @@ class RuntimeTests(unittest.TestCase):
             process.service_runtime(TransferPolicy(frozenset({1024}),1,5,3600,3600))
 
     def test_linux_required_without_mutation(self):
+        frozen = bundle()
         with patch('controller_firmware_stage.os.name','nt'), patch.object(stage,'_publish') as publish:
-            with self.assertRaises(fw.FirmwareError): stage.stage_bundle(bundle())
+            with self.assertRaises(fw.FirmwareError): stage.stage_bundle(frozen)
             publish.assert_not_called()
         with patch('controller_firmware_process.os.name','nt'), patch.object(process.subprocess,'run') as run:
             with self.assertRaises(fw.FirmwareError): process.launch_service(None,policy())
