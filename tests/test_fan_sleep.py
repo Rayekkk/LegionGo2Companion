@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 import errno
 import os
+import time
 import unittest
 from unittest.mock import patch
 from fan_sleep import SleepSafety
@@ -60,7 +61,16 @@ class SleepSafetyTests(unittest.TestCase):
                 SleepSafety()
             self.assertTrue(lib.closed)
     def test_prepare_signal_disconnect_and_queue_flood_fail_closed(self):
-        for events in [[False,True],['disconnect'],['owner-change'],[False]*17]:
+        class Flood:
+            """Never-empty input; do not pin the production batch size to 16."""
+            def __init__(self): self.deadline=None
+            def __bool__(self): return True
+            def pop(self,index):
+                if self.deadline is None: self.deadline=time.monotonic()+5
+                if time.monotonic()>=self.deadline:
+                    raise AssertionError('Sleep-event draining did not terminate')
+                return False
+        for events in [[False,True],['disconnect'],['owner-change'],Flood()]:
             lib=Library(self.r)
             with patch('fan_sleep.c.CDLL',return_value=lib):s=SleepSafety()
             lib.messages=events

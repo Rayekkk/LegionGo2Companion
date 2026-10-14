@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 import copy
+import pathlib
+import tempfile
 import unittest
 from fan_policy import *
 
@@ -11,8 +13,9 @@ class FanPolicyTests(unittest.TestCase):
         self.assertEqual(defaults()['global_curve'],TEMPLATES['balanced'])
         self.assertEqual(defaults()['display_unit'],'rpm');self.assertFalse(defaults()['assign_tdp_presets'])
         self.assertFalse(defaults()['enabled']);self.assertEqual(defaults()['presets'],{})
-        modified=defaults();modified['global_curve'][0][1]=0
-        self.assertEqual(TEMPLATES['balanced'][0][1],1500)
+        original=copy.deepcopy(TEMPLATES)
+        modified=defaults();modified['global_curve'][0][1]=MAX_RPM
+        self.assertEqual(TEMPLATES,original)
         for temp in range(101):
             self.assertLessEqual(target_for(TEMPLATES['silent'],temp),target_for(TEMPLATES['balanced'],temp))
             self.assertLessEqual(target_for(TEMPLATES['balanced'],temp),target_for(TEMPLATES['aggressive'],temp))
@@ -34,7 +37,7 @@ class FanPolicyTests(unittest.TestCase):
             with self.subTest(curve=curve), self.assertRaises(ValueError):
                 validate_curve(curve)
         self.assertEqual(validate_curve([[t,0 if i<7 else MAX_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)])[0][1],0)
-        for index, axis, value in [(0,0,-1),(7,0,99),(5,0,61),(7,1,4799),
+        for index, axis, value in [(0,0,-1),(7,0,99),(5,0,DEFAULT_CURVE[4][0]),(7,1,4799),
                                   (7,1,5300),(2,0,True),(2,1,float('nan')),(0,1,1400)]:
             bad = copy.deepcopy(DEFAULT_CURVE); bad[index][axis] = value
             with self.subTest(index=index, value=value), self.assertRaises(ValueError):
@@ -65,14 +68,15 @@ class FanPolicyTests(unittest.TestCase):
         self.assertEqual(p.step(c,77,39),MAX_RPM-600)
 
     def test_settings_schema_assignments_and_defaults_are_isolated(self):
-        a, b = defaults(), defaults(); a['global_curve'][0][1]=3300
-        self.assertEqual(b['global_curve'][0][1],1500)
+        a, b = defaults(), defaults(); original=copy.deepcopy(b)
+        a['global_curve'][0][1]=MAX_RPM
+        self.assertEqual(b,original)
         self.assertFalse(validate_settings(b)['enabled'])
         for value in [dict(b,schema=99),dict(b,enabled='false'),dict(b,revision=True),
                       dict(b,presets={'qam':DEFAULT_CURVE}),dict(b,presets={'silent': []})]:
             with self.assertRaises(ValueError): validate_settings(value)
         all_presets = dict(b,presets={p:DEFAULT_CURVE for p in PRESETS})
-        self.assertEqual(len(validate_settings(all_presets)['presets']),5)
+        self.assertEqual(set(validate_settings(all_presets)['presets']),set(PRESETS))
         self.assertIn('max',validate_settings(all_presets)['presets'])
         self.assertIn('custom',validate_settings(all_presets)['presets'])
 
@@ -159,6 +163,53 @@ class FanPolicyTests(unittest.TestCase):
         self.assertEqual(new['curve_archive_v2']['global'],curve)
         for bad in (dict(old,schema=True),dict(old,schema=2.0),dict(old,global_curve=[[0,0]]*8)):
             with self.assertRaises(ValueError):migrate_settings(bad)
+
+    def test_hard_max_ramps_a_running_fan_without_masking_failure(self):
+        curve=[[0,1500],[35,1500],[45,1500],[55,1500],[65,1500],[75,1500],[99,1500],[100,MAX_RPM]]
+        validate_curve(curve)
+        p=CurveControl(0,99,curve)
+        for tick in range(1,121):p.step(curve,99,tick/4)
+        self.assertEqual(p.step(curve,100,30.25),MAX_RPM)
+        self.assertFalse(p.is_stalled(1500,30.25),'a running rotor cannot accelerate in the write sample')
+        self.assertTrue(p.is_stalled(0,30.25),'hard maximum must not hide an already stopped rotor')
+        for tick in range(122,174):
+            self.assertEqual(p.step(curve,100,tick/4),MAX_RPM)
+        self.assertTrue(p.is_stalled(1500,43.25),'repeated hot samples must not extend ramp grace')
+        self.assertFalse(p.is_stalled(MAX_RPM,43.25))
+
+    def test_hard_max_starts_a_stopped_fan_with_bounded_startup_grace(self):
+        curve=[[0,0],[35,0],[45,0],[55,0],[65,0],[75,0],[99,0],[100,MAX_RPM]]
+        validate_curve(curve)
+        p=CurveControl(0,99,curve)
+        for tick in range(1,121):p.step(curve,99,tick/4)
+        self.assertEqual(p.step(curve,100,30.25),MAX_RPM)
+        self.assertFalse(p.is_stalled(0,30.25))
+        for tick in range(122,174):p.step(curve,100,tick/4)
+        self.assertTrue(p.is_stalled(0,43.25),'a failed hard-max start must be detected')
+
+    def test_independent_hard_max_adoption_preserves_acceleration_and_start_grace(self):
+        from fan_guardian import adopt_hard_max
+        class Readback:
+            def word(self, addr):
+                self.assert_address=addr
+                return MAX_RPM
+        for rpm in (0,1500):
+            curve=[[0,rpm],[35,rpm],[45,rpm],[55,rpm],[65,rpm],[75,rpm],[99,rpm],[100,MAX_RPM]]
+            p=CurveControl(0,99,curve)
+            for tick in range(1,121):p.step(curve,99,tick/4)
+            with self.subTest(rpm=rpm),tempfile.TemporaryDirectory() as directory:
+                root=pathlib.Path(directory)
+                (root/'hard-max').touch()
+                (root/'owned-target.json').write_text('{"rpm":4800}')
+                state={};ec=Readback()
+                adopt_hard_max(ec,root,state,p,30.25)
+                self.assertEqual(state['target'],MAX_RPM)
+                self.assertEqual(ec.assert_address,0xC6C8)
+                self.assertFalse((root/'hard-max').exists())
+                self.assertFalse(p.is_stalled(rpm,30.25))
+                if rpm:self.assertTrue(p.is_stalled(0,30.25))
+                for tick in range(122,174):p.step(curve,100,tick/4)
+                self.assertTrue(p.is_stalled(rpm,43.25))
 
     def test_flat_curve_startup_settles_while_temperature_increases(self):
         curve=[[t,1501 if i<7 else MAX_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)]

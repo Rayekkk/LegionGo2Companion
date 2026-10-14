@@ -163,7 +163,7 @@ export const CurveGraph: FC<{curve: Curve; selected: number; status: FanState; d
         event.preventDefault();select(i);if(!disabled && i<7){drag.current={point:i,pointer:event.pointerId};svg.current?.setPointerCapture(event.pointerId);}
       }}><circle data-fan-point={i+1} cx={x(t)} cy={y(r)} r={fullscreen ? 22*layout.scale : 16} fill="transparent" />
         <circle cx={x(t)} cy={y(r)} r={fullscreen ? (i===selected ? 8 : 5)*layout.scale : i===selected ? 7 : 4} fill={i===selected ? "#fff" : "#66c0f4"} stroke="#66c0f4" strokeWidth={fullscreen ? 2*layout.scale : 2} /></g>)}
-      {fresh && <g data-fan-live-marker="true"><circle cx={x(Math.min(100,Math.max(0,status.readings!.apu_temperature!)))}
+      {fresh && <g data-fan-live-marker="true" style={{pointerEvents:"none"}}><circle cx={x(Math.min(100,Math.max(0,status.readings!.apu_temperature!)))}
         cy={y(Math.min(status.limits.max_rpm,Math.max(0,status.readings!.rpm!)))} r="6" fill="#f5c96b" stroke="#111" strokeWidth="2" />
         <text x={left} y={fullscreen ? 24 : 18} fill="#f5c96b" fontSize={font}>{`Live tach · ${fanReadingLabel(status)}`}</text></g>}
       <text x={left} y={fullscreen ? 299 : 240} fill="currentColor" fontSize={font}>{`Point ${selected+1}/8 · ${curve[selected][0]}°C · ${speedLabel(curve[selected][1],status)}${selected===7 ? " · fixed" : ""}`}</text>
@@ -209,6 +209,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [readError, setReadError] = useState("");
   const [readingNow, setReadingNow] = useState(Date.now());
   const dirtyRef = useRef(false), mounted = useRef(false), baseRevision = useRef(0);
   const mutationEpoch = useRef(0), busyRef = useRef(false), acceptedRevision = useRef(-1);
@@ -218,6 +219,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     if (!mounted.current) return;
     if (next.settings.revision < acceptedRevision.current) return;
     acceptedRevision.current = next.settings.revision;
+    setReadError("");
     setStatus(next);
     if (!next.settings.assign_tdp_presets && scopeRef.current !== "global") {
       if (draftRef.current) drafts.current[scopeRef.current]={curve:clone(draftRef.current),dirty:dirtyRef.current,revision:baseRevision.current};
@@ -250,7 +252,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
       const epoch = mutationEpoch.current;
       try { const next = await getFanState(() => !cancelled && rootVisible() && (fullscreen || isViewVisible())); if (!cancelled && epoch === mutationEpoch.current) accept(next); }
       catch (e) { if (!cancelled && epoch === mutationEpoch.current) {
-        setNotice(String(e));
+        setReadError(String(e));
         setStatus(previous => previous && { ...previous, readings: { valid: false, error: String(e) } });
       } }
       finally { if (!cancelled) timer = setTimeout(() => void poll(), 1000); }
@@ -277,8 +279,9 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     } catch (e) { if (mounted.current) setNotice(String(e)); }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
-  if (!status || !draft) return <div ref={pageRoot}>{fullscreen ? <DialogBody>{notice || "Reading fan state…"}</DialogBody>
-    : <PanelSection><PanelSectionRow><Field focusable label="Fan Control" description={notice || "Reading fan state…"} /></PanelSectionRow></PanelSection>}</div>;
+  const feedback = notice || readError;
+  if (!status || !draft) return <div ref={pageRoot}>{fullscreen ? <DialogBody>{feedback || "Reading fan state…"}</DialogBody>
+    : <PanelSection><PanelSectionRow><Field focusable label="Fan Control" description={feedback || "Reading fan state…"} /></PanelSectionRow></PanelSection>}</div>;
   const telemetry = status.telemetry, limits = status.limits;
   const edit = (axis: 0 | 1, value: number, point=selected) => {
     if (busyRef.current || point===7) return;
@@ -347,7 +350,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
       </Focusable>
       {assignmentMode && <div data-fan-assignment-note="true" style={{color:"#66c0f4",fontSize:13}}>{ASSIGNMENT_NOTE}</div>}
       <div data-fan-dialog-graph="true" style={{minHeight:260,flex:"1 0 260px",maxHeight:480}}>{graph}</div>
-      {notice && <div role="status">{notice}</div>}
+      {feedback && <div role="status">{feedback}</div>}
       {scope!=="global" && status.settings.presets[scope] && <DialogButton disabled={busy || dirty} onClick={()=>void mutate(()=>saveCurve(scope,null,baseRevision.current),true)}>Use global curve for {title(scope)}</DialogButton>}
       <div style={{fontSize:13,color:"#afb7c0"}}>7 editable points · 100°C / full speed is fixed{dirty ? " · Unsaved changes" : ""}</div>
     </DialogBody>
@@ -371,7 +374,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
         onChange={enabled => void mutate(() => setEnabled(enabled))} /></PanelSectionRow>
       {(status.error || telemetry?.error || status.readings?.error) && <PanelSectionRow><Field focusable label="Fan Control needs attention"
         description={status.error || telemetry?.error || status.readings?.error} /></PanelSectionRow>}
-      {notice && <PanelSectionRow><Field focusable label="Fan Control status" description={notice} /></PanelSectionRow>}
+      {feedback && <PanelSectionRow><Field focusable label="Fan Control status" description={feedback} /></PanelSectionRow>}
     </PanelSection>
     <PanelSection title={dirty ? "Curve · unsaved" : undefined}>
       {assignmentMode && <PanelSectionRow><DropdownItem label="Curve" selectedOption={scope} disabled={busy}

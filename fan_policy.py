@@ -211,15 +211,29 @@ class CurveControl:
         self.cool_since = now
         self.last_down = now
 
+    def _remember_target(self, now):
+        if not self.history or self.history[-1][1] != self.target:
+            self.history.append((now, self.target))
+        while len(self.history)>1 and self.history[1][0] <= now-12:
+            self.history.popleft()
+
+    def force_max(self, now, temperature=HARD_MAX_C):
+        # The target changes immediately; a healthy rotor still needs its
+        # bounded acceleration window. Repeated hot samples cannot renew it.
+        if self.target == 0:
+            self.started = now
+            self.history.clear()
+        self.target = MAX_RPM
+        self.peak = temperature
+        self.cool_since = None
+        self.settling = False
+        self._remember_target(now)
+        return self.target
+
     def step(self, curve, temperature, now):
         desired = target_for(curve, temperature)
         if temperature >= HARD_MAX_C:
-            self.target = MAX_RPM
-            self.peak = temperature
-            self.cool_since = None
-            self.settling = False
-            self.history.clear(); self.history.append((now, MAX_RPM))
-            return MAX_RPM
+            return self.force_max(now, temperature)
         if self.target == 0 and desired > 0:
             self.started = now
             self.target = desired
@@ -253,10 +267,7 @@ class CurveControl:
         else:
             self.cool_since = None
             self.peak = max(self.peak, temperature)
-        if self.history[-1][1] != self.target:
-            self.history.append((now, self.target))
-        while len(self.history)>1 and self.history[1][0] <= now-12:
-            self.history.popleft()
+        self._remember_target(now)
         return self.target
 
     def is_stalled(self, rpm, now):

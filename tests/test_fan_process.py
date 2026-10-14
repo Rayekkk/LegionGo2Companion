@@ -71,8 +71,12 @@ def model_worker(root, ipc_fd):
         def read(self):
             if (root/'invalid-sensor').exists(): raise RuntimeError('Invalid model sensor')
             temp=int((root/'temperature').read_text()) if (root/'temperature').exists() else 100 if (root/'thermal').exists() else 45
-            model_sample['temperature']=temp
-            return {'k10temp':temp,'amdgpu':temp-1}
+            model_sample['temperature']=int((root/'ec-temperature').read_text()) if (root/'ec-temperature').exists() else temp
+            gpu=int((root/'gpu-temperature').read_text()) if (root/'gpu-temperature').exists() else temp-1
+            stamp=time.monotonic()
+            self.last_sample=dict(cpu_temperature=temp,gpu_temperature=gpu,
+                                  sensor_started_at=stamp,sensor_finished_at=stamp,acquisition_ms=0)
+            return {'k10temp':temp,'amdgpu':gpu}
         def close(self): pass
     class Sleep:
         def __init__(self):
@@ -114,6 +118,7 @@ class FanProcessTests(unittest.TestCase):
         self.workers=[];self.sockets=[]
         state=self.start()
         self.assertEqual(state['kind'],'ready',state)
+        self.initial=state
 
     def start(self):
         a,b=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
@@ -138,9 +143,13 @@ class FanProcessTests(unittest.TestCase):
         raise AssertionError('Missing '+kind+': '+last)
 
     def configure(self,enabled=True,revision=1,curve=None):
-        from fan_policy import DEFAULT_CURVE,MAX_RPM
+        # A process/IPC fixture must not depend on the shipped Balanced template
+        # continuing to request exactly 1800 RPM at the model's 45 degrees.
+        # Template contents have their own policy tests.
+        running_curve = [[0,1800],[20,1800],[35,1800],[50,1800],
+                         [65,1800],[80,2000],[90,3000],[100,4800]]
         self.ipc.send(json.dumps(dict(op='heartbeat')).encode())
-        self.ipc.send(json.dumps(dict(op='configure',enabled=enabled,curve=curve if curve is not None else DEFAULT_CURVE,revision=revision)).encode())
+        self.ipc.send(json.dumps(dict(op='configure',enabled=enabled,curve=curve if curve is not None else running_curve,revision=revision)).encode())
         return self.receive_kind('configured',2)
 
     def wait_release(self,timeout=5):
@@ -202,7 +211,48 @@ class FanProcessTests(unittest.TestCase):
     def test_invalid_sensor_and_thermal_boundary_fail_closed(self):
         self.configure();(self.root/'invalid-sensor').touch();self.wait_release()
 
+    def test_independent_ec_channel_does_not_reject_startup(self):
+        self.ipc.close();self.wait_release()
+        (self.root/'temperature').write_text('72')
+        (self.root/'gpu-temperature').write_text('47')
+        (self.root/'ec-temperature').write_text('40')
+        ready=self.start()
+        self.assertEqual(ready['kind'],'ready',ready)
+        self.assertEqual(ready['ec_temperature'],40)
+        state=self.configure()
+        self.assertTrue(state['active']);self.assertFalse(state['automatic'])
+        self.assertEqual(state['temperatures'],{'k10temp':72,'amdgpu':47})
+
+    def test_independent_temperature_changes_keep_control_and_use_hotter_apu_channel(self):
+        from fan_policy import DEFAULT_CURVE
+        (self.root/'gpu-temperature').write_text('85')
+        (self.root/'ec-temperature').write_text('45')
+        state=self.configure(curve=DEFAULT_CURVE)
+        self.assertTrue(state['active']);self.assertEqual(state['target'],4400)
+        (self.root/'temperature').write_text('72')
+        (self.root/'gpu-temperature').write_text('47')
+        deadline=time.monotonic()+1.5
+        while time.monotonic()<deadline:
+            state=self.receive_kind('telemetry',1.5)
+            if state.get('temperatures')=={'k10temp':72,'amdgpu':47}:break
+        self.assertEqual(state['temperatures'],{'k10temp':72,'amdgpu':47})
+        self.assertTrue(state['active']);self.assertEqual(state['ec_temperature'],45)
+        self.assertFalse(state['automatic']);self.assertFalse((self.root/'last-fault.json').exists())
+
+    def test_invalid_ec_value_preserves_actual_fault_sample_and_releases(self):
+        self.configure()
+        (self.root/'ec-temperature').write_text('255')
+        self.wait_release()
+        record=json.loads((self.root/'last-fault.json').read_text())
+        self.assertEqual(record['sensor_sample']['code'],'ec_temperature_range')
+        self.assertEqual(record['sensor_sample']['ec_temperature'],255)
+        self.assertEqual(record['sensor_sample']['cpu_temperature'],45)
+        self.assertIn('sensor_started_at',record['sensor_sample'])
+        self.assertIn('ec_finished_at',record['sensor_sample'])
+        self.assertTrue(record['recovery']['automatic'])
+
     def test_100_hardmax_without_handover_or_heating_hardware(self):
+        (self.root/'ec-temperature').write_text('45')
         self.configure();(self.root/'thermal').touch()
         end=time.monotonic()+1.5
         while time.monotonic()<end:
@@ -213,10 +263,11 @@ class FanProcessTests(unittest.TestCase):
         self.fail('No hard maximum')
 
     def test_duplicate_owner_cannot_arm_or_steal_override(self):
-        self.configure();first=self.p
+        active=self.configure();first=self.p
         st=self.start();self.assertEqual(st['kind'],'closed');self.assertIn('Another',st['error'])
         self.assertIsNone(first.poll())
-        self.assertEqual((self.root/'ports-model').read_bytes()[0xC6C9],1800>>8)
+        self.assertEqual(int.from_bytes((self.root/'ports-model').read_bytes()[0xC6C8:0xC6CA],'little'),
+                         active['override'],'A second owner must not change either override byte')
 
     def test_explicit_stop_is_not_native_auto_and_disable_releases(self):
         from fan_policy import DEFAULT_CURVE,MAX_RPM
@@ -281,6 +332,7 @@ class FanProcessTests(unittest.TestCase):
     def test_stopped_frozen_worker_thermal_backup_releases(self):
         from fan_policy import DEFAULT_CURVE,MAX_RPM
         self.configure(curve=[[t,0 if i<7 else MAX_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)]);self.receive_kind('telemetry',1)
+        (self.root/'ec-temperature').write_text('45')
         os.kill(self.p.pid,signal.SIGSTOP);(self.root/'temperature').write_text('100')
         # Frozen worker cannot service heat; backup sets max before progress-lease recovery.
         end=time.monotonic()+1.5
@@ -331,6 +383,128 @@ class FanProcessTests(unittest.TestCase):
         self.ipc.send(json.dumps(dict(op='configure',enabled=True,curve=DEFAULT_CURVE,revision=1)).encode())
         self.wait_release()
         self.assertEqual((self.root/'ports-model').read_bytes()[0xC6C9],0)
+
+    def real_client(self):
+        # Standalone model invocation does not import Decky's real settings.
+        if 'decky' not in sys.modules:
+            import types
+            sys.modules['decky']=types.SimpleNamespace(DECKY_PLUGIN_SETTINGS_DIR=str(self.root/'settings'))
+        import fan_backend
+        client=fan_backend.Client(runtime=self.root)
+        client.process=self.p;client.socket=self.ipc;self.ipc.setblocking(False)
+        client._accept(self.initial);client._start_heartbeat()
+        return client
+
+    def test_client_heartbeat_survives_real_monitor_mutation_and_slow_settings_save(self):
+        import asyncio
+        import copy
+        import fan_policy
+        from unittest.mock import patch
+        client=self.real_client()
+        import fan_backend
+        plugin=fan_backend.Plugin();plugin._client=client;plugin._loaded=plugin._supported=True
+        plugin._state=dict(fan_policy.defaults(),enabled=True)
+        client.configure(True,fan_policy.DEFAULT_CURVE)
+        plugin._applied=(True,json.dumps(fan_policy.DEFAULT_CURVE))
+        def slow_save(value):
+            time.sleep(3.5)
+            plugin._state=copy.deepcopy(value)
+        async def run():
+            plugin._task=asyncio.create_task(plugin._monitor())
+            try:
+                with patch.object(plugin,'_save',side_effect=slow_save):
+                    result=await plugin.save_unit('percent',0)
+                self.assertTrue(result['settings']['enabled'])
+                self.assertTrue(result['telemetry']['active'])
+                self.assertFalse(result['telemetry']['automatic'])
+            finally:await plugin._unload()
+        asyncio.run(run())
+        self.assertFalse(client._heartbeat.is_alive())
+        self.assertTrue(client.snapshot()['automatic'])
+        self.assertEqual(self.p.wait(timeout=1),0)
+
+    def test_client_loss_of_worker_recovers_exact_session_without_raw_reset_error(self):
+        client=self.real_client()
+        from fan_policy import DEFAULT_CURVE
+        client.configure(True,DEFAULT_CURVE)
+        try:
+            os.kill(self.p.pid,signal.SIGKILL)
+            deadline=time.monotonic()+6
+            while client._heartbeat.is_alive() and time.monotonic()<deadline:time.sleep(.05)
+            self.assertFalse(client._heartbeat.is_alive())
+            state=client.snapshot()
+            self.assertFalse(state['active']);self.assertTrue(state['automatic'])
+            self.assertEqual(state['override'],0);self.assertEqual(state['automatic_reads'],3)
+            self.assertIn('EC owner died',state['error'])
+            with self.assertRaises(RuntimeError):client.check()
+            record=json.loads((self.root/'last-fault.json').read_text())
+            self.assertEqual(record['session'],self.initial['session'])
+            self.assertTrue(record['recovery']['automatic'])
+        finally:client.close()
+
+    def test_unload_stops_heartbeat_before_a_slow_settings_operation_drains(self):
+        import asyncio
+        import copy
+        import threading
+        from unittest.mock import patch
+        import fan_policy
+        client=self.real_client()
+        import fan_backend
+        plugin=fan_backend.Plugin();plugin._client=client;plugin._loaded=plugin._supported=True
+        plugin._state=dict(fan_policy.defaults(),enabled=True)
+        client.configure(True,fan_policy.DEFAULT_CURVE)
+        entered=threading.Event();release=threading.Event()
+        def save(value):
+            entered.set();release.wait(7);plugin._state=copy.deepcopy(value)
+        async def run():
+            with patch.object(plugin,'_save',side_effect=save):
+                request=asyncio.create_task(plugin.save_unit('percent',0))
+                while not entered.is_set():await asyncio.sleep(.01)
+                unload=asyncio.create_task(plugin._unload())
+                try:
+                    deadline=time.monotonic()+5
+                    while self.p.poll() is None and time.monotonic()<deadline:await asyncio.sleep(.05)
+                    self.assertIsNotNone(self.p.poll(),'withdrawal must not wait for settings I/O')
+                    self.assertEqual((self.root/'ports-model').read_bytes()[0xC6C8:0xC6CA],b'\0\0')
+                    self.assertFalse(client._heartbeat.is_alive());self.assertFalse(unload.done())
+                finally:
+                    release.set();await request;await unload
+        asyncio.run(run())
+        self.assertTrue(client.snapshot()['automatic'])
+
+    def test_client_sensor_fault_persists_primary_reason_and_never_rearms(self):
+        client=self.real_client()
+        from fan_policy import DEFAULT_CURVE
+        client.configure(True,DEFAULT_CURVE)
+        try:
+            (self.root/'invalid-sensor').touch()
+            deadline=time.monotonic()+6
+            while client._heartbeat.is_alive() and time.monotonic()<deadline:time.sleep(.05)
+            self.assertFalse(client._heartbeat.is_alive())
+            state=client.snapshot();self.assertFalse(state['active']);self.assertTrue(state['automatic'])
+            self.assertIn('Invalid model sensor',state['error'])
+            (self.root/'invalid-sensor').unlink()
+            with self.assertRaises(RuntimeError):client.configure(True,DEFAULT_CURVE)
+            self.assertEqual((self.root/'ports-model').read_bytes()[0xC6C8:0xC6CA],b'\0\0')
+            record=json.loads((self.root/'last-fault.json').read_text())
+            self.assertIn('Invalid model sensor',record['reason'])
+            self.assertTrue(record['recovery']['automatic'])
+        finally:client.close()
+
+    def test_fault_log_is_bounded_private_and_retains_first_cause(self):
+        import fan_guardian
+        fan_guardian.record_fault(self.root,self.initial['session'],'first sensor fault','sensor',
+                                  sensor_sample=dict(code='sensor_range',cpu_temperature=255,sensor_started_at=1))
+        fan_guardian.record_fault(self.root,self.initial['session'],'later socket reset','ipc',
+                                  dict(active=False,automatic=True,override=0,automatic_reads=3),transport_error='x'*10000,
+                                  sensor_sample=dict(code='sensor_range',cpu_temperature=45,sensor_started_at=2))
+        path=self.root/'last-fault.json';record=json.loads(path.read_text())
+        self.assertEqual(record['reason'],'first sensor fault');self.assertEqual(record['stage'],'sensor')
+        self.assertTrue(record['recovery']['automatic']);self.assertEqual(len(record['transport_error']),512)
+        self.assertEqual(record['sensor_sample']['cpu_temperature'],255)
+        self.assertEqual(record['sensor_sample']['sensor_started_at'],1)
+        self.assertEqual(path.stat().st_mode&0o777,0o600)
+        self.assertLess(path.stat().st_size,8192)
 
 
 if __name__=='__main__':

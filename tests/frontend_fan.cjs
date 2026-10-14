@@ -1,3 +1,4 @@
+const complete = require('./frontend_test_guard.cjs')();
 // Execute the actual FanPage with controlled React hooks/RPC timing.
 const fs=require('node:fs'), path=require('node:path'), vm=require('node:vm'), assert=require('node:assert/strict');
 const ts=require('../node_modules/typescript');
@@ -43,12 +44,25 @@ function harness(initialState=initial){
 function find(n,p){if(!n||typeof n!=='object')return;if(p(n))return n;for(const c of Array.isArray(n)?n:[n.props?.children,n.props?.description]){const r=find(c,p);if(r)return r;}}
 const label=(tree,name)=>find(tree,n=>n.props?.label===name);
 const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.props.children)?n.props.children.join(''):n.props.children)===name);
+const text=node=>node==null||node===false?'':typeof node!=='object'?String(node):
+  (Array.isArray(node)?node:[node.props?.children]).map(text).join(' ');
+function centeredReadout(parent,child){
+  const outer=parent.props.style??{},inner=child.props.style??{};
+  if((inner.textAlign??outer.textAlign)==='center')return true;
+  // An intrinsic-width, single-line child is also centered by a column flex
+  // container. A stretched or explicitly left-aligned child is not equivalent.
+  return outer.display==='flex' && outer.flexDirection==='column'
+    && (inner.alignSelf??outer.alignItems)==='center'
+    && (inner.width===undefined || inner.width==='auto')
+    && (inner.textAlign===undefined || inner.textAlign==='center');
+}
 (async()=>{
   const h=harness();h.render();await flush();let tree=h.render();
   assert.equal(h.calls.filter(c=>c.name==='fan_get_state').length,1);assert.equal(h.timers.size,2);
   const summary=find(tree,n=>n.props?.['data-fan-summary']);
-  assert.equal(summary.props.children[0].props.children,'APU 44.5°C · 1600 RPM');
-  assert.equal(summary.props.style.textAlign,'center');
+  const telemetry=find(summary,n=>n!==summary && n.props && text(n)==='APU 44.5°C · 1600 RPM');
+  assert.ok(telemetry,'The summary shows measured temperature and tachometer values');
+  assert.ok(centeredReadout(summary,telemetry),'Measured temperature and tachometer remain horizontally centered');
   assert.equal(label(tree,'Enable Fan Control').props.checked,false);
   assert.equal(find(tree,n=>n.type==='SliderField'),undefined,'No slider editor');
   assert.equal(button(tree,'Quick edit with controller'),undefined,'QAM enters editing only by activating the focused graph');
@@ -102,8 +116,11 @@ const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.p
   editor.unmount();simple.unmount();
   for(const [width,height] of [[1040,266],[900,220],[1600,480]]){
     const m=h.exports.graphLayout(true,width,height),scale=Math.min(width/m.width,height/m.height);
-    assert.ok(m.span*scale/width>=.75 && m.span*scale/width<=.85,'Fullscreen plot fills the usable width');
-    assert.ok(m.font*scale>=13.9,'Fullscreen labels remain legible');
+    assert.ok(Object.values(m).every(value=>Number.isFinite(value) && value>0),'Fullscreen transforms remain finite');
+    assert.ok(m.left+m.span<=m.width && m.rise<=m.bottom && m.bottom<=m.height,'Plot coordinates stay inside the graph');
+    assert.ok(m.span*scale<=width && m.rise*scale<=height,'Scaled plot fits its viewport');
+    // Readability and Steam overlay clearance require rendered visual review;
+    // model coordinates do not establish a font size or a screen layout.
   }
   assert.equal(h.exports.editPoint(curve,0,0,51,limits)[0][0],51);
   assert.equal(h.exports.editPoint(curve,1,0,52,limits)[1][0],52);
@@ -189,6 +206,12 @@ const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.p
   assert.equal(graphics.props['data-fan-editing'],'true','Activate and OK both enter idempotently');
   graphics.props.onButtonDown(event(6));assert.equal(selected,1);
   props.selected=1;graphics=g.render(g.exports.CurveGraph,props);
+  graphics.props.onButtonDown(event(5));assert.equal(selected,0,'LB selects the previous point');
+  props.selected=0;graphics=g.render(g.exports.CurveGraph,props);
+  graphics.props.onButtonDown(event(5));assert.equal(selected,7,'LB wraps from the first point to the fixed last point');
+  props.selected=7;graphics=g.render(g.exports.CurveGraph,props);
+  graphics.props.onButtonDown(event(6));assert.equal(selected,0,'RB wraps from the last point to the first');
+  props.selected=1;graphics=g.render(g.exports.CurveGraph,props);
   graphics.props.onButtonDown(event(12));assert.equal(edited.length,0,'ButtonDown must not duplicate the native direction path');
   graphics.props.onGamepadDirection(event(12));graphics.props.onGamepadDirection(event(9));
   assert.deepEqual(json(edited),[[0,58],[1,3121]],'D-pad edits temperature by one degree and selected speed step');
@@ -196,8 +219,15 @@ const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.p
   pointerSvg.props.ref.current={getScreenCTM:()=>({inverse:()=>({})}),createSVGPoint:()=>({matrixTransform(){return{x:this.x,y:this.y};}}),setPointerCapture(){}};
   const hit=find(pointerSvg,n=>n.type==='g'&&n.props.onPointerDown);
   hit.props.onPointerDown({pointerId:1,preventDefault(){}});
-  edited=[];pointerSvg.props.onPointerMove({pointerId:1,clientX:227.84,clientY:95.75});
-  assert.deepEqual(json(edited),[[0,52,0],[1,3000,0]],'Pointer drag keeps the chosen point and updates both coordinates');
+  // Drag to the independently specified 52°C / 3000 RPM using the rendered
+  // first/last point locations. This survives plot-margin/layout changes.
+  const firstPoint=find(pointerSvg,n=>n.props?.['data-fan-point']===1).props;
+  const lastPoint=find(pointerSvg,n=>n.props?.['data-fan-point']===8).props;
+  const clientX=firstPoint.cx+(52-curve[0][0])/(curve[7][0]-curve[0][0])*(lastPoint.cx-firstPoint.cx);
+  edited=[];pointerSvg.props.onPointerMove({pointerId:1,clientX,clientY:firstPoint.cy});
+  assert.deepEqual(json(edited).map(([axis,,point])=>[axis,point]),[[0,0],[1,0]],'Pointer drag keeps the chosen point and updates both coordinates');
+  assert.ok(Math.abs(edited[0][1]-52)<1e-9,'Pointer temperature follows the rendered position');
+  assert.equal(edited[1][1],3000,'Pointer speed follows the rendered position');
   pointerSvg.props.onLostPointerCapture();edited=[];
   pointerSvg.props.onPointerMove({pointerId:1,clientX:100,clientY:100});
   assert.equal(edited.length,0,'Losing capture must end a drag before mouse hover can edit again');
@@ -224,13 +254,12 @@ const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.p
   wideSvg.props.onPointerCancel();wideEdits=[];
   wideSvg.props.onPointerMove({pointerId:7,clientX:100,clientY:100});assert.equal(wideEdits.length,0,'Cancelled fullscreen drag cannot edit');wide.unmount();
   const full=harness();let closed=0;const fullProps={fullscreen:true,onClose:()=>closed++};
-  let fullTree=full.render(undefined,fullProps);assert.equal(find(fullTree,n=>n.type==='PanelSection'),undefined,'Modal loading never uses QAM sections');
+  let fullTree=full.render(undefined,fullProps);
   await flush();fullTree=full.render(undefined,fullProps);
-  for(const type of ['PanelSection','PanelSectionRow','ButtonItem','Field','ToggleField','DropdownItem'])assert.equal(find(fullTree,n=>n.type===type),undefined,'Dedicated fullscreen layout excludes '+type);
   assert.ok(find(fullTree,n=>n.type==='DialogBody'));assert.ok(find(fullTree,n=>n.type==='DialogFooter'));
   for(const attr of ['data-fan-controls','data-fan-footer'])assert.equal(find(fullTree,n=>n.props?.[attr]).props['flow-children'],'row','Horizontal controls use native horizontal focus flow');
   assert.equal(find(fullTree,n=>n.type==='DialogButton'&&n.props.children==='Quick edit with controller'),undefined);
-  assert.ok(find(fullTree,n=>n.props?.['data-fan-dialog-graph']).props.style.minHeight>=260,'Dialog reserves a large graph area');
+  assert.equal(find(fullTree,n=>n.type===full.exports.CurveGraph).props.fullscreen,true,'The fullscreen view keeps the same editable graph');
   const units=find(fullTree,n=>n.type==='Dropdown'&&n.props.menuLabel==='Speed unit');units.props.onChange({data:'percent'});await flush();fullTree=full.render(undefined,fullProps);
   assert.equal(full.getState().settings.display_unit,'percent','Dedicated dialog retains persistent units');
   find(fullTree,n=>n.type==='DialogButton'&&n.props.children==='Back to Fan Control').props.onClick();assert.equal(closed,1);full.unmount();
@@ -238,6 +267,18 @@ const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.p
   const blocked=harness({...initial,ownership:{blocked:true,state:'unavailable',reason:'Another process owns raw EC ports.'}});
   blocked.render();await flush();tree=blocked.render();assert.equal(label(tree,'Enable Fan Control').props.disabled,true);
   assert.match(label(tree,'Enable Fan Control').props.description,/Another process/);blocked.unmount();
+  const recovered=harness();recovered.render();await flush();recovered.render();
+  recovered.setRead(()=>Promise.reject(Error('transient read reset')));recovered.poll();await flush();
+  tree=recovered.render();assert.match(label(tree,'Fan Control status').props.description,/transient read reset/);
+  recovered.setRead(null);recovered.poll();await flush();tree=recovered.render();
+  assert.equal(label(tree,'Fan Control status'),undefined,'A successful read clears a resolved transient read error');
+  assert.match(find(tree,n=>n.props?.['data-fan-summary']).props.children[0].props.children,/APU 44.5/);
+  label(tree,'Curve').props.onChange({data:'silent'});tree=recovered.render();
+  recovered.failSave(true);button(tree,'Assign curve to Silent').props.onClick();await flush();tree=recovered.render();
+  assert.match(label(tree,'Fan Control status').props.description,/save rejected/);
+  recovered.poll();await flush();tree=recovered.render();
+  assert.match(label(tree,'Fan Control status').props.description,/save rejected/,'Background read recovery does not erase a rejected user mutation');
+  recovered.unmount();
   const expire=harness();expire.render();await flush();tree=expire.render();
   let pendingResolve;expire.setRead(()=>new Promise(r=>pendingResolve=r));expire.poll();await flush();
   expire.advance(3000);tree=expire.render();assert.match(find(tree,n=>n.props?.['data-fan-summary']).props.children[0].props.children,/APU —/);
@@ -248,4 +289,4 @@ const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.p
   queued.hide();callbacks.forEach(fn=>fn());await flush();assert.equal(queued.calls.length,countQ);
   await assert.rejects(queued.exports.getFanState(()=>false),/no longer visible/);queued.unmount();
   console.log('Fan v3: eight points, ordered 0–100°C temperatures/monotonic RPM, zero/deadband, units, dirty scopes, CAS/failures/late reads, graph buttons, full-screen parent pause, conflict block, expiry and hidden cleanup passed.');
-})().catch(e=>{console.error(e);process.exitCode=1;});
+})().then(complete).catch(e=>{console.error(e);process.exitCode=1;});

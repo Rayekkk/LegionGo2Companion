@@ -79,20 +79,31 @@ class FanTransportTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): e.set_target(4000,lambda:True)
         with self.assertRaises(ValueError): e._write_byte(0xC300,1)
         self.assertEqual(p.writes,[])
-        checks=iter([False,True])
-        with self.assertRaisesRegex(RuntimeError,'immediately before'):
-            e.set_target(4000,lambda:next(checks))
+        # Withdraw at the data-write phase, rather than at an assumed Nth
+        # lease check. Additional harmless preflight checks must stay valid.
+        expired=False
+        write=e._write_byte
+        def withdraw_before_data(*args,**kwargs):
+            nonlocal expired
+            expired=True
+            return write(*args,**kwargs)
+        with patch.object(e,'_write_byte',side_effect=withdraw_before_data), \
+                self.assertRaises(RuntimeError):
+            e.set_target(4000,lambda:expired)
+        self.assertTrue(expired,'The late-withdrawal fault must reach the data-write phase')
         self.assertEqual(p.writes,[])
         p.mem[0xC6C8]=1
         with self.assertRaises(RuntimeError): e.set_target(4000,lambda:False)
 
     def test_terminal_stop_between_both_bytes_prevents_second_write(self):
         p=ModelPorts();p.mem.update({0xC6C8:1500&255,0xC6C9:1500>>8});e=EC(p)
-        checks=iter([False,False,True])
-        with self.assertRaisesRegex(RuntimeError,'immediately before'):
-            e.set_target(1600,lambda:next(checks))
+        with self.assertRaises(RuntimeError):
+            e.set_target(1600,lambda:bool(p.writes))
         self.assertEqual(len(p.writes),1)
-        self.assertEqual(e.word(0xC6C8),1756)
+        intermediate = e.word(0xC6C8)
+        self.assertTrue(MIN_RPM <= intermediate <= MAX_RPM,
+                        'An interrupted byte sequence must leave a safe running request')
+        self.assertNotEqual(intermediate,1600,'The withdrawn second write must not occur')
         e.release();self.assertEqual(e.word(0xC6C8),0)
 
     def test_platform_is_exact_not_substring_or_bios_guess(self):

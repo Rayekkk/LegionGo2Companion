@@ -6,6 +6,7 @@ progress, sensors and suspend clock; it can reap its stalled sibling with pidfd
 before release. Both recovery paths require a functioning kernel and EC bus.
 """
 import json
+import math
 import os
 import pathlib
 import select
@@ -15,6 +16,7 @@ import socket
 import stat
 import time
 import tempfile
+from diagnostics import configure_worker, event as diagnostic_event
 from fan_ec import EC, Ports, platform_check
 from fan_sleep import SleepSafety
 from fan_policy import CurveControl, LEASE_S, SAMPLE_S, HARD_MAX_C, MAX_RPM, encode_target, validate_curve, stop_timed_out
@@ -31,6 +33,99 @@ def atomic(path, value):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def record_fault(runtime, session, reason, stage, state=None, **details):
+    """One bounded, private diagnostic; never prevent hardware recovery.
+
+    Healthy telemetry and later clean shutdowns do not erase this record. The
+    session correlates a transport failure with its independent recovery.
+    """
+    if not hasattr(os, 'geteuid') or not isinstance(session, str) or not session.startswith('session-') or not reason:
+        return
+    try:
+        runtime = pathlib.Path(runtime)
+        info = runtime.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            return
+        previous = {}
+        path = runtime/'last-fault.json'
+        if path.exists():
+            if path.is_symlink() or path.stat().st_size > 8192:
+                return
+            try:
+                previous = json.loads(path.read_text())
+            except (ValueError, TypeError):
+                pass
+        first = not isinstance(previous, dict) or previous.get('session') != session
+        if first:
+            previous = dict(session=session, reason=str(reason)[:512], stage=str(stage)[:64],
+                            monotonic=time.monotonic(), pid=os.getpid())
+        if first and isinstance(details.get('sensor_sample'), dict):
+            snapshot = clean_sensor_sample(details['sensor_sample'])
+            previous['sensor_sample'] = snapshot
+            # Existing log/export allowlists accept these fixed numeric fields
+            # as a bounded summary; never log raw sysfs input or recovery samples.
+            summary = ' '.join(k+'='+format(v, '.6g') for k, v in snapshot.items()
+                               if type(v) in (int, float))
+            diagnostic_event('fan', 'fault_sample', level='error', stage=stage,
+                             code=snapshot.get('code', 'unknown'), worker_id=session,
+                             reason=summary)
+        sample = state or {}
+        previous.update(recovery=dict(active=sample.get('active'), automatic=sample.get('automatic'),
+                                      override=sample.get('override'), automatic_reads=sample.get('automatic_reads')))
+        for key, value in details.items():
+            if key in ('transport_error', 'exit_code', 'heartbeat_age'):
+                previous[key] = value[:512] if isinstance(value, str) else value
+        atomic(path, previous)
+    except (OSError, ValueError, TypeError):
+        pass  # Diagnostics, including a full disk, cannot delay release.
+
+
+def clean_sensor_sample(sample):
+    result = {}
+    for key in ('cpu_temperature', 'gpu_temperature', 'ec_temperature', 'difference_c',
+                'sensor_started_at', 'sensor_finished_at', 'ec_started_at',
+                'ec_finished_at', 'fault_at', 'acquisition_ms'):
+        value = sample.get(key)
+        if type(value) in (int, float) and math.isfinite(value):
+            result[key] = value
+    if sample.get('sensor_name') in ('k10temp', 'amdgpu'):
+        result['sensor_name'] = sample['sensor_name']
+    code = sample.get('code', 'unknown')
+    result['code'] = code if code in ('sensor_io', 'sensor_value_format', 'sensor_range',
+        'sensor_acquisition_timeout', 'ec_io', 'ec_temperature_range') else 'other_fault'
+    return result
+
+
+def fault_sample(sensors, ec_sample):
+    sample = dict(ec_sample)
+    sample.update(getattr(sensors, 'last_sample', {}) if sensors is not None else {})
+    values = [sample[k] for k in ('cpu_temperature', 'gpu_temperature') if k in sample]
+    if values and 'ec_temperature' in sample:
+        sample['difference_c'] = max(values)-sample['ec_temperature']
+    sample['fault_at'] = time.monotonic()
+    return sample
+
+
+def read_ec_status(ec, sample):
+    sample.clear()
+    sample.update(ec_started_at=time.monotonic(), code='ec_io')
+    try:
+        result = ec.status()
+        sample.update(ec_temperature=result['ec_temperature'])
+        sample.pop('code')
+        return result
+    finally:
+        sample['ec_finished_at'] = time.monotonic()
+
+
+def check_ec_temperature(sample):
+    # C307 has no proven identity equivalent to Tctl or GPU edge. A valid
+    # independent channel may lag or differ; equality is not a freshness test.
+    if not 10 <= sample['ec_temperature'] <= 105:
+        sample['code'] = 'ec_temperature_range'
+        raise RuntimeError('Invalid EC temperature reading.')
 
 
 def secure_root():
@@ -71,14 +166,26 @@ class Sensors:
     def read(self):
         values = {}
         start = time.monotonic()
-        for name, fd in self.fds.items():
-            os.lseek(fd, 0, os.SEEK_SET)
-            raw = os.read(fd, 64)
-            t = int(raw)/1000
-            if not 10 <= t <= 105:
-                raise RuntimeError('Invalid APU temperature reading.')
-            values[name] = t
-        if time.monotonic()-start > SAMPLE_S:
+        self.last_sample = dict(sensor_started_at=start)
+        try:
+            for name, fd in self.fds.items():
+                self.last_sample.update(sensor_name=name, code='sensor_io')
+                os.lseek(fd, 0, os.SEEK_SET)
+                raw = os.read(fd, 64)
+                self.last_sample['code'] = 'sensor_value_format'
+                t = int(raw)/1000
+                self.last_sample['cpu_temperature' if name == 'k10temp' else 'gpu_temperature'] = t
+                self.last_sample['code'] = 'sensor_range'
+                if not 10 <= t <= 105:
+                    raise RuntimeError('Invalid APU temperature reading.')
+                values[name] = t
+            self.last_sample.pop('code')
+            self.last_sample.pop('sensor_name')
+        finally:
+            finished = time.monotonic()
+            self.last_sample.update(sensor_finished_at=finished, acquisition_ms=(finished-start)*1000)
+        if finished-start > SAMPLE_S:
+            self.last_sample['code'] = 'sensor_acquisition_timeout'
             raise RuntimeError('Stale/slow APU temperature acquisition.')
         return values
 
@@ -97,8 +204,8 @@ def boot_gap(previous):
 
 
 def check_owners(exclude=()):
-    modules = pathlib.Path('/proc/modules').read_text()
-    if any(name in modules for name in ('legion_laptop', 'gpd_fan')):
+    modules = {line.split()[0] for line in pathlib.Path('/proc/modules').read_text().splitlines() if line.split()}
+    if modules.intersection(('legion_laptop', 'gpd_fan')):
         raise RuntimeError('Conflicting fan driver is loaded.')
     for line in pathlib.Path('/proc/ioports').read_text().splitlines():
         prefix, _, name = line.strip().partition(':')
@@ -155,11 +262,7 @@ def adopt_hard_max(ec, root, state, control, now):
     if owned != MAX_RPM or ec.word(0xC6C8) != MAX_RPM:
         raise RuntimeError('Independent hard maximum readback changed.')
     state.update(target=MAX_RPM, target_changed_at=now)
-    control.target = MAX_RPM
-    control.history.clear(); control.history.append((now, MAX_RPM))
-    control.peak = HARD_MAX_C
-    control.cool_since = None
-    control.starting = False
+    control.force_max(now)
     (root/'hard-max').unlink()
 
 
@@ -206,6 +309,8 @@ def backup(root, baseline, parent, ready_fd, inherited_port, ipc, owner_fd):
     port, sensors, pidfd, sleep = None, None, None, None
     recovered = False
     reason = 'EC owner exited'
+    stage = 'backup_startup'
+    fault = False
     try:
         port = Ports(); ec = EC(port); ec.baseline = baseline
         sensors = Sensors()
@@ -220,25 +325,30 @@ def backup(root, baseline, parent, ready_fd, inherited_port, ipc, owner_fd):
         next_temperature = next_owners = 0
         while True:
             now = time.monotonic()
+            stage = 'backup_sleep'
             clock = boot_gap(clock)
             sleep.check()
             pulse = json.loads((root/'pulse.json').read_text())
             if now >= next_owners:
+                stage = 'backup_ownership'
                 check_owners((parent,))
                 next_owners = now+1
             if now >= next_temperature:
+                stage = 'backup_sensor'
                 temperature = max(sensors.read().values())
                 independent_hard_max(ec, root, temperature)
                 next_temperature = now+0.5
             if (root/'stop').exists():
                 reason = 'Control withdrawn'; break
             if now-pulse['monotonic'] >= LEASE_S:
-                reason = 'EC owner progress lease expired'; break
+                reason = 'EC owner progress lease expired'; stage = 'backup_progress'; fault = True; break
             if select.select([pidfd], [], [], 0.1)[0]:
-                reason = 'EC owner died'; break
+                reason = 'EC owner died'; stage = 'backup_owner_exit'; fault = True; break
     except Exception as exc:
-        reason = str(exc)
+        reason = str(exc); fault = True
     finally:
+        if fault:
+            record_fault(RUNTIME, root.name, reason, stage, sensor_sample=fault_sample(sensors, {}))
         if ready_fd >= 0:
             os.close(ready_fd)
         if port is not None:
@@ -252,17 +362,22 @@ def backup(root, baseline, parent, ready_fd, inherited_port, ipc, owner_fd):
                     pass
             try:
                 try:
-                    stop_release(ec, root, reason)
+                    restored = stop_release(ec, root, reason)
                 except Exception:
                     if pidfd is not None:
                         signal.pidfd_send_signal(pidfd, signal.SIGKILL)
                         select.select([pidfd], [], [], 0.5)
-                    stop_release(ec, root, reason)
+                    restored = stop_release(ec, root, reason)
                 recovered = True
+                if fault:
+                    record_fault(RUNTIME, root.name, reason, stage, dict(restored, active=False, automatic=True))
             except Exception as exc:
                 atomic(RUNTIME/'last.json', dict(active=False, automatic=False,
                                                 reason=str(exc), monotonic=time.monotonic()))
             port.close()
+        if fault or not recovered:
+            diagnostic_event('fan', 'worker_recovery', level='warning' if recovered else 'error',
+                             stage=stage, source='backup', restored=recovered, worker_id=root.name)
         if sensors is not None:
             sensors.close()
         if sleep is not None:
@@ -282,16 +397,17 @@ def serve(ipc):
     port, sensors, child, sleep = None, None, None, None
     state = dict(active=False, automatic=False, error='', target=0, writes=0, samples=0, stop_verified=False, session=root.name)
     reason = 'Controller disconnected'
+    stage = 'startup'
+    ec_sample = {}
     try:
         check_owners()
         port = Ports(); ec = EC(port)
         sensors = Sensors(); temperatures = sensors.read()
         with ec.transaction():
-            initial = ec.status()
+            initial = read_ec_status(ec, ec_sample)
             if initial['override'] != 0:
                 raise RuntimeError('Another controller has an EC fan override; custom control remains off.')
-            if not 10 <= initial['ec_temperature'] <= 105 or abs(initial['ec_temperature']-max(temperatures.values())) > 15:
-                raise RuntimeError('EC mapping/temperature cross-check failed.')
+            check_ec_temperature(ec_sample)
         atomic(root/'pulse.json', dict(monotonic=time.monotonic()))
         rfd, wfd = os.pipe()
         worker_pid = os.getpid()
@@ -310,17 +426,21 @@ def serve(ipc):
         ipc.setblocking(False)
         state.update(initial, automatic=True, guardian_pid=os.getpid(), backup_pid=child)
         ipc.send(json.dumps(dict(kind='ready', **state)).encode())
+        diagnostic_event('fan', 'worker_ready', source='owner', worker_id=root.name)
         last_lease = time.monotonic(); next_sample = next_ec = last_lease
         clock = boot_gap(None); curve = None; control = None; revision = -1
         last_report, last_file, last_owner_scan = 0, 0, time.monotonic()
         while True:
             now = time.monotonic()
+            stage = 'sleep'
             clock = boot_gap(clock)
             sleep.check()
             if now-last_owner_scan >= 1:
+                stage = 'ownership'
                 check_owners((child,))
                 last_owner_scan = time.monotonic()
             if now-last_lease >= LEASE_S:
+                stage = 'plugin_heartbeat'
                 raise RuntimeError('Plugin heartbeat expired; firmware automatic restored.')
             if (root/'stop').exists():
                 raise RuntimeError('Independent watchdog withdrew the lease.')
@@ -328,6 +448,7 @@ def serve(ipc):
                 child = None
                 raise RuntimeError('Independent backup watchdog died.')
             if select.select([ipc], [], [], min(0.1, max(0, next_sample-now)))[0]:
+                stage = 'ipc'
                 raw = ipc.recv(16384)
                 if not raw:
                     break
@@ -335,6 +456,7 @@ def serve(ipc):
                 if command.get('op') == 'heartbeat':
                     last_lease = time.monotonic()
                 elif command.get('op') == 'configure':
+                    stage = 'configuration'
                     seq = command.get('revision')
                     if type(seq) is not int or seq <= revision or type(command.get('enabled')) is not bool:
                         raise RuntimeError('Stale/invalid fan configuration.')
@@ -357,7 +479,7 @@ def serve(ipc):
                             if ec.word(0xC6C8) != encode_target(control.target):
                                 ec.set_target(control.target, lambda: (root/'stop').exists() or time.monotonic()-last_lease >= LEASE_S)
                                 state['writes'] += 1
-                            activated = ec.status()
+                            activated = read_ec_status(ec, ec_sample)
                             atomic(root/'owned-target.json', dict(rpm=control.target))
                         curve = new_curve
                         state.update(activated, active=True, automatic=False, target=control.target,
@@ -380,25 +502,27 @@ def serve(ipc):
                     raise RuntimeError('Unknown fan command.')
             now = time.monotonic()
             if now >= next_sample:
+                stage = 'sensor'
                 # Safety continues off-screen, independent of plugin RPC/React.
                 temperatures = sensors.read()
                 target = control.step(curve, max(temperatures.values()), now) if state['active'] else 0
                 if now >= next_ec or target != state['target']:
+                    stage = 'ec_readback'
                     with ec.transaction():
                         if state['active'] and (root/'hard-max').exists():
                             adopt_hard_max(ec, root, state, control, now)
                             target = MAX_RPM
-                        current = ec.status()
-                        if not 10 <= current['ec_temperature'] <= 105 or abs(current['ec_temperature']-max(temperatures.values())) > 15:
-                            raise RuntimeError('Stale/inconsistent EC temperature sensor.')
+                        current = read_ec_status(ec, ec_sample)
+                        check_ec_temperature(ec_sample)
                         expected = encode_target(state['target']) if state['active'] else 0
                         if current['override'] != expected:
                             raise RuntimeError('Fan override changed outside its owner.')
                         if target != state['target']:
                             ec.set_target(target, lambda: (root/'stop').exists() or time.monotonic()-last_lease >= LEASE_S)
                             state['target'] = target; state['writes'] += 1; state['target_changed_at'] = now
-                            current = ec.status()
+                            current = read_ec_status(ec, ec_sample)
                         if state['active'] and control.is_stalled(current['rpm'], now):
+                            stage = 'tach'
                             raise RuntimeError('Fan did not reach a stable running speed.')
                         if state['active'] and target == 0 and stop_timed_out(current['rpm'], current['effective'], now-state['target_changed_at']):
                             raise RuntimeError('Fan stop did not reach zero; firmware automatic restored.')
@@ -423,12 +547,16 @@ def serve(ipc):
                         pass  # A backed-up frontend never blocks EC recovery.
     except Exception as exc:
         reason = str(exc); state['error'] = reason
+        record_fault(RUNTIME, root.name, reason, stage, state,
+                     sensor_sample=fault_sample(sensors, ec_sample), heartbeat_age=None if 'last_lease' not in locals() else max(0, time.monotonic()-last_lease))
     finally:
         if port is not None:
             try:
                 state.update(stop_release(ec, root, reason), active=False, automatic=True, target=0, stop_verified=False)
             except Exception as exc:
                 state.update(error=str(exc), active=False, automatic=False)
+        if state['error']:
+            record_fault(RUNTIME, root.name, reason, stage, state)
         if child is not None:
             # Backup observes stop within 100ms; bounded wait retains recovery ownership.
             deadline = time.monotonic()+2
@@ -444,6 +572,9 @@ def serve(ipc):
             sensors.close()
         if port is not None:
             port.close()
+        diagnostic_event('fan', 'worker_closed', level='warning' if state['error'] else 'info',
+                         source='owner', stage=stage, worker_id=root.name,
+                         restored=state.get('automatic') is True, pending=state.get('automatic') is not True)
         if sleep is not None:
             sleep.close()
         if child is None and state['automatic']:
@@ -453,10 +584,12 @@ def serve(ipc):
 
 if __name__ == '__main__':
     import sys
+    configure_worker('fan')
     sock = socket.socket(fileno=int(sys.argv[1]))
     try:
         serve(sock)
     except Exception as exc:
+        diagnostic_event('fan', 'worker_start_failed', level='error', error=exc, stage='bootstrap')
         sock.send(json.dumps(dict(kind='closed', active=False, automatic=False, error=str(exc))).encode())
     finally:
         sock.close()
