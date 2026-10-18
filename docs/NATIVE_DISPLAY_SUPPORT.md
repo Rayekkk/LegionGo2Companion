@@ -117,10 +117,6 @@ migration recovery, session boundaries, preservation of foreign files, RPC
 blocking, independent EDID operation, and frontend availability. Packaging must
 include the detector and both legacy Lua variants.
 
-After simplification, local validation passed: 426 backend tests (408 passed,
-18 platform-dependent skips), all nine frontend suites, TypeScript checks,
-frontend build, and package staging.
-
 On 2026-09-28, SSH readback on the user's Legion Go 2 running SteamOS 3.9.2
 confirmed retirement with the previous detector: owned Lua and backup removed,
 no cleanup or restart pending, the native profile loaded by gamescope 3.16.30,

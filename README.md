@@ -11,7 +11,7 @@
 **Your Legion Go 2 hardware controls, together in the Steam overlay.**
 Tune power, cooling and vibration, personalise lighting and buttons, manage charging, and check your display and Wi-Fi without leaving Gaming Mode.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#quick-start) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#quick-start) · [Modules](#using-the-modules) · [Desktop app](#desktop-app) · [Troubleshooting](#troubleshooting) · [AI disclaimer](#ai-disclaimer)
 
 </div>
 
@@ -21,309 +21,327 @@ Tune power, cooling and vibration, personalise lighting and buttons, manage char
 
 Legion Go 2 Companion combines nine hardware modules in one Decky plugin. Use the
 controls you need, hide the rest, and keep separate power and vibration settings for
-your games. Saved profiles continue working while the menu is closed.
+your games. Saved profiles keep working while the menu is closed. In Desktop Mode the
+same controls are also available as a native [Desktop app](#desktop-app).
 
 | Module | What you can do |
 |---|---|
-| [TDP](#tdp) | Choose four power presets or Custom limits, adjust CPU Boost and EPP, and save game profiles with separate battery/AC settings |
-| [Fan Control](#fan-control) | Edit a fan curve with touch or controller, view measured speed and temperature, and optionally assign curves to Companion TDP presets |
-| [Vibration](#vibration) | Set handle vibration, touchpad feedback and game profiles; try a short vibration test |
-| [RGB Lighting](#rgb-lighting) | Set the joystick-ring effect, colour, brightness and speed; control the power-button light on verified firmware |
-| [Button Remapper](#button-remapper) | Give the left controller's Desktop and Page buttons separate actions |
-| [Gyro & Touchpad](#gyro--touchpad) | Choose the controller motion source and compare controller readings with the output reaching Steam |
-| [Battery](#battery) | Limit charging to about 80% and view the console and both controller batteries |
-| [OLED Display](#oled-display) | Use display fixes on older systems and correct the HDR metadata that games read |
-| [WiFi](#wifi) | Prefer higher bands with iwd, or make a one-time 5/6 GHz connection with WPA |
+| [TDP](#tdp) | Choose a power preset or your own limits, adjust CPU Boost and CPU energy preference, and give games their own settings, also separately on battery and charger |
+| [Fan Control](#fan-control) | Draw your own fan curve with touch or controller and see the measured fan speed and temperature |
+| [Vibration](#vibration) | Set handle vibration and touchpad feedback, also per game |
+| [Lighting](#lighting) | Set the stick-light effect, colour, brightness and speed, and switch the power-button light |
+| [Button mapping](#button-mapping) | Give the two extra buttons on the left controller your own actions |
+| [Gyro & touchpad](#gyro--touchpad) | Choose which controller's gyro Steam uses and test the gyro and touchpad |
+| [Controller firmware](#controller-firmware) | Update the controllers and their receiver with Lenovo's firmware (experimental) |
+| [Battery](#battery) | Limit charging to about 80% and see the console and both controller batteries |
+| [Display](#display) | Fix the HDR brightness games read; on older SteamOS also choose the screen mode |
+| [Wi-Fi](#wi-fi) | Prefer or require the faster 5/6 GHz bands |
 
 ## Requirements
 
 | Requirement | Details |
 |---|---|
-| Device | Lenovo Legion Go 2; see model compatibility below |
-| System | SteamOS with [Decky Loader](https://decky.xyz) installed |
-| Tested system builds | SteamOS **3.8.16 Stable (kernel 6.16.12)** and **3.10 (kernel 7.2)**; available controls depend on the system interfaces |
+| Device | Lenovo Legion Go 2 (best supported: **8ASP2 / 83N0**) |
+| System | SteamOS **Stable** (tested on 3.8.16 and 3.8.28) with [Decky Loader](https://decky.xyz) |
+| Desktop app (optional) | Nothing extra: it uses the Qt 6.9+ that comes with SteamOS 3.8 and newer |
 
-**Model compatibility:** the main validation device is **8ASP2 / 83N0**. Joystick RGB
-also supports **8AHP2 / 83N1** when the expected Lenovo controller and complete
-`hid-lenovo-go` lighting interface are present. An 8AHP2 owner confirmed RGB and
-sleep/wake recovery on **SteamOS 3.9.1 Preview, build 20260914.100**. This covers
-controller RGB; maintainers have not independently verified every feature on 8AHP2.
+Compatibility was also checked on SteamOS 3.9.3 Beta. Each page explains when a control
+is unavailable on your console.
 
-Each module checks its own hardware support and explains unavailable controls. The
-**power-button light** additionally requires the verified **83N0 / RRCN16WW** BIOS
-and ACPI layout. **Fan Control** requires the validated **83N0 / Legion Go 8ASP2,
-RRCN16WW BIOS and EC 1.16** platform. Other model/firmware variants are unavailable
-for Fan Control until validated; 83N1 joystick RGB support does not extend either
-firmware control.
+<details>
+<summary><b>Model compatibility and hardware checks</b></summary>
 
-Use only one fan controller at a time. Stop another EC fan-control tool and let it
-return control to firmware before enabling Companion's curve. Detected raw-port
-owners, an existing EC override or unknown ownership block activation; these checks
-cannot detect or exclude every non-cooperating EC writer.
+The main validation device is **8ASP2 / 83N0**. Joystick RGB also supports **8AHP2 / 83N1**
+when the expected Lenovo controller and the complete `hid-lenovo-go` lighting interface are
+present. An 8AHP2 owner confirmed RGB and sleep/wake recovery on SteamOS 3.9.1 Preview
+(build 20260914.100). This covers controller RGB; not every feature has been verified on 8AHP2.
+
+The **power-button light** and **Fan Control** require the **83N0 / Legion Go 8ASP2** model.
+They do not depend on an exact BIOS or EC version:
+
+- The power-button light checks that the BIOS's ACPI table still describes the light the same way.
+- Fan Control checks the EC fan interface's readings at every start. After a BIOS or EC update
+  it also runs a one-time fan check: a short raise of the fan speed that Companion watches. If
+  that check fails, Fan Control returns to firmware automatic, turns off and the page says
+  why; turning it on again repeats the check.
+
+83N1 joystick RGB support does not extend either firmware control.
+
+Use only one fan controller at a time. Stop another EC fan-control tool and let it return
+control to firmware before enabling Companion's curve. Detected raw-port owners, an existing
+EC override or unknown ownership block activation; these checks cannot detect every
+non-cooperating EC writer.
+
+</details>
 
 ## Installation
 
 1. Install [Decky Loader](https://decky.xyz) if you do not already have it.
-2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases). Choose the plugin ZIP attached to the release.
-3. Uninstall overlapping standalone plugins, keeping their saved settings as described below.
+2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases).
+3. Uninstall **LeGoTDP**, **LeGo Vibe Control** and **LeGo2 Brightness Fix** if you have them (keep their settings, see below).
 4. In Gaming Mode, open **Quick Access Menu → Decky → Settings → Developer**.
 5. Choose **Install Plugin from ZIP**, select the archive, then open **Legion Go 2 Companion** in Decky.
 
-Normal use needs no terminal commands. If you build your own ZIP, follow the
-[development instructions](#development).
+No terminal commands are needed.
 
 > [!IMPORTANT]
 > Companion pauses **all modules** while **LeGoTDP**, **LeGo Vibe Control** or
-> **LeGo2 Brightness Fix** is installed. Uninstall the named plugins in Decky Settings,
-> keep their settings, then restart Decky or the console. Disabling them is not enough.
-> **Check again** confirms that the conflict is gone; a restart is still required.
-> An unreadable manifest belonging to an unrelated plugin is logged and does not
-> pause Companion. Failure to inspect the plugin directory itself still blocks controls.
+> **LeGo2 Brightness Fix** is installed; disabling them is not enough. Uninstall them in
+> Decky Settings, keep their settings, then restart Decky or the console.
 
-### Moving from standalone plugins
+<details>
+<summary><b>Moving from the standalone plugins</b></summary>
 
 Keep the old plugins' Decky settings folders when uninstalling them. Companion imports
-missing TDP, vibration, display and Wi-Fi settings; values already saved in Companion
-take precedence. It leaves the original files intact. Deleted settings cannot be imported.
+missing TDP, vibration and display settings; values already saved in Companion take
+precedence. It leaves the original files intact. Deleted settings cannot be imported.
 
-Companion's own settings live outside its installed plugin folder, so replacing the
-plugin files preserves them. After installation, check **Manage Modules** and **OLED
-Display**, where setup or a Gaming Mode restart may be requested.
+**Check again** confirms that a conflict is gone; a restart is still required. Renamed
+copies of those plugins still count. An unreadable manifest of an unrelated plugin is
+logged and does not pause Companion; failure to inspect the plugin directory itself still
+blocks controls.
+
+Companion's own settings live outside its plugin folder, so replacing the plugin files
+keeps them. After installation, check **Manage Modules** and **Display**, where setup or a
+Gaming Mode restart may be requested.
+
+</details>
 
 ### Updating
 
-1. Open **About → Check for Updates**.
-2. If a newer stable release has a downloadable plugin ZIP, choose **Download &lt;version&gt;**.
-3. Wait for the confirmed download path in your Downloads folder.
-4. Install that ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
-5. Review your module settings afterwards, especially fan control, gyro, battery protection and Wi-Fi. Fan Control requires explicit re-enabling after startup or reload.
+1. Open **About → Check for updates**.
+2. Choose **Download &lt;version&gt;** and wait until the page shows the file in your Downloads folder.
+3. Install that ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
+4. Afterwards, check your settings, especially Fan Control, gyro, battery protection and Wi-Fi.
 
-**Downloading does not install the update.** Decky's installation process can reset
-those hardware preferences. Companion verifies the ZIP before offering the completed
-file; if checking or downloading fails, the page shows the reason and you can try again.
-Opening About alone does not contact GitHub.
+Downloading does not install the update. If Fan Control was on, it resumes your curve after
+the update, and an open Desktop app restarts in the new version.
 
-## Usage
+<details>
+<summary><b>How updates are checked</b></summary>
 
-### Quick start
+Opening About alone does not contact GitHub. Only stable releases with a plugin ZIP are
+offered. Companion verifies the ZIP's version, size, SHA-256 digest and contents before it
+offers the file; if checking or downloading fails, the page shows the reason and you can try
+again. A failed download never replaces an existing ZIP. Decky's installation can reset some
+hardware preferences, which is why step 4 is there.
 
-Open Companion in Decky. **Hardware Controls** shows a short status beside each module;
-select a row to open its page, and use **‹ All Controls** to return. Dropdown selections
-keep you on the current page.
+</details>
 
-The screenshots below show Companion on a Legion Go 2 in Gaming Mode. Click any
-image to open the full 1920 × 1066 PNG.
+## Quick start
 
-<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware Controls menu with module status summaries" width="760"></a>
+Open Companion in Decky. **Hardware Controls** shows a short status for each module. Select
+a row to open its page and use **‹ All Controls** to go back.
 
-1. Open **Manage Modules** and leave enabled the modules you want to use.
-2. Open a module and check its status before changing a setting.
-3. For custom cooling, open **Fan Control**, review the curve and save any edits, then turn on **Enable Fan Control**. Leave it off to keep firmware automatic control.
-4. For game-specific TDP or vibration, launch the game first, then enable **Per Game Profile** on that page.
-5. Wait for the result after a change. A saved preference can be waiting for hardware confirmation; check the current/applied state too.
+<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware Controls menu with module status summaries" width="360"></a>
 
-The overview keeps the last received summaries when reopened. A note about old data
-means a fresh status could not yet be confirmed. Preferences remain saved across
-reboots. Managed profiles and supported controls recover after wake; **Fan Control
-stays off after startup, reload, sleep or a fault until you explicitly enable it again**.
+1. Open **Manage Modules** and keep the modules you want to use.
+2. For game-specific power or vibration, start the game first. On **TDP** choose **This game** under **Settings for &lt;game&gt;**; on **Vibration** turn on **Per-game profile**.
+3. For custom cooling, open **Fan Control**, check the curve, save any edits, then turn on **Enable Fan Control**.
+4. Results appear as short notifications. If something fails, the reason stays under that control; **Show details** at the end of each page has the technical facts.
+
+Your settings stay saved across reboots and come back after sleep. Fan Control resumes your
+curve after startup and sleep, but stays off after a detected fault until you turn it on again.
+
+<details>
+<summary><b>About the status summaries</b></summary>
+
+The overview keeps the last received summaries when reopened. A note about old data means a
+fresh status could not be confirmed yet. Dropdown selections keep you on the current page.
+The screenshots in this guide are full 1920 × 1066 PNGs: click one to open it.
+
+</details>
+
+## Using the modules
 
 ### Manage Modules
 
-Disabling a module stops its work, withdraws its hardware controls and hides its page.
-Its saved preferences remain available when you enable it again. This differs from
-turning off an individual setting: for example, **Joystick ring lights** can stay off
-while RGB control remains active to keep them off after wake.
+Turn a module off to stop its work, give its hardware back to the system and hide its page.
+Its settings are kept for when you turn it on again.
 
-<a href="docs/screenshots/manage-modules.png"><img src="docs/screenshots/manage-modules.png" alt="Manage Modules switches in the Steam overlay" width="760"></a>
+<a href="docs/screenshots/manage-modules.png"><img src="docs/screenshots/manage-modules.png" alt="Manage Modules switches in the Steam overlay" width="360"></a>
 
-Restoration depends on the module:
+<details>
+<summary><b>What each module restores when turned off</b></summary>
 
-| Module | When disabled |
+This differs from turning off a single setting: for example, **Stick lights** can stay off
+while lighting control stays active to keep them off after wake.
+
+| Module | When turned off |
 |---|---|
-| TDP & CPU | Returns TDP to the balanced firmware profile, CPU Boost to standard boost, and EPP to `balance_performance` |
-| Fan Control | Releases the custom override to firmware automatic. Curves, assignments and display units are kept; enabling the module again does not activate the curve |
-| Vibration | Returns to driver defaults |
-| RGB, Button Remapper, Gyro & Touchpad, Battery | Restores the captured state for controls still owned by Companion |
-| WiFi | Restores the configuration Companion changed; Wi-Fi may briefly reconnect |
-| OLED Display | Withdraws display adjustments and its script; Gaming Mode may need a restart |
+| TDP | Restores the platform profile, CPU Boost and EPP found before Companion first changed them; without them, Balanced, Boost on and `balance_performance` |
+| Fan Control | Returns the fan to firmware automatic. Curves, assignments and units are kept; turning the module on again does not start the curve |
+| Vibration | Restores the vibration settings found before Companion first changed them, otherwise the driver defaults |
+| Lighting, Button mapping, Gyro & touchpad, Battery | Restores the previous state for controls Companion still manages |
+| Wi-Fi | Restores the configuration Companion changed; Wi-Fi may briefly reconnect |
+| Display | Withdraws display adjustments and its script; Gaming Mode may need a restart |
 
-If cleanup cannot finish, the module stays blocked and offers **Retry &lt;module&gt; Cleanup**.
-An enabled module that could not start offers **Retry &lt;module&gt; Start**. Recovery records
-are retained and unfinished cleanup is retried on startup. **Restart Gaming Mode (closes
-games)** ends the current gaming session, so save and close your games first.
+If cleanup cannot finish, the module stays blocked and offers **Retry &lt;module&gt; cleanup**.
+A module that could not start offers **Retry &lt;module&gt; start**. Unfinished cleanup is
+retried on startup. **Restart Gaming Mode** asks first: it ends the current gaming session.
+
+</details>
 
 ### TDP
 
-Use **Enable** to give Companion control of the power limits, then choose a preset.
-**CPU Boost** and **EPP** are independent controls in the same page.
+Turn on **Enable TDP control**, then pick a preset. The line under the switch shows what runs
+now (Global or the game, the preset, the power limit and the live APU power).
 
-<a href="docs/screenshots/tdp.png"><img src="docs/screenshots/tdp.png" alt="TDP power limits and preset selection" width="760"></a>
+<a href="docs/screenshots/tdp.png"><img src="docs/screenshots/tdp.png" alt="TDP preset buttons and power status" width="360"></a>
 
-#### Presets and Custom
-
-Four presets are available, plus **Custom**. SPL is sustained power; SPPT and FPPT allow
-higher power for slower and shorter bursts. These are APU limits, not the whole console's
-battery consumption.
-
-| Preset | SPL: sustained | SPPT: slow burst | FPPT: fast burst |
+| Preset | Sustained | Slow boost | Fast boost |
 |---|---|---|---|
 | Silent | 8 W | 15 W | 20 W |
 | Balanced | 16 W | 25 W | 30 W |
 | Performance | 20 W | 32 W | 35 W |
-| Full Power | 35 W | 37 W | 45 W |
+| Maximum | 35 W | 37 W | 45 W |
 
-Presets apply immediately to the active profile. In **Custom**, adjust the sliders and
-use **Apply TDP**, **Apply & Save for &lt;game&gt;** or **Save AC for &lt;game&gt;**, depending on
-which profile you are editing.
-
-**Advanced TDP Control** is on by default and shows all three limits. Turn it off for
-one **TDP** slider: normally 5–35 W, with SPPT following at +10 W up to 37 W and FPPT
-at +15 W up to 45 W. The available range is checked against your firmware.
-
-**Profile overview** identifies the profile you are editing, its selected limits and
-whether AC is connected. **Current TDP** shows hardware limits and live **Package draw**;
-the latter is the APU power reading.
-
-#### Game and charging profiles
-
-With a game running, turn on **Per Game Profile** to save its TDP, CPU Boost and EPP
-settings. Turn on **Separate AC Profile** if you want different settings while charging.
-Use **Battery profile** and **AC profile** to choose which one to edit.
-
-The charger selects which profile applies on the hardware. Editing the inactive profile
-saves it for later without changing the current hardware settings. Leaving the game,
-turning off its profile, or playing a game without a profile returns to the global choices.
-New game profiles start with the current choices; older profiles without CPU settings
-inherit the global CPU choices until edited.
-
-#### CPU Power Controls
-
-**CPU Boost** allows or disables turbo frequencies. **EPP** controls the CPU's energy
-preference: **Prefer CPU** favours CPU performance; **Prefer GPU** reduces CPU energy
-demand and can leave more of the shared power budget for graphics.
-
-Newer kernels expose a **0–100% slider in 10% steps**: 0% is Prefer CPU and 100% is Prefer
-GPU. Older kernels expose supported named preferences, including **System default**
-when available. Companion uses the closest supported preset while keeping the exact
-saved value for systems that can apply it. CPU changes save automatically to the profile
-shown above the controls and are checked against the kernel.
-
-#### Extras
-
-**Unlock Custom TDP to 50 W** extends the three Custom limits up to 50/50/50 W using the
-optional `ryzenadj` helper. If the helper is temporarily unavailable, normal firmware
-limits remain available and your profiles are kept. Use **Retry Extras download** when offered.
+- A preset applies and saves as soon as you press it.
+- **Custom** opens sliders for your own limits; press **Apply** to use them.
+- **Settings for &lt;game&gt;** (while a game runs) chooses **Global**, **This game**, or
+  **This game + charger** for different settings on battery and on charger.
+- **CPU Boost** turns turbo frequencies on or off. **CPU energy preference** leans towards
+  CPU speed (left) or leaves more power for the GPU (right).
 
 > [!WARNING]
-> The 50 W range exceeds the manufacturer's normal firmware limits. It can increase
-> heat and power use, and the hardware can still constrain the request. Enable it only
-> if you intend to use that range.
+> **Allow up to 50 W** (under **More**) goes beyond Lenovo's normal limits. The console gets
+> hotter and louder and the battery drains faster. It downloads and verifies the `ryzenadj`
+> helper from GitHub the first time you turn it on.
 
-If status or a profile could not load, use **Retry status** or **Retry profile** and wait
-for fresh values before editing.
+<details>
+<summary><b>Custom limits, boosts and game profiles in detail</b></summary>
+
+Sustained power (SPL) is the main limit; slow and fast boost (SPPT and FPPT) allow more power
+for slower and shorter bursts. These are APU limits, not the whole console's consumption.
+
+Custom limits are a draft: the section title shows **· unsaved** until you press **Apply**
+(**Apply for &lt;game&gt;** or **Apply for &lt;game&gt; on charger**, depending on what you edit).
+Picking a preset drops an unsaved draft.
+
+**Separate boost limits** (under **More**) is on by default and shows all three limits. Turn it
+off for one **Sustained power** slider: normally 5–35 W, with slow boost following at +10 W up
+to 37 W and fast boost at +15 W up to 45 W. The available range is checked against your
+firmware. **Show details** lists the limits now in effect.
+
+With **This game + charger**, **Edit settings for** picks **Battery** or **Charger**; it starts on
+the power source in use now. The charger decides which settings run; editing the other one
+saves it for later. Choosing **Global** keeps the game's own settings unused; choose
+**This game** again to bring them back. **Delete profile for &lt;game&gt;** removes them after a
+confirmation. A game's own settings start as a copy of the global ones; older profiles without
+CPU settings use the global CPU choices until edited.
+
+Newer kernels show **CPU energy preference** as a 0–100% slider in 10% steps; older kernels show
+named preferences, including **System default** when available. CPU changes apply and save at
+once for the settings chosen above.
+
+Turning **Allow up to 50 W** off lowers saved settings above the standard limit. If the helper is
+unavailable, the normal range and your profiles stay available; use **Retry helper download**
+when offered. If status or a profile could not load, use **Retry status** or **Retry profile**.
+
+</details>
 
 ### Fan Control
 
-Open **Fan Control** directly below TDP. New settings start with the **Balanced**
-curve, **RPM** units and one **global curve**; custom control and preset assignments
-are off. Existing curves and display units are preserved.
+Fan Control starts with the **Balanced** curve and stays off until you turn it on.
 
-<a href="docs/screenshots/fan-control.png"><img src="docs/screenshots/fan-control.png" alt="Fan Control readings, enable switch and fan curve" width="760"></a>
+<a href="docs/screenshots/fan-control.png"><img src="docs/screenshots/fan-control.png" alt="Fan Control readings, enable switch and fan curve" width="360"></a>
 
-Review the graph, use **Save global curve** for any edits, then turn on **Enable Fan
-Control**. Saving while control is off does not start the fan controller. When it is
-already enabled, saving the active curve updates its target. Turn the switch off to
-return to **Firmware automatic**; a saved curve remains available for later.
+1. Check the curve, adjust it if you like and press **Save global curve**.
+2. Turn on **Enable Fan Control**. Turn it off at any time to return to the fan's automatic mode.
 
-#### Edit the curve
-
-The graph has **8 points across 0–100°C**. Move the first seven points; the last is
-fixed at **100°C / full speed**. Temperatures stay in order, and fan speeds can stay
-equal or rise as temperature increases. The editor stops a point crossing its
-neighbours or creating a falling speed segment.
-
-Drag a point, or focus the graph and use the controller:
+The graph has **8 points from 0 to 100°C**. Drag a point, or focus the graph and use the controller:
 
 | Control | Action |
 |---|---|
-| A | Enter point editing |
+| A | Start editing points |
 | LB / RB | Select the previous / next point |
-| D-pad left / right | Adjust temperature by 1°C |
-| D-pad up / down | Adjust speed by the selected step |
-| B | Finish point editing; normal Back navigation is available afterwards |
+| D-pad left / right | Change the temperature by 1°C |
+| D-pad up / down | Change the speed by the selected step |
+| B | Finish editing |
 
-**Speed edit step** starts at **100 RPM**. Choose a smaller or larger step as needed.
-**Full screen curve editor** provides the same curve controls with more space.
-**Discard changes** returns to the saved curve. Unsaved drafts are kept while switching
-between curves and the full-screen editor; save them before leaving the page.
+**Starting curve** offers **Silent**, **Balanced** and **Aggressive** as starting points to edit.
+**Full screen curve editor** gives you more room.
 
 <a href="docs/screenshots/fan-curve-editor.png"><img src="docs/screenshots/fan-curve-editor.png" alt="Full-screen fan curve editor with temperature and measured speed" width="760"></a>
 
-**Starting curve** offers **Silent**, **Balanced** and **Aggressive** as editable
-templates. Silent allows a stop at the cold end, Balanced starts with running cooling,
-and Aggressive raises cooling earlier. Selecting a template changes only the draft:
-save it as-is or adjust it first. These are Companion starting points, not Lenovo
-firmware profiles. Edited points show **Edited curve** rather than a template name.
+<details>
+<summary><b>Curve rules, readings and units</b></summary>
 
-#### Readings and units
+Move the first seven points freely; the last stays at **100°C** and only its speed changes,
+never below **1500 RPM**. At 100°C the fan runs at full speed whatever the curve says.
+Temperatures stay in order and speeds can only stay equal or rise with temperature; the
+editor stops a point from crossing its neighbours. Positive speeds below 1500 RPM are
+skipped; **0 RPM** requests a real stop.
 
-The overview, page header and live graph marker show **measured fan speed**, separately
-from the requested curve. They also work in firmware automatic mode without enabling
-custom control. **APU** here means the higher of **CPU Tctl and GPU edge**; it is not a
-separate measured whole-package temperature. Missing or stale readings show a dash.
+**Speed edit step** starts at 100 RPM. **Discard changes** returns to the saved curve. Unsaved
+drafts are kept while you switch curves or open the full-screen editor; save them before
+leaving the page. Saving while Fan Control is off does not start it; when it is on, saving the
+active curve updates the fan at once. Templates are Companion's starting points, not Lenovo
+firmware profiles.
 
-In **Settings**, **Show fan speed as percentage** changes the menu, graph and readings;
-the full-screen editor calls this **Speed unit**. The choice is saved. **100% means
-4800 RPM**, the tested operating ceiling for the supported unit/firmware. A **0 RPM**
-point requests an actual stop; turning custom control off instead returns to firmware
-automatic. See [Fan Control internals and limits](#fan-control-internals-and-limits).
+The page shows the **measured fan speed**, separately from the requested curve, also in
+automatic mode. **APU** means the higher of **CPU Tctl and GPU edge**. Missing or stale readings
+show a dash. **Show fan speed as percentage** (in **Settings**) changes the unit everywhere;
+**100% means 4800 RPM**, the tested ceiling.
 
-#### Optional TDP assignments
+</details>
 
-The global curve is used unless **Settings → Assign curves to TDP presets** is on.
-This option starts off and hides the assignment controls, even if old assignments
-remain saved. With assignments off, the global curve stays the same when you change
-Companion TDP or SteamOS QAM power modes.
+<details>
+<summary><b>Different curves per TDP preset</b></summary>
 
-Turn it on to choose **Global**, **Silent**, **Balanced**, **Performance**, **Maximum**
-or **Custom** in **Curve**. Maximum corresponds to **Full Power** on Companion's TDP
-page. Choose or edit points, then use **Assign curve to &lt;preset&gt;**. Selecting a row
-only chooses what you are editing; it does not assign or activate that curve.
+The global curve is used unless **Settings → Assign curves to TDP presets** is on. Turn it on
+to choose **Global**, **Silent**, **Balanced**, **Performance**, **Maximum** or **Custom** in
+**Curve**, edit points and use **Assign curve to &lt;preset&gt;**. Selecting a row only chooses
+what you edit. An unassigned preset uses the global curve; **Use global curve for
+&lt;preset&gt;** removes an assignment. Assignments follow **Companion's TDP presets**, including
+those chosen by game and charger profiles, **not SteamOS's own Performance profiles**.
+Turning assignments off keeps saved curves and uses only the global curve.
 
-An unassigned preset uses the global curve. **Use global curve for &lt;preset&gt;** removes
-its assignment. Turning assignments off keeps saved curves and open drafts and uses
-only the global curve. Assignments follow **Companion TDP presets**, including those
-selected by game/AC profiles, **not SteamOS QAM Performance profiles**. They are separate
-from the three Starting curve templates.
+</details>
 
-After startup, reload, sleep or a fault, review the status and explicitly enable
-custom control again. Disabling Fan Control or its module returns to firmware
-automatic. If the page says **Fan Control blocked**, **Fan recovery pending** or
-**Fan Control needs attention**, follow [Troubleshooting](#troubleshooting).
+<details>
+<summary><b>What happens on sleep, restarts and errors</b></summary>
+
+Once enabled, your curve keeps running across Gaming and Desktop Mode. Sleep, shutdown and
+plugin restarts briefly return the fan to automatic; the page shows **Starting your curve…**
+or **Paused, resuming automatically** until the curve is active again.
+
+A short internal error (a slow sensor read or a momentary EC access error) restarts the
+controller up to three times in ten minutes before Fan Control turns itself off with the
+reason. Hardware evidence, such as a stalled fan, another program's fan override or a failed
+readback, turns it off at once. If the page says **Another app controls the fan**,
+**Returning fan to automatic…** or **Turned off after an error**, see
+[Troubleshooting](#troubleshooting). The technical background is in
+[Fan Control internals](#fan-control-internals-and-limits).
+
+</details>
 
 ### Vibration
 
-Set **Intensity** for both handles: Off, Low, Medium or High. **Mode** selects the
-vibration pattern; the choices come from the driver and can include FPS, Racing,
-Standard, SPG and RPG. **Touchpad vibration** and **Touchpad intensity** are separate.
+Set **Vibration strength** for both handles (Off, Low, Medium, High) and a **Vibration mode**
+pattern (for example FPS, Racing, Standard, SPG or RPG). **Touchpad vibration** and
+**Touchpad strength** are separate. **Test vibration** plays a short buzz.
 
-<a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration mode and touchpad feedback controls" width="760"></a>
+<a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration mode and touchpad feedback controls" width="360"></a>
 
-Changes save automatically. With a game running, **Per Game Profile** switches between
-that game's haptics and the global settings. Saved game profiles apply when their game
-starts, and global settings return when you leave it or turn its profile off.
+Changes save automatically. With a game running, **Per-game profile** gives that game its own
+settings; they apply whenever the game starts.
 
-- **Test Vibration (0.5s)** tests the selected handle intensity and mode.
-- **Reset to defaults** resets the currently selected global or game profile.
-- **Show driver details** expands the controller interface information for diagnosis.
-- **Retry settings** reloads settings after a load failure.
+<details>
+<summary><b>More vibration options</b></summary>
 
-Controller reconnection and wake reapply saved haptics once the driver is available.
+- **Reset to defaults** resets the selected global or game profile.
+- **Show details** shows the controller driver and its endpoints.
+- **Retry settings** reloads the settings after a load failure.
 
-### RGB Lighting
+The available modes come from the controller driver. Saved vibration settings are reapplied
+after controller reconnection and wake.
 
-Turn on **Enable RGB control**, then use **Joystick ring lights** to switch both rings
-on or off. Choose a **Lighting effect** and adjust the controls it uses:
+</details>
+
+### Lighting
+
+Turn on **Enable lighting control**, switch **Stick lights** on or off and choose an **Effect**:
 
 | Effect | Controls |
 |---|---|
@@ -332,194 +350,280 @@ on or off. Choose a **Lighting effect** and adjust the controls it uses:
 | Color cycle | Brightness and speed |
 | Rainbow | Brightness and speed |
 
-<a href="docs/screenshots/rgb-lighting.png"><img src="docs/screenshots/rgb-lighting.png" alt="RGB hue, saturation, brightness and power-button light controls" width="760"></a>
+<a href="docs/screenshots/rgb-lighting.png"><img src="docs/screenshots/rgb-lighting.png" alt="Lighting effect, hue, saturation and brightness" width="360"></a>
 
-The two previews show the selected colour for Solid and Breathing. Changes save
-automatically; the controller runs the animations. Saved settings, including lights off,
-are reapplied after startup and wake when the controller becomes available.
+Changes save automatically and come back after startup and wake. **Power button light**
+switches the light in the power button (83N0 model). **Restore original lighting** returns the
+lights to how they were before Companion.
 
-**Power button light** is separate and available only on the verified firmware described
-in [Requirements](#requirements). **Restore lighting state from before Companion**
-restores the captured lighting state and releases Companion's lighting control.
+<details>
+<summary><b>Lighting details</b></summary>
 
-### Button Remapper
+The dot in the Hue description shows the chosen colour. The controller runs the animations
+itself. Saved settings, including lights off, are reapplied when the controller becomes
+available. The power-button light needs the BIOS to describe the light as explained in
+[Requirements](#requirements). Restore original lighting also ends Companion's lighting control.
 
-Turn on **Enable button remapping**, then choose separate actions for the left
-controller's **Desktop button** (upper extra button) and **Page button** (lower extra
-button). Options include Steam menus, the on-screen keyboard, screenshots, window
-switching, navigation keys and F1–F12. **Disabled** makes a button produce no action.
+</details>
 
-<a href="docs/screenshots/button-remapper.png"><img src="docs/screenshots/button-remapper.png" alt="Separate Desktop and Page button mappings" width="760"></a>
+### Button mapping
 
-**Default** restores that button's captured system mapping. **Restore Default Actions**
-restores both. Turning remapping off restores mappings Companion still owns while
-preserving unrelated mappings and changes made elsewhere. Actions are saved and
-reapplied through SteamOS's existing InputPlumber service.
+Turn on **Enable button mapping**, then choose actions for the left controller's
+**Desktop button** (upper extra button) and **Page button** (lower extra button): Steam menus,
+the on-screen keyboard, screenshots, window switching, navigation keys, F1–F12 or **Disabled**.
 
-### Gyro & Touchpad
+<a href="docs/screenshots/button-remapper.png"><img src="docs/screenshots/button-remapper.png" alt="Separate Desktop and Page button mappings" width="360"></a>
 
-Choose **Controller motion source**: **Left controller**, **Right controller**,
-**Both controllers (average)** or **System default**. Selecting a controller enables its gyro reporting and routes its
-motion through InputPlumber. These sensors are in the removable handles; Both averages
-their readings. The page shows the current route separately from the saved choice.
+**Default** restores a button's original action and **Restore defaults** restores both.
 
-<a href="docs/screenshots/gyro-touchpad.png"><img src="docs/screenshots/gyro-touchpad.png" alt="Controller motion source and gyro reporting status" width="760"></a>
+<details>
+<summary><b>How mappings are applied</b></summary>
 
-**System default** or **Release Companion Control** restores the previous settings still
-owned by Companion. If an interrupted change is reported, use the release action to
-recover before making another change.
+Actions are saved and applied through SteamOS's own InputPlumber service. Turning mapping off
+restores the mappings Companion still manages and keeps unrelated mappings and changes made
+elsewhere.
 
-For a quick check, choose **Start 30-Second Test**, move each controller and touch the
-touchpad. Compare **Physical controllers** with **Existing Steam controller** to see
-whether input reaches the virtual controller. **Stop Test** ends it early; it also stops
-after 30 seconds or when the page is hidden. Zero readings and missing reports are
-shown separately.
+</details>
 
-The test observes existing reports. It does not enable sensors, calibrate the console
-body or configure a game's Steam Input layout. You still need gyro/touchpad assignments
-in that game's controller layout. Raw test values are diagnostic counts, not degrees
-per second.
+### Gyro & touchpad
+
+Choose the **Gyro source**: **Left controller**, **Right controller**, **Both controllers** or
+**System default**. The gyros are in the removable handles; Both averages them.
+
+<a href="docs/screenshots/gyro-touchpad.png"><img src="docs/screenshots/gyro-touchpad.png" alt="Controller motion source and gyro reporting status" width="360"></a>
+
+**Start controller test** shows live gyro and touchpad readings for 30 seconds, from the
+controllers and as Steam receives them, so you can see whether input reaches Steam. A game
+still needs gyro or touchpad assignments in its Steam Input layout.
+
+<details>
+<summary><b>Gyro and test details</b></summary>
+
+Selecting a controller turns on its gyro reporting and routes its motion through InputPlumber.
+Until the route is confirmed, the description says **Not confirmed yet…**; **Show details**
+shows the current route. **System default** restores the previous settings Companion still
+manages. If an interrupted change is reported, use **Restore previous controller settings**
+before making another change.
+
+The test only reads existing reports: it does not turn on sensors, calibrate the console or
+configure games. **Stop test** ends it early; it also stops when the page is hidden. Zero
+readings and missing reports are shown separately. Raw values are diagnostic counts, not
+degrees per second.
+
+</details>
+
+### Controller firmware
+
+At the end of the **Gyro & touchpad** page (its own menu entry when that module is off), one
+button walks you through **Check for updates**, **Download** and **Install**. Companion asks
+Lenovo's update service for the newest left controller, right controller and receiver
+firmware and installs every newer part in one go.
+
+> [!IMPORTANT]
+> Connect the charger (on battery, Install needs at least 30% charge), keep both controllers
+> attached and do not put the console to sleep. It can take up to about five minutes and the
+> controllers may disconnect briefly. This feature is marked experimental.
+
+<details>
+<summary><b>How firmware updates work</b></summary>
+
+Companion asks Lenovo's Legion Space update service for the current firmware, downloads and
+verifies every image with Lenovo's signing key, and installs the newer ones (left, right, then
+receiver) with SteamOS's own fwupd tool. Its own controller features pause during the install,
+and the new versions are checked afterwards. Only versions newer than the installed ones are
+offered. If an update fails, check again and retry, or use Legion Space on Windows. Details:
+[CONTROLLER_FIRMWARE.md](docs/CONTROLLER_FIRMWARE.md).
+
+</details>
 
 ### Battery
 
-**Charging state** shows the console battery and charging status. **Battery protection**
-uses Lenovo's Long Life mode to limit charging to **about 80%**. The percentage is fixed
-by firmware. If the battery is already above the limit, enabling protection does not
-actively discharge it.
+The first row shows the console battery, charging status and both controllers.
+**Battery protection** limits charging to **about 80%** using Lenovo's Long Life mode.
 
-<a href="docs/screenshots/battery.png"><img src="docs/screenshots/battery.png" alt="Battery charge and battery protection controls" width="760"></a>
+<a href="docs/screenshots/battery.png"><img src="docs/screenshots/battery.png" alt="Battery charge and battery protection controls" width="360"></a>
 
-Turning protection off restores the previous normal charging mode, including **Fast**
-when it was active. **Release Companion Control** returns the captured state and stops
-maintaining a charging preference. If a change was interrupted, use **Recover and
-Release Control** first. The page distinguishes the saved preference from the battery's
-confirmed state. First installation leaves the charging mode alone until you choose it.
+<details>
+<summary><b>Battery details</b></summary>
 
-**Controller batteries** shows separate left/right charge levels and connection states.
-Detached controllers are labelled separately, with a controller-reported level when available.
+The percentage is fixed by the firmware. If the battery is already above it, protection does
+not discharge it. Turning protection off restores the previous normal charging mode, including
+**Fast** when it was active. **Restore previous charging mode** (under **Show details**) returns
+the original state and stops Companion managing it; if a change was interrupted, the page asks
+you to use it first. Until the battery confirms a change, the switch says
+**Waiting for the battery to confirm…**. A fresh install leaves the charging mode alone until
+you choose. Detached controllers are labelled, with their last reported level when available.
 
-### OLED Display
+</details>
 
-The available controls depend on whether SteamOS already supplies the Legion Go 2
-OLED display profile.
+### Display
 
-<a href="docs/screenshots/oled-display.png"><img src="docs/screenshots/oled-display.png" alt="Native OLED display support and EDID correction status" width="760"></a>
+**Fix HDR brightness in games** corrects the brightness information (EDID) that games read, so
+HDR games use the panel's real values. Restart a game that was already running.
 
-**With native display support:** Companion retires its older brightness/display fix and
-removes its recognised user script. PQ, Gamma 2.2, Hybrid and brightness forwarding are
-locked with an explanation. **EDID for games** remains available independently. Cleanup
-retries automatically if needed; use **Restart Game Mode** when requested to finish
-the handover.
+<a href="docs/screenshots/oled-display.png"><img src="docs/screenshots/oled-display.png" alt="Display mode, HDR brightness slider and HDR info for games" width="360"></a>
 
-**On older systems:** choose a mode at first setup, or use **Switch Display Mode** later.
+**On SteamOS 3.9 and newer**, SteamOS supports this screen itself: the page says
+**SteamOS supports this screen** and only the HDR fix stays. **On older SteamOS**, choose a
+screen mode at first setup (it asks before installing), or later with **Change display mode**:
 
 | Mode | What it does | What you may notice |
 |---|---|---|
-| Hybrid (recommended) | Uses Gamma 2.2 for SDR and switches to PQ for HDR content | The panel briefly blanks when the mode changes |
-| PQ | Keeps the panel in its HDR transfer function | SDR dimming through gamescope can raise the apparent black floor |
-| Gamma 2.2 | Keeps direct panel brightness control | HDR highlights are tone mapped into a lower luminance range |
-
-**Brightness slider → Enabled** forwards Steam's slider while the panel is in PQ and
-Steam is not already handling HDR brightness. A standby/not-applicable status explains
-when forwarding is unnecessary.
-
-**EDID for games → Enabled** corrects the display metadata games read, including panel
-luminance. It works independently of the legacy display-mode script. Restart a game
-that was already running so it can read the updated metadata.
-
-On systems using the legacy fix, **Reset Display Fix → Confirm Display Reset** withdraws
-brightness, HDR and EDID changes, removes Companion's script, restores a previous
-third-party script from backup if present, and clears this module's settings. It returns
-to initial setup; an incomplete reset stays paused and offers **Retry Display Reset**.
+| Hybrid (recommended) | Gamma 2.2 for normal content, PQ for HDR | The screen briefly blanks when it switches |
+| PQ | Keeps the panel in HDR mode | Dark scenes can look slightly grey |
+| Gamma 2.2 | Keeps direct brightness control | HDR highlights are less bright |
 
 > [!IMPORTANT]
-> **Restart Game Mode** closes Steam and running games. Save and close your games first.
-> Hybrid/PQ can switch immediately; changing to or from Gamma 2.2 can require a restart.
-> Follow the page's restart status.
+> **Restart Gaming Mode** asks first, then closes Steam and running games. Save your games first.
 
-### WiFi
+<details>
+<summary><b>Display details</b></summary>
 
-Check **Current WiFi connection** first: it shows the confirmed SSID, band/frequency and
-active backend (**iwd** or **WPA supplicant**). The available actions follow that backend
-and the supported Legion Go 2 MT7922 adapter using `mt7921e`.
+When SteamOS ships its own Legion Go 2 display profile, Companion retires its older fix,
+removes its own display script and hides PQ, Gamma 2.2, Hybrid and brightness forwarding.
+Cleanup retries automatically; use **Restart Gaming Mode** when asked to finish the handover.
+A display script installed by 2.1.0 moves automatically to the folder gamescope reads; restart
+Gaming Mode once to apply it.
 
-<a href="docs/screenshots/wifi.png"><img src="docs/screenshots/wifi.png" alt="WiFi band preference and one-time connection controls" width="760"></a>
+**Brightness slider in HDR** forwards Steam's brightness slider while the panel is in PQ and
+Steam does not already handle HDR brightness; its description says when it is not needed.
+Hybrid and PQ can switch immediately; changing to or from Gamma 2.2 can need a restart.
 
-**Automatic WiFi** restores Companion's owned band settings and leaves selection to
-SteamOS. A saved policy is not proof of the current connection; check the live band and
-operation result.
+The HDR fix changes gamescope's copy of the EDID, never the panel firmware, and works
+independently of the screen mode. On systems using the older fix, **Reset display fix** (after
+a confirmation) removes Companion's brightness, HDR and EDID changes and its script, restores a
+previous third-party script from backup if present, and returns to first setup. An unfinished
+reset stays paused and offers **Retry display reset**.
+
+</details>
+
+### Wi-Fi
+
+The first row shows your network, band and channel. Pick a policy in **Band**:
+
+| Option | What it does |
+|---|---|
+| Automatic | SteamOS chooses the band |
+| Prefer 5/6 GHz | Favours the faster bands, keeps 2.4 GHz as a fallback |
+| Only 5/6 GHz | Never uses 2.4 GHz; asks first, because you can lose Wi-Fi away from a 5/6 GHz router |
+| Only 6 GHz | Connects only to 6 GHz; asks first. Needs SteamOS 3.9 or newer |
+
+<a href="docs/screenshots/wifi.png"><img src="docs/screenshots/wifi.png" alt="WiFi band preference and one-time connection controls" width="360"></a>
+
+If you lose Wi-Fi with a strict option, choose **Automatic** or **Prefer 5/6 GHz** again.
+
+<details>
+<summary><b>Wi-Fi details by backend</b></summary>
+
+The options depend on SteamOS's Wi-Fi backend (**iwd** or **WPA supplicant**, shown under
+**Show details**) and need the Legion Go 2's MT7922 adapter (`mt7921e` driver).
 
 | Backend | Option | Behaviour |
 |---|---|---|
-| iwd | Prefer 5/6 GHz (2.4 GHz fallback) | Favours higher bands while keeping 2.4 GHz available |
-| iwd | Only 5/6 GHz | Excludes 2.4 GHz; can leave Wi-Fi disconnected outside higher-band coverage |
-| iwd with Prefer enabled, or WPA with Automatic WiFi | Rescan and reconnect to 5/6 GHz | Makes a bounded attempt to connect to a suitable detected higher-band access point |
-| WPA with Automatic WiFi | Connect to 6 GHz once | Connects to a freshly detected 6 GHz access point, then clears the temporary selection for normal roaming |
+| iwd | Band: Prefer 5/6 GHz | Favours higher bands while keeping 2.4 GHz available |
+| iwd | Band: Only 5/6 GHz | Excludes 2.4 GHz; can leave Wi-Fi disconnected outside higher-band coverage |
+| iwd with Prefer, or WPA with Automatic | Reconnect to 5/6 GHz | A one-time attempt to connect to a detected higher-band access point |
+| WPA with Automatic | Connect to 6 GHz once | Connects to a detected 6 GHz access point, then returns to normal roaming |
+| WPA with Automatic | Band: Only 6 GHz | Limits the saved network to 6 GHz; needs NetworkManager 1.58 or newer |
 
-Saved iwd preferences survive restart and wake. With **Prefer 5/6 GHz** active, Companion
-also searches for suitable higher-band access points and attempts to move the connection
-automatically. WPA uses SteamOS's normal automatic roaming; its manual actions are
-one-time attempts, not a continuous higher-band policy.
+**Automatic** restores the band settings Companion changed. A saved policy is not proof of the
+current connection; check the live band. With **Prefer 5/6 GHz** on iwd, Companion also looks
+for higher-band access points and moves the connection automatically. WPA uses SteamOS's normal
+roaming; its manual actions are one-time attempts.
 
-Selecting **Only 5/6 GHz** asks for confirmation. A failed initial attempt restores the
-previous policy if no higher-band link is verified. If the policy was successfully
-applied and you later leave coverage, choose **Automatic WiFi** or **Prefer 5/6 GHz** to
-allow 2.4 GHz again. Manual reconnect actions briefly interrupt Wi-Fi.
+If the first attempt of **Only 5/6 GHz** connects to no higher band, the previous policy comes
+back automatically. Manual reconnect actions briefly interrupt Wi-Fi. If SteamOS switches
+backend, a saved iwd preference stays visible but unused under WPA; choose **Automatic** to
+clear it. Companion never switches the backend or runs another Wi-Fi manager.
 
-If SteamOS's backend changes, a saved iwd preference can be shown as inactive under WPA.
-Use **Clear saved iwd preference** when offered. Older saved restrictions show a restore
-action before new choices become available. Companion uses the active system backend;
-it does not switch it or run another Wi-Fi manager.
+</details>
 
 ### About
 
-**About** shows the installed version, included modules, author and license information.
-Use its update controls as described in [Updating](#updating). Results and the completed
-download path remain available if you leave and return to About during the operation.
+**About** shows the installed version, author and license, and checks for updates as
+described in [Updating](#updating).
+
+## Desktop app
+
+In Desktop Mode, **Legion Go Companion** is in the application menu. It has the same modules
+and settings as the Decky panel, laid out for a mouse and a wide window, and both always show
+the same state.
+
+- When Desktop Mode starts, the app waits in the system tray; click the icon to open it.
+- The TDP page lists every game that has its own settings, by name. **Edit** changes a game's
+  settings even when it isn't running; **Delete** removes them.
+- **About → View logs** shows recent events and can export them for a bug report.
+
+<a href="docs/screenshots/desktop-tdp.png"><img src="docs/screenshots/desktop-tdp.png" alt="Desktop app TDP page with power, CPU and game profiles" width="760"></a>
+
+<a href="docs/screenshots/desktop-fan.png"><img src="docs/screenshots/desktop-fan.png" alt="Desktop app Fan Control page with live readings and the curve editor" width="760"></a>
+
+<details>
+<summary><b>Desktop app details</b></summary>
+
+The app talks to the running Decky plugin. If Decky is not running, the app pauses its controls
+and offers **Check Decky** and, when the service is stopped, **Start Decky**. Turning off
+**Show tray icon** in the app's settings also stops the start in the tray. Editing a saved game
+profile never changes the settings running now; they apply when that game starts. Uninstalling
+the plugin closes the app and removes its menu and autostart entries; updating the plugin
+restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.md).
+
+</details>
 
 ## Troubleshooting
 
 | What you see | What to do |
 |---|---|
-| All modules paused | Uninstall the conflicting standalone plugins, keep their settings, then restart Decky or the console. Renamed copies still count; keep backups outside Decky's plugin directory. If the plugin directory cannot be inspected, restore access to it before retrying. |
-| A module is missing from the overview | Check Manage Modules. A disabled module is hidden; a failed start or pending cleanup has a retry action there. |
-| A hardware control is unavailable | Read the page's reason. Driver, InputPlumber, adapter and firmware checks determine availability; installing Companion does not supply missing system interfaces. |
-| A preference is saved but not confirmed | Check the current hardware state and the error. Wait for recovery or use the offered retry. An unavailable reading is not treated as a confirmed on/off state. |
-| Extras is unavailable | Keep using the firmware range. Connect to the internet and use Retry Extras download; saved extended profiles are retained. |
-| Fan Control unavailable | Check the model, BIOS and EC versions against Requirements. Other variants stay blocked until their register mapping is validated. |
-| Fan Control blocked or External fan control | Stop the other fan/EC control tool and let it restore firmware automatic. Companion also blocks uncertain ownership; do not force-enable a second controller. |
-| Fan Control needs attention or Fan recovery pending | Read the reason, allow recovery to finish and resolve any sensor or ownership error. Review the saved curve before explicitly enabling it again. Keep custom control off if recovery cannot be confirmed. |
-| Fan Control reports a watchdog connection failure | This is communication between local processes. A fault still returns control to firmware automatic. Include the displayed reason and, before rebooting, the output of `sudo cat /run/legiongo2companion-fan/last-fault.json` in a report if that file exists. It retains the latest failed session; a healthy later session does not erase it. |
-| My fan curve is saved but Firmware automatic is shown | Saving does not enable custom control. Startup, reload, sleep, a fault or disabling the module requires you to enable Fan Control again. |
-| A fan graph point will not move further | Temperatures must stay ordered and speeds cannot decrease between points. The eighth point is fixed at 100°C/full speed; positive speeds below 1500 RPM are skipped. |
-| Fan RPM or APU shows a dash | The reading is unavailable or stale. Open Fan Control and read its status; another raw-port owner can prevent a safe read. A dash is not a confirmed stopped fan. |
-| Gyro test has data but the game does not react | Check that game's Steam Input layout and gyro/touchpad assignments. The passive test checks the input path. |
-| Battery is above 80% after protection is enabled | The firmware stops further charging according to its Long Life mode; it does not actively discharge an already charged battery. |
-| OLED controls are locked | Read the native-support or cleanup message. Use the requested restart; EDID correction remains separate. |
-| A game still reads old HDR values | Check EDID status and restart the game. A requested Gaming Mode restart is needed for display-script changes. |
-| Wi-Fi stays on 2.4 GHz | Check the active backend and live band. Use the applicable rescan action; a preference cannot create an available 5/6 GHz access point. |
-| Wi-Fi disconnected with Only 5/6 GHz | Choose Automatic WiFi or Prefer 5/6 GHz to allow 2.4 GHz again. |
-| Recovery required, settings damaged or cleanup incomplete | Keep the saved settings, backups and recovery record. Follow the page's reason and retry action; deleting them can remove the information needed to restore the previous state. |
-| Update check/download failed | Read the error and retry. You can also download the plugin ZIP from Releases and install it manually. |
+| All modules paused | Uninstall LeGoTDP, LeGo Vibe Control and LeGo2 Brightness Fix (keep their settings), then restart Decky or the console. |
+| A module is missing | Check **Manage Modules**: a disabled module is hidden; a failed start or cleanup has a retry button there. |
+| A control is unavailable | Read the reason on the page; some controls need system drivers or a specific model. |
+| Fan Control is not available | Check your model in [Requirements](#requirements). |
+| Another app controls the fan | Stop the other fan tool and let it return the fan to automatic. |
+| Fan Control turned off after an error | Read the reason, let recovery finish, check your curve, then turn it on again. |
+| Turned off: the BIOS/EC version changed how the fan is controlled | The check after a firmware update failed. Turn Fan Control on again to repeat it; if it keeps failing, report it with your BIOS and EC versions. |
+| My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
+| A curve point will not move further | Temperatures stay in order and speeds cannot drop between points; the last point stays at 100°C and at least 1500 RPM. |
+| The gyro test works but the game does not react | Check that game's Steam Input layout. |
+| Battery stays above 80% with protection on | Normal: protection stops charging, it does not discharge the battery. |
+| A game still reads old HDR values | Turn on **Fix HDR brightness in games** and restart the game. |
+| Wi-Fi stays on 2.4 GHz | Check the live band; use **Reconnect to 5/6 GHz** when offered. A setting cannot create a missing 5/6 GHz network. |
+| No Wi-Fi with Only 5/6 GHz or Only 6 GHz | Choose **Automatic** or **Prefer 5/6 GHz**. |
+| Update check or download failed | Read the error and retry, or download the ZIP from Releases and install it manually. |
+| The Desktop app says Qt is missing or too old | Use the Decky panel; the app needs SteamOS 3.8 or newer. |
 
-When reporting a problem, include the plugin version, SteamOS build/kernel, console model
-and the affected page's status/error, the time and action that triggered it, and the relevant
-[diagnostic logs](docs/LOGGING.md). Backend operations, desktop connection faults and independent
-worker recovery have separate, bounded records; the logging guide explains how to collect them.
-[CHANGELOG.md](CHANGELOG.md) lists changes by version.
+<details>
+<summary><b>More troubleshooting</b></summary>
+
+| What you see | What to do |
+|---|---|
+| A preference is saved but not confirmed | Check the current state and the error; wait for recovery or use the offered retry. An unavailable reading is not treated as on or off. |
+| 50 W is paused | Keep using the normal range. Connect to the internet and use **Retry helper download**; your profiles are kept. |
+| Returning fan to automatic… | Let it finish. Keep custom control off if recovery cannot be confirmed. |
+| Fan Control reports a watchdog connection failure | This is communication between local processes; the fan still returns to automatic. Include the reason and, before rebooting, the output of `sudo cat /run/legiongo2companion-fan/last-fault.json` (if it exists) in a report. |
+| Fan RPM or APU shows a dash | The reading is unavailable or stale. Another program reading the EC can prevent a safe read. A dash does not mean the fan stopped. |
+| Display controls are locked | Read the SteamOS-support or cleanup message and use the requested restart. |
+| Recovery required, settings damaged or cleanup incomplete | Keep the saved settings and backups; follow the page's reason and retry button. Deleting them can remove what is needed to restore your previous state. |
+| A plugin conflict persists | Renamed copies of the old plugins still count; keep backups outside Decky's plugin folder. If the plugin folder cannot be read, restore access to it. |
+
+</details>
+
+**Reporting a problem:** include the plugin version, SteamOS version, console model, what the
+page says, when it happened and what you did, plus the logs from **About → View logs** in the
+Desktop app or as described in [LOGGING.md](docs/LOGGING.md). [CHANGELOG.md](CHANGELOG.md) lists
+the changes in each version.
 
 ## How it works
 
 <details>
 <summary><b>Hardware interfaces, recovery and background work</b></summary>
 
-Companion coordinates independent hardware modules through Decky. Each module manages
-its own settings and verifies the interface it uses.
+Companion coordinates independent hardware modules through Decky. Each module manages its own
+settings and verifies the interface it uses.
 
 | Area | System interface |
 |---|---|
-| TDP | Lenovo WMI in the firmware range; verified `ryzenadj` helper for Extras |
-| Fan Control | Restricted EC access on validated firmware; k10temp and amdgpu temperatures plus EC tachometer feedback |
+| TDP | Lenovo WMI in the firmware range; verified `ryzenadj` helper for Allow up to 50 W |
+| Fan Control | Restricted EC access on the 83N0 model, checked by behaviour; k10temp and amdgpu temperatures plus EC tachometer feedback |
 | CPU Boost / EPP | Kernel CPU policy controls under sysfs |
 | Package power | RAPL energy counters |
 | Haptics / joystick RGB | `hid-lenovo-go` sysfs controls |
@@ -532,40 +636,38 @@ its own settings and verifies the interface it uses.
 
 Display corrections change gamescope's EDID copy, not the panel firmware. Native-display
 handover detects the system profile at
-`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`.
-Detection checks file presence, not Lua contents or SteamOS channel. The first handover
-requests a Gaming Mode restart. See the [technical review](docs/NATIVE_DISPLAY_SUPPORT.md).
+`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`. Detection checks
+file presence, not Lua contents or SteamOS channel. The first handover requests a Gaming Mode
+restart. See the [technical review](docs/NATIVE_DISPLAY_SUPPORT.md).
 
-Settings use atomic replacement and backup/recovery handling. Failed changes retain
-restoration information; controls pause if settings cannot be recovered. Restoration
-only changes state still owned by Companion, preserving conflicting external changes.
-The TDP/CPU module uses balanced firmware power, standard boost and
-`balance_performance` for module withdrawal because earlier versions did not capture
-the original CPU policy. Interrupted cleanup is also retried during uninstall when
-Companion is not paused by a plugin conflict.
+Settings use atomic replacement and backup/recovery handling. Failed changes retain restoration
+information; controls pause if settings cannot be recovered. Restoration only changes state
+still owned by Companion, preserving conflicting external changes. TDP/CPU and Vibration capture
+the system's own values before their first change and restore them on withdrawal; installs from
+before 2.2 without captured values fall back to the defaults listed under Manage Modules.
+Interrupted cleanup is also retried during uninstall when Companion is not paused by a plugin
+conflict.
 
-Background profile/recovery checks continue with Quick Access closed. RGB and remapping
-normally check once per minute, with five-second checks during the first 30 seconds
-after startup/wake; matching state avoids another write or profile reload. Battery and
-gyro also recover after startup/wake and check for drift. RGB retries a temporarily
-missing controller during wake recovery. InputPlumber restarts trigger earlier recovery
-checks, with backoff after failures.
+Background profile and recovery checks continue with Quick Access closed. RGB and remapping
+normally check once per minute, with five-second checks during the first 30 seconds after
+startup or wake; matching state avoids another write or profile reload. Battery and gyro also
+recover after startup and wake and check for drift. RGB retries a temporarily missing controller
+during wake recovery. InputPlumber restarts trigger earlier recovery checks, with backoff after
+failures.
 
-Page refreshes pause while Quick Access is hidden. Diagnostic readers close outside a
-test; controller battery sampling is a short read with a 15-second cache when requested.
-RGB animations run in firmware, and slider edits are grouped while a control is moving.
-Vibration also discards superseded queued values for the same field and profile while
-preserving the final accepted edit when its page closes.
-Actual overhead depends on enabled modules, display mode and the system build.
+Page refreshes pause while Quick Access is hidden. Diagnostic readers close outside a test;
+controller battery sampling is a short read with a 15-second cache. RGB animations run in
+firmware, and slider edits are grouped while a control is moving. Vibration discards superseded
+queued values for the same field and profile while keeping the final accepted edit. Actual
+overhead depends on enabled modules, display mode and the system build.
 
-Conflict detection checks plugin folders and manifests, including renamed copies. It
-blocks requests and stops workers when a conflict appears; a restart is required after
-removal. WiFi Optimizer and HueSync are not included in that installation check.
+Conflict detection checks plugin folders and manifests, including renamed copies. It blocks
+requests and stops workers when a conflict appears; a restart is required after removal. WiFi
+Optimizer and HueSync are not part of that check.
 
 The update downloader accepts stable release plugin ZIPs with a SHA-256 digest. It checks
-version, size, digest and archive contents before completing the download. Failed
-downloads do not replace an existing ZIP. Source archives and development branches are
-not used as fallback downloads.
+version, size, digest and archive contents before completing the download. Source archives and
+development branches are not used as fallback downloads.
 
 </details>
 
@@ -576,98 +678,111 @@ not used as fallback downloads.
 
 Fan Control uses an independently implemented, restricted EC register interface on
 [the validated hardware](#requirements). The positive target range is **1500–4800 RPM**;
-unsupported positive values below 1500 snap to stop or the running minimum. Custom
-zero uses a distinct EC stop request; a zero override releases control to firmware.
-Firmware automatic can also naturally stop a cool fan.
+unsupported positive values below 1500 snap to stop or the running minimum. Custom zero uses a
+distinct EC stop request; a zero override releases control to firmware. Firmware automatic can
+also naturally stop a cool fan.
 
-**4800 RPM is an observed operating plateau on the tested unit, not a manufacturer
-motor rating or a guarantee for every console.** Bounded trials through a 5200 RPM
-target produced no useful increase. The editor's finer target steps do not imply
-one-RPM motor accuracy. Starting from stop requests the curve's positive speed
-directly, without an artificial 4000 RPM kick; insufficient tach feedback causes
-withdrawal rather than repeated hidden boosts.
+The EC interface is checked by behaviour, not by version. Every session start first reads all
+of the registers Companion uses twice, without writing. The readings must be stable and
+plausible, and an override must be absent or released. On a BIOS/EC version pair that Companion
+has not checked yet, the first session sets 3000 RPM (4800 RPM if the fan already runs at
+2200 RPM or more). The target must read back exactly, and the tachometer must come within 15% of
+it in two consecutive samples within 15 seconds. Release must then read firmware automatic three
+times. The check never lowers the fan speed, and the backup watchdog runs throughout. The
+checked pair is remembered in a root-only file outside Decky's settings folder
+(`/var/lib/legiongo2companion-fan/fan_firmware.json`), so later sessions skip this check. It is
+a hardware fact, so uninstalling leaves it in place. A failed check is not remembered: Fan
+Control turns off with the reason, and enabling it again repeats the check.
 
-Control and the displayed APU value use **max(CPU Tctl, GPU edge)** from k10temp and
-amdgpu. The tested system exposes no Tdie or verified separate whole-package sensor.
-The EC temperature is supplementary telemetry with an unproven physical
-sensor identity. Its instantaneous difference from Tctl/GPU edge is not a fault;
-invalid or slow sensor reads still withdraw control. A live tachometer reading is never replaced by the requested RPM.
+**4800 RPM is an observed operating plateau on the tested unit, not a manufacturer motor rating
+or a guarantee for every console.** Bounded trials through a 5200 RPM target produced no useful
+increase. The editor's finer target steps do not imply one-RPM motor accuracy. Starting from stop
+requests the curve's positive speed directly, without an artificial 4000 RPM kick; insufficient
+tach feedback causes withdrawal rather than repeated hidden boosts.
 
-A separate controller process and independent recovery process supervise fresh sensors,
-progress and ownership. Cooling rises quickly and falls more slowly to limit
-oscillation. Custom control continues above **85°C**; at **100°C**, the controller
-and backup can enforce full speed without the normal ramp. This high-temperature
-policy is tested with model inputs, not by heating the console to 100°C. Native
-thermal protections remain in place.
+Control and the displayed APU value use **max(CPU Tctl, GPU edge)** from k10temp and amdgpu.
+The tested system exposes no Tdie or verified separate whole-package sensor. The EC temperature
+is supplementary telemetry with an unproven physical sensor identity; its difference from
+Tctl/GPU edge is not a fault. Invalid or slow sensor reads still withdraw control. A live
+tachometer reading is never replaced by the requested RPM.
 
-Disable, unload, faults and normal sleep withdraw custom control and verify firmware
-automatic. Sleep preparation uses login1 delay inhibitors. Saved enabled state never
-automatically starts a new controller after startup/reload or a fault. Detected
-conflicting owners or unverifiable ownership block activation; a foreign raw-port
-reader can also block telemetry without proving an active fan override.
+A separate controller process and an independent recovery process supervise fresh sensors,
+progress and ownership. Cooling rises quickly and falls more slowly to limit oscillation. Custom
+control follows the curve up to **100°C**; there, the controller and backup can enforce full
+speed without the normal ramp. This policy is tested with model inputs, not by heating the
+console to 100°C. Native thermal protections remain in place.
 
-Recovery requires a functioning kernel and EC transport. Recovery after a whole-system
-hang and a firmware-enforced lease have not been established. Userspace locks cannot
-exclude firmware/SMM or every non-cooperating EC writer. Do not run another fan or EC
-control tool alongside Companion's custom controller.
+Disable, unload, SIGTERM, faults and normal sleep withdraw custom control and verify firmware
+automatic. Both fan processes hold their own login1 delay inhibitor during sleep preparation.
+Session endings are classified: sleep, shutdown and plugin restarts **pause** and then re-arm
+the saved curve with a fresh controller; transient software or timing errors **retry** at most
+three times in ten minutes; hardware evidence is a **fault** that saves Fan Control off with its
+reason. Every start repeats all checks (platform, ownership, both sensors, EC plausibility,
+backup readiness, sleep inhibitor, curve). The controller runs the curve from its own sensors,
+so a busy or detached Decky frontend does not end the session. Detected conflicting owners or
+unverifiable ownership block activation; a foreign raw-port reader can also block telemetry
+without proving an active fan override. A leftover EC override with no live owner, for example
+after both fan processes were killed, is released to firmware automatic when the next session
+starts.
 
-With custom control off, there are no fan workers or sleep inhibitors and no background
-EC polling. Visible fan views request bounded passive readings; hiding them stops new
-requests. Active control uses its own telemetry independently of the menu.
+Recovery requires a functioning kernel and EC transport. Recovery after a whole-system hang and
+a firmware-enforced lease have not been established. Userspace locks cannot exclude firmware/SMM
+or every non-cooperating EC writer. Do not run another fan or EC control tool alongside
+Companion's custom controller.
 
-Settings migrations preserve the original ten-point and earlier eight-point curves,
-preset mappings and units in the saved data. Falling segments are raised to remove
-speed decreases while retaining the originals in archives. Migration keeps custom
-control off; optional TDP assignments remain dormant until explicitly enabled.
-Saving uses a revision check so an old editor cannot overwrite newer settings.
+With custom control off, there are no fan workers or sleep inhibitors and no background EC
+polling. Visible fan views request bounded passive readings; hiding them stops new requests.
+Active control uses its own telemetry independently of the menu.
 
-See [SOURCE.md](SOURCE.md#fan-control-hardware-facts-and-independent-implementation)
-for protocol provenance, migration details and the limits of the hardware evidence.
+Settings migrations preserve the original ten-point and earlier eight-point curves, preset
+mappings and units in the saved data. Falling segments are raised to remove speed decreases
+while retaining the originals in archives. Migration keeps custom control off; optional TDP
+assignments remain dormant until explicitly enabled. Saving uses a revision check so an old
+editor cannot overwrite newer settings.
+
+See [SOURCE.md](SOURCE.md#fan-control-hardware-facts-and-independent-implementation) for
+protocol provenance, migration details and the limits of the hardware evidence.
 
 </details>
 
 ## Development
 
-**Local 2.2 experiment:** an automatically registered **Legion Go Companion**
-Desktop Mode app uses **C++ and Qt Quick/QML**, presents the same nine modules,
-and calls the shared Decky backend and settings. The Decky menu stays unchanged.
-The native app has been built locally, deployed on the Legion and checked in
-Desktop and Gaming Mode, including shared settings and backend access. These
-checks do not establish physical controller firmware flashing or recovery.
-The manifest remains 2.1.0; this experimental work is not a new release.
-See [Desktop UI development notes](docs/DESKTOP_UI.md) for architecture, tests,
-pending SteamOS checks and the 2.2/2.3/3.0 roadmap.
-
 <details>
 <summary><b>Build, test and package from source</b></summary>
 
-Requires Node.js 24 and a ZIP tool (`zip` on Linux or 7-Zip on Windows). Backend tests
-require Python 3.10+. The experimental native Desktop build additionally requires
-CMake, Ninja, a C++17 compiler and Qt 6.11.2; see the Desktop notes.
+The [Desktop app](#desktop-app) is written in **C++17 and Qt Quick/QML** and ships in the plugin
+ZIP. It links SteamOS's system Qt (6.9 or newer) instead of bundling Qt, and calls the same
+Python backend as the Decky panel over an authenticated loopback connection. See the
+[Desktop app notes](docs/DESKTOP_UI.md) for its architecture, lifecycle, build and tests.
+
+Requires Node.js 24 and a ZIP tool (`zip` on Linux or 7-Zip on Windows). Backend tests require
+Python 3.10+. The native Desktop build additionally requires CMake, Ninja, a C++17 compiler and
+a Qt 6.9 SDK.
 
 ```bash
 npm ci
 npm run typecheck      # frontend types
 npm run test:frontend  # frontend regression suites
-npm test              # Python backend tests
-npm run build         # compile and validate the frontend
-python scripts/build-native.py --qt /path/to/Qt/6.11.2/gcc_64 --build /tmp/companion-native --test
-# Bundle the matching Linux runtime as described in docs/DESKTOP_UI.md.
-npm run test:desktop  # native API/source contract; Qt tests run in the command above
-npm run package       # create LegionGo2Companion-<version>.zip
+npm test               # Python backend tests
+npm run build          # compile and validate the frontend
+python scripts/build-native.py --qt /path/to/Qt/6.9.1/gcc_64 --build /tmp/companion-native --test --bundle dist/desktop
+npm run test:desktop   # native API/source contract; Qt tests run in the command above
+npm run package        # create LegionGo2Companion-<version>.zip
 ```
 
-**Build before packaging:** package uses the existing frontend build. Install the result
-through Decky; a source checkout with `node_modules` is not an installation package.
+**Build before packaging:** package uses the existing frontend build and the native app in
+`dist/desktop` from the command above. Install the result through Decky; a source checkout with
+`node_modules` is not an installation package.
 
-GitHub Actions checks backend tests on Linux/Python 3.10 and Windows/Python 3.13, plus
-frontend tests, build and package validation on Node.js 24 LTS. Linux-specific checks
-skip on Windows. Hardware calls are mocked; device testing is still required for
-startup, wake, game transitions and native Steam UI behaviour. CI does not publish releases.
+GitHub Actions runs the backend tests on Linux/Python 3.10 and 3.14 and Windows/Python 3.13,
+plus frontend tests, build and package validation on Node.js 24 LTS. The native app is built
+against Qt 6.9.1 and its tests run again on the newest Qt 6. Linux-specific checks skip on
+Windows. Hardware calls are mocked; device testing is still required for startup, wake, game
+transitions and native Steam UI behaviour. CI does not publish releases.
 
-The archive includes frontend source/build inputs, license notices and bundled pyudev
-source. RyzenAdj is downloaded separately and verified against its pinned hash.
-See [SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component provenance.
+The archive includes frontend source/build inputs, license notices and bundled pyudev source.
+RyzenAdj is downloaded separately and verified against its pinned hash. See
+[SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component provenance.
 
 </details>
 
@@ -675,7 +790,6 @@ See [SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component pro
 
 ## Credits
 
-- [LeGoTDP](https://github.com/Rayekkk/LeGoTDP), [LeGo Vibe Control](https://github.com/Rayekkk/LeGo-Vibe-Control), [LeGo2 Brightness Fix](https://github.com/Rayekkk/LeGo2BrightnessFix) and the unpublished WiFi Optimizer Go 2 - the standalone foundations
 - Andrii Dmytrenko ([@Antti](https://github.com/Antti)) - 8AHP2 / 83N1 joystick RGB support and owner testing in [PR #2](https://github.com/Rayekkk/LegionGo2Companion/pull/2)
 - Ally Vibe Control by [piyush-tyagi-13](https://github.com/piyush-tyagi-13/ally-vibe-control), with original per-game profile work by M4ttiA - inherited MIT-licensed vibration code
 - [HueSync](https://github.com/honjow/HueSync) by honjow and Steam Deck Homebrew - reference for the lighting interface and Go 2 sysfs controls
@@ -697,8 +811,28 @@ in [NOTICE](NOTICE) and [SOURCE.md](SOURCE.md).
 
 ---
 
-<div align="left">
+## AI disclaimer
 
-*Vibe coded with AI assistance 🤖*
+This project was built with substantial help from AI coding assistants. Most of the code,
+tests and documentation were written by AI agents (first OpenAI Codex, later Anthropic's
+Claude Code) working under my direction: I defined what each feature should do, made the
+design and safety decisions, reviewed the results and chose what was released.
 
-</div>
+The AI was used to:
+
+- write and refactor the Python backend, the Decky panel and the native Desktop app;
+- build the automated test suites (about 1,300 tests run on Linux and Windows for every change);
+- audit the code for bugs, security issues and wasted work, with every finding checked by
+  independent review passes and, where possible, reproduced before it was fixed;
+- research hardware interfaces and write this documentation.
+
+Nothing here is untested AI output. I tested the plugin continuously on my own Legion Go 2
+throughout development: in Gaming and Desktop Mode, across sleep, restarts, plugin
+updates and reinstalls, with games and HDR content, on SteamOS Stable (with a compatibility
+check on the Beta), and with supervised controller firmware installs. Hardware-facing features (fan control, power
+limits, display, firmware) were held back until they behaved correctly on the real device,
+and safety rules such as releasing the fan to firmware control on any failure were kept as
+hard requirements.
+
+Even so, Companion controls power, cooling and firmware on your console. It is provided
+as is, without warranty (see [License](#license)); use it at your own risk.

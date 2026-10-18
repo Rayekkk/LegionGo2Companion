@@ -218,15 +218,11 @@ The ordinary Decky build and its `src/*.tsx` panel source are preserved.
 panels, excluding Steam foreground-app hint setters. The UI has no EC/HID
 transport and owns no hardware. No web engine or browser frontend is included.
 
-The Linux x86-64 payload in `dist/desktop/` dynamically links Qt 6.11.2 and ICU
-73.2. Exact file hashes and system library dependencies are recorded in
-`native-manifest.json`; matching license texts, upstream source references and
-SDK inventories accompany the bundle. Source builds use CMake/Ninja and the
-matching Qt SDK. See `scripts/build-native.py` and `scripts/bundle-native.py`.
-The optional Windows-to-Linux cross-builder is an experimental fallback;
-its successful ELF build is not proof of SteamOS execution. A future public
-binary release must also publish the corresponding Qt source/build material
-alongside its download; this local experiment has not been published.
+The Linux x86-64 payload in `dist/desktop/` is the executable alone; its hash is
+recorded in `native-manifest.json`. It dynamically links the system Qt 6.9 or
+newer that SteamOS provides; Qt is not redistributed. Source builds use
+CMake/Ninja and any Qt 6.9+ SDK; see `scripts/build-native.py` and
+[docs/DESKTOP_UI.md](docs/DESKTOP_UI.md).
 
 `desktop_bridge.py` calls the same guarded Plugin RPCs; `desktop_install.py` and
 `desktop/launch.py` register and execute the native UI as the desktop user. They introduce no second
@@ -236,42 +232,25 @@ boundaries are documented in [docs/DESKTOP_UI.md](docs/DESKTOP_UI.md).
 
 ## Controller firmware updater
 
-Both UI panels use one `firmware_check_updates` action and shared
-`firmware_get_status`. `controller_firmware_catalog.py` queries the official
-Lenovo 8ASP2 model/component feed. `controller_firmware.py` authenticates
-original signed bytes with an independently pinned RSA-3072/PSS key, signed
-component footer and JLFS CRC checks. Future release versions and official
-filenames are selected dynamically; the reference snapshot is not a release
-whitelist. Authenticated size/hash/version/URL are frozen per job.
+Both UI panels use `firmware_check`, `firmware_download`, `firmware_install`
+and shared `firmware_get_status`. `controller_firmware_catalog.py` queries the
+official Lenovo 8ASP2 model/component feed. `controller_firmware.py` reads the
+installed versions from the in-tree `hid-lenovo-go` sysfs attributes and
+authenticates original signed bytes with an independently pinned RSA-3072/PSS
+key, signed component footer and JLFS CRC checks. Future release versions and
+official filenames are selected dynamically; the reference snapshot is not a
+release whitelist.
 
-`controller_firmware_protocol.py` is a pure codec reconstructed from
-LegionSpace 1.4.4.31 static evidence. `controller_firmware_transfer.py` schedules
-serial exact-write/reply phases, bounded progress checkpoints and fresh final
-version confirmation. `controller_firmware_journal.py` stores a private atomic
-transaction record; recovery is display-only, never command replay.
-
-`controller_firmware_install.py` coordinates the complete update through one
-independent frozen systemd worker, libusb ownership, fresh preflight, a login1
-sleep/shutdown inhibitor, post-update version queries and input restoration.
-`controller_firmware_process.py` and `controller_firmware_stage.py` capture and
-verify bounded source/image bytes outside the plugin before worker import.
-`controller_firmware_ota.py` is the independently written C0/A0 transport.
-The experimental installer is enabled for explicit user actions. No startup,
-poll or UI close starts or cancels a flash. No physical flash was performed in
-the qualification rounds when the installed versions equalled Lenovo's feed.
-Test-only transports are excluded from packages.
-
-`controller_maintenance.py` fences cooperating Companion operations;
-`module_runtime.py` drains operations and invalidates stale generations.
-The actual libusb claim and foreign-consumer checks protect transport ownership.
-`controller_firmware_usb.py` follows https://libusb.sourceforge.io/api-1.0/ with
-an independently written ctypes binding; no copied driver/vendor implementation.
+Installation delegates to fwupd's `legion-hid` plugin (`fwupdtool install-blob`),
+the engine SteamOS ships for this controller. Companion only wraps the verified
+images in fwupd's 24-byte container header. Installation is disabled in this
+build until a supervised hardware test passes.
 
 Primary vendor artifacts: Lenovo LegionSpace 26.07.10.01 and original S3
 controller images. JLFS/SFC format reference:
 https://github.com/kagaimiq/jl-misctools (firmware/fwunpack_newfw.py and cipher.py).
-The format/protocol implementation is independently written; no reference source
-is included. fwupd legion-hid was compared but uses a different UART path; its
-code was not incorporated. The signed footer is not a model/version certificate;
-model/target selection depends on the official TLS feed and fresh device checks.
+fwupd container and protocol reference: https://github.com/fwupd/fwupd
+(plugins/legion-hid). No reference source is included. The signed footer is not
+a model/version certificate; model/target selection depends on the official TLS
+feed and fresh device checks.
 See [controller firmware boundaries](docs/CONTROLLER_FIRMWARE.md).
