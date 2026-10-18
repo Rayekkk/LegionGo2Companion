@@ -14,7 +14,7 @@ import time
 import urllib.error
 import zipfile
 from diagnostics import event
-from bounded_http import checked_url as _http_url, open_http, tls_context
+from bounded_http import checked_url, open_http, tls_context
 
 REPOSITORY = "Rayekkk/LegionGo2Companion"
 PLUGIN_NAME = "Legion Go 2 Companion"
@@ -40,10 +40,6 @@ def _version(value):
     if not isinstance(value, str) or not _VERSION.fullmatch(value):
         raise ValueError("The release version must use stable X.Y.Z numbering.")
     return tuple(int(part) for part in value.split("."))
-
-
-def _checked_url(url, initial_url, metadata=False):
-    return _http_url(url, initial_url, "metadata" if metadata else "archive")
 
 
 def _read_chunks(response, limit, deadline, cancel=None):
@@ -105,7 +101,8 @@ class CompanionUpdates:
 
     def _open(self, url, *, metadata):
         self._ensure_open()
-        _checked_url(url, url, metadata)
+        policy = "metadata" if metadata else "archive"
+        checked_url(url, url, policy)
         response = open_http(url, headers={
             "User-Agent": "LegionGo2Companion-release-check",
             "Accept": "application/vnd.github+json" if metadata else "application/octet-stream",
@@ -113,9 +110,9 @@ class CompanionUpdates:
         }, context=tls_context(), timeout=REQUEST_TIMEOUT,
             limit=MAX_METADATA if metadata else MAX_DOWNLOAD,
             total_seconds=METADATA_SECONDS if metadata else DOWNLOAD_SECONDS,
-            policy="metadata" if metadata else "archive", cancel=self._ensure_open)
+            policy=policy, cancel=self._ensure_open)
         try:
-            _checked_url(response.geturl(), url, metadata)
+            checked_url(response.geturl(), url, policy)
             if response.status != 200:
                 raise ValueError("GitHub returned an unexpected response status.")
         except BaseException:

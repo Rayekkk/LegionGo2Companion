@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
-"""Decky entry point for the Legion Go 2 all-in-one plugin.
-
-The hardware implementations remain isolated in their original backends.  This
-module owns lifecycle ordering and a single, collision-free RPC surface.
-"""
+"""Decky entry point: lifecycle ordering and one guarded RPC surface over the hardware backends."""
 
 from __future__ import annotations
 
@@ -50,8 +46,7 @@ GUARD_FAILURE_LIMIT = 3  # Consecutive failed scans (~15 s of periodic checks) b
 UPDATER_WAIT_S = len(INSTALL_ORDER) * INSTALL_SECONDS  # One fwupd time limit per controller component.
 UPDATER_POLL_S = 2.0
 SHUTDOWN_BUDGET_S = 4.0  # Of Decky's 5 s SIGTERM-to-SIGKILL window; _uninstall needs the rest.
-_ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_active_app',
-                           'controller_get_diagnostics'})
+_ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_active_app'})  # Besides reads.
 # Preconditions the backend checks before changing anything; the reply already tells the user why.
 _REFUSALS = frozenset({'unsupported_backend', 'unsupported_device', 'preflight_failed', 'no_wifi',
                        'backend_inactive', 'iwd_inactive', 'preference_disabled', 'managed_profile_not_active'})
@@ -264,7 +259,7 @@ def _guard_component_calls(cls):
                     elif module:
                         # Independent modules need not queue behind a slow WiFi
                         # probe. Lifecycle changes still drain every admitted RPC.
-                        task = asyncio.create_task(self._run_rpc(module, fn, args, kwargs))
+                        task = asyncio.create_task(self._run_rpc(resource, fn, args, kwargs))
                         self._rpc_jobs.add(task)
                         task.add_done_callback(self._rpc_jobs.discard)
                         if resource in module_runtime.CONTROLLER_MODULES:
@@ -353,8 +348,7 @@ class Plugin:
             pass
         self._updates = CompanionUpdates(PLUGIN_DIR, home, uid, gid)
 
-    async def _run_rpc(self, module, function, args, kwargs):
-        resource = 'controller' if function.__name__ == 'battery_get_controller_levels' else module
+    async def _run_rpc(self, resource, function, args, kwargs):
         async with self._rpc_locks[resource]:
             # A queued call may have been admitted before a conflict or shutdown.
             if self._guard_blocked or self._guard_error or self._closing:
@@ -493,11 +487,7 @@ class Plugin:
                 raise
             await self._publish_modules()
             try:
-                note = await withdraw(name, component)
-                self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
-                if name == 'display':
-                    self._module_state[name]['session'] = await asyncio.to_thread(display_backend._gamescope_start_time)
-                await module_runtime.complete(asyncio.to_thread(self._save_modules))
+                await self._withdraw_module(name, resume)
             except Exception as exc:
                 self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
                 await module_runtime.complete(asyncio.to_thread(self._save_modules))
@@ -628,11 +618,7 @@ class Plugin:
             return
         resume = entry.get('resume', {})
         try:
-            note = await withdraw(name, getattr(self, '_' + name))
-            self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
-            if name == 'display':
-                self._module_state[name]['session'] = await asyncio.to_thread(display_backend._gamescope_start_time)
-            await module_runtime.complete(asyncio.to_thread(self._save_modules))
+            await self._withdraw_module(name, resume)
         except Exception as exc:
             self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
             diagnostics.event(name, 'module_recovery_failed', level='error', error=exc)
@@ -640,6 +626,13 @@ class Plugin:
                 await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception as save_error:
                 diagnostics.event(name, 'module_recovery_persist_failed', level='error', error=save_error)
+
+    async def _withdraw_module(self, name, resume):
+        note = await withdraw(name, getattr(self, '_' + name))
+        self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
+        if name == 'display':
+            self._module_state[name]['session'] = await asyncio.to_thread(display_backend._gamescope_start_time)
+        await module_runtime.complete(asyncio.to_thread(self._save_modules))
 
     async def _migration(self):
         await self._check_guard()

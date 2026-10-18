@@ -177,10 +177,9 @@ class DesktopBridge:
             diagnostics.event('desktop', 'dispatch_failed', level='error', error=exc, repeat=60)
             await self._reply(writer, 500, {'error': 'The backend could not complete this request. Refresh its state.'})
 
-    async def _reply(self, writer, status, data, mime='application/json; charset=utf-8'):
-        if not isinstance(data, bytes):
-            data = json.dumps(data, allow_nan=False).encode('utf-8')
-        response = (f'HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\n'
+    async def _reply(self, writer, status, data):
+        data = json.dumps(data, allow_nan=False).encode('utf-8')
+        response = (f'HTTP/1.1 {status} Response\r\nContent-Type: application/json; charset=utf-8\r\n'
                     f'Content-Length: {len(data)}\r\nConnection: close\r\n'
                     'Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n'
                     'Cross-Origin-Resource-Policy: same-origin\r\n\r\n').encode('ascii')

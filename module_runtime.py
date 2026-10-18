@@ -61,12 +61,7 @@ def controller_operation(module):
 
 
 def background_task(operation):
-    """Create a lifecycle monitor, not a continuation of the initiating RPC.
-
-    Each monitored transaction still enters its own scope. Never use this to
-    revive a stale transaction/retry: clearing an operation generation is only
-    appropriate at the boundary creating a new long-lived monitor.
-    """
+    """Start a long-lived monitor outside the caller's operation generation; never use it to revive a stale retry."""
     context = contextvars.copy_context()
     context.run(_operation_generation.set, None)
     task = context.run(asyncio.create_task, operation)
@@ -80,11 +75,7 @@ def background_task(operation):
 
 
 def pause_controller():
-    """Close controller admission while fwupd writes the controllers.
-
-    Process-local only: it stops Companion's own writes, not other programs.
-    The caller drains already admitted work with drain_controller().
-    """
+    """Close Companion's own controller admission while fwupd writes; the caller then runs drain_controller()."""
     global _controller_paused, _controller_generation
     if _controller_paused:
         raise ControllerPaused('Controller maintenance is already in progress.')
@@ -92,14 +83,14 @@ def pause_controller():
     _controller_generation += 1
 
 
-async def drain_controller(*, timeout=5.0):
+async def drain_controller():
     work = asyncio.ensure_future(asyncio.gather(*(drain(module) for module in CONTROLLER_MODULES)))
     def finished(task):
         if not task.cancelled():
             task.exception()
     work.add_done_callback(finished)
     # A timed-out/cancelled caller cannot cancel a still-running hardware thread.
-    await complete(asyncio.wait_for(asyncio.shield(work), timeout))
+    await complete(asyncio.wait_for(asyncio.shield(work), 5.0))
 
 
 def resume_controller():

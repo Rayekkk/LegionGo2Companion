@@ -115,6 +115,13 @@ class Response:
     def __exit__(self, *args): self.close()
 
 
+def _check_bounds(limit, timeout, total_seconds):
+    if (type(limit) is not int or not 1 <= limit <= MAX_BODY or
+            type(total_seconds) not in (int, float) or not 0 < total_seconds <= 120 or
+            type(timeout) not in (int, float) or not 0 < timeout <= 30):
+        raise ValueError("Invalid GitHub download bounds.")
+
+
 def _status_error(url, code):
     # Status-only exception: never retain a response backing object. An empty
     # stream also keeps close() well-defined on Python versions where fp=None
@@ -131,10 +138,7 @@ def open_http(url, *, headers, context, timeout, limit, total_seconds, policy, c
     The input contains public trust anchors, never private key material.
     """
     checked_url(url, url, policy)
-    if (type(limit) is not int or not 1 <= limit <= MAX_BODY or
-            type(total_seconds) not in (int, float) or not 0 < total_seconds <= 120 or
-            type(timeout) not in (int, float) or not 0 < timeout <= 30):
-        raise ValueError("Invalid GitHub download bounds.")
+    _check_bounds(limit, timeout, total_seconds)
     deadline = time.monotonic() + total_seconds
 
     def check():
@@ -202,10 +206,7 @@ def _fetch(request, body):
     url, policy = request["url"], request["policy"]
     checked_url(url, url, policy)
     limit, timeout, total_seconds = request["limit"], request["timeout"], request["total_seconds"]
-    if (type(limit) is not int or not 1 <= limit <= MAX_BODY or
-            type(timeout) not in (int, float) or not 0 < timeout <= 30 or
-            type(total_seconds) not in (int, float) or not 0 < total_seconds <= 120):
-        raise ValueError("Invalid request bounds")
+    _check_bounds(limit, timeout, total_seconds)  # The worker trusts no caller.
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.verify_flags = request["verify_flags"]
     context.minimum_version = ssl.TLSVersion(request["minimum_version"])
