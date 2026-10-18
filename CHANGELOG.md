@@ -1,3 +1,12 @@
+# Unreleased
+
+### Fixed
+
+- **Controller firmware:** Install refuses a controller that is detached from the console or below 30% battery, and checks it again right before that controller is written. Check waits while another firmware updater is running.
+- Wi-Fi never writes a line break into `/etc/iwd/main.conf` from saved settings.
+- Removing old plugin logs never follows a link out of the log folder.
+- Companion logs a warning when a Decky update stops its unload workaround from applying.
+
 # 2.2.0
 
 Released 2026-10-18.

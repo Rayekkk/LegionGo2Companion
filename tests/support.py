@@ -31,8 +31,18 @@ class Logger:
         pass
 
 
-async def emit(_event, *_args):
-    pass
+class _Socket:  # Shape of Decky's UnixSocket, so main's unload workaround finds its listener.
+    async def _read_single_line(self, _reader):
+        return ""
+
+
+def _emitter(sandboxed):
+    async def emit(_event, *_args):
+        sandboxed._socket
+    return emit
+
+
+emit = _emitter(types.SimpleNamespace(_socket=_Socket()))
 
 
 decky = types.ModuleType("decky")

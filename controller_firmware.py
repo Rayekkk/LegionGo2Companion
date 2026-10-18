@@ -385,6 +385,17 @@ def console_power():
     return ac, percent
 
 
+def pad_power(read, components):
+    """fwupd writes each pad over the receiver link: a detached or low pad could drop mid-write."""
+    pads = [c for c in ('left', 'right') if c in components]
+    levels = read() if pads and read else None
+    for side in pads:
+        level = levels.get(side) if isinstance(levels, dict) else None
+        if levels is None or levels.get('connection_' + side) != 'attached' or type(level) is not int or level < 30:
+            raise FirmwareError(f'{RELEASES[side].label}: attach it to the console and charge it to at least 30%. '
+                                'Nothing was installed.')
+
+
 def build_container(images):
     """fwupd legion-hid container: six LE u32 (size, version) for the receiver,
     left and right images, then the three signed images unchanged.
@@ -469,11 +480,12 @@ class FirmwarePreparation:
     selected them. Nothing is persisted, so a failed step never locks retries.
     """
 
-    def __init__(self, *, reader=None, sleep=time.sleep):
+    def __init__(self, *, reader=None, pads=None, sleep=time.sleep):
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
         self._thread = None
         self._reader = reader or read_installed_versions
+        self._pads = pads  # Returns controller attach/battery levels; None refuses every pad install.
         self._sleep = sleep
         self._phase, self._component, self._error = 'idle', '', ''
         self._check = None   # id, at, checked_at, installed, offers, newer
@@ -557,6 +569,7 @@ class FirmwarePreparation:
             console_power()  # A refusal here keeps the verified download; _run_install re-checks it.
         except (OSError, ValueError) as exc:
             raise FirmwareError('Console power could not be read. Nothing was installed.') from exc
+        pad_power(self._pads, check['newer'])
         return check, self._images
 
     def install(self, token, on_done):
@@ -596,6 +609,9 @@ class FirmwarePreparation:
         from controller_firmware_catalog import check_catalog
         from diagnostics import event
         try:
+            # Version reads query the controllers; an updater that outlived a restart may be writing them.
+            if updater_running():
+                raise FirmwareError('Another firmware update is running. Try again when it finishes.')
             before = self._reader()
             catalog = check_catalog(self._cancelled)
             if self._reader() != before:
@@ -657,6 +673,7 @@ class FirmwarePreparation:
                         raise FirmwareError('fwupd and the controller driver report different versions. Check again.')
                     if updater_running():
                         raise FirmwareError('Another firmware update is running. Try again when it finishes.')
+                    pad_power(self._pads, (component,))
                     self._step('installing', component)
                     event('firmware', 'install_started', scope=component, version=images[component].release.version)
                     returncode, seconds, tail = install_blob(container, devices[component]['id'],

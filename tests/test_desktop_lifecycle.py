@@ -156,6 +156,13 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handled, ['{"id": 1}\n'])
         self.assertEqual(unload.result(), 'unloaded')
 
+    async def test_decky_listener_that_cannot_be_found_is_reported(self):
+        async def emit(_event, *_args):
+            pass
+        with patch.object(main.decky, 'emit', emit), patch.object(main.diagnostics, 'event') as event:
+            main._end_decky_listener_at_eof()
+        event.assert_called_once_with('plugin', 'decky_listener_unpatched', level='warning')
+
     async def test_firmware_calls_never_block_other_backend_tasks(self):
         loop = asyncio.get_running_loop()
         observed = []

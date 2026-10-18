@@ -7,6 +7,7 @@ from contextlib import ExitStack
 import copy
 import errno
 import json
+import os
 from pathlib import Path
 import tempfile
 import types
@@ -337,3 +338,50 @@ class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(os.name == 'posix', 'dir_fd and O_NOFOLLOW semantics')
+class LogRotationTests(unittest.TestCase):
+    """Decky chowns the plugin log directory to deck; root pruning must stay inside it."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.logs = self.root / 'logs'
+        self.logs.mkdir()
+
+    def make_logs(self, folder, count):
+        for i in range(count):
+            path = folder / f'{i:02}.log'
+            path.write_text('x')
+            os.utime(path, (1000 + i, 1000 + i))
+
+    def rotate(self, log_dir, current='00.log'):
+        with patch.object(main.decky, 'DECKY_PLUGIN_LOG_DIR', str(log_dir), create=True), \
+                patch.object(main.decky, 'DECKY_PLUGIN_LOG', str(log_dir / current), create=True):
+            main._rotate_logs(keep=10)
+
+    def test_keeps_the_newest_ten_and_the_current_log(self):
+        self.make_logs(self.logs, 13)
+        (self.logs / 'notes.txt').write_text('keep')
+        self.rotate(self.logs)
+        self.assertEqual(sorted(p.name for p in self.logs.iterdir()),
+                         ['00.log'] + [f'{i:02}.log' for i in range(3, 13)] + ['notes.txt'])
+
+    def test_a_symlinked_log_directory_or_log_entry_is_never_followed(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        self.make_logs(outside, 13)
+        link = self.root / 'linked'
+        link.symlink_to(outside, target_is_directory=True)
+        with patch.object(main.diagnostics, 'event'):
+            self.rotate(link)
+        self.assertEqual(len(list(outside.iterdir())), 13)
+        self.make_logs(self.logs, 11)
+        (self.logs / 'aa.log').symlink_to(outside / '05.log')
+        os.utime(self.logs / 'aa.log', (1, 1), follow_symlinks=False)
+        self.rotate(self.logs, current='none.log')
+        self.assertTrue((outside / '05.log').exists())
+        self.assertTrue((self.logs / 'aa.log').is_symlink())
+        self.assertFalse((self.logs / '00.log').exists())

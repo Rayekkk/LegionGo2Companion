@@ -14,6 +14,7 @@ import functools
 import inspect
 import os
 import platform
+import stat
 import sys
 import time
 from pathlib import Path
@@ -216,23 +217,35 @@ def _rotate_logs(keep: int = 10) -> None:
     Keep the newest `keep`; diagnostics have their own size-based rotation."""
     try:
         log_dir = getattr(decky, "DECKY_PLUGIN_LOG_DIR", None)
-        if not log_dir or not os.path.isdir(log_dir):
+        if not log_dir or os.name != "posix":
             return
-        files = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith(".log")]
-        if len(files) <= keep:
+        # Decky chowns this directory to deck: never follow a symlink swapped in for it.
+        try:
+            fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except (FileNotFoundError, NotADirectoryError):
             return
-        files.sort(key=os.path.getmtime, reverse=True)
-        current_log = getattr(decky, "DECKY_PLUGIN_LOG", None)
-        removed = 0
-        for path in files[keep:]:
-            # Never delete the file we're currently writing to.
-            if current_log and os.path.realpath(path) == os.path.realpath(current_log):
-                continue
-            try:
-                os.remove(path)
-                removed += 1
-            except Exception:
-                pass
+        try:
+            files = []
+            for name in os.listdir(fd):
+                if name.endswith(".log"):
+                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if stat.S_ISREG(info.st_mode):
+                        files.append((info.st_mtime, name))
+            if len(files) <= keep:
+                return
+            files.sort(reverse=True)
+            current_log = os.path.basename(getattr(decky, "DECKY_PLUGIN_LOG", None) or "")
+            removed = 0
+            for _mtime, name in files[keep:]:
+                if name == current_log:  # Never delete the file we're currently writing to.
+                    continue
+                try:
+                    os.unlink(name, dir_fd=fd)
+                    removed += 1
+                except OSError:
+                    pass
+        finally:
+            os.close(fd)
         if removed:
             decky.logger.info(f"Rotated logs: removed {removed} old file(s), kept {keep} newest")
     except Exception as e:
@@ -257,6 +270,9 @@ def _end_decky_listener_at_eof():
                 raise asyncio.CancelledError
             return line
         socket._read_single_line = read_line
+        return
+    # A Decky update changed these internals: a stop may be SIGKILLed before hardware is restored.
+    diagnostics.event('plugin', 'decky_listener_unpatched', level='warning')
 
 
 def _guard_component_calls(cls):
@@ -351,7 +367,7 @@ class Plugin:
         self._closing = False
         self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
         self._updates = None
-        self._firmware = FirmwarePreparation()
+        self._firmware = FirmwarePreparation(pads=lambda: self._controller._controller_batteries())
         self._desktop = None
         self._desktop_install = None
         self._desktop_lock = asyncio.Lock()

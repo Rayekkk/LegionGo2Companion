@@ -62,7 +62,10 @@ and the confirmation `token`.
 3. **Install**. The confirmation lists old → new versions and sends the token,
    a hash of the check id, target components, versions and image digests.
    Power must be a connected charger or the console battery (`BAT0`) at 30% or
-   more; a refusal here keeps the download. Companion then pauses its own
+   more, and each pad being updated must be attached to the console with at
+   least 30% battery (read from the controller's input report); a refusal here
+   keeps the download. Before each pad write the attach and battery check runs
+   again. Check is refused while another firmware updater runs. Companion then pauses its own
    controller writes (RGB, vibration, remap, gyro), checks power again, writes
    the container to a private temporary directory and, for each newer
    component (left, right, then receiver), re-reads the

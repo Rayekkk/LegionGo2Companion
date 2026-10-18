@@ -975,6 +975,9 @@ class Plugin:
         self, value: str | None, cleanup_created_rank: bool = False
     ):
         """Set/remove `[Rank] BandModifier2_4GHz` without rewriting INI data."""
+        # Restored values come from the deck-owned settings file; a line break would inject iwd config.
+        if value is not None and any(ord(c) < 0x20 or c == "\x7f" for c in value):
+            raise ValueError("Refusing an iwd band modifier value with control characters")
         if os.path.islink(IWD_MAIN_CONF):
             raise ValueError("Refusing to modify a symlinked iwd main.conf")
         try:

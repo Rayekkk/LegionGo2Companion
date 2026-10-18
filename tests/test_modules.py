@@ -373,6 +373,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         again = self.make_plugin()
         self.assertTrue(all(not x['enabled'] for x in again._module_status().values()))
 
+    @unittest.skipUnless(os.name == 'posix', 'log pruning uses dir_fd and O_NOFOLLOW')
     async def test_old_logs_are_pruned_at_startup_with_wifi_disabled(self):
         self.plugin._module_state['wifi'] = {'enabled': False}
         with tempfile.TemporaryDirectory() as logs:

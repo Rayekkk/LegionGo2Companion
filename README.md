@@ -421,7 +421,8 @@ firmware and installs every newer part in one go.
 
 > [!IMPORTANT]
 > Connect the charger (on battery, Install needs at least 30% charge), keep both controllers
-> attached and do not put the console to sleep. It can take up to about five minutes and the
+> attached and do not put the console to sleep. Install refuses a controller that is detached
+> or below 30% battery. It can take up to about five minutes and the
 > controllers may disconnect briefly. This feature is marked experimental.
 
 <details>

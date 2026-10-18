@@ -54,7 +54,8 @@ class Service:
     """A FirmwarePreparation with a scripted reader and synchronous waits."""
     def __init__(self, readings=None):
         self.readings = readings or []
-        self.service = fw.FirmwarePreparation(reader=self.read, sleep=lambda _seconds: None)
+        self.pads = {'left': 100, 'right': 100, 'connection_left': 'attached', 'connection_right': 'attached'}
+        self.service = fw.FirmwarePreparation(reader=self.read, pads=lambda: self.pads, sleep=lambda _seconds: None)
 
     def read(self):
         if self.readings:
@@ -255,6 +256,49 @@ class FlowTests(unittest.TestCase):
                 _, status = state.run('install', token, Mock())
             install.assert_not_called()
             self.assertEqual(status['phase'], 'failed')
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_pad_install_needs_the_pad_attached_and_charged(self):
+        found, _ = devices()
+        for pads in ({'left': 100, 'connection_left': 'detached'}, {'left': 29, 'connection_left': 'attached'},
+                     {'left': None, 'connection_left': 'attached'}, None):
+            state = self.downloaded()
+            token = state.service.status()['token']
+            state.pads = pads
+            with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                    patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
+                    patch.object(fw, 'install_blob') as install, self.assertRaisesRegex(fw.FirmwareError, 'Left controller: attach'):
+                state.service.install(token, Mock())
+            install.assert_not_called()
+            self.assertEqual(state.service.status()['phase'], 'downloaded')  # The verified download stays for a retry.
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_pad_detached_after_admission_is_refused_before_its_write(self):
+        found, _ = devices()
+        state = self.downloaded()
+        token = state.service.status()['token']
+        reads = iter([state.pads, {'left': 100, 'connection_left': 'detached'}])
+        state.service._pads = lambda: next(reads)
+        with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
+                patch.object(fw, 'install_blob') as install:
+            _, status = state.run('install', token, Mock())
+        install.assert_not_called()
+        self.assertEqual(status['phase'], 'failed')
+        self.assertIn('attach it to the console', status['error'])
+
+    def test_receiver_only_install_does_not_read_the_pads(self):
+        fw.pad_power(None, ('receiver',))
+        fw.pad_power(Mock(side_effect=AssertionError('read')), ('receiver',))
+
+    def test_check_refuses_while_another_updater_runs(self):
+        state = Service()
+        with patch.object(fw, 'updater_running', return_value=True), \
+                patch.object(catalog, 'check_catalog') as check:
+            _, status = state.run('check')
+        check.assert_not_called()
+        self.assertEqual(status['phase'], 'failed')
+        self.assertIn('Another firmware update is running', status['error'])
 
     @patch.object(fw, 'INSTALL_ENABLED', True)
     def test_failed_or_unverified_install_reports_error_and_allows_retry(self):

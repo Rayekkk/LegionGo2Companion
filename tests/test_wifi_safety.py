@@ -248,6 +248,15 @@ class IwdMainConfEditorTests(unittest.TestCase):
                 self.plugin._set_iwd_rank_modifier("0.01")
             self.assertEqual(self.iwd.read_bytes().decode(), original)
 
+    def test_value_with_a_line_break_cannot_inject_config(self):
+        original = "[Rank]\nBandModifier2_4GHz=0.5 # mine\n"
+        for value in ("0.5\n[General]\nEnableNetworkConfiguration=true", "0.5\r", "0.5\x00"):
+            self.iwd.write_bytes(original.encode())
+            with self.assertRaisesRegex(ValueError, "control characters"):
+                self.plugin._set_iwd_rank_modifier(value)
+            self.assertEqual(self.iwd.read_bytes().decode(), original)
+        self.assertEqual(self.edit(original, "0.5 # mine"), original)  # A user's one-line value still restores.
+
     @unittest.skipUnless(os.name == "posix", "symlink semantics")
     def test_symlinked_main_conf_is_refused_without_touching_the_target(self):
         target = self.iwd.with_name("target.conf")
