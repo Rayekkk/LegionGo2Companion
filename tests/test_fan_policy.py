@@ -20,28 +20,44 @@ class FanPolicyTests(unittest.TestCase):
             self.assertLessEqual(target_for(TEMPLATES['silent'],temp),target_for(TEMPLATES['balanced'],temp))
             self.assertLessEqual(target_for(TEMPLATES['balanced'],temp),target_for(TEMPLATES['aggressive'],temp))
 
-    def test_v3_preserves_curves_units_maps_archives_with_assignments_dormant(self):
-        old=dict(defaults(),schema=3,enabled=True,revision=43,display_unit='percent',presets={'custom':TEMPLATES['silent']})
-        old.pop('assign_tdp_presets');original=copy.deepcopy(old);new=migrate_settings(old)
-        self.assertEqual(old,original);self.assertEqual(new['global_curve'],old['global_curve'])
-        self.assertEqual(new['presets'],old['presets']);self.assertEqual(new['display_unit'],'percent')
-        self.assertFalse(new['assign_tdp_presets']);self.assertFalse(new['enabled']);self.assertEqual(new['revision'],44)
-        self.assertEqual(migrate_settings(new),new)
+    def test_only_schema_4_loads_and_dev_archive_keys_are_dropped(self):
+        # Fan first shipped (2.1.0) at schema 4; older or unknown schemas fail closed.
+        for schema in (1, 2, 3, 5, True, 4.0, '4', None):
+            with self.subTest(schema=schema), self.assertRaises(ValueError):
+                validate_settings(dict(defaults(), schema=schema))
+        current=dict(defaults(),enabled=True,revision=7,display_unit='percent',presets={'custom':TEMPLATES['silent']})
+        # The owner's dev console still has these two keys inside a schema-4 file.
+        dev=dict(current,**dict(curve_archive_v2={'global':TEMPLATES['silent'],'presets':{}},
+             legacy_curves={'global':[[t,1500] for t in range(50,101,5)][:10],'presets':{}}))
+        self.assertEqual(validate_settings(dev),current)
         for bad in (None,1,'false',[],{}):
-            with self.assertRaises(ValueError):validate_settings(dict(new,assign_tdp_presets=bad))
+            with self.assertRaises(ValueError):validate_settings(dict(current,assign_tdp_presets=bad))
 
-    def test_eight_points_only_final_fixed_one_degree_and_real_stop(self):
+    def test_eight_points_final_at_100_never_stops_one_degree_and_real_stop(self):
         self.assertEqual(validate_curve(DEFAULT_CURVE), DEFAULT_CURVE)
         for curve in [DEFAULT_CURVE[:-1], DEFAULT_CURVE+[DEFAULT_CURVE[-1]],
                       [[50, 0]]*8, [[50, 1499]]*8, [[50, True]]*8]:
             with self.subTest(curve=curve), self.assertRaises(ValueError):
                 validate_curve(curve)
         self.assertEqual(validate_curve([[t,0 if i<7 else MAX_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)])[0][1],0)
-        for index, axis, value in [(0,0,-1),(7,0,99),(5,0,DEFAULT_CURVE[4][0]),(7,1,4799),
-                                  (7,1,5300),(2,0,True),(2,1,float('nan')),(0,1,1400)]:
+        for index, axis, value in [(0,0,-1),(7,0,99),(5,0,DEFAULT_CURVE[4][0]),(7,1,0),(7,1,1),
+                                  (7,1,MIN_RPM-1),(7,1,MAX_RPM+1),(7,1,5300),(7,1,DEFAULT_CURVE[6][1]-1),(2,0,True),(2,1,float('nan')),(0,1,1400)]:
             bad = copy.deepcopy(DEFAULT_CURVE); bad[index][axis] = value
             with self.subTest(index=index, value=value), self.assertRaises(ValueError):
                 validate_curve(bad)
+
+    def test_final_point_speed_is_editable_but_100c_still_forces_full_speed(self):
+        for rpm in (MIN_RPM, 1501, 3000, MAX_RPM-1, MAX_RPM):
+            curve=[[t,0 if i<7 else rpm] for i,(t,_) in enumerate(DEFAULT_CURVE)]
+            self.assertEqual(validate_curve(curve)[7],[100,rpm])
+        low=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE]
+        self.assertEqual(validate_curve(low),low)
+        self.assertEqual(target_for(low,99.9),MIN_RPM)
+        for temp in (100,100.5,120):self.assertEqual(target_for(low,temp),MAX_RPM)
+        p=CurveControl(0,99,low)
+        for tick in range(1,41):self.assertEqual(p.step(low,99,tick/4),MIN_RPM)
+        self.assertEqual(p.step(low,100,10.25),MAX_RPM,'hard maximum bypasses a 1500 RPM final point')
+        self.assertEqual(CurveControl(0,100,low).target,MAX_RPM)
 
     def test_interpolation_never_requests_firmware_deadband(self):
         stop_ramp=[[t,0 if i<2 else MIN_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)]
@@ -117,19 +133,9 @@ class FanPolicyTests(unittest.TestCase):
             bad=copy.deepcopy(DEFAULT_CURVE);bad[index][1]=bad[index-1][1]-1
             with self.assertRaises(ValueError):validate_curve(bad)
 
-    def test_legacy_migration_preserves_all_points_and_assignments_never_arms(self):
-        legacy=[[50,3000],[55,3000],[60,3300],[65,3600],[70,3900],[75,4200],[80,4600],[85,4800],[95,4800],[100,4800]]
-        low=[[t,1500] for t,_ in legacy]
-        old=dict(schema=1,enabled=True,revision=14,global_curve=legacy,presets={'silent':low,'max':legacy})
-        original=copy.deepcopy(old);new=migrate_settings(old)
-        self.assertEqual(old,original);self.assertFalse(new['enabled']);self.assertEqual(new['revision'],15)
-        self.assertEqual(new['schema'],4);self.assertEqual(new['display_unit'],'rpm')
-        self.assertEqual(new['legacy_curves'],{'global':legacy,'presets':old['presets']})
-        self.assertEqual(set(new['presets']),{'silent','max'})
-        for curve in [new['global_curve'],*new['presets'].values()]:self.assertEqual(len(validate_curve(curve)),8);self.assertEqual(curve[-1],[100,4800])
-        self.assertEqual(migrate_settings(new),new)
-        for bad in (dict(old,schema=99),dict(old,enabled=1),dict(old,global_curve=legacy[:-1]),dict(old,presets={'invalid':legacy})):
-            with self.assertRaises(ValueError):migrate_settings(bad)
+    def test_a_stopped_tach_counts_as_a_stall_only_after_twelve_seconds(self):
+        p=CurveControl(0,50)
+        self.assertFalse(p.is_stalled(0,12));self.assertTrue(p.is_stalled(0,12.01))
 
     def test_running_fan_new_higher_target_gets_ramp_grace_without_masking_a_stall(self):
         low=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE];high=[[t,MAX_RPM] for t,_ in DEFAULT_CURVE]
@@ -144,28 +150,8 @@ class FanPolicyTests(unittest.TestCase):
         for i in range(177,200):p.step(high,50,i/4)
         self.assertLessEqual(len(p.history),49)
 
-    def test_v2_migration_archives_all_scopes_and_never_reduces_cooling(self):
-        curve=[[50,4800],[57,0],[64,1501],[71,3500],[78,1501],[85,4600],[93,0],[100,4800]]
-        legacy=[[50,3000],[55,3000],[60,3300],[65,3600],[70,3900],[75,4200],[80,4600],[85,4800],[95,4800],[100,4800]]
-        old=dict(schema=2,enabled=True,revision=42,display_unit='percent',global_curve=curve,
-                 presets={name:copy.deepcopy(curve) for name in PRESETS},
-                 legacy_curves={'global':legacy,'presets':{'custom':legacy}})
-        original=copy.deepcopy(old);new=migrate_settings(old)
-        self.assertEqual(old,original);self.assertFalse(new['enabled']);self.assertEqual(new['revision'],43)
-        self.assertEqual(new['schema'],4);self.assertEqual(new['display_unit'],'percent')
-        self.assertEqual(new['curve_archive_v2'],{'global':curve,'presets':old['presets']})
-        self.assertEqual(new['legacy_curves'],old['legacy_curves'])
-        for c in [new['global_curve'],*new['presets'].values()]:
-            validate_curve(c)
-            for tenth in range(1001):self.assertGreaterEqual(target_for(c,tenth/10),target_for(curve,tenth/10))
-        self.assertEqual(validate_settings(new),new);self.assertEqual(migrate_settings(new),new)
-        new['global_curve'][0][1]=1500
-        self.assertEqual(new['curve_archive_v2']['global'],curve)
-        for bad in (dict(old,schema=True),dict(old,schema=2.0),dict(old,global_curve=[[0,0]]*8)):
-            with self.assertRaises(ValueError):migrate_settings(bad)
-
     def test_hard_max_ramps_a_running_fan_without_masking_failure(self):
-        curve=[[0,1500],[35,1500],[45,1500],[55,1500],[65,1500],[75,1500],[99,1500],[100,MAX_RPM]]
+        curve=[[0,1500],[35,1500],[45,1500],[55,1500],[65,1500],[75,1500],[99,1500],[100,MIN_RPM]]
         validate_curve(curve)
         p=CurveControl(0,99,curve)
         for tick in range(1,121):p.step(curve,99,tick/4)
@@ -178,7 +164,7 @@ class FanPolicyTests(unittest.TestCase):
         self.assertFalse(p.is_stalled(MAX_RPM,43.25))
 
     def test_hard_max_starts_a_stopped_fan_with_bounded_startup_grace(self):
-        curve=[[0,0],[35,0],[45,0],[55,0],[65,0],[75,0],[99,0],[100,MAX_RPM]]
+        curve=[[0,0],[35,0],[45,0],[55,0],[65,0],[75,0],[99,0],[100,MIN_RPM]]
         validate_curve(curve)
         p=CurveControl(0,99,curve)
         for tick in range(1,121):p.step(curve,99,tick/4)

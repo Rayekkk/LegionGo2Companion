@@ -10,6 +10,9 @@ STOP_SETTLE_S = 20  # A rotor coasting down from 4800 RPM can exceed 12 seconds.
 STOP_OVERRIDE = 256
 HARD_MAX_C = 100.0
 LEASE_S, SAMPLE_S = 3.0, 0.25
+TACH_GRACE_S = 12  # Spin-up time before a nonzero target with a slow tach counts as stalled (tests shorten it).
+# One-time active check of a new (BIOS, EC) pair: the tach must follow a raised target within this time.
+SELF_TEST_S, SELF_TEST_RPM = 15, 3000
 PRESETS = ('silent', 'balanced', 'performance', 'max', 'custom')
 # Starting points for editing, not firmware profiles or saved template identities.
 TEMPLATES = {
@@ -35,13 +38,9 @@ def encode_target(rpm):
 
 
 def validate_curve(value):
-    return _validate_curve(value, -1, True)
-
-
-def _validate_curve(value, minimum, monotonic):
     if not isinstance(value, list) or len(value) != 8:
         raise ValueError('A curve must contain exactly eight points.')
-    last_t, last_r = minimum, 0
+    last_t, last_r = -1, 0
     result = []
     for i, point in enumerate(value):
         if not isinstance(point, (list, tuple)) or len(point) != 2:
@@ -49,20 +48,18 @@ def _validate_curve(value, minimum, monotonic):
         t, rpm = point
         if type(t) is not int or type(rpm) is not int:
             raise ValueError('Temperature and RPM must be integers.')
-        if not last_t < t <= 100 or not valid_rpm(rpm) or monotonic and rpm < last_r:
+        if not last_t < t <= 100 or not valid_rpm(rpm) or rpm < last_r:
             raise ValueError('Curve points must be ordered and inside the validated operating range.')
-        if i == 7 and (t != 100 or rpm != MAX_RPM):
-            raise ValueError('The last point must be 100°C at full speed.')
+        if i == 7 and (t != 100 or rpm < MIN_RPM):
+            raise ValueError('The last point must be at 100°C and cannot stop or run below the minimum speed.')
         result.append([t, rpm]); last_t, last_r = t, rpm
     return result
 
 
 def validate_settings(value):
-    return _validate_settings(value, 4)
-
-
-def _validate_settings(value, schema):
-    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != schema:
+    """Schema 4 only: Fan first shipped (2.1.0) at schema 4. Anything else fails
+    closed for review. Unknown keys, such as dev-era curve archives, are dropped."""
+    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 4:
         raise ValueError('Unsupported fan settings schema; review before enabling.')
     if type(value.get('enabled')) is not bool or type(value.get('revision')) is not int or value['revision'] < 0:
         raise ValueError('Invalid fan settings intent.')
@@ -72,101 +69,13 @@ def _validate_settings(value, schema):
     unit = value.get('display_unit', 'rpm')
     if unit not in ('rpm', 'percent'):
         raise ValueError('Unknown fan speed display unit.')
-    check = validate_curve if schema >= 3 else lambda curve: _validate_curve(curve, 49, False)
-    result = dict(schema=schema, enabled=value['enabled'], revision=value['revision'], display_unit=unit,
-                global_curve=check(value.get('global_curve')),
-                presets={k: check(v) for k, v in mappings.items()})
-    if schema == 4:
-        assignment_mode = value.get('assign_tdp_presets', False)
-        if type(assignment_mode) is not bool:
-            raise ValueError('TDP curve assignments must be a boolean.')
-        result['assign_tdp_presets'] = assignment_mode
-    if 'curve_archive_v2' in value:
-        archive = value['curve_archive_v2']
-        if schema < 3 or not isinstance(archive, dict) or set(archive) != {'global', 'presets'}:
-            raise ValueError('Invalid eight-point curve archive.')
-        _validate_curve(archive['global'], 49, False)
-        if not isinstance(archive['presets'], dict) or set(archive['presets']) - set(PRESETS):
-            raise ValueError('Invalid eight-point preset archive.')
-        for curve in archive['presets'].values():
-            _validate_curve(curve, 49, False)
-        result['curve_archive_v2'] = copy.deepcopy(archive)
-    if 'legacy_curves' in value:
-        legacy = value['legacy_curves']
-        if not isinstance(legacy, dict) or set(legacy) != {'global', 'presets'}:
-            raise ValueError('Invalid legacy curve archive.')
-        validate_legacy_curve(legacy['global'])
-        if not isinstance(legacy['presets'], dict) or set(legacy['presets']) - set(PRESETS):
-            raise ValueError('Invalid legacy preset archive.')
-        for curve in legacy['presets'].values():
-            validate_legacy_curve(curve)
-        result['legacy_curves'] = copy.deepcopy(legacy)
-    return result
-
-
-def validate_legacy_curve(value):
-    if not isinstance(value, list) or len(value) != 10:
-        raise ValueError('Invalid legacy ten-point curve.')
-    last_t, last_r = 49, 0
-    for i, point in enumerate(value):
-        if not isinstance(point, (list, tuple)) or len(point) != 2:
-            raise ValueError('Invalid legacy point.')
-        t, r = point
-        if (type(t) is not int or type(r) is not int or not last_t < t <= 100 or t % 5
-                or not (r == 0 or MIN_RPM <= r <= MAX_RPM and r % 100 == 0) or r < last_r
-                or i == 0 and t != 50 or i == 9 and t != 100):
-            raise ValueError('Invalid legacy operating range.')
-        last_t, last_r = t, r
-    return copy.deepcopy(value)
-
-
-def migrate_settings(value):
-    """Preserve every old point and mapping; minimize resampling error, never arm."""
-    if isinstance(value, dict) and type(value.get('schema')) is int and value['schema'] == 3:
-        result = _validate_settings(value, 3)
-        result.update(schema=4, enabled=False, assign_tdp_presets=False, revision=result['revision']+1)
-        return validate_settings(result)
-    if isinstance(value, dict) and type(value.get('schema')) is int and value['schema'] == 2:
-        result = _validate_settings(value, 2)
-        result['curve_archive_v2'] = copy.deepcopy({'global': result['global_curve'], 'presets': result['presets']})
-        for curve in [result['global_curve'], *result['presets'].values()]:
-            # Cumulative maximum never reduces cooling at any temperature.
-            running = 0
-            for point in curve:
-                running = max(running, point[1])
-                point[1] = running
-        result.update(schema=4, enabled=False, assign_tdp_presets=False, revision=result['revision']+1)
-        return validate_settings(result)
-    if not isinstance(value, dict) or value.get('schema') != 1:
-        return validate_settings(value)
-    if type(value['schema']) is not int:
-        raise ValueError('Invalid legacy schema.')
-    from itertools import combinations
-    if type(value.get('enabled')) is not bool or type(value.get('revision')) is not int or value['revision'] < 0:
-        raise ValueError('Invalid legacy intent.')
-    mappings = value.get('presets')
-    if not isinstance(mappings, dict) or set(mappings) - set(PRESETS):
-        raise ValueError('Invalid legacy preset assignments.')
-    original = dict(global_curve=validate_legacy_curve(value.get('global_curve')),
-                    presets={k: validate_legacy_curve(v) for k, v in mappings.items()})
-    def reduce(curve):
-        candidates = [copy.deepcopy([curve[0]]+[curve[i] for i in indices]+[[100, MAX_RPM]])
-                      for indices in combinations(range(1, 9), 6)]
-        # Compare raw interpolation below the newly fixed full-speed endpoint.
-        def raw(points, t):
-            if t <= points[0][0]: return points[0][1]
-            for (a, r1), (b, r2) in zip(points, points[1:]):
-                if t <= b: return r1+(r2-r1)*(t-a)/(b-a)
-            return points[-1][1]
-        def error(points):
-            errors = [abs(raw(points, t)-raw(curve, t)) for t in range(50, 100)]
-            return max(errors), sum(errors)
-        return validate_curve(min(candidates, key=error))
-    result = dict(schema=4, enabled=False, assign_tdp_presets=False, revision=value['revision']+1, display_unit='rpm',
-                  global_curve=reduce(original['global_curve']),
-                  presets={k: reduce(v) for k, v in original['presets'].items()},
-                  legacy_curves={'global':original['global_curve'], 'presets':original['presets']})
-    return validate_settings(result)
+    assignment_mode = value.get('assign_tdp_presets', False)
+    if type(assignment_mode) is not bool:
+        raise ValueError('TDP curve assignments must be a boolean.')
+    return dict(schema=4, enabled=value['enabled'], revision=value['revision'], display_unit=unit,
+                global_curve=validate_curve(value.get('global_curve')),
+                presets={k: validate_curve(v) for k, v in mappings.items()},
+                assign_tdp_presets=assignment_mode)
 
 
 def defaults():
@@ -275,4 +184,4 @@ class CurveControl:
         # only at initial startup. The rolling minimum remains bounded and
         # still catches a stopped/underperforming fan during repeated edits.
         required = max(MIN_RPM, min(target for _, target in self.history))
-        return self.target > 0 and now-self.started > 12 and rpm < .6*required
+        return self.target > 0 and now-self.started > TACH_GRACE_S and rpm < .6*required

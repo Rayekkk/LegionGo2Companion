@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Detached EC owner and independent recovery process. No Decky/UI/network calls.
 
-The plugin must renew its lease. The backup separately watches the EC owner's
-progress, sensors and suspend clock; it can reap its stalled sibling with pidfd
-before release. Both recovery paths require a functioning kernel and EC bus.
+The owner runs the curve from its own sensors; plugin EOF releases. The backup
+separately watches the owner's progress and temperature; it can reap its stalled
+sibling with pidfd before release. Both recovery paths require a functioning
+kernel and EC bus.
 """
+import errno
 import json
-import math
 import os
 import pathlib
 import select
@@ -18,10 +19,15 @@ import time
 import tempfile
 from diagnostics import configure_worker, event as diagnostic_event
 from fan_ec import EC, Ports, platform_check
-from fan_sleep import SleepSafety
-from fan_policy import CurveControl, LEASE_S, SAMPLE_S, HARD_MAX_C, MAX_RPM, encode_target, validate_curve, stop_timed_out
+from fan_sleep import Pause, Retry, SleepSafety
+from fan_policy import (CurveControl, LEASE_S, SAMPLE_S, HARD_MAX_C, MAX_RPM, SELF_TEST_S, SELF_TEST_RPM,
+                        encode_target, validate_curve, stop_timed_out)
 
 RUNTIME = pathlib.Path('/run/legiongo2companion-fan')
+# Self-tested (BIOS, EC) pairs. Root-owned and outside Decky's settings tree, which Decky re-chowns to deck on every load.
+FIRMWARE_FILE = pathlib.Path('/var/lib/legiongo2companion-fan/fan_firmware.json')
+VALIDATED_FIRMWARE = frozenset({('RRCN16WW', '1.16')})  # Hardware-validated before the self-test existed.
+CHANGED = 'This BIOS/EC version changed how the fan is controlled; Fan Control stays on automatic.'
 
 
 def atomic(path, value):
@@ -35,97 +41,116 @@ def atomic(path, value):
             os.unlink(tmp)
 
 
-def record_fault(runtime, session, reason, stage, state=None, **details):
-    """One bounded, private diagnostic; never prevent hardware recovery.
+def outcome_of(exc):
+    """pause: power/process lifecycle; retry: transient software or timing; fault: anything else."""
+    if isinstance(exc, (Pause, ConnectionError)):
+        return 'pause'  # A dead or unloading plugin breaks the socket.
+    return 'retry' if isinstance(exc, (Retry, TimeoutError)) else 'fault'
 
-    Healthy telemetry and later clean shutdowns do not erase this record. The
-    session correlates a transport failure with its independent recovery.
-    """
-    if not hasattr(os, 'geteuid') or not isinstance(session, str) or not session.startswith('session-') or not reason:
-        return
+
+def record_fault(session, reason, stage, outcome, sensors=None, ec_sample=None):
+    """First failure of a session in the private last-fault.json; never delays release."""
     try:
-        runtime = pathlib.Path(runtime)
-        info = runtime.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        path = RUNTIME/'last-fault.json'
+        if (path.is_file() and not path.is_symlink() and path.stat().st_size < 8192
+                and json.loads(path.read_text()).get('session') == session):
             return
-        previous = {}
-        path = runtime/'last-fault.json'
-        if path.exists():
-            if path.is_symlink() or path.stat().st_size > 8192:
-                return
-            try:
-                previous = json.loads(path.read_text())
-            except (ValueError, TypeError):
-                pass
-        first = not isinstance(previous, dict) or previous.get('session') != session
-        if first:
-            previous = dict(session=session, reason=str(reason)[:512], stage=str(stage)[:64],
-                            monotonic=time.monotonic(), pid=os.getpid())
-        if first and isinstance(details.get('sensor_sample'), dict):
-            snapshot = clean_sensor_sample(details['sensor_sample'])
-            previous['sensor_sample'] = snapshot
-            # Existing log/export allowlists accept these fixed numeric fields
-            # as a bounded summary; never log raw sysfs input or recovery samples.
-            summary = ' '.join(k+'='+format(v, '.6g') for k, v in snapshot.items()
-                               if type(v) in (int, float))
-            diagnostic_event('fan', 'fault_sample', level='error', stage=stage,
-                             code=snapshot.get('code', 'unknown'), worker_id=session,
-                             reason=summary)
-        sample = state or {}
-        previous.update(recovery=dict(active=sample.get('active'), automatic=sample.get('automatic'),
-                                      override=sample.get('override'), automatic_reads=sample.get('automatic_reads')))
-        for key, value in details.items():
-            if key in ('transport_error', 'exit_code', 'heartbeat_age'):
-                previous[key] = value[:512] if isinstance(value, str) else value
-        atomic(path, previous)
-    except (OSError, ValueError, TypeError):
+        sample = dict(ec_sample or {}, **getattr(sensors, 'last_sample', {}))
+        atomic(path, dict(session=session, reason=str(reason)[:512], stage=stage, outcome=outcome,
+                          monotonic=time.monotonic(),
+                          sample={k: v for k, v in sample.items() if type(v) in (int, float, str)}))
+    except (OSError, ValueError, TypeError, AttributeError):
         pass  # Diagnostics, including a full disk, cannot delay release.
 
 
-def clean_sensor_sample(sample):
-    result = {}
-    for key in ('cpu_temperature', 'gpu_temperature', 'ec_temperature', 'difference_c',
-                'sensor_started_at', 'sensor_finished_at', 'ec_started_at',
-                'ec_finished_at', 'fault_at', 'acquisition_ms'):
-        value = sample.get(key)
-        if type(value) in (int, float) and math.isfinite(value):
-            result[key] = value
-    if sample.get('sensor_name') in ('k10temp', 'amdgpu'):
-        result['sensor_name'] = sample['sensor_name']
-    code = sample.get('code', 'unknown')
-    result['code'] = code if code in ('sensor_io', 'sensor_value_format', 'sensor_range',
-        'sensor_acquisition_timeout', 'ec_io', 'ec_temperature_range') else 'other_fault'
-    return result
-
-
-def fault_sample(sensors, ec_sample):
-    sample = dict(ec_sample)
-    sample.update(getattr(sensors, 'last_sample', {}) if sensors is not None else {})
-    values = [sample[k] for k in ('cpu_temperature', 'gpu_temperature') if k in sample]
-    if values and 'ec_temperature' in sample:
-        sample['difference_c'] = max(values)-sample['ec_temperature']
-    sample['fault_at'] = time.monotonic()
-    return sample
-
-
 def read_ec_status(ec, sample):
-    sample.clear()
-    sample.update(ec_started_at=time.monotonic(), code='ec_io')
-    try:
-        result = ec.status()
-        sample.update(ec_temperature=result['ec_temperature'])
-        sample.pop('code')
-        return result
-    finally:
-        sample['ec_finished_at'] = time.monotonic()
+    sample.clear(); sample.update(ec.status())
+    return dict(sample)
 
 
 def check_ec_temperature(sample):
     # C307 has no proven identity equivalent to Tctl or GPU edge. A valid
     # independent channel may lag or differ; equality is not a freshness test.
     if not 10 <= sample['ec_temperature'] <= 105:
-        sample['code'] = 'ec_temperature_range'
         raise RuntimeError('Invalid EC temperature reading.')
+
+
+def firmware_dir(create=False):
+    """The remembered-pairs directory, only if it is ours: a directory, our uid, no group/other access."""
+    directory = pathlib.Path(FIRMWARE_FILE).parent
+    if create:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise OSError('Unsafe fan firmware directory.')
+    return directory
+
+
+def validated_firmware():
+    pairs = set(VALIDATED_FIRMWARE)
+    try:
+        firmware_dir()
+        fd = os.open(FIRMWARE_FILE, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            # Only our own (root) file counts: a forged entry would skip the active check.
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_size <= 8192:
+                pairs.update(tuple(pair) for pair in json.loads(os.read(fd, 8192))['validated']
+                             if isinstance(pair, list) and len(pair) == 2 and all(type(x) is str for x in pair))
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, TypeError, KeyError):
+        pass  # Missing or damaged: the self-test runs again.
+    return pairs
+
+
+def remember_firmware(pair):
+    try:
+        firmware_dir(create=True)
+        atomic(pathlib.Path(FIRMWARE_FILE),
+               dict(validated=sorted(map(list, validated_firmware() - VALIDATED_FIRMWARE | {pair}))))
+    except OSError as exc:
+        diagnostic_event('fan', 'firmware_record_failed', level='warning', error=exc)
+
+
+def self_test(ec, root, ipc, sleep):
+    """First session on a new (BIOS, EC) pair, with the backup and inhibitor live.
+
+    A raised target must read back exactly and the tach must follow it; release
+    must then read firmware automatic. It never lowers the firmware's speed.
+    """
+    stopped = lambda: (root/'stop').exists()
+    try:
+        with ec.transaction():
+            target = SELF_TEST_RPM if ec.status()['rpm'] < SELF_TEST_RPM-800 else MAX_RPM
+            (root/'armed').touch(mode=0o600, exist_ok=True)
+            ec.set_target(target, stopped)
+            atomic(root/'owned-target.json', dict(rpm=target))
+        near = lambda value: abs(value-target) <= .15*target
+        deadline, followed = time.monotonic()+SELF_TEST_S, 0
+        while followed < 2:
+            if time.monotonic() > deadline:
+                raise RuntimeError('Fan tach did not follow the self-test target.')
+            if select.select([ipc], [], [], 0.25)[0]:  # Nothing is sent before ready: this is EOF.
+                raise Pause('Fan check cancelled; firmware automatic restored.')
+            check_terminated(); sleep.check()
+            atomic(root/'pulse.json', dict(monotonic=time.monotonic()))
+            with ec.transaction():
+                sample = ec.status()
+            if sample['override'] != target:
+                raise RuntimeError('Fan override changed during the self-test.')
+            followed = followed+1 if near(sample['rpm']) and near(sample['effective']) else 0
+        with ec.transaction():
+            ec.release()
+            (root/'armed').unlink()
+        return confirm_automatic(ec)
+    except (Pause, Retry, TimeoutError):
+        raise
+    except RuntimeError as exc:
+        if stopped() or (root/'hard-max').exists():
+            raise  # The backup acted; its own reason is the cause.
+        diagnostic_event('fan', 'self_test_failed', level='warning', error=exc, worker_id=root.name)
+        raise RuntimeError(CHANGED) from exc
 
 
 def secure_root():
@@ -143,7 +168,7 @@ def secure_root():
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BaseException:
         os.close(fd)
-        raise RuntimeError('Another Fan Control instance still owns EC recovery.')
+        raise Retry('Another Fan Control instance still owns EC recovery.')
     return fd
 
 
@@ -158,7 +183,7 @@ class Sensors:
                         raise RuntimeError('Ambiguous APU temperature sensors.')
                     self.fds[name] = os.open(p/'temp1_input', os.O_RDONLY | os.O_CLOEXEC)
             if set(self.fds) != {'k10temp', 'amdgpu'}:
-                raise RuntimeError('Both independent APU sensors are required.')
+                raise Retry('Both independent APU sensors are required.')
         except BaseException:
             self.close()
             raise
@@ -170,8 +195,11 @@ class Sensors:
         try:
             for name, fd in self.fds.items():
                 self.last_sample.update(sensor_name=name, code='sensor_io')
-                os.lseek(fd, 0, os.SEEK_SET)
-                raw = os.read(fd, 64)
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    raw = os.read(fd, 64)
+                except OSError as exc:
+                    raise Retry('APU temperature read failed.') from exc
                 self.last_sample['code'] = 'sensor_value_format'
                 t = int(raw)/1000
                 self.last_sample['cpu_temperature' if name == 'k10temp' else 'gpu_temperature'] = t
@@ -186,7 +214,7 @@ class Sensors:
             self.last_sample.update(sensor_finished_at=finished, acquisition_ms=(finished-start)*1000)
         if finished-start > SAMPLE_S:
             self.last_sample['code'] = 'sensor_acquisition_timeout'
-            raise RuntimeError('Stale/slow APU temperature acquisition.')
+            raise Retry('Stale/slow APU temperature acquisition.')
         return values
 
     def close(self):
@@ -199,11 +227,12 @@ def boot_gap(previous):
     # CLOCK_BOOTTIME includes suspend, CLOCK_MONOTONIC excludes it.
     current = time.clock_gettime(time.CLOCK_BOOTTIME)-time.monotonic()
     if previous is not None and abs(current-previous) > 0.75:
-        raise RuntimeError('Suspend/resume detected; re-enable Fan Control after resume.')
+        raise Pause('Suspend/resume detected; firmware automatic restored.')
     return current
 
 
-def check_owners(exclude=()):
+def check_owners():
+    """Session start and every passive read; afterwards the override readback catches a foreign writer."""
     modules = {line.split()[0] for line in pathlib.Path('/proc/modules').read_text().splitlines() if line.split()}
     if modules.intersection(('legion_laptop', 'gpd_fan')):
         raise RuntimeError('Conflicting fan driver is loaded.')
@@ -217,22 +246,24 @@ def check_owners(exclude=()):
         except ValueError:
             continue
         if lo <= 0x4F and hi >= 0x4E:
-            raise RuntimeError('EC host ports have another kernel owner.')
+            raise RuntimeError('Another driver is using the fan controller.')
     started = time.monotonic()
-    for p in pathlib.Path('/proc').glob('[0-9]*'):
-        if int(p.name) in (os.getpid(), *exclude):
+    # Plain str paths: pathlib costs over twice as much per fd and this runs on every passive read.
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or int(pid) == os.getpid():
             continue
+        fds = f'/proc/{pid}/fd/'
         try:
-            for fd in (p/'fd').iterdir():
+            for fd in os.listdir(fds):
                 try:
-                    if os.readlink(fd) == '/dev/port':
-                        raise RuntimeError('Another userspace process has raw EC host port access.')
+                    if os.readlink(fds+fd) == '/dev/port':
+                        raise RuntimeError('Another app is using the fan controller.')
                 except FileNotFoundError:
                     pass
         except FileNotFoundError:
             pass
         if time.monotonic()-started > 0.5:
-            raise RuntimeError('Raw-port ownership scan exceeded its time budget.')
+            raise Retry('Raw-port ownership scan exceeded its time budget.')
 
 
 def independent_hard_max(ec, root, temperature):
@@ -266,28 +297,48 @@ def adopt_hard_max(ec, root, state, control, now):
     (root/'hard-max').unlink()
 
 
-def stop_release(ec, root, reason):
-    """Stop marker and zero are committed under the same lock as every target."""
+def stop_release(ec, root, reason, outcome, sole_writer=False):
+    """Stop marker and zero are committed under the same lock as every target.
+
+    The first reason and outcome of a session win; both processes may release.
+    Only the stop marker must be written first: it keeps a stale owner from
+    re-arming. The reason and last.json records never delay or block the release.
+    sole_writer: the caller is the owner itself, or the owner is proven dead,
+    so nobody is left to re-arm and an unwritable marker cannot block the release.
+    """
     errors = []
     for _ in range(8):
         try:
             with ec.transaction():
-                if not (root/'reason.json').exists():
-                    atomic(root/'reason.json', dict(reason=reason))
-                (root/'stop').touch(mode=0o600, exist_ok=True)
+                try:
+                    (root/'stop').touch(mode=0o600, exist_ok=True)
+                except OSError:
+                    if not sole_writer:
+                        raise
                 if (root/'armed').exists():
                     ec.release()
                 elif ec.word(0xC6C8):
                     raise RuntimeError('Foreign fan override; ownership was never armed.')
                 result = ec.status()
+                try:
+                    if not (root/'reason.json').exists():
+                        atomic(root/'reason.json', dict(reason=reason, outcome=outcome))
+                except OSError:
+                    pass
             # Zero selects the native firmware branch on this exact EC image.
             # Require fresh observations as well; native effective RPM may
             # legitimately equal the preceding override and is not rejected.
             result = confirm_automatic(ec)
-            first_reason = json.loads((root/'reason.json').read_text())['reason']
-            atomic(RUNTIME/'last.json', dict(active=False, automatic=result['override'] == 0,
-                                            reason=first_reason, state=result, session=root.name, monotonic=time.monotonic()))
-            return result
+            try:
+                first = json.loads((root/'reason.json').read_text())
+            except (OSError, ValueError):
+                first = dict(reason=reason, outcome=outcome)
+            try:
+                atomic(RUNTIME/'last.json', dict(active=False, automatic=result['override'] == 0, reason=first['reason'],
+                                                outcome=first['outcome'], state=result, session=root.name, monotonic=time.monotonic()))
+            except OSError:
+                pass
+            return dict(result, outcome=first['outcome'])
         except Exception as exc:
             errors.append(str(exc)); time.sleep(0.1)
     raise RuntimeError('EC recovery is pending: ' + '; '.join(errors))
@@ -303,36 +354,48 @@ def confirm_automatic(ec):
     return dict(result, automatic_reads=3)
 
 
+TERMINATED = False
+
+
+def _terminate(*_):
+    global TERMINATED
+    TERMINATED = True  # Polled at loop safe points: an EC transaction is never interrupted.
+
+
+def check_terminated():
+    if TERMINATED:
+        raise Pause('Stopped by SIGTERM; firmware automatic restored.')
+
+
 def backup(root, baseline, parent, ready_fd, inherited_port, ipc, owner_fd):
     os.setsid()
     ipc.close(); inherited_port.close()
     port, sensors, pidfd, sleep = None, None, None, None
     recovered = False
-    reason = 'EC owner exited'
+    reason, outcome = 'EC owner exited', 'pause'
     stage = 'backup_startup'
-    fault = False
     try:
         port = Ports(); ec = EC(port); ec.baseline = baseline
         sensors = Sensors()
         pidfd = os.pidfd_open(parent)
-        sleep = SleepSafety()
+        try:
+            sleep = SleepSafety()  # Its own bus and delay inhibitor: the owner's dies with the owner.
+        except OSError as exc:
+            if exc.errno == errno.EINPROGRESS:
+                raise Pause('Sleep is preparing; fan control remains off.') from exc
+            raise
         sensors.read()
         with ec.transaction():
             if ec.status()['override'] != 0:
                 raise RuntimeError('Backup readiness requires firmware automatic.')
         os.write(ready_fd, b'1'); os.close(ready_fd); ready_fd = -1
-        clock = boot_gap(None)
-        next_temperature = next_owners = 0
+        next_temperature = 0
         while True:
             now = time.monotonic()
-            stage = 'backup_sleep'
-            clock = boot_gap(clock)
+            if TERMINATED:
+                reason = 'Stopped by SIGTERM; firmware automatic restored.'; break
             sleep.check()
             pulse = json.loads((root/'pulse.json').read_text())
-            if now >= next_owners:
-                stage = 'backup_ownership'
-                check_owners((parent,))
-                next_owners = now+1
             if now >= next_temperature:
                 stage = 'backup_sensor'
                 temperature = max(sensors.read().values())
@@ -341,43 +404,53 @@ def backup(root, baseline, parent, ready_fd, inherited_port, ipc, owner_fd):
             if (root/'stop').exists():
                 reason = 'Control withdrawn'; break
             if now-pulse['monotonic'] >= LEASE_S:
-                reason = 'EC owner progress lease expired'; stage = 'backup_progress'; fault = True; break
-            if select.select([pidfd], [], [], 0.1)[0]:
-                reason = 'EC owner died'; stage = 'backup_owner_exit'; fault = True; break
+                reason, outcome, stage = 'EC owner progress lease expired', 'retry', 'backup_progress'; break
+            # pidfd wakes at once on owner death; otherwise wake for the 0.5 s temperature check or lease expiry.
+            if select.select([pidfd], [], [], min(0.5, max(0, pulse['monotonic']+LEASE_S-time.monotonic())))[0]:
+                reason, outcome, stage = 'EC owner died', 'retry', 'backup_owner_exit'; break
     except Exception as exc:
-        reason = str(exc); fault = True
+        reason, outcome = str(exc), outcome_of(exc)
     finally:
-        if fault:
-            record_fault(RUNTIME, root.name, reason, stage, sensor_sample=fault_sample(sensors, {}))
+        # After the owner's own release, the owner already recorded the first cause.
+        failed = outcome != 'pause' and not (root/'stop').exists()
+        if failed:
+            record_fault(root.name, reason, stage, outcome, sensors)
         if ready_fd >= 0:
             os.close(ready_fd)
         if port is not None:
             # Stop own EC worker BEFORE attempting recovery of a transaction it
             # might still hold. pidfd identifies this exact process, not a PID reuse.
-            if pidfd is not None and not (root/'stop').exists():
+            if pidfd is not None and failed:
                 try:
                     signal.pidfd_send_signal(pidfd, signal.SIGKILL)
                     select.select([pidfd], [], [], 0.5)
                 except ProcessLookupError:
                     pass
+            def owner_dead():
+                return pidfd is not None and bool(select.select([pidfd], [], [], 0)[0])
             try:
                 try:
-                    restored = stop_release(ec, root, reason)
+                    stop_release(ec, root, reason, outcome, sole_writer=owner_dead())
                 except Exception:
                     if pidfd is not None:
-                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-                        select.select([pidfd], [], [], 0.5)
-                    restored = stop_release(ec, root, reason)
+                        try:
+                            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                            select.select([pidfd], [], [], 0.5)
+                        except ProcessLookupError:
+                            pass  # Already gone: exactly what the kill was for.
+                    stop_release(ec, root, reason, outcome, sole_writer=owner_dead())
                 recovered = True
-                if fault:
-                    record_fault(RUNTIME, root.name, reason, stage, dict(restored, active=False, automatic=True))
             except Exception as exc:
-                atomic(RUNTIME/'last.json', dict(active=False, automatic=False,
-                                                reason=str(exc), monotonic=time.monotonic()))
+                try:
+                    atomic(RUNTIME/'last.json', dict(active=False, automatic=False, reason=str(exc),
+                                                    outcome='fault', monotonic=time.monotonic()))
+                except OSError:
+                    pass  # os._exit below must still run: this is a forked child.
             port.close()
-        if fault or not recovered:
+        if failed or not recovered:
             diagnostic_event('fan', 'worker_recovery', level='warning' if recovered else 'error',
-                             stage=stage, source='backup', restored=recovered, worker_id=root.name)
+                             stage=stage, source='backup', restored=recovered, worker_id=root.name,
+                             outcome=outcome, reason=reason)
         if sensors is not None:
             sensors.close()
         if sleep is not None:
@@ -391,23 +464,47 @@ def backup(root, baseline, parent, ready_fd, inherited_port, ipc, owner_fd):
 
 
 def serve(ipc):
-    platform_check()
+    signal.signal(signal.SIGTERM, _terminate)  # Inherited by the backup fork.
+    identity = platform_check()
     owner = secure_root()
+    try:
+        pathlib.Path('/proc/self/oom_score_adj').write_text('-900')  # Also inherited by the backup.
+    except OSError as exc:
+        diagnostic_event('fan', 'oom_protection_failed', level='warning', error=exc)
+    for stale in RUNTIME.glob('session-*'):  # Owner lock held: left by SIGKILLed sessions, no live user.
+        shutil.rmtree(stale, ignore_errors=True)
     root = pathlib.Path(tempfile.mkdtemp(prefix='session-', dir=RUNTIME))
     port, sensors, child, sleep = None, None, None, None
     state = dict(active=False, automatic=False, error='', target=0, writes=0, samples=0, stop_verified=False, session=root.name)
-    reason = 'Controller disconnected'
+    reason, outcome = 'Controller disconnected', 'pause'
     stage = 'startup'
     ec_sample = {}
     try:
         check_owners()
         port = Ports(); ec = EC(port)
         sensors = Sensors(); temperatures = sensors.read()
+        known = validated_firmware()
         with ec.transaction():
-            initial = read_ec_status(ec, ec_sample)
-            if initial['override'] != 0:
-                raise RuntimeError('Another controller has an EC fan override; custom control remains off.')
-            check_ec_temperature(ec_sample)
+            initial = ec.plausible(); ec_sample.update(initial)  # Read-only, before any write.
+        pair = (identity['bios_version'], initial['ec_version'])
+        if pair not in known:
+            # An unproven interface gets no write, not even a release, until it looks sane.
+            try:
+                check_ec_temperature(ec_sample)
+                if initial['override'] not in (0, SELF_TEST_RPM, MAX_RPM):  # Only a killed self-test's own target.
+                    raise RuntimeError('Unknown fan override on this BIOS/EC version; Fan Control was not started.')
+            except RuntimeError:
+                port.close(); port = None  # Nothing was written, so there is no release to attempt.
+                raise
+        if initial['override'] != 0:
+            with ec.transaction():
+                ec.release()
+        if initial['override'] != 0:
+            # Owner lock and ownership scan found no live writer: an orphan from a
+            # killed session or tool. Release it instead of blocking until power-off.
+            diagnostic_event('fan', 'stale_override_released', level='warning', worker_id=root.name, count=initial['override'])
+            initial = confirm_automatic(ec); ec_sample.update(initial)
+        check_ec_temperature(ec_sample)
         atomic(root/'pulse.json', dict(monotonic=time.monotonic()))
         rfd, wfd = os.pipe()
         worker_pid = os.getpid()
@@ -418,44 +515,47 @@ def serve(ipc):
             backup(root, ec.baseline, worker_pid, wfd, port, ipc, owner)
         os.close(wfd)
         try:
-            sleep = SleepSafety()  # Construct after fork: no inherited bus reuse.
+            try:
+                sleep = SleepSafety()  # Construct after fork: no inherited bus reuse.
+            except OSError as exc:
+                if exc.errno == errno.EINPROGRESS:  # logind refuses inhibitors while a sleep is already under way.
+                    raise Pause('Sleep is preparing; fan control remains off.') from exc
+                raise Retry(str(exc)) from exc
             if not select.select([rfd], [], [], 1)[0] or os.read(rfd, 1) != b'1':
-                raise RuntimeError('Independent backup watchdog did not become ready.')
+                raise Retry('Independent backup watchdog did not become ready.')
         finally:
             os.close(rfd)
+        if pair not in known:
+            stage = 'self_test'
+            initial = self_test(ec, root, ipc, sleep); ec_sample.update(initial)
+            remember_firmware(pair)
+            diagnostic_event('fan', 'firmware_validated', worker_id=root.name, version='/'.join(pair))
         ipc.setblocking(False)
         state.update(initial, automatic=True, guardian_pid=os.getpid(), backup_pid=child)
         ipc.send(json.dumps(dict(kind='ready', **state)).encode())
         diagnostic_event('fan', 'worker_ready', source='owner', worker_id=root.name)
-        last_lease = time.monotonic(); next_sample = next_ec = last_lease
+        next_sample = next_ec = time.monotonic()
         clock = boot_gap(None); curve = None; control = None; revision = -1
-        last_report, last_file, last_owner_scan = 0, 0, time.monotonic()
+        last_report, last_file, last_pulse = 0, 0, 0
+        stopped = lambda: (root/'stop').exists()
         while True:
             now = time.monotonic()
             stage = 'sleep'
+            check_terminated()
             clock = boot_gap(clock)
             sleep.check()
-            if now-last_owner_scan >= 1:
-                stage = 'ownership'
-                check_owners((child,))
-                last_owner_scan = time.monotonic()
-            if now-last_lease >= LEASE_S:
-                stage = 'plugin_heartbeat'
-                raise RuntimeError('Plugin heartbeat expired; firmware automatic restored.')
-            if (root/'stop').exists():
+            if stopped():
                 raise RuntimeError('Independent watchdog withdrew the lease.')
             if os.waitpid(child, os.WNOHANG)[0]:
                 child = None
-                raise RuntimeError('Independent backup watchdog died.')
-            if select.select([ipc], [], [], min(0.1, max(0, next_sample-now)))[0]:
+                raise Retry('Independent backup watchdog died.')
+            if select.select([ipc], [], [], min(SAMPLE_S, max(0, next_sample-now)))[0]:
                 stage = 'ipc'
                 raw = ipc.recv(16384)
                 if not raw:
                     break
                 command = json.loads(raw)
-                if command.get('op') == 'heartbeat':
-                    last_lease = time.monotonic()
-                elif command.get('op') == 'configure':
+                if command.get('op') == 'configure':
                     stage = 'configuration'
                     seq = command.get('revision')
                     if type(seq) is not int or seq <= revision or type(command.get('enabled')) is not bool:
@@ -477,13 +577,15 @@ def serve(ipc):
                                 raise RuntimeError('Fan ownership changed before activation.')
                             (root/'armed').touch(mode=0o600, exist_ok=True)
                             if ec.word(0xC6C8) != encode_target(control.target):
-                                ec.set_target(control.target, lambda: (root/'stop').exists() or time.monotonic()-last_lease >= LEASE_S)
+                                ec.set_target(control.target, stopped)
                                 state['writes'] += 1
                             activated = read_ec_status(ec, ec_sample)
                             atomic(root/'owned-target.json', dict(rpm=control.target))
                         curve = new_curve
+                        # Only a new target restarts the stop check; repeated saves must not postpone it.
+                        changed_at = state['target_changed_at'] if state['active'] and control.target == state['target'] else time.monotonic()
                         state.update(activated, active=True, automatic=False, target=control.target,
-                                     target_changed_at=time.monotonic(), temperatures=temperatures, sampled_at=time.monotonic(),
+                                     target_changed_at=changed_at, temperatures=temperatures, sampled_at=time.monotonic(),
                                      stop_verified=control.target == 0 and activated['rpm'] == 0 and activated['effective'] == 0)
                     else:
                         with ec.transaction():
@@ -518,7 +620,7 @@ def serve(ipc):
                         if current['override'] != expected:
                             raise RuntimeError('Fan override changed outside its owner.')
                         if target != state['target']:
-                            ec.set_target(target, lambda: (root/'stop').exists() or time.monotonic()-last_lease >= LEASE_S)
+                            ec.set_target(target, stopped)
                             state['target'] = target; state['writes'] += 1; state['target_changed_at'] = now
                             current = read_ec_status(ec, ec_sample)
                         if state['active'] and control.is_stalled(current['rpm'], now):
@@ -534,7 +636,9 @@ def serve(ipc):
                 state.update(temperatures=temperatures)
                 state['samples'] += 1
                 next_sample = now + (SAMPLE_S if state['active'] else 1.0)
-                atomic(root/'pulse.json', dict(monotonic=time.monotonic(), active=state['active'], target=state['target']))
+                if now-last_pulse >= 1:  # About 3 progress proofs per backup lease (LEASE_S).
+                    atomic(root/'pulse.json', dict(monotonic=time.monotonic(), active=state['active'], target=state['target']))
+                    last_pulse = now
                 if now-last_file >= 2:
                     atomic(RUNTIME/'last.json', dict(active=state['active'], automatic=state['automatic'],
                                                     reason='', state=state, session=root.name, monotonic=now))
@@ -546,19 +650,19 @@ def serve(ipc):
                     except BlockingIOError:
                         pass  # A backed-up frontend never blocks EC recovery.
     except Exception as exc:
-        reason = str(exc); state['error'] = reason
-        record_fault(RUNTIME, root.name, reason, stage, state,
-                     sensor_sample=fault_sample(sensors, ec_sample), heartbeat_age=None if 'last_lease' not in locals() else max(0, time.monotonic()-last_lease))
+        reason, outcome = str(exc), outcome_of(exc)
+        state['error'] = reason
     finally:
+        state['outcome'] = outcome
         if port is not None:
             try:
-                state.update(stop_release(ec, root, reason), active=False, automatic=True, target=0, stop_verified=False)
+                state.update(stop_release(ec, root, reason, outcome, sole_writer=True), active=False, automatic=True, target=0, stop_verified=False)
             except Exception as exc:
-                state.update(error=str(exc), active=False, automatic=False)
-        if state['error']:
-            record_fault(RUNTIME, root.name, reason, stage, state)
+                state.update(error=str(exc), active=False, automatic=False, outcome='fault')
+        if state['outcome'] != 'pause':
+            record_fault(root.name, state['error'] or reason, stage, state['outcome'], sensors, ec_sample)
         if child is not None:
-            # Backup observes stop within 100ms; bounded wait retains recovery ownership.
+            # Backup observes stop within 0.5 s; bounded wait retains recovery ownership.
             deadline = time.monotonic()+2
             while time.monotonic() < deadline:
                 if os.waitpid(child, os.WNOHANG)[0]:
@@ -572,12 +676,12 @@ def serve(ipc):
             sensors.close()
         if port is not None:
             port.close()
-        diagnostic_event('fan', 'worker_closed', level='warning' if state['error'] else 'info',
-                         source='owner', stage=stage, worker_id=root.name,
+        diagnostic_event('fan', 'worker_closed', level='info' if state['outcome'] == 'pause' else 'warning',
+                         source='owner', stage=stage, worker_id=root.name, outcome=state['outcome'], reason=reason,
                          restored=state.get('automatic') is True, pending=state.get('automatic') is not True)
         if sleep is not None:
             sleep.close()
-        if child is None and state['automatic']:
+        if child is None and (state['automatic'] or port is None):  # port None: start failed before the EC opened.
             shutil.rmtree(root)
         os.close(owner)
 
@@ -589,7 +693,7 @@ if __name__ == '__main__':
     try:
         serve(sock)
     except Exception as exc:
-        diagnostic_event('fan', 'worker_start_failed', level='error', error=exc, stage='bootstrap')
-        sock.send(json.dumps(dict(kind='closed', active=False, automatic=False, error=str(exc))).encode())
+        diagnostic_event('fan', 'worker_start_failed', level='error', error=exc, stage='bootstrap', outcome=outcome_of(exc))
+        sock.send(json.dumps(dict(kind='closed', active=False, automatic=False, error=str(exc), outcome=outcome_of(exc))).encode())
     finally:
         sock.close()

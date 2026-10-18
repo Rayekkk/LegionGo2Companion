@@ -8,6 +8,14 @@ import ctypes as c
 import os
 
 
+class Pause(RuntimeError):
+    """Power or process lifecycle: release, keep the saved intent, re-arm later."""
+
+
+class Retry(RuntimeError):
+    """Transient software or timing failure: release, re-arm with a bounded budget."""
+
+
 class SleepSafety:
     def __init__(self):
         self.bus = c.c_void_p()
@@ -72,7 +80,7 @@ class SleepSafety:
     def _initial(self, reply):
         value = c.c_int()
         if self._ok(self.lib.sd_bus_message_read(reply, b'v', c.c_char_p(b'b'), c.byref(value))) != 1 or value.value:
-            raise RuntimeError('Sleep is preparing; fan control remains off.')
+            raise Pause('Sleep is preparing; fan control remains off.')
 
     def _owner(self, reply):
         owner = c.c_char_p()
@@ -90,13 +98,13 @@ class SleepSafety:
                 if message.value and self.lib.sd_bus_message_is_signal(message, b'org.freedesktop.DBus', b'NameOwnerChanged') > 0:
                     name, old, new = c.c_char_p(), c.c_char_p(), c.c_char_p()
                     if self._ok(self.lib.sd_bus_message_read(message, b'sss', c.byref(name), c.byref(old), c.byref(new))) != 1 or name.value == b'org.freedesktop.login1':
-                        raise RuntimeError('login1 restarted; fan sleep protection must be renewed.')
+                        raise Pause('login1 restarted; fan sleep protection must be renewed.')
                 if message.value and self.lib.sd_bus_message_is_signal(message, b'org.freedesktop.login1.Manager', b'PrepareForSleep') > 0:
                     if self.lib.sd_bus_message_get_sender(message) != self.login_owner:
                         raise RuntimeError('Unexpected sleep signal owner; fan control withdrawn.')
                     value = c.c_int()
                     if self._ok(self.lib.sd_bus_message_read(message, b'b', c.byref(value))) != 1 or value.value:
-                        raise RuntimeError('Suspend requested; firmware automatic restored before sleep.')
+                        raise Pause('Suspend requested; firmware automatic restored before sleep.')
             finally:
                 if message.value:
                     self.lib.sd_bus_message_unref(message)

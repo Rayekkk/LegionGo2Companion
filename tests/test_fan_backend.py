@@ -7,36 +7,71 @@ import threading
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
-import test_integration
+import support
 import main
 import fan_backend as fan
 import fan_guardian as guard
 import module_control
+import module_runtime
 from fan_policy import defaults, DEFAULT_CURVE, stop_timed_out
 from safe_settings import SettingsManager
 
 
 class FakeClient:
+    timeout=None
     def __init__(self):
-        self.socket=object();self.state=dict(active=False,automatic=True);self.calls=[]
+        self.socket=object();self.state=dict(kind='ready',active=False,automatic=True);self.calls=[];self.withdrawn=False
+    def start(self): pass
     def configure(self,enabled,curve):
         if self.socket is None:raise RuntimeError('Closed fan client')
         self.calls.append((enabled,copy.deepcopy(curve)))
-        self.state.update(active=enabled,automatic=not enabled)
+        self.state.update(kind='configured',active=enabled,automatic=not enabled)
         return self.snapshot()
     def snapshot(self): return copy.deepcopy(self.state)
-    def close(self): self.socket=None;self.state.update(active=False,automatic=True)
-    def pump(self): return self.snapshot()
-    def check(self): return self.snapshot()
-    def stop_heartbeat(self): pass
+    def close(self): self.socket=None;self.state.update(kind='closed',active=False,automatic=True)
+    def check(self):
+        if self.state.get('kind') in ('closed','disconnected'):raise RuntimeError(self.state.get('error') or 'Fan watchdog stopped.')
+        return self.snapshot()
+    def pump(self): return self.check()
+    def withdraw(self): self.withdrawn=True
+
+
+class EndingClient(FakeClient):
+    """A guardian session that ends on its first telemetry poll with a classified outcome."""
+    def __init__(self,outcome,reason):
+        super().__init__();self.outcome,self.reason=outcome,reason
+    def pump(self):
+        self.state.update(kind='closed',active=False,automatic=True,outcome=self.outcome,error=self.reason)
+        return self.check()
+
+
+class DeadClient(FakeClient):
+    """Owner and backup were both killed: no terminal packet, no receipt, the override is still set."""
+    LOST=fan.Client.LOST
+    def pump(self):
+        self.state.update(kind='disconnected',active=False,automatic=False,error=self.LOST)
+        return self.check()
+    def close(self):
+        self.socket=None;raise RuntimeError(self.state.get('error') or 'Firmware automatic readback is pending.')
+
+
+class RefusedClient(FakeClient):
+    def start(self):raise fan.Retry('Another Fan Control instance still owns EC recovery.')
 
 
 class FanBackendTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.storage=patch.object(fan,'settings',SettingsManager('fan_settings',self.tmp.name))
-        self.storage.start();self.owner_read=patch.object(fan,'read_automatic',return_value=dict(valid=True,rpm=1500,apu_temperature=45,age_seconds=0,automatic=True,error='',ownership=dict(blocked=False,state='firmware_auto',reason='')));self.owner_read.start();self.p=fan.Plugin();self.p._supported=True;self.p._client=FakeClient()
+        import tdp_backend as tdp
+        self.tdp_running=patch.object(tdp.Plugin,'_ready',True);self.tdp_running.start();self.addCleanup(self.tdp_running.stop)
+        self.storage.start();self.owner_read=patch.object(fan,'read_automatic',return_value=dict(valid=True,rpm=1500,apu_temperature=45,age_seconds=0,automatic=True,error='',ownership=dict(blocked=False,state='firmware_auto',reason='')));self.owner_read.start();self.p=fan.Plugin();self.p._supported=True;self.p._client=FakeClient();self.supervisors=[]
     async def asyncTearDown(self):
+        # Fan workers drain module-wide: stop every supervising plugin first.
+        for plugin in self.supervisors:
+            plugin._withdraw_lease()
+            if plugin._task is not None:plugin._task.cancel()
+        for plugin in self.supervisors:await plugin._unload()
         await self.p._unload();self.owner_read.stop();self.storage.stop();self.tmp.cleanup()
 
     async def test_first_install_custom_off_and_persisted_curves_readback(self):
@@ -55,6 +90,29 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(fan,'companion_preset',side_effect=AssertionError('TDP dependency')):
             await self.p._apply();await self.p._apply()
         self.assertEqual(len(self.p._client.calls),1)
+
+    async def test_global_curve_is_selected_on_the_loop_and_tdp_assignment_off_it(self):
+        # The monitor applies every 0.5 s: only TDP assignment reads files and needs a worker thread.
+        real=module_runtime.offload;hops=[]
+        async def offload(module,function,*args,**kwargs):
+            hops.append(function.__name__);return await real(module,function,*args,**kwargs)
+        with patch.object(module_runtime,'offload',new=offload):
+            await self.p._apply();await self.p._apply()
+            self.p._state.update(assign_tdp_presets=True,presets={'silent':[[t,4800] for t,_ in DEFAULT_CURVE]})
+            with patch.object(fan,'companion_preset',return_value='silent'):await self.p._apply()
+        self.assertEqual(hops,['configure','_selected','configure'])
+
+    async def test_tdp_assignment_reparses_tdp_settings_only_after_they_change(self):
+        import tdp_backend as tdp
+        with patch.object(tdp,'settings',SettingsManager('tdp_settings',self.tmp.name)),patch.object(tdp,'_current_game_id',None):
+            tdp._write_keys({tdp.SETTINGS_KEY_SETTINGS:dict(enabled=True,active_preset='silent')})
+            real=tdp._read_valid_settings;reads=[]
+            with patch.object(tdp,'_read_valid_settings',side_effect=lambda:(reads.append(1),real())[1]):
+                cache={}
+                self.assertEqual([fan.companion_preset(cache) for _ in range(3)],['silent']*3)
+                self.assertEqual(len(reads),2,'settings and profiles parsed once, then served from the cache')
+                tdp._write_keys({tdp.SETTINGS_KEY_SETTINGS:dict(enabled=True,active_preset='max')})
+                self.assertEqual(fan.companion_preset(cache),'max')
 
     async def test_assignment_mode_is_cas_persisted_global_off_and_never_arms(self):
         self.p._load();self.p._state['presets']={'silent':[[t,4800] for t,_ in DEFAULT_CURVE]}
@@ -97,25 +155,170 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any('template' in key for key in saved['settings']))
         fresh=fan.Plugin();fresh._load();self.assertEqual(fresh._state,saved['settings'])
 
-    async def test_saved_enable_never_rearms_after_controller_eof_or_missing_runtime_record(self):
-        for reason in ('Controller disconnected','Control withdrawn','',None):
-            with self.subTest(reason=reason):
-                fan.settings.setSetting('state',dict(defaults(),enabled=True,revision=8));fan.settings.commit()
-                fresh=fan.Plugin()
-                previous=dict(active=False,automatic=True,reason=reason)
-                runtime=(patch.object(fan.pathlib.Path,'read_text',side_effect=FileNotFoundError())
-                         if reason is None else patch.object(fan.pathlib.Path,'read_text',return_value=json.dumps(previous)))
-                with patch.object(fan,'platform_check',return_value={}), \
-                        runtime, \
-                        patch.object(fresh,'_start_client',new=AsyncMock()) as start:
+    async def supervised(self,clients,outcome=None,backoff=(0,)):
+        """Fresh plugin whose saved ON intent re-arms through scripted guardian sessions."""
+        fan.settings.setSetting('state',dict(defaults(),enabled=True,revision=8));fan.settings.commit()
+        fresh=fan.Plugin();fresh.BACKOFF_S=backoff;fresh.POLL_S=0
+        self.supervisors.append(fresh)
+        receipt=None if outcome is None else dict(outcome=outcome,reason='Fan did not reach a stable running speed.')
+        made=[]
+        def client():
+            made.append(clients.pop(0) if clients else FakeClient());return made[-1]
+        for item in (patch.object(fan,'platform_check',return_value={}),
+                     patch.object(fan,'last_session',return_value=receipt or {}),
+                     patch.object(fan,'Client',side_effect=client)):
+            item.start();self.addCleanup(item.stop)
+        await fresh._main()
+        return fresh,made
+
+    async def until(self,condition,timeout=3):
+        deadline=time.monotonic()+timeout
+        while not condition():
+            if time.monotonic()>deadline:self.fail('Condition not reached')
+            await asyncio.sleep(.01)
+
+    async def idle(self,plugin):
+        # With POLL_S=0 the monitor retakes the lock at once; a polled locked() can miss the gap.
+        # asyncio.Lock is FIFO, so waiting for it is guaranteed to get in at the next release.
+        async with plugin._mutation:pass
+
+    async def test_saved_enable_rearms_at_startup_unless_this_boot_ended_in_a_fault(self):
+        for outcome in (None,'pause','retry'):
+            with self.subTest(outcome=outcome):
+                fresh,made=await self.supervised([],outcome)
+                self.assertIn('Resuming',(await fresh.get_state())['error'],'no control is claimed before readiness')
+                await self.until(lambda:made and made[-1].calls);await self.idle(fresh)
+                self.assertEqual(made[-1].calls,[(True,DEFAULT_CURVE)])
+                self.assertEqual(fresh._error,'')
+                self.assertEqual(fan.settings.getSetting('state')['revision'],8,'re-arm never rewrites the saved intent')
+                await fresh._unload()
+                self.assertTrue(made[-1].withdrawn);self.assertIsNone(made[-1].socket)
+                self.assertEqual(fan.settings.getSetting('state')['revision'],8,'unload never writes enabled')
+        fresh,made=await self.supervised([],'fault')
+        self.assertEqual(made,[]);self.assertIsNone(fresh._task)
+        self.assertFalse(fan.settings.getSetting('state')['enabled'])
+        self.assertIn('stable running speed',fresh._error)
+
+    async def test_pause_rearms_without_limit_and_keeps_saved_intent(self):
+        clients=[EndingClient('pause','Suspend requested; firmware automatic restored before sleep.') for _ in range(6)]
+        fresh,made=await self.supervised(clients)
+        await self.until(lambda:len(made)==7 and made[-1].calls)
+        self.assertTrue(all(c.socket is None for c in made[:-1]),'each ended session was closed first')
+        self.assertTrue(fresh._state['enabled']);self.assertEqual(fan.settings.getSetting('state')['revision'],8)
+
+    async def test_retry_rearms_three_times_in_ten_minutes_then_latches_off_with_reason(self):
+        clients=[EndingClient('retry','Stale/slow APU temperature acquisition.') for _ in range(4)]
+        fresh,made=await self.supervised(clients)
+        await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
+        self.assertEqual(len(made),4)
+        stored=fan.settings.getSetting('state');self.assertFalse(stored['enabled']);self.assertEqual(stored['revision'],9)
+        self.assertIn('kept failing',fresh._error);self.assertIn('Stale/slow',fresh._error)
+
+    async def test_retries_outside_the_window_do_not_accumulate(self):
+        fresh,made=await self.supervised([EndingClient('retry','EC owner died') for _ in range(5)])
+        fresh.RETRY_WINDOW_S=0  # Every earlier retry is already outside the window.
+        await self.until(lambda:len(made)==6 and made[-1].calls)
+        self.assertTrue(fan.settings.getSetting('state')['enabled'])
+
+    async def test_fault_latches_off_immediately_and_a_local_timeout_is_a_retry(self):
+        fresh,made=await self.supervised([EndingClient('fault','Fan override changed outside its owner.')])
+        await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
+        self.assertEqual(len(made),1);self.assertFalse(fan.settings.getSetting('state')['enabled'])
+        self.assertIn('outside its owner',fresh._error)
+        slow=FakeClient();slow.configure=lambda *_:(_ for _ in ()).throw(TimeoutError('Fan configuration readback timed out; control withdrawn.'))
+        fresh,made=await self.supervised([slow])
+        await self.until(lambda:len(made)==2 and made[-1].calls)
+        self.assertTrue(fan.settings.getSetting('state')['enabled'])
+
+    async def test_user_save_readback_timeout_counts_as_retry_not_pause(self):
+        class TimingOut(FakeClient):
+            def configure(self,enabled,curve):
+                if not self.calls:return super().configure(enabled,curve)
+                # Client.configure on timeout: close the channel, then raise.
+                self.timeout=TimeoutError('Fan configuration readback timed out; control withdrawn.')
+                self.socket=None;self.state.update(kind='disconnected',active=False,automatic=False,error=fan.Client.LOST)
+                raise self.timeout
+            def close(self):
+                # The guardian saw EOF: its receipt says pause.
+                self.socket=None;self.state.update(kind='closed',active=False,automatic=True,outcome='pause',error='Controller disconnected')
+        fresh,made=await self.supervised([TimingOut()])
+        await self.until(lambda:made and made[-1].calls and fresh._live());await self.idle(fresh)
+        curve=copy.deepcopy(fresh._state['global_curve']);curve[1][1]=1600
+        with patch.object(fan,'diagnostic_event') as event:
+            with self.assertRaises(TimeoutError):await fresh.save_curve('global',curve,fresh._state['revision'])
+            await self.until(lambda:len(made)==2 and made[-1].calls)
+        ended=[c.kwargs for c in event.call_args_list if c.args[1:]==('session_ended',)]
+        self.assertEqual([(e['outcome'],e['count']) for e in ended],[('retry',1)])
+        self.assertIn('timed out',ended[0]['reason'])
+
+    async def test_failed_start_is_classified_by_the_guardian(self):
+        class Failing(FakeClient):
+            def __init__(self,error):super().__init__();self.error=error
+            def start(self):raise self.error
+        from fan_sleep import Pause,Retry
+        fresh,made=await self.supervised([Failing(Pause('Sleep is preparing; fan control remains off.')),
+                                          Failing(Retry('Another Fan Control instance still owns EC recovery.'))])
+        await self.until(lambda:len(made)==3 and made[-1].calls)
+        self.assertTrue(fan.settings.getSetting('state')['enabled'])
+        fresh,made=await self.supervised([Failing(RuntimeError('This hardware/BIOS/EC variant has not been validated for Fan Control.'))])
+        await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
+        self.assertFalse(fan.settings.getSetting('state')['enabled']);self.assertIn('validated',fresh._error)
+
+    async def test_unconfirmed_release_runs_one_release_only_session_before_latching_off(self):
+        fresh,made=await self.supervised([DeadClient()])
+        await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
+        self.assertEqual(len(made),2,'exactly one release-only session, no re-arm')
+        self.assertEqual(made[1].calls,[]);self.assertIsNone(made[1].socket,'started, never configured, closed')
+        self.assertIsNone(fresh._client)
+        self.assertFalse(fan.settings.getSetting('state')['enabled'])
+        self.assertIn('restored by a release-only session',fresh._error)
+        # The release cannot run either: today's fault latch, with the reason surfaced.
+        fresh,made=await self.supervised([DeadClient(),RefusedClient()])
+        await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
+        self.assertEqual(len(made),2);self.assertFalse(fan.settings.getSetting('state')['enabled'])
+        self.assertIn('release failed',fresh._error);self.assertIn('still owns EC recovery',fresh._error)
+        fresh._client=None  # Its release stays unconfirmed; unload would report that again.
+
+    async def test_startup_with_fan_off_releases_a_leftover_override_once(self):
+        fan.settings.setSetting('state',dict(defaults(),revision=8));fan.settings.commit()
+        made=[]
+        def client():
+            made.append(clients.pop(0) if clients else FakeClient());return made[-1]
+        orphan=dict(valid=True,rpm=0,automatic=False,error='',ownership=dict(blocked=False,state='external_override',override=256,reason=''))
+        with patch.object(fan,'platform_check',return_value={}),patch.object(fan,'Client',side_effect=client):
+            for observed,clients,count,error in ((orphan,[],1,''),(fan.read_automatic.return_value,[],0,''),
+                                                  (orphan,[RefusedClient()],1,'release failed')):
+                with self.subTest(state=observed['ownership']['state'],error=error),patch.object(fan,'read_automatic',return_value=observed):
+                    made.clear();fresh=fan.Plugin();self.supervisors.append(fresh)
                     await fresh._main()
-                start.assert_not_awaited()
-                self.assertFalse(fresh._state['enabled'])
-                self.assertEqual(fresh._state['revision'],9)
-                self.assertIsNone(fresh._client)
-                self.assertIsNone(fresh._task)
-                self.assertFalse(fan.settings.getSetting('state')['enabled'])
-                self.assertIn('re-enable',fresh._error)
+                    self.assertEqual(len(made),count);self.assertTrue(all(c.calls==[] for c in made))
+                    self.assertIsNone(fresh._task);self.assertIsNone(fresh._client)
+                    self.assertIn(error,fresh._error)
+                    self.assertEqual(fan.settings.getSetting('state'),dict(defaults(),revision=8),'intent stays OFF, unwritten')
+
+    async def test_user_disable_during_backoff_stops_rearm_and_unload_during_backoff_writes_nothing(self):
+        fresh,made=await self.supervised([],backoff=(30,))
+        await asyncio.sleep(.05)
+        state=await fresh.set_enabled(False)
+        self.assertFalse(state['settings']['enabled']);self.assertIsNone(fresh._task);self.assertEqual(made,[])
+        self.assertEqual(state['error'],'','OFF never claims that Fan Control is resuming')
+        class Sleeping(FakeClient):
+            def start(self):raise fan.Pause('Sleep is preparing; fan control remains off.')
+        fresh,made=await self.supervised([Sleeping()],backoff=(0,30))  # Paused, next re-arm in 30 s.
+        await self.until(lambda:'paused' in fresh._error and not fresh._mutation.locked())
+        self.assertEqual((await fresh.set_enabled(False))['error'],'')
+        fresh,made=await self.supervised([EndingClient('fault','Fan override changed outside its owner.')])
+        await self.until(lambda:fresh._task is None and not fresh._mutation.locked())
+        self.assertIn('outside its owner',(await fresh.set_enabled(False))['error'],'a fault reason stays until re-enable')
+        fresh,made=await self.supervised([],backoff=(30,))
+        await fresh._unload()
+        self.assertEqual(made,[]);self.assertEqual(fan.settings.getSetting('state')['revision'],8)
+
+    async def test_explicit_enable_during_pending_rearm_starts_fresh_instead_of_disabling(self):
+        fresh,made=await self.supervised([],backoff=(30,))
+        state=await fresh.set_enabled(True)
+        self.assertTrue(state['settings']['enabled']);self.assertEqual(len(made),1)
+        self.assertEqual(made[0].calls,[(True,DEFAULT_CURVE)]);self.assertTrue(fresh._live())
 
     async def test_explicit_preset_mapping_missing_mapping_and_game_ac_observation(self):
         c=[[t,4800] for t,_ in DEFAULT_CURVE]
@@ -177,6 +380,15 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tdp,'_load_settings',return_value={'enabled':False,'active_preset':'custom'}):
             self.assertIsNone(fan.companion_preset())
 
+    def test_tdp_module_turned_off_in_manage_modules_means_the_global_curve(self):
+        import tdp_backend as tdp
+        # Withdrawal keeps TDP intent and the last game id; no Companion preset is active.
+        with patch.object(tdp.Plugin,'_ready',False), \
+                patch.object(tdp,'_load_settings',return_value={'enabled':True,'active_preset':'max'}), \
+                patch.object(tdp,'_current_game_id','42'), \
+                patch.object(tdp,'_load_profiles',return_value={'42':{'preset':'silent'}}):
+            self.assertIsNone(fan.companion_preset())
+
     async def test_disable_disk_failure_never_rearms_previous_enabled_intent(self):
         self.p._state['enabled']=True
         with patch.object(self.p,'_save',side_effect=OSError('disk full')):
@@ -203,6 +415,22 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.p._client.socket)
         self.assertFalse(fan.settings.getSetting('state')['enabled'])
         self.assertIn('Channel lost',result['error'])
+
+    async def test_disable_persists_off_even_when_the_leftover_release_fails(self):
+        fan.settings.setSetting('state',dict(defaults(),enabled=True));fan.settings.commit()
+        self.p._load();self.assertTrue(self.p._state['enabled'])
+        self.p._client=DeadClient();self.p._client.state.update(active=True,automatic=False)
+        busy=fan.Retry('Another Fan Control instance still owns EC recovery.')
+        try:
+            with patch.object(self.p._client,'configure',side_effect=RuntimeError('Channel lost')), \
+                    patch.object(fan,'release_orphan',side_effect=busy):
+                with self.assertRaisesRegex(RuntimeError,'still owns EC recovery'):
+                    await self.p.set_enabled(False)
+        finally:
+            self.p._client=None  # DeadClient.close would fail again in teardown
+        self.assertIn('still owns EC recovery',self.p._error)
+        # Otherwise the next Decky start resumes Fan Control the user turned off.
+        self.assertFalse(fan.settings.getSetting('state')['enabled'])
 
     async def test_corrupt_or_newer_schema_is_not_silently_enabled(self):
         fan.settings.setSetting('state',dict(defaults(),schema=99,enabled=True));fan.settings.commit()
@@ -362,7 +590,7 @@ class ClientRecoveryTests(unittest.TestCase):
 class PassiveTelemetryTests(unittest.TestCase):
     def test_foreign_raw_port_check_runs_before_any_competing_port_open(self):
         with patch.object(fan,'platform_check'),patch.object(fan,'secure_root',return_value=71), \
-                patch.object(fan,'check_owners',side_effect=RuntimeError('Another userspace process has raw EC host port access.')), \
+                patch.object(fan,'check_owners',side_effect=RuntimeError('Another app is using the fan controller.')), \
                 patch.object(fan,'Ports') as ports,patch.object(fan.os,'close') as close:
             reading=fan.read_automatic()
         self.assertFalse(reading['valid']);self.assertTrue(reading['ownership']['blocked'])
@@ -387,6 +615,19 @@ class PassiveTelemetryTests(unittest.TestCase):
         self.assertCountEqual(events,['port closed','sensor closed','owner closed'])
         self.assertLess(events.index('port closed'),events.index('owner closed'),
                         'Raw EC access must close before another owner can acquire it')
+        ec.set_target.assert_not_called();ec.release.assert_not_called()
+
+    def test_orphaned_override_with_clear_ownership_does_not_block_enable(self):
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+        sensor=Mock();sensor.read.return_value={'k10temp':45,'amdgpu':44};ec=Mock()
+        ec.transaction.return_value=nullcontext();ec.status.return_value=dict(rpm=1800,effective=1800,override=1800)
+        with patch.object(fan,'platform_check'),patch.object(fan,'secure_root',return_value=71), \
+                patch.object(fan,'check_owners'),patch.object(fan,'Sensors',return_value=sensor), \
+                patch.object(fan,'Ports'),patch.object(fan,'EC',return_value=ec),patch.object(fan.os,'close'):
+            reading=fan.read_automatic()
+        self.assertFalse(reading['automatic']);self.assertEqual(reading['ownership']['state'],'external_override')
+        self.assertFalse(reading['ownership']['blocked'],'session start releases an orphan after the same checks')
         ec.set_target.assert_not_called();ec.release.assert_not_called()
 
     def test_sensor_failure_and_foreign_owner_fail_closed_without_cached_numbers(self):
@@ -444,16 +685,12 @@ class TelemetryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):await self.p.save_unit('invalid',value['settings']['revision'])
         fresh=fan.Plugin();fresh._load();self.assertEqual(fresh._state['display_unit'],'percent')
 
-    async def test_legacy_settings_migrate_once_without_starting_controller(self):
-        legacy=[[50,3000],[55,3000],[60,3300],[65,3600],[70,3900],[75,4200],[80,4600],[85,4800],[95,4800],[100,4800]]
-        old=dict(schema=1,enabled=True,revision=5,global_curve=legacy,presets={'silent':legacy})
+    async def test_pre_release_schema_fails_closed_without_rewriting_or_starting(self):
+        old=dict(defaults(),schema=3,enabled=True,revision=5)
         fan.settings.setSetting('state',old);fan.settings.commit()
         fresh=fan.Plugin();fresh._load()
-        self.assertEqual(fresh._state['schema'],4);self.assertFalse(fresh._state['enabled'])
-        self.assertEqual(fresh._state['legacy_curves']['global'],legacy)
-        self.assertEqual(fresh._state['legacy_curves']['presets'],old['presets'])
-        self.assertIsNone(fresh._client);self.assertEqual(fan.settings.getSetting('state'),fresh._state)
-        again=fan.Plugin();again._load();self.assertEqual(again._state,fresh._state)
+        self.assertFalse(fresh._settings_valid);self.assertFalse(fresh._state['enabled'])
+        self.assertIsNone(fresh._client);self.assertEqual(fan.settings.getSetting('state'),old)
 
     async def test_stale_active_snapshot_does_not_claim_verified_ec_ownership(self):
         self.p._load();self.p._state['enabled']=True;self.p._client=FakeClient()
@@ -466,25 +703,17 @@ class TelemetryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state['ownership']['state'],'unavailable')
         self.assertNotIn('override',state['ownership'])
 
-    async def test_v2_migration_persists_once_archives_and_rejects_stale_or_descending_save(self):
-        curve=[[50,4000],[57,0],[64,1501],[71,3960],[78,4440],[85,4800],[93,4800],[100,4800]]
-        old=dict(schema=2,enabled=True,revision=9,display_unit='percent',global_curve=curve,
-                 presets={name:copy.deepcopy(curve) for name in ('silent','balanced','performance','max','custom')})
-        fan.settings.setSetting('state',old);fan.settings.commit()
-        fresh=fan.Plugin();fresh._load();migrated=copy.deepcopy(fresh._state)
-        self.assertEqual(migrated['schema'],4);self.assertEqual(migrated['revision'],10)
-        self.assertFalse(migrated['enabled']);self.assertIsNone(fresh._client)
-        self.assertEqual(migrated['curve_archive_v2'],{'global':curve,'presets':old['presets']})
-        again=fan.Plugin();again._load();self.assertEqual(again._state,migrated)
-        with self.assertRaises(ValueError):await fresh.save_curve('global',DEFAULT_CURVE,9)
-        for scope in ['global',*old['presets']]:
-            with self.assertRaises(ValueError):await fresh.save_curve(scope,curve,10)
-        self.assertEqual(fan.settings.getSetting('state'),migrated)
-        saved=await fresh.save_curve('custom',DEFAULT_CURVE,10)
-        self.assertEqual(saved['settings']['curve_archive_v2'],migrated['curve_archive_v2'])
-        self.assertEqual(saved['settings']['presets']['max'],migrated['presets']['max'])
-        saved=await fresh.save_unit('rpm',saved['settings']['revision'])
-        again=fan.Plugin();again._load();self.assertEqual(again._state,saved['settings'])
+    async def test_schema_4_with_dev_archive_keys_loads_and_next_save_drops_them(self):
+        current=dict(defaults(),enabled=False,revision=9,display_unit='percent')
+        fan.settings.setSetting('state',dict(current,**dict(curve_archive_v2={'global':fan.TEMPLATES['silent'],'presets':{}},
+             legacy_curves={'global':[[t,1500] for t in range(50,101,5)][:10],'presets':{}})))
+        fan.settings.commit()
+        fresh=fan.Plugin();fresh._load()
+        self.assertTrue(fresh._settings_valid);self.assertEqual(fresh._state,current)
+        with self.assertRaises(ValueError):await fresh.save_curve('global',DEFAULT_CURVE,8)
+        saved=await fresh.save_curve('custom',DEFAULT_CURVE,9)
+        self.assertEqual(fan.settings.getSetting('state'),saved['settings'])
+        self.assertNotIn('curve_archive_v2',saved['settings']);self.assertNotIn('legacy_curves',saved['settings'])
         self.assertIsNone(fresh._client)
 
     async def test_custom_uses_fresh_worker_but_auto_reads_again_instead_of_closed_snapshot(self):
@@ -545,7 +774,7 @@ class SafetyInputTests(unittest.TestCase):
                     self.assertIn('sensor_finished_at',s.last_sample)
                 path.write_text('45000')
                 with patch.object(guard.time,'monotonic',side_effect=[0,1]):
-                    with self.assertRaisesRegex(RuntimeError,'Stale'): s.read()
+                    with self.assertRaisesRegex(guard.Retry,'Stale'): s.read()
                 self.assertEqual(s.last_sample['code'],'sensor_acquisition_timeout')
                 self.assertEqual(s.last_sample['acquisition_ms'],1000)
                 self.assertEqual(s.last_sample['cpu_temperature'],45)
@@ -553,41 +782,21 @@ class SafetyInputTests(unittest.TestCase):
                 self.assertNotIn('code',s.last_sample,'A later healthy acquisition must not inherit an old fault')
             finally:s.close()
 
-    def test_fault_snapshot_log_survives_desktop_filter_and_keeps_original_sample(self):
-        import diagnostics
-        import diagnostics_reader
-        from pathlib import Path
-        with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);root.chmod(0o700)
-            # Permission checks are POSIX-specific and exercised by process tests.
-            with patch.object(guard.os,'geteuid',return_value=root.stat().st_uid,create=True), \
-                    patch.object(guard,'diagnostic_event') as log:
-                guard.record_fault(root,'session-sample','Invalid EC temperature reading.','ec_readback',
-                                   sensor_sample=dict(cpu_temperature=72.25,gpu_temperature=47,
-                                       ec_temperature=255,ec_started_at=12,ec_finished_at=12.01,
-                                       code='ec_temperature_range',password='not-allowed'))
-            if not log.called:
-                self.skipTest('POSIX private-directory mode is required')
-            args,context=log.call_args
-            self.assertEqual(args,('fan','fault_sample'))
-            self.assertIn('ec_temperature=255',context['reason'])
-            self.assertIn('cpu_temperature=72.25',context['reason'])
-            records=[]
-            with patch.object(diagnostics,'_sink',lambda text,level:records.append(json.loads(text))):
-                diagnostics.event(*args,**context)
-            normalized=diagnostics_reader.normalize_event(records[0],'fan')
-            self.assertEqual(normalized['context']['code'],'ec_temperature_range')
-            self.assertIn('ec_temperature=255',normalized['context']['reason'])
-            record=json.loads((root/'last-fault.json').read_text())
-            self.assertNotIn('password',record['sensor_sample'])
-            self.assertNotIn('not-allowed',json.dumps(record))
+    def test_session_endings_are_classified_and_unknown_failures_fail_closed(self):
+        from fan_sleep import Pause,Retry
+        for exc,outcome in [(Pause('Suspend requested'),'pause'),(BrokenPipeError(),'pause'),(ConnectionResetError(),'pause'),
+                            (Retry('Stale/slow APU temperature acquisition.'),'retry'),(TimeoutError('EC transaction ownership timeout.'),'retry'),
+                            (RuntimeError('Fan override changed outside its owner.'),'fault'),(OSError('Short EC port read.'),'fault'),
+                            (ValueError('bad'),'fault')]:
+            self.assertEqual(guard.outcome_of(exc),outcome,exc)
 
-    def test_suspend_gap_releases_but_normal_clock_jitter_does_not(self):
+    def test_suspend_gap_pauses_but_normal_clock_jitter_does_not(self):
+        from fan_sleep import Pause
         with patch.object(guard.time,'CLOCK_BOOTTIME',7,create=True), \
                 patch.object(guard.time,'clock_gettime',return_value=100,create=True), \
                 patch.object(guard.time,'monotonic',return_value=95):
             self.assertEqual(guard.boot_gap(5.1),5)
-            with self.assertRaisesRegex(RuntimeError,'Suspend'): guard.boot_gap(3)
+            with self.assertRaisesRegex(Pause,'Suspend'): guard.boot_gap(3)
 
     def test_conflicting_kernel_modules_are_matched_by_exact_module_name(self):
         from pathlib import Path
@@ -597,17 +806,38 @@ class SafetyInputTests(unittest.TestCase):
                                 ('gpd_fan_telemetry 4096 0 - Live 0x0',False)]:
             with self.subTest(modules=modules), \
                     patch.object(Path,'read_text',lambda p:modules if p.name=='modules' else ''), \
-                    patch.object(Path,'glob',return_value=[]):
+                    patch.object(guard.os,'listdir',return_value=[]):
                 if blocked:
                     with self.assertRaisesRegex(RuntimeError,'Conflicting fan driver'):guard.check_owners()
                 else:guard.check_owners()
+
+    def test_raw_port_scan_finds_dev_port_holder_and_skips_vanished_entries(self):
+        from pathlib import Path
+        me=str(guard.os.getpid())
+        listing={'/proc':['1','self','7','9',me],'/proc/1/fd/':['0','3'],'/proc/9/fd/':['0','4']}
+        links={'/proc/1/fd/0':'/dev/null','/proc/9/fd/0':'/dev/null','/proc/9/fd/4':'/dev/port'}
+        def listdir(path):
+            if path==f'/proc/{me}/fd/':self.fail('the guardian must not scan its own fds')
+            if path not in listing:raise FileNotFoundError(path)  # process 7 exited mid-scan
+            return listing[path]
+        def readlink(path):
+            if path not in links:raise FileNotFoundError(path)  # fd 3 closed mid-scan
+            return links[path]
+        with patch.object(Path,'read_text',return_value=''), \
+                patch.object(guard.os,'listdir',side_effect=listdir), \
+                patch.object(guard.os,'readlink',side_effect=readlink):
+            with self.assertRaisesRegex(RuntimeError,'Another app is using the fan controller'):guard.check_owners()
+            links['/proc/9/fd/4']='/dev/tty'
+            guard.check_owners()
+            with patch.object(guard.time,'monotonic',side_effect=[0,0.6]):
+                with self.assertRaisesRegex(guard.Retry,'time budget'):guard.check_owners()
 
     def test_pci_aperture_is_not_claimant_but_real_ec_port_driver_blocks(self):
         from pathlib import Path
         for text,blocked in [('0000-0cf7 : PCI Bus 0000:00\n  0062-0062 : EC data',False),
                              ('0000-0cf7 : PCI Bus 0000:00\n  004e-004f : unknown ec driver',True)]:
             with patch.object(Path,'read_text',lambda p:text if p.name=='ioports' else ''), \
-                    patch.object(Path,'glob',return_value=[]):
+                    patch.object(guard.os,'listdir',return_value=[]):
                 if blocked:
-                    with self.assertRaisesRegex(RuntimeError,'another kernel owner'): guard.check_owners()
+                    with self.assertRaisesRegex(RuntimeError,'Another driver is using the fan controller'): guard.check_owners()
                 else:guard.check_owners()

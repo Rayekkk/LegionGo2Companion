@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 import copy
+import os
 import unittest
 from unittest.mock import patch
 from fan_ec import EC, platform_check, transition_bytes
@@ -106,13 +107,92 @@ class FanTransportTests(unittest.TestCase):
         self.assertNotEqual(intermediate,1600,'The withdrawn second write must not occur')
         e.release();self.assertEqual(e.word(0xC6C8),0)
 
-    def test_platform_is_exact_not_substring_or_bios_guess(self):
-        expected={'sys_vendor':'LENOVO','product_name':'83N0','product_version':'Legion Go 8ASP2',
-                  'bios_version':'RRCN16WW','ec_firmware_release':'1.16','board_name':'LNVNB161216'}
+    def test_platform_is_the_exact_model_with_any_bios_or_ec_version(self):
+        dmi={'sys_vendor':'LENOVO','product_name':'83N0','product_version':'Legion Go 8ASP2',
+             'bios_version':'RRCN16WW','ec_firmware_release':'1.16','board_name':'LNVNB161216'}
         with patch('fan_ec.platform.system',return_value='Linux'), patch('fan_ec.platform.machine',return_value='x86_64'), \
-                patch('fan_ec.pathlib.Path.read_text',lambda p:expected[p.name]):
-            self.assertEqual(platform_check(),expected)
-            for name in expected:
-                value=expected[name]; expected[name]=value+'-unknown'
+                patch('fan_ec.pathlib.Path.read_text',lambda p:dmi[p.name]):
+            self.assertEqual(platform_check()['bios_version'],'RRCN16WW')
+            dmi.update(bios_version='RRCN99WW',ec_firmware_release='2.03')  # A Lenovo update keeps the model.
+            self.assertEqual(platform_check()['bios_version'],'RRCN99WW')
+            for name in ('sys_vendor','product_name','product_version','board_name'):
+                value=dmi[name]; dmi[name]=value+'-unknown'
                 with self.assertRaises(RuntimeError): platform_check()
-                expected[name]=value
+                dmi[name]=value
+
+    def test_any_ec_version_reads_but_a_change_within_the_session_fails(self):
+        p=ModelPorts();p.mem.update({0xC300:2,0xC301:3});e=EC(p)
+        self.assertEqual(e.plausible()['ec_version'],'2.3')
+        p.mem[0xC301]=4
+        with self.assertRaisesRegex(RuntimeError,'EC version changed'): e.status()
+        self.assertEqual(p.writes,[])
+
+    def test_plausibility_rejects_unstable_or_implausible_readings_without_writes(self):
+        for addr,values in ((0xC6C8,[0,0x08]),(0xC307,[45,60])):  # Override appears; temperature jumps 15 °C.
+            with self.subTest(addr=hex(addr)):
+                p=ModelPorts();e=EC(p);real=e.status;sequence=iter(values)
+                def status():
+                    p.mem[addr]=next(sequence);return real()
+                with patch.object(e,'status',side_effect=status), self.assertRaisesRegex(RuntimeError,'unstable'):
+                    e.plausible()
+                self.assertEqual(p.writes,[])
+        p=ModelPorts();p.mem.update({0xC6C0:0x10,0xC6C1:0x30});e=EC(p)  # 12304 RPM is not a fan reading.
+        with self.assertRaisesRegex(RuntimeError,'Implausible'): e.plausible()
+        self.assertEqual(p.writes,[])
+
+    @unittest.skipUnless(hasattr(os,'O_NOFOLLOW'),'POSIX file checks')
+    def test_remembered_firmware_is_read_only_from_our_own_regular_file(self):
+        import json, pathlib, tempfile
+        import fan_guardian
+        with tempfile.TemporaryDirectory() as raw, patch.object(fan_guardian,'FIRMWARE_FILE',pathlib.Path(raw)/'fw'/'fan_firmware.json'):
+            path=fan_guardian.FIRMWARE_FILE;known={('RRCN16WW','1.16')}
+            self.assertEqual(fan_guardian.validated_firmware(),known)
+            fan_guardian.remember_firmware(('RRCN17WW','1.17'))
+            self.assertEqual(json.loads(path.read_text()),{'validated':[['RRCN17WW','1.17']]})
+            self.assertEqual(path.stat().st_mode&0o777,0o600);self.assertEqual(path.parent.stat().st_mode&0o777,0o700)
+            self.assertIn(('RRCN17WW','1.17'),fan_guardian.validated_firmware())
+            for damaged in ('{"validated": [["RRCN17WW", 1]]}','[]','not json'):
+                path.write_text(damaged);self.assertEqual(fan_guardian.validated_firmware(),known)
+            other=path.parent/'other.json';other.write_text('{"validated": [["RRCN17WW", "1.17"]]}')
+            path.unlink();path.symlink_to(other)
+            self.assertEqual(fan_guardian.validated_firmware(),known,'a symlink is not our file')
+            path.unlink();path.write_text('{"validated": [["RRCN17WW", "1.17"]]}')
+            with patch.object(fan_guardian.os,'geteuid',return_value=os.geteuid()+1):
+                self.assertEqual(fan_guardian.validated_firmware(),known,'a foreign owner (deck after a Decky chown) is not trusted')
+                fan_guardian.remember_firmware(('RRCN18WW','1.18'))
+            os.chmod(path.parent,0o770)
+            self.assertEqual(fan_guardian.validated_firmware(),known,'a directory others can write is not trusted')
+            fan_guardian.remember_firmware(('RRCN18WW','1.18'))
+            self.assertNotIn('RRCN18WW',path.read_text())
+            os.chmod(path.parent,0o700)
+            self.assertIn(('RRCN17WW','1.17'),fan_guardian.validated_firmware())
+
+    def test_remembered_pairs_live_outside_the_decky_settings_tree(self):
+        # Decky re-chowns DECKY_PLUGIN_SETTINGS_DIR to deck on every load, which made the root-only check drop the pairs.
+        import pathlib
+        import fan_guardian
+        self.assertEqual(fan_guardian.FIRMWARE_FILE,pathlib.Path('/var/lib/legiongo2companion-fan/fan_firmware.json'))
+
+    def test_transient_ec_access_errors_are_retries_and_readback_mismatch_is_a_fault(self):
+        from fan_guardian import outcome_of
+        class Interfering(ModelPorts):
+            def read(self,port):
+                value=super().read(port)
+                return value^1 if port==0x4E else value  # Another 0x4E/0x4F user moved the selector.
+        with self.assertRaisesRegex(RuntimeError,'selector interference') as caught: EC(Interfering()).byte(0xC300)
+        self.assertEqual(outcome_of(caught.exception),'retry')
+        e=EC(ModelPorts());changing=iter(range(9))
+        with patch.object(e,'byte',side_effect=lambda addr:next(changing)), self.assertRaisesRegex(RuntimeError,'Unstable EC word') as caught:
+            e.word(0xC6C0)
+        self.assertEqual(outcome_of(caught.exception),'retry')
+        if hasattr(os,'pread'):
+            import tempfile
+            from fan_ec import Ports
+            with tempfile.TemporaryFile() as empty:
+                ports=object.__new__(Ports);ports.fd=empty.fileno()
+                with self.assertRaisesRegex(RuntimeError,'Short EC port read') as caught: ports.read(0x4E)
+            self.assertEqual(outcome_of(caught.exception),'retry')
+        e=EC(ModelPorts())
+        with patch.object(e,'byte',return_value=0), self.assertRaisesRegex(RuntimeError,'readback mismatch') as caught:
+            e._write_byte(0xC6C8,7)
+        self.assertEqual(outcome_of(caught.exception),'fault','a write readback mismatch is hardware evidence')

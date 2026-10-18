@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
-import test_integration
+import support
 import fan_backend as fan
 
 
@@ -28,6 +28,20 @@ class FanClientTests(unittest.TestCase):
     def receive(self, client):
         with patch.object(fan.select, 'select', return_value=([client.socket], [], [])):
             client._receive()
+
+    @unittest.skipUnless(hasattr(socket, 'AF_UNIX') and hasattr(socket, 'SOCK_SEQPACKET'), 'UNIX SEQPACKET sockets')
+    def test_start_is_ready_when_ready_and_telemetry_arrive_in_one_drain(self):
+        parent, child = Mock(), Mock()
+        child.fileno.return_value = 7
+        status = dict(session='session-client-test', active=False, automatic=True, error='')
+        parent.recv.side_effect = [json.dumps(dict(status, kind='ready')).encode(),
+                                   json.dumps(dict(status, kind='telemetry')).encode(), BlockingIOError()]
+        c = fan.Client()
+        with patch.object(fan.socket, 'socketpair', return_value=(parent, child)), \
+                patch.object(fan.subprocess, 'Popen', return_value=Mock(poll=Mock(return_value=None))), \
+                patch.object(fan.select, 'select', return_value=([parent], [], [])), patch.object(fan, 'SELF_TEST_S', 0):
+            c.start()
+        self.assertEqual(c.snapshot()['kind'], 'telemetry')
 
     def test_reset_before_queued_terminal_preserves_reason_and_confirmed_auto(self):
         c = self.client()
@@ -110,25 +124,27 @@ class FanClientTests(unittest.TestCase):
             c.close()
         c.process.wait.assert_called_once()
 
-    def test_stop_is_rechecked_after_io_lock_no_late_heartbeat(self):
-        c = self.client(); sent = []
-        c.pump = lambda: sent.append(True)
-        with c.lock:
-            c._start_heartbeat(); c._stop.set()
-        c._heartbeat.join(1)
-        self.assertFalse(c._heartbeat.is_alive()); self.assertEqual(sent, [])
+    def test_withdraw_requests_release_without_waiting_for_the_io_lock(self):
+        c = self.client(); held = threading.Event(); release = threading.Event()
+        def busy():
+            with c.lock:
+                held.set(); release.wait(5)
+        worker = threading.Thread(target=busy); worker.start()
+        try:
+            self.assertTrue(held.wait(5))
+            c.withdraw()
+            c.socket.shutdown.assert_called_once_with(socket.SHUT_WR)
+        finally:
+            release.set(); worker.join(5)
+        with self.assertRaisesRegex(RuntimeError, 'closing'):
+            c.configure(True, [])
 
-    def test_heartbeat_fault_closes_once_latches_and_does_not_restart(self):
-        c = self.client(); recovered = threading.Event()
-        c.pump = Mock(side_effect=RuntimeError('Sensor unavailable'))
-        def close():
-            c._stop.set(); c.state = terminal(error='Sensor unavailable'); recovered.set()
-        c.close = Mock(side_effect=close); c._record_fault = Mock()
-        c._start_heartbeat(); self.assertTrue(recovered.wait(1)); c._heartbeat.join(1)
-        self.assertFalse(c._heartbeat.is_alive()); c.close.assert_called_once()
-        self.assertEqual(c.pump.call_count, 1)
-        with self.assertRaisesRegex(RuntimeError, 'Sensor unavailable'): c.check()
-        with self.assertRaises(RuntimeError): c._start_heartbeat()
+    def test_telemetry_poll_never_sends_a_lease(self):
+        c = self.client(); c.socket.recv.side_effect = BlockingIOError()
+        self.receive(c)
+        with patch.object(fan.select, 'select', return_value=([c.socket], [], [])):
+            self.assertTrue(c.pump()['active'])
+        c.socket.send.assert_not_called()
 
 
 @unittest.skipUnless(__import__('sys').platform == 'linux', 'Linux UNIX/SEQPACKET reset')

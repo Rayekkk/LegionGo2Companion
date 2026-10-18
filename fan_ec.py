@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Independent EC implementation. Hardware protocol facts are attributed in SOURCE.md.
 
-    ONLY the validated 83N0 / 8ASP2 RRCN16WW EC1.16 mapping is admitted.
+    ONLY the 83N0 / 8ASP2 model is admitted. BIOS/EC versions are not pinned:
+    the guardian verifies the interface's behaviour instead (plausible(), self-test).
     No WMI fan controls, MMIO writes or arbitrary register API.
 """
 import contextlib
@@ -10,6 +11,7 @@ import pathlib
 import platform
 import time
 from fan_policy import MIN_RPM, MAX_RPM, STOP_OVERRIDE, encode_target
+from fan_sleep import Retry
 
 
 def transition_bytes(current, target):
@@ -52,15 +54,15 @@ WHITELIST = frozenset((0xC300, 0xC301, 0xC307, 0xC683,
 
 
 def platform_check(root='/sys/class/dmi/id'):
+    """Model identity only; returns it with the BIOS version that keys the guardian's self-test."""
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         raise RuntimeError('Fan Control requires the validated Legion Go 8ASP2 platform.')
     expected = {'sys_vendor': 'LENOVO', 'product_name': '83N0',
-                'product_version': 'Legion Go 8ASP2', 'bios_version': 'RRCN16WW',
-                'ec_firmware_release': '1.16', 'board_name': 'LNVNB161216'}
+                'product_version': 'Legion Go 8ASP2', 'board_name': 'LNVNB161216'}
     for name, value in expected.items():
         if (pathlib.Path(root)/name).read_text().strip() != value:
-            raise RuntimeError('This hardware/BIOS/EC variant has not been validated for Fan Control.')
-    return expected
+            raise RuntimeError('Fan Control supports only the Legion Go 2 (83N0 / 8ASP2).')
+    return dict(expected, bios_version=(pathlib.Path(root)/'bios_version').read_text().strip())
 
 
 class Ports:
@@ -70,12 +72,12 @@ class Ports:
     def read(self, port):
         b = os.pread(self.fd, 1, port)
         if len(b) != 1:
-            raise OSError('Short EC port read.')
+            raise Retry('Short EC port read.')
         return b[0]
 
     def write(self, port, value):
         if os.pwrite(self.fd, bytes([value]), port) != 1:
-            raise OSError('Short EC port write.')
+            raise Retry('Short EC port write.')
 
     def close(self):
         os.close(self.fd)
@@ -85,11 +87,12 @@ class EC:
     def __init__(self, ports):
         self.p = ports
         self.baseline = None
+        self.version = None
 
     def primary(self, value):
         self.p.write(0x4E, value)
         if self.p.read(0x4E) != value:
-            raise RuntimeError('EC primary selector interference.')
+            raise Retry('EC primary selector interference.')
 
     def secondary(self, value):
         if value not in (0x10, 0x11, 0x12):
@@ -97,7 +100,7 @@ class EC:
         self.primary(0x2E)
         self.p.write(0x4F, value)
         if self.p.read(0x4F) != value:
-            raise RuntimeError('EC secondary selector interference.')
+            raise Retry('EC secondary selector interference.')
 
     def selector_read(self, value):
         self.secondary(value); self.primary(0x2F)
@@ -108,7 +111,7 @@ class EC:
             raise ValueError('Not an address selector.')
         self.secondary(register); self.primary(0x2F); self.p.write(0x4F, value)
         if self.p.read(0x4F) != value:
-            raise RuntimeError('EC address selector interference.')
+            raise Retry('EC address selector interference.')
 
     def address(self, addr):
         if addr not in WHITELIST:
@@ -125,7 +128,7 @@ class EC:
             high = self.byte(addr+1); low = self.byte(addr)
             if high == self.byte(addr+1):
                 return (high << 8) | low
-        raise RuntimeError('Unstable EC word.')
+        raise Retry('Unstable EC word.')
 
     def _write_byte(self, addr, value, stopped=None):
         if type(value) is not int or not ((addr == 0xC6C9 and 0 <= value <= MAX_RPM//256)
@@ -183,13 +186,23 @@ class EC:
                 fcntl.flock(self.p.fd, fcntl.LOCK_UN)
 
     def status(self):
-        if [self.byte(0xC300), self.byte(0xC301)] != [1, 16]:
-            raise RuntimeError('EC version gate failed.')
-        result = dict(rpm=self.word(0xC6C0), effective=self.word(0xC6C2),
+        version = f'{self.byte(0xC300)}.{self.byte(0xC301)}'
+        if self.version is None:
+            self.version = version
+        elif version != self.version:
+            raise RuntimeError('EC version changed during the session.')
+        result = dict(ec_version=version, rpm=self.word(0xC6C0), effective=self.word(0xC6C2),
                       override=self.word(0xC6C8), ec_temperature=self.byte(0xC307), power_mode=self.byte(0xC683))
         if any(result[k] > 10000 for k in ('rpm', 'effective', 'override')):
             raise RuntimeError('Implausible EC fan telemetry.')
         return result
+
+    def plausible(self):
+        """Read-only check before any write: two whole-whitelist reads must agree."""
+        first, second = self.status(), self.status()
+        if first['override'] != second['override'] or abs(first['ec_temperature']-second['ec_temperature']) > 2:
+            raise RuntimeError('EC fan readings are unstable; Fan Control stays on automatic.')
+        return second
 
     def set_target(self, rpm, stopped):
         target = encode_target(rpm)
