@@ -1,21 +1,29 @@
 // SPDX-License-Identifier: BSD-3-Clause
-import { callable } from "@decky/api";
-import { ButtonItem, Field, PanelSection, PanelSectionRow } from "@decky/ui";
+import { callable, toaster } from "@decky/api";
+import { ButtonItem, ConfirmModal, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
+import { errorText, infoRow } from "./shared";
 
-type FirmwareStatus = {
-  job: { id: string; phase: string; message: string; error: string };
-};
+type FirmwareComponent = { id: string; label: string; installed: string; available: string; newer: boolean; downloaded: boolean };
+type FirmwareStatus = { phase: string; message: string; error: string; component: string; install_enabled: boolean;
+  install_reason: string; checked_at: string; token: string; components: FirmwareComponent[] };
 const getStatus = callable<[], FirmwareStatus>("firmware_get_status");
-const checkUpdates = callable<[], FirmwareStatus>("firmware_check_updates");
-const activePhases = ["checking", "downloading", "validating", "installing", "verifying", "restoring"];
-const retryablePhases = ["idle", "succeeded", "up_to_date", "blocked", "failed", "failed_before_write", "stopped"];
-const knownStatus = (value: FirmwareStatus) => [value?.job?.id, value?.job?.message, value?.job?.error].every(v => v === undefined || typeof v === "string") &&
-  (activePhases.includes(value?.job?.phase) || retryablePhases.includes(value?.job?.phase) || value?.job?.phase === "uncertain");
-const phaseLabel = (phase: string) => ({ checking: "Checking for updates", downloading: "Downloading update",
-  validating: "Checking update", installing: "Updating controllers", verifying: "Verifying update",
-  restoring: "Reconnecting controllers", succeeded: "Controllers updated", up_to_date: "No update available",
-  blocked: "Update unavailable", failed: "Update failed", failed_before_write: "Update not started", uncertain: "Update needs attention", stopped: "Check stopped" }[phase] || "Controller firmware");
+const checkUpdates = callable<[], FirmwareStatus>("firmware_check");
+const downloadUpdate = callable<[], FirmwareStatus>("firmware_download");
+const installUpdate = callable<[string], FirmwareStatus>("firmware_install");
+const busyPhases: Record<string, string> = { checking: "Checking…", downloading: "Downloading…", installing: "Installing…", verifying: "Verifying…" };
+const checkPhases = ["idle", "up_to_date", "installed", "failed"];
+const canInstall = (value: FirmwareStatus) => value.phase === "downloaded" && value.install_enabled;
+const phaseLabel: Record<string, string> = { idle: "Controller firmware", checking: "Checking for updates", up_to_date: "Up to date",
+  available: "Update available", downloading: "Downloading update", downloaded: "Update downloaded", installing: "Installing update",
+  verifying: "Verifying update", installed: "Update installed", failed: "Update failed" };
+const has = (table: object, key: unknown) => typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key);
+const knownStatus = (value: FirmwareStatus) => !!value && has(phaseLabel, value.phase) &&
+  [value.message, value.error, value.token, value.install_reason].every(v => v === undefined || typeof v === "string") &&
+  (value.components === undefined || Array.isArray(value.components));
+const actionLabel = (value: FirmwareStatus) => (has(busyPhases, value.phase) ? busyPhases[value.phase] : "") ||
+  (value.phase === "available" ? "Download" : canInstall(value) ? "Install" : "Check for updates");
+const targets = (value: FirmwareStatus | null) => (value?.components || []).filter(c => c?.newer);
 export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = ({ visible, allowUpdates = true }) => {
   const [state, setState] = useState<FirmwareStatus | null>(null);
   const [error, setError] = useState("");
@@ -69,7 +77,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
         if (alive && mounted.current && generation === revision.current) {
           if (!unavailable.current) console.warn("[legiongo2companion] firmware.status_unavailable");
           unavailable.current = true;
-          invalidate(); setError(failure instanceof Error ? failure.message : "Firmware status is unavailable.");
+          invalidate(); setError(errorText(failure, "Firmware status is unavailable."));
         }
       } finally { currentRead.current = null; inFlight.current = false; }
       if (alive) timer = setTimeout(() => void poll(), 2000);
@@ -77,9 +85,11 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
     void poll();
     return () => { alive = false; if (timer) clearTimeout(timer); invalidate(); };
   }, [visible]);
-  const begin = async () => {
+  // One explicit step per click; it runs only if the backend is still in the phase the user saw.
+  const begin = async (phase: string, run: () => Promise<FirmwareStatus>) => {
+    const current = (value: FirmwareStatus | null) => value?.phase === phase;
     if (!allowUpdates || mutating.current || !freshRef.current || performance.now() >= expiresAt.current ||
-        !retryablePhases.includes(statusRef.current?.job.phase || "") || !mounted.current || !shown.current) return;
+        !current(statusRef.current) || !mounted.current || !shown.current) return;
     mutating.current = true; revision.current++;
     invalidate();
     setSubmitting(true); setError("");
@@ -90,24 +100,68 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
         const latest = await pending;
         if (!mounted.current || !shown.current) return;
         if (!adopt(latest, sampledAt)) return;
-        if (!retryablePhases.includes(latest.job.phase)) return;
+        if (!current(latest)) return;
       }
       if (!mounted.current || !shown.current) return;
       const sampledAt = performance.now();
-      const result = await checkUpdates(); if (mounted.current && shown.current) adopt(result, sampledAt);
+      const result = await run(); if (mounted.current && shown.current) adopt(result, sampledAt);
     }
-    catch (failure) { if (mounted.current) { console.warn("[legiongo2companion] firmware.check_failed"); invalidate(); setError(failure instanceof Error ? failure.message : "Firmware check failed. Wait for a fresh status before retrying."); } }
+    catch (failure) { if (mounted.current) { console.warn("[legiongo2companion] firmware.step_failed"); invalidate(); setError(errorText(failure, "The firmware step failed. Wait for a fresh status before retrying.")); } }
     finally { mutating.current = false; if (mounted.current) setSubmitting(false); }
   };
-  const active = activePhases.includes(state?.job.phase || "");
+  // The confirmation takes focus from the Quick Access menu, so the panel is usually hidden and
+  // its status stale when OK is pressed. The token pins what the dialog showed; the backend
+  // refuses any other check, versions or images.
+  const install = async (token: string) => {
+    if (!allowUpdates || mutating.current) return;
+    const latest = statusRef.current;
+    if (latest && (latest.phase !== "downloaded" || latest.token !== token)) {
+      toaster.toast({ title: "Controller firmware", body: "The download changed. Check for updates again." });
+      return;
+    }
+    mutating.current = true; revision.current++;
+    invalidate();
+    setSubmitting(true); setError("");
+    try {
+      const sampledAt = performance.now();
+      const result = await installUpdate(token); if (mounted.current) adopt(result, sampledAt);
+    } catch (failure) {
+      const text = errorText(failure, "The firmware update did not start. Check for updates again.");
+      console.warn("[legiongo2companion] firmware.step_failed");
+      toaster.toast({ title: "Controller firmware", body: text });
+      if (mounted.current) { invalidate(); setError(text); }
+    } finally { mutating.current = false; if (mounted.current) setSubmitting(false); }
+  };
+  const confirmInstall = () => {
+    const seen = statusRef.current;
+    if (!seen || seen.phase !== "downloaded" || !seen.install_enabled || !freshRef.current) return;
+    const changes = targets(seen).map(c => `${c.label}: ${c.installed} → ${c.available}`).join("\n");
+    showModal(<ConfirmModal strTitle="Install controller firmware?" strOKButtonText="Install"
+      strDescription={<div style={{ whiteSpace: "pre-line" }}>{changes + "\n\nThe update takes about 5 minutes. Keep AC power connected and do not detach the controllers. Controller input may be unavailable until it finishes."}</div>}
+      onOK={() => void install(seen.token)} />);
+  };
+  const act = () => {
+    const phase = statusRef.current?.phase || "";
+    if (statusRef.current && canInstall(statusRef.current)) confirmInstall();
+    else if (phase === "available") void begin(phase, () => downloadUpdate());
+    // With the install kill switch on, a finished download offers Check again instead of a dead end.
+    else if (checkPhases.includes(phase) || phase === "downloaded") void begin(phase, () => checkUpdates());
+  };
+  const phase = state?.phase || "";
+  const installBlocked = !!state && phase === "downloaded" && !state.install_enabled;
+  const rows = (state?.components || []).filter(c => c && (c.installed || c.available));
   return <PanelSection title="Controller firmware">
     <PanelSectionRow><div style={{ background: "rgba(236, 99, 112, 0.12)", border: "1px solid rgba(236, 99, 112, 0.45)", borderRadius: 10, padding: "4px 12px" }}>
       <Field focusable label={<span style={{ color: "#ff9ca6" }}>Experimental feature</span>}
         description={<span style={{ color: "#ff9ca6" }}>Use at your own risk.</span>} />
     </div></PanelSectionRow>
-    <PanelSectionRow><Field focusable label={fresh ? phaseLabel(state?.job.phase || "idle") : state ? "Status unavailable" : "Controller firmware"}
-      description={fresh ? state?.job.error || state?.job.message || "Check for Lenovo updates for your controllers. Available updates are installed together." : "Wait for a fresh firmware status before updating."} /></PanelSectionRow>
-    <PanelSectionRow><ButtonItem layout="below" disabled={!allowUpdates || !fresh || !state || active || submitting || !retryablePhases.includes(state.job.phase)} onClick={() => void begin()}>Check updates</ButtonItem></PanelSectionRow>
-    {error && <PanelSectionRow><Field focusable label="Firmware status" description={error} /></PanelSectionRow>}
+    {infoRow(fresh ? phaseLabel[phase] : state ? "Status unavailable" : "Controller firmware",
+      fresh ? state?.error || state?.message || "" : "Wait for a fresh firmware status before updating.")}
+    {fresh && rows.map(c => <PanelSectionRow key={c.id}><Field focusable label={c.label}
+      description={`Installed ${c.installed || "—"} · Available ${c.available || "—"}${c.newer ? " · newer" : ""}`} /></PanelSectionRow>)}
+    {fresh && installBlocked && infoRow("Install unavailable", state?.install_reason || "")}
+    <PanelSectionRow><ButtonItem layout="below" disabled={!allowUpdates || !fresh || !state || submitting || has(busyPhases, phase)}
+      onClick={act}>{state ? actionLabel(state) : "Check for updates"}</ButtonItem></PanelSectionRow>
+    {error && infoRow("Firmware status", error)}
   </PanelSection>;
 };

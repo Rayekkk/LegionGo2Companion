@@ -5,12 +5,8 @@
 
 import {
   ButtonItem,
-  Field,
-  findModuleExport,
-  Focusable,
   PanelSection,
   PanelSectionRow,
-  Router,
   SliderField,
   Spinner,
   ToggleField,
@@ -23,6 +19,7 @@ import {
   useQuickAccessVisible,
 } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
+import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,7 +63,6 @@ interface ReadyState {
 const DEFAULT_APP = "0";
 const APP_HEARTBEAT_MS = 6000;
 
-const LEVEL_LABELS = ["Off", "Low", "Medium", "High"];
 const LEVEL_NOTCHES = ["Off", "Low", "Med", "High"];
 
 // Display names for the driver's raw mode values. Anything the driver
@@ -90,8 +86,7 @@ const MODE_NOTCHES: Record<string, string> = {
 const FALLBACK_MODES = ["fps", "racing", "standard", "spg", "rpg"];
 
 const titleCase = (raw: string) => raw.charAt(0).toUpperCase() + raw.slice(1);
-const modeLabel = (raw: string) => MODE_LABELS[raw] ?? titleCase(raw);
-const modeNotch = (raw: string) => MODE_NOTCHES[raw] ?? titleCase(raw).slice(0, 5);
+const modeNotch = (raw: string) => MODE_NOTCHES[raw] ?? (MODE_LABELS[raw] ?? titleCase(raw)).slice(0, 5);
 
 // ── Backend callables ─────────────────────────────────────────────────────────
 
@@ -114,118 +109,50 @@ const testVibration = callable<[number], { success: boolean; error?: string }>("
 
 // ── Toasts ────────────────────────────────────────────────────────────────────
 
-const notify = (title: string, body: string) => {
+// Toasts carry the module name; a failure's body says what failed and why.
+const notify = (body: string) => {
   try {
-    toaster.toast({ title, body, duration: 4000 });
+    toaster.toast({ title: "Vibration", body, duration: 4000 });
   } catch {
     console.error("[legiongo2companion] vibration.notification_failed");
   }
 };
 
-const notifyFailure = (title: string, err: unknown) => {
-  const body = err instanceof Error ? err.message : String(err ?? "Unknown error");
+const notifyFailure = (what: string, err: unknown) => {
   console.error("[legiongo2companion] vibration.operation_failed");
-  notify(title, body);
+  notify(`${what}: ${errorText(err ?? "Unknown error")}`);
 };
 
 /** Report a backend result that carries its own error string. */
-const checkResult = (title: string, res: { success: boolean; error?: string }) => {
-  if (!res.success) notify(title, res.error ?? "The driver rejected the change");
+const checkResult = (what: string, res: { success: boolean; error?: string }) => {
+  if (!res.success) notify(`${what}: ${res.error ?? "The driver rejected the change"}`);
   return res.success;
 };
-
-// ── Resume from suspend ───────────────────────────────────────────────────────
-
-/**
- * Subscribe to resume-from-suspend. Returns an unsubscribe function, or null
- * when the client offers no way to hear about it.
- *
- * `SteamClient.System.RegisterForOnResumeFromSuspend` was removed from the
- * Steam client in the September 2025 beta. Optional chaining meant calling it
- * silently did nothing - confirmed on the device, where two suspend cycles
- * produced no reapply at all. Nothing looked broken only because the
- * controller happened to re-enumerate and the hotplug monitor caught it; on a
- * resume where it does not, the write cache still believes our values are in
- * place and the controller quietly keeps the firmware defaults.
- *
- * The replacement lives on a SleepManager module, reachable either as a global
- * or through the webpack exports; the legacy call stays for older clients.
- */
-function onResumeFromSuspend(handler: () => void): (() => void) | null {
-  const asUnsub = (reg: any): (() => void) | null => {
-    if (typeof reg === "function") return reg;
-    if (typeof reg?.unregister === "function") return () => reg.unregister();
-    return null;
-  };
-  const isSleepManager = (e: any) =>
-    !!e && typeof e === "object" &&
-    (typeof e.RegisterForNotifyResumeFromSuspend === "function" ||
-      typeof e.NotifyResumeFromSuspend === "function");
-
-  try {
-    const mgr = (window as any).SleepManager ?? findModuleExport(isSleepManager);
-    const unsub = asUnsub(mgr?.RegisterForNotifyResumeFromSuspend?.(handler));
-    if (unsub) return unsub;
-  } catch (e) {
-    console.warn("[legiongo2companion] vibration.resume_lookup_failed");
-  }
-
-  try {
-    const unsub = asUnsub(
-      (window as any).SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
-    if (unsub) return unsub;
-  } catch (e) {
-    console.warn("[legiongo2companion] vibration.legacy_resume_registration_failed");
-  }
-
-  // Said out loud rather than swallowed: this going quiet again is exactly how
-  // the previous registration rotted unnoticed.
-  console.warn("[lego-vibe] no resume-from-suspend notification available; "
-    + "settings will be restored by the backend resume and drift checks");
-  return null;
-}
 
 // ── Running app watcher ───────────────────────────────────────────────────────
 
 type SettingsListener = (res: SettingsResponse, readEpoch?: number) => void;
 let vibeReadEpoch = 0;
+const appIdOf = (app: RunningApp | null) => String(app?.appid || DEFAULT_APP);
 
 /**
  * Tracks the foreground game and tells the backend about it, so the backend
  * can resolve per-game profiles on its own - including for hotplug and
- * resume, which never go through the UI.
- *
- * This used to poll every 100 ms. It now reacts to Steam's app lifetime
- * notifications, with a slow interval purely as a safety net because
- * Router.MainRunningApp can change without a lifetime event firing.
+ * resume, which never go through the UI. Fed by the shared watchRunningApp.
  */
 class AppWatcher {
   private static listeners: SettingsListener[] = [];
   private static currentId = DEFAULT_APP;
-  private static timer: ReturnType<typeof setInterval> | undefined;
-  private static unsubs: Array<() => void> = [];
+  private static unwatch: (() => void) | undefined;
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
   private static reportFailed = false;
   private static generation = 0;
-  private static delayedChecks = new Set<ReturnType<typeof setTimeout>>();
-
-  static activeId(): string {
-    try {
-      return String((Router as any)?.MainRunningApp?.appid || DEFAULT_APP);
-    } catch {
-      return DEFAULT_APP;
-    }
-  }
 
   static displayName(): string {
-    try {
-      const app = (Router as any)?.MainRunningApp;
-      return app?.appid ? (app.display_name || `App ${app.appid}`) : "";
-    } catch {
-      return "";
-    }
+    const app = runningApp();
+    return app ? (app.display_name || `App ${app.appid}`) : "";
   }
 
   static listen(fn: SettingsListener): () => void {
@@ -238,71 +165,38 @@ class AppWatcher {
   static start() {
     if (this.started) return;
     this.started = true;
-    const generation = ++this.generation;
-    this.currentId = this.activeId();
-
-    const steam = (window as any).SteamClient;
-
-    try {
-      const reg = steam?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
-        // Router.MainRunningApp lags the notification slightly.
-        if (!this.started || generation !== this.generation) return;
-        const timer = setTimeout(() => {
-          this.delayedChecks.delete(timer);
-          if (generation === this.generation) void this.check();
-        }, 300);
-        this.delayedChecks.add(timer);
-      });
-      if (reg?.unregister) this.unsubs.push(() => reg.unregister());
-    } catch (e) {
-      console.warn("[legiongo2companion] vibration.app_notifications_unavailable");
-    }
-
-    // The controller comes back at its firmware defaults, and the backend's
-    // write cache would otherwise skip the rewrite.
-    const offResume = onResumeFromSuspend(() => {
-      if (!this.started || generation !== this.generation) return;
-      void reapply()
-        .then((res) => {
-          if (!res.success) console.warn("[legiongo2companion] vibration.resume_reapply_failed");
-        })
-        .catch(() => console.error("[legiongo2companion] vibration.resume_reapply_failed"));
-    });
-    if (offResume) this.unsubs.push(offResume);
-
-    this.timer = setInterval(() => void this.check(), 2000);
-    void this.check();
+    this.generation += 1;
+    this.currentId = appIdOf(runningApp());
+    this.unwatch = watchRunningApp(this);
   }
 
   static stop() {
+    this.unwatch?.();
+    this.unwatch = undefined;
     this.started = false;
     this.generation += 1;
     this.busy = false;
-    for (const timer of this.delayedChecks) clearTimeout(timer);
-    this.delayedChecks.clear();
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
-    for (const off of this.unsubs) {
-      try {
-        off();
-      } catch {
-        /* the subscription may already be gone */
-      }
-    }
-    this.unsubs = [];
     this.listeners = [];
     this.currentId = DEFAULT_APP;
     this.lastPush = 0;
     this.reportFailed = false;
-    this.started = false;
   }
 
-  private static async check() {
+  // The controller comes back at its firmware defaults, and the backend's
+  // write cache would otherwise skip the rewrite.
+  static resume() {
+    if (!this.started) return;
+    void reapply()
+      .then((res) => {
+        if (!res.success) console.warn("[legiongo2companion] vibration.resume_reapply_failed");
+      })
+      .catch(() => console.error("[legiongo2companion] vibration.resume_reapply_failed"));
+  }
+
+  static async check(app = runningApp()) {
     if (!this.started || this.busy) return;
     const generation = this.generation;
-    const id = this.activeId();
+    const id = appIdOf(app);
     const changed = id !== this.currentId;
     const now = Date.now();
     if (!changed && now - this.lastPush < APP_HEARTBEAT_MS) return;
@@ -311,7 +205,7 @@ class AppWatcher {
     try {
       const res = await setActiveApp(id);
       if (!this.started || generation !== this.generation) return;
-      if (this.activeId() !== id) return;
+      if (appIdOf(runningApp()) !== id) return;
       if (this.reportFailed) console.info("[legiongo2companion] vibration.foreground_reporting_restored");
       this.reportFailed = false;
       // Committed only once the backend has it. Recording the id before the
@@ -331,77 +225,13 @@ class AppWatcher {
         this.busy = false;
         // A game changed while the previous RPC was busy. Deliver its profile
         // immediately instead of waiting for the next two-second timer tick.
-        if (this.started && this.activeId() !== id) void this.check();
+        if (this.started && appIdOf(runningApp()) !== id) void this.check();
       }
     }
   }
 }
 
-// ── Styles - Steam theme variables with hardcoded fallbacks ───────────────────
-
-const OK_COLOR = "var(--gpColor-Green, #4ade80)";
-const BAD_COLOR = "var(--gpColor-Red, #f87171)";
-const WARN_COLOR = "var(--gpColor-Yellow, #fbbf24)";
-const DIM_COLOR = "var(--gpColor-TextMuted, rgba(255,255,255,0.5))";
-
-const styles = {
-  container: { display: "flex", flexDirection: "column" as const, gap: "4px" },
-  statusRow: { display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" },
-  dot: (ok: boolean) => ({
-    width: "8px",
-    height: "8px",
-    borderRadius: "50%",
-    backgroundColor: ok ? OK_COLOR : BAD_COLOR,
-    flexShrink: 0,
-  }),
-  statusText: (ok: boolean) => ({
-    fontSize: "11px",
-    color: ok ? OK_COLOR : BAD_COLOR,
-    wordBreak: "break-all" as const,
-  }),
-  valueTag: {
-    fontSize: "13px",
-    fontWeight: "bold",
-    color: "var(--gpColor-White, #fff)",
-    background: "rgba(255,255,255,0.1)",
-    borderRadius: "4px",
-    padding: "1px 6px",
-  },
-  infoBox: {
-    background: "rgba(251,191,36,0.15)",
-    border: "1px solid rgba(251,191,36,0.4)",
-    borderRadius: "6px",
-    padding: "8px 10px",
-    fontSize: "11px",
-    color: WARN_COLOR,
-    lineHeight: "1.5",
-    marginTop: "4px",
-  },
-  errorBox: {
-    background: "rgba(248,113,113,0.1)",
-    border: "1px solid rgba(248,113,113,0.4)",
-    borderRadius: "6px",
-    padding: "8px 10px",
-    fontSize: "11px",
-    color: BAD_COLOR,
-    lineHeight: "1.5",
-    marginTop: "4px",
-  },
-  methodText: {
-    fontSize: "10px",
-    color: DIM_COLOR,
-    marginTop: "2px",
-  },
-  profileTag: {
-    fontSize: "11px",
-    fontWeight: "bold",
-    color: "var(--gpColor-White, #fff)",
-    background: "rgba(74,222,128,0.25)",
-    border: "1px solid rgba(74,222,128,0.5)",
-    borderRadius: "3px",
-    padding: "0px 5px",
-  },
-};
+const styles = { container: { display: "flex", flexDirection: "column" as const, gap: "4px" } };
 
 // ── Main component ────────────────────────────────────────────────────────────
 
@@ -412,8 +242,7 @@ const DEFAULT_SETTINGS: VibeSettings = {
   touchpadEnabled: true,
 };
 
-let vibeMutationChain: Promise<unknown> = Promise.resolve();
-let vibeMutationsPending = 0;
+const mutations = mutationQueue();
 
 const LGoVibeControl = () => {
   const [settings, setSettings] = useState<VibeSettings>(DEFAULT_SETTINGS);
@@ -430,7 +259,7 @@ const LGoVibeControl = () => {
   const [applying, setApplying] = useState(false);
   const [profileChanging, setProfileChanging] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [showDriverDetails, setShowDriverDetails] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
 
   const visible = useQuickAccessVisible();
   const initialDriverReadRef = useRef(false);
@@ -504,14 +333,11 @@ const LGoVibeControl = () => {
   const enqueueMutation = useCallback(<T,>(operation: () => Promise<T>) => {
     vibeReadEpoch += 1;
     mutationsPending.current += 1;
-    vibeMutationsPending += 1;
     if (mounted.current) setApplying(true);
-    const request = vibeMutationChain.then(operation, operation);
-    vibeMutationChain = request.catch(() => undefined);
-    return request.finally(() => {
+    return mutations.push(operation).finally(() => {
       vibeReadEpoch += 1;
       mutationsPending.current -= 1;
-      vibeMutationsPending -= 1;
+      mutations.done();
       if (mounted.current) setApplying(mutationsPending.current > 0);
     });
   }, []);
@@ -546,7 +372,7 @@ const LGoVibeControl = () => {
             if (active) retryTimer = setTimeout(check, 1000);
             return;
           }
-          if (vibeMutationsPending) await vibeMutationChain;
+          if (mutations.pending) await mutations.tail;
           if (!active) return;
           const driverRevision = driverRevisionRef.current;
           const settingsRevision = editSeq.current;
@@ -559,7 +385,7 @@ const LGoVibeControl = () => {
           try { snapshot = await Promise.all(reads); }
           catch (error) {
             if (active) {
-              setLoadError(error instanceof Error ? error.message : "Vibration settings could not be loaded. Check the Decky connection and retry.");
+              setLoadError(errorText(error, "Vibration settings could not be loaded. Check the Decky connection and retry."));
               setLoading(false);
             }
             // A rejection does not finish the other RPCs. Keep a retry behind
@@ -577,7 +403,7 @@ const LGoVibeControl = () => {
           setLoading(false);
         } catch (e) {
           if (!active) return;
-          setLoadError(e instanceof Error ? e.message : "Vibration settings could not be loaded. Check the Decky connection and retry.");
+          setLoadError(errorText(e, "Vibration settings could not be loaded. Check the Decky connection and retry."));
           setLoading(false);
         }
       })();
@@ -704,7 +530,7 @@ const LGoVibeControl = () => {
         adoptResponse(res as SettingsResponse);
       else if (res.settings) setSettings(res.settings);
       if (checkResult("Reset failed", res)) {
-        notify("LeGo Vibe Control", "Settings restored to defaults");
+        notify("Defaults restored.");
       }
     } catch (e) {
       if (isCurrent()) notifyFailure("Reset failed", e);
@@ -723,7 +549,7 @@ const LGoVibeControl = () => {
       // A slider value is optimistic until its debounced save completes.
       // Test the confirmed value from this gesture, rather than the old one.
       flushPendingWrites();
-      await vibeMutationChain;
+      await mutations.tail;
       if (!mounted.current || revision !== gameRevision.current) return;
       const res = await testVibration(500);
       checkResult("Test vibration failed", res);
@@ -765,7 +591,7 @@ const LGoVibeControl = () => {
             const snapshot = await getSettings();
             if (isCurrent()) adoptResponse(snapshot);
           } catch (readError) {
-            if (isCurrent()) setLoadError(readError instanceof Error ? readError.message : "Could not confirm the active vibration profile.");
+            if (isCurrent()) setLoadError(errorText(readError, "Could not confirm the active vibration profile."));
           }
         }
       } finally {
@@ -784,19 +610,14 @@ const LGoVibeControl = () => {
   };
 
   if (loadError) return <PanelSection title="Vibration settings unavailable">
-    <PanelSectionRow><Field focusable label="Could not load settings" description={loadError} /></PanelSectionRow>
+    {infoRow("Could not load settings", loadError)}
     <PanelSectionRow><ButtonItem layout="below" onClick={retryLoad}>Retry settings</ButtonItem></PanelSectionRow>
   </PanelSection>;
 
-  if (setupErr) {
-    return (
-      <PanelSection title="Setup Error">
-        <PanelSectionRow>
-          <Focusable><div style={styles.errorBox}>{setupErr}</div></Focusable>
-        </PanelSectionRow>
-      </PanelSection>
-    );
-  }
+  if (setupErr) return <PanelSection title="Vibration unavailable">
+    {infoRow("Could not start vibration control", setupErr)}
+    <PanelSectionRow><ButtonItem layout="below" onClick={retryLoad}>Retry settings</ButtonItem></PanelSectionRow>
+  </PanelSection>;
 
   if (loading) {
     return (
@@ -810,56 +631,25 @@ const LGoVibeControl = () => {
 
   const driverFound = driver?.found ?? false;
   const gameRunning = appId !== DEFAULT_APP;
-  const modeName = modes[settings.mode] ?? FALLBACK_MODES[0];
 
   return (
     <div style={styles.container}>
-      <PanelSection title="Current vibration">
-        <PanelSectionRow>
-          <Field focusable label={`${modeLabel(modeName)} · ${LEVEL_LABELS[settings.level] ?? "Unknown"}`}
-            description={`Both controller handles · ${gameRunning && perGameOn ? gameName : "Global profile"}`} />
-        </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Per-Game Profile">
+      <PanelSection title="Vibration">
+        {!driverFound && infoRow("Controller driver not found", "Needs SteamOS 3.8 or newer.")}
         <PanelSectionRow>
           <ToggleField
-            label="Per Game Profile"
-            description={
-              gameRunning ? (
-                perGameOn ? (
-                  <span style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                    <span>{gameName}</span>
-                    <span>
-                      <span style={styles.profileTag}>
-                        {modeLabel(modeName)} | {LEVEL_LABELS[settings.level]}
-                      </span>
-                    </span>
-                  </span>
-                ) : (
-                  gameName
-                )
-              ) : (
-                "Launch a game to use per-game profiles."
-              )
-            }
+            label="Per-game profile"
+            description={!gameRunning ? "Start a game to give it its own settings."
+              : perGameOn ? `${gameName} has its own settings.` : `${gameName} uses the global settings.`}
             checked={perGameOn && gameRunning}
             disabled={!gameRunning || applying}
             onChange={handlePerGameToggle}
           />
         </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Vibration">
         <PanelSectionRow>
           <SliderField
-            label="Intensity"
+            label="Vibration strength"
             disabled={profileChanging}
-            description={
-              <span>
-                Level: <span style={styles.valueTag}>{LEVEL_LABELS[settings.level]}</span>
-              </span>
-            }
             value={settings.level}
             min={0}
             max={3}
@@ -871,13 +661,9 @@ const LGoVibeControl = () => {
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Mode"
+            label="Vibration mode"
+            description="A vibration pattern tuned for a game type."
             disabled={profileChanging}
-            description={
-              <span>
-                Mode: <span style={styles.valueTag}>{modeLabel(modeName)}</span>
-              </span>
-            }
             value={settings.mode}
             min={0}
             max={Math.max(0, modes.length - 1)}
@@ -894,20 +680,13 @@ const LGoVibeControl = () => {
           <ToggleField
             label="Touchpad vibration"
             disabled={profileChanging}
-            description="Enable vibration on touchpad"
             checked={settings.touchpadEnabled}
             onChange={handleTpToggle}
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Touchpad intensity"
-            description={
-              <span>
-                Level:{" "}
-                <span style={styles.valueTag}>{LEVEL_LABELS[settings.touchpadIntensity]}</span>
-              </span>
-            }
+            label="Touchpad strength"
             value={settings.touchpadIntensity}
             min={0}
             max={3}
@@ -920,15 +699,15 @@ const LGoVibeControl = () => {
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Actions">
+      <PanelSection title="More">
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            description="Tests current intensity and mode."
+            description="A short buzz with the current settings."
             onClick={handleTest}
             disabled={applying || testing}
           >
-            {testing ? "Vibrating..." : "Test Vibration (0.5s)"}
+            {testing ? "Vibrating…" : "Test vibration"}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -936,37 +715,14 @@ const LGoVibeControl = () => {
             Reset to defaults
           </ButtonItem>
         </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Driver Status">
-        <PanelSectionRow>
-          <Field focusable label={driverFound ? "Controller driver ready" : "Controller driver unavailable"}
-            description={driverFound ? `hid-lenovo-go${driver?.method ? ` · ${driver.method}` : ""}${driver?.ids ? ` · ${driver.ids}` : ""}`
-              : "The hid-lenovo-go sysfs endpoint was not detected. Requires SteamOS 3.8+ / Kernel 6.18+ with the hid-lenovo-go module loaded on Legion Go hardware."} />
-        </PanelSectionRow>
-        {driverFound && <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => setShowDriverDetails(value => !value)}>
-            {showDriverDetails ? "Hide driver details" : "Show driver details"}
-          </ButtonItem>
-        </PanelSectionRow>}
-        {showDriverDetails && driverFound && <PanelSectionRow>
-          <Field focusable label="Controller endpoints" description={
-            <span style={{ display: "block", maxWidth: "100%", overflowWrap: "anywhere" }}>
-              {driver?.paths?.join(" · ") || "No endpoint reported"}
-            </span>
-          } />
-        </PanelSectionRow>}
-      </PanelSection>
-
-      <PanelSection title="Notes">
-        <PanelSectionRow>
-          <Focusable><div style={styles.infoBox}>
-            Intensity levels: Off, Low, Medium, High. Mode selects the vibration pattern, applied to
-            both handles. Settings persist across reboots and are re-applied after sleep or a
-            controller reconnect. Per-game profiles auto-apply when a game with a saved profile
-            starts.
-          </div></Focusable>
-        </PanelSectionRow>
+        {detailsRows(showDetails, () => setShowDetails(value => !value), [
+          ["Driver", driverFound
+            ? `hid-lenovo-go${driver?.method ? ` · ${driver.method}` : ""}${driver?.ids ? ` · ${driver.ids}` : ""}`
+            : "hid-lenovo-go not detected"],
+          ["Endpoints", <span style={{ display: "block", maxWidth: "100%", overflowWrap: "anywhere" }}>
+            {driver?.paths?.join(" · ") || "No endpoint reported"}
+          </span>],
+        ])}
       </PanelSection>
     </div>
   );
@@ -976,7 +732,7 @@ const LGoVibeControl = () => {
 
 export const VibrationPage = LGoVibeControl;
 export const getVibrationSettings = async () => {
-  if (vibeMutationsPending) await vibeMutationChain;
+  if (mutations.pending) await mutations.tail;
   return getSettings();
 };
 export const startVibrationWatcher = () => AppWatcher.start();

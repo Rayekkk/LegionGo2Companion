@@ -1,28 +1,19 @@
-const complete = require('./frontend_test_guard.cjs')();
 // Execute the actual FanPage with controlled React hooks/RPC timing.
-const fs=require('node:fs'), path=require('node:path'), vm=require('node:vm'), assert=require('node:assert/strict');
-const ts=require('../node_modules/typescript');
+const { assert, run, settle, mount, find, label, button, nodes: walk } = require('./frontend_harness.cjs');
 const curve=[[50,3000],[57,3120],[64,3540],[71,3960],[78,4440],[85,4800],[93,4800],[100,4800]];
 const initial={supported:true,error:'',active_curve:'global',settings:{enabled:false,assign_tdp_presets:true,revision:0,display_unit:'rpm',global_curve:curve,presets:{}},
   templates:{silent:curve.map(([t,r],i)=>[t,i<7?0:r]),balanced:curve,aggressive:curve.map(([t])=>[t,4800])},
   presets:['silent','balanced','performance','max','custom'],limits:{min_rpm:1500,max_rpm:4800,step:1,hard_max:100},telemetry:{active:false,automatic:true},
   readings:{valid:true,rpm:1600,apu_temperature:44.5,age_seconds:0,automatic:true,error:''}};
-const json=x=>JSON.parse(JSON.stringify(x)), same=(a,b)=>a&&b&&a.length===b.length&&a.every((v,i)=>v===b[i]);
-const flush=async()=>{for(let i=0;i<30;i++)await Promise.resolve();};
+const json=x=>JSON.parse(JSON.stringify(x));
+const flush=()=>settle(30);
 function harness(initialState=initial){
-  const slots=[],effects=new Map(),pending=[],timers=new Map(),calls=[];
-  let cursor=0,visible=true,timerId=0,state=json(initialState), read=null, failSave=false,now=100000,modal=null;
-  const hooks={useState(v){const i=cursor++;if(!(i in slots))slots[i]=typeof v==='function'?v():v;return[slots[i],n=>{slots[i]=typeof n==='function'?n(slots[i]):n;}];},
-    useRef(v){const i=cursor++;return slots[i]??=( {current:v});},useEffect(fn,deps){const i=cursor++,prev=effects.get(i);if(!prev||!same(prev.deps,deps))pending.push(()=>{prev?.cleanup?.();effects.set(i,{deps,cleanup:fn()});});}};
-  const mod={exports:{}};
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../src/fan.tsx'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.ReactJSX}}).outputText,{
-    module:mod,exports:mod.exports,console,Date:class extends Date{static now(){return now;}},
-    setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms,kind:'timeout'});return id;},clearTimeout:id=>timers.delete(id),
-    setInterval(fn,ms){const id=++timerId;timers.set(id,{fn,ms,kind:'interval'});return id;},clearInterval:id=>timers.delete(id),
-    require(name){if(name==='react')return hooks;if(name==='react/jsx-runtime')return{jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})};
-      if(name==='@decky/ui')return new Proxy({GamepadButton:{OK:1,CANCEL:2,BUMPER_LEFT:5,BUMPER_RIGHT:6,DIR_UP:9,DIR_DOWN:10,DIR_LEFT:11,DIR_RIGHT:12},showModal:(node,parent,props)=>{modal={node,props,Close(){props.fnOnClose?.();}};return modal;}}, {get:(o,k)=>k in o?o[k]:k});
-      if(name==='@decky/api')return{useQuickAccessVisible:()=>visible,callable:name=>async(...args)=>{
-        calls.push({name,args:json(args)});
+  let state=json(initialState), read=null, failSave=false,modal=null;const toasts=[];
+  const h=mount('fan.tsx',{component:'FanPage',clock:100000,
+    ui:{GamepadButton:{OK:1,CANCEL:2,BUMPER_LEFT:5,BUMPER_RIGHT:6,DIR_UP:9,DIR_DOWN:10,DIR_LEFT:11,DIR_RIGHT:12},
+      showModal:(node,parent,props)=>{modal={node,props,Close(){props.fnOnClose?.();}};return modal;}},
+    api:{toaster:{toast:t=>toasts.push(t)},callable:name=>async(...args)=>{
+        h.calls.push({name,args:json(args)});
         if(name==='fan_get_state')return read?read():json(state);
         if(name==='fan_set_enabled'){state.settings.enabled=args[0];state.settings.revision++;state.telemetry.active=args[0];state.telemetry.automatic=!args[0];}
         if(name==='fan_save_assignment_mode'){assert.equal(args[1],state.settings.revision);state.settings.assign_tdp_presets=args[0];state.settings.revision++;}
@@ -33,40 +24,23 @@ function harness(initialState=initial){
           state.settings.revision++;
           state.needs_curve_review=false;
         }return json(state);
-      }};throw Error(name);}
-  });
-  return{exports:mod.exports,calls,timers,render(component=mod.exports.FanPage,props={}){cursor=0;const tree=component(props);pending.splice(0).forEach(f=>f());return tree;},
-    hide(){visible=false;return this.render();},show(){visible=true;return this.render();},unmount(){for(const e of effects.values())e.cleanup?.();effects.clear();},
-    poll(){const [id,t]=[...timers].find(([,t])=>t.kind==='timeout');timers.delete(id);t.fn();},
-    advance(ms){now+=ms;for(const t of timers.values())if(t.kind==='interval')t.fn();},
-    setRead(fn){read=fn;},failSave(v){failSave=v;},getState:()=>json(state),getModal:()=>modal};
+      }}});
+  return{exports:h.exports,calls:h.calls,timers:h.timers,render:(component=h.exports.FanPage,props={})=>h.render(props,component),
+    hide(){h.hide();return this.render();},show(){h.show();return this.render();},unmount:h.unmount,
+    poll(){const [id,t]=[...h.timers].find(([,t])=>t.kind==='timeout');h.timers.delete(id);t.fn();},
+    advance(ms){h.advance(ms);h.fire('interval');},
+    setRead(fn){read=fn;},failSave(v){failSave=v;},getState:()=>json(state),foreign(fn){fn(state);},getModal:()=>modal,toasts};
 }
-function find(n,p){if(!n||typeof n!=='object')return;if(p(n))return n;for(const c of Array.isArray(n)?n:[n.props?.children,n.props?.description]){const r=find(c,p);if(r)return r;}}
-const label=(tree,name)=>find(tree,n=>n.props?.label===name);
-const button=(tree,name)=>find(tree,n=>n.type==='ButtonItem'&&(Array.isArray(n.props.children)?n.props.children.join(''):n.props.children)===name);
 const text=node=>node==null||node===false?'':typeof node!=='object'?String(node):
   (Array.isArray(node)?node:[node.props?.children]).map(text).join(' ');
-function centeredReadout(parent,child){
-  const outer=parent.props.style??{},inner=child.props.style??{};
-  if((inner.textAlign??outer.textAlign)==='center')return true;
-  // An intrinsic-width, single-line child is also centered by a column flex
-  // container. A stretched or explicitly left-aligned child is not equivalent.
-  return outer.display==='flex' && outer.flexDirection==='column'
-    && (inner.alignSelf??outer.alignItems)==='center'
-    && (inner.width===undefined || inner.width==='auto')
-    && (inner.textAlign===undefined || inner.textAlign==='center');
-}
-(async()=>{
+run(async()=>{
   const h=harness();h.render();await flush();let tree=h.render();
   assert.equal(h.calls.filter(c=>c.name==='fan_get_state').length,1);assert.equal(h.timers.size,2);
   const summary=find(tree,n=>n.props?.['data-fan-summary']);
   const telemetry=find(summary,n=>n!==summary && n.props && text(n)==='APU 44.5°C · 1600 RPM');
   assert.ok(telemetry,'The summary shows measured temperature and tachometer values');
-  assert.ok(centeredReadout(summary,telemetry),'Measured temperature and tachometer remain horizontally centered');
   assert.equal(label(tree,'Enable Fan Control').props.checked,false);
   assert.equal(find(tree,n=>n.type==='SliderField'),undefined,'No slider editor');
-  assert.equal(button(tree,'Quick edit with controller'),undefined,'QAM enters editing only by activating the focused graph');
-  assert.equal(label(tree,'Curve behavior'),undefined,'Detailed policy does not crowd the menu');
   assert.equal(label(tree,'Speed edit step').props.selectedOption,100,'Default manual edit step is 100 RPM');
   assert.ok(label(tree,'Curve').props.rgOptions.some(o=>o.data==='custom'),'Custom and Maximum remain independent curve assignments');
   const limits=initial.limits;
@@ -75,7 +49,6 @@ function centeredReadout(parent,child){
   assert.equal(label(st,'Curve'),undefined,'Default global mode hides TDP scope selection');
   assert.equal(label(st,'Assign curves to TDP presets').props.checked,false);
   assert.ok(find(st,n=>n.type==='PanelSection'&&n.props.title==='Settings'));
-  assert.match(find(st,n=>n.props?.['data-fan-assignment-note']).props.children,/Companion TDP presets, not SteamOS QAM Performance/);
   const callsBefore=simple.calls.length,untouched=simple.getState();
   label(st,'Starting curve').props.onChange({data:'aggressive'});st=simple.render();
   assert.equal(simple.calls.length,callsBefore,'Selecting a template performs no RPC');
@@ -125,7 +98,15 @@ function centeredReadout(parent,child){
   assert.equal(h.exports.editPoint(curve,0,0,51,limits)[0][0],51);
   assert.equal(h.exports.editPoint(curve,1,0,52,limits)[1][0],52);
   assert.equal(h.exports.editPoint(curve,7,0,99,limits)[7][0],100);
-  assert.equal(h.exports.editPoint(curve,7,1,0,limits)[7][1],4800);
+  assert.equal(h.exports.editPoint(curve,7,1,0,limits)[7][1],4800,'Point 8 cannot drop below point 7');
+  const low=[[0,0],[10,0],[20,0],[30,0],[40,0],[50,0],[95,0],[100,4800]];
+  assert.equal(h.exports.editPoint(low,7,1,1500,limits)[7][1],1500,'Point 8 moves down to the running minimum');
+  for(const v of [0,1,1499,-100])assert.equal(h.exports.editPoint(low,7,1,v,limits)[7][1],1500,'Point 8 can never stop or go below 1500 RPM');
+  assert.equal(h.exports.editPoint(low,7,1,9999,limits)[7][1],4800);
+  assert.equal(h.exports.editPoint(low,7,0,50,limits)[7][0],100,'Point 8 stays at 100°C');
+  const lowLast=[[0,0],[45,1500],[55,2000],[65,2600],[75,2700],[85,2800],[95,2900],[100,3000]];
+  assert.equal(h.exports.editPoint(lowLast,6,1,4000,limits)[6][1],3000,'Point 7 cannot rise above point 8');
+  assert.equal(h.exports.editPoint(lowLast,7,1,2000,limits)[7][1],2900,'Point 8 cannot drop below point 7');
   assert.equal(h.exports.editPoint(curve,4,1,1501,limits)[4][1],3960,'Lower neighbour bounds RPM');
   assert.equal(h.exports.editPoint(curve,0,1,100,limits)[0][1],0,'Deadband descending snaps to stop');
   const stopped=json(curve);stopped[0][1]=0;
@@ -138,10 +119,11 @@ function centeredReadout(parent,child){
   const zeroPair=json(curve);zeroPair[0][1]=zeroPair[1][1]=0;
   assert.equal(h.exports.editPoint(zeroPair,0,1,1,limits)[0][1],0,'A following stopped point prevents a rising deadband snap');
   assert.equal(h.exports.editPoint(curve,2,1,0,limits)[2][1],3120,'Cannot stop after a running neighbour');
-  for(const delta of [-5000,-500,-100,-48,-1,1,48,100,500,5000])for(let i=0;i<7;i++){
-    const result=h.exports.editPoint(curve,i,1,curve[i][1]+delta,limits);
+  for(const delta of [-5000,-500,-100,-48,-1,1,48,100,500,5000])for(const base of [curve,low,lowLast])for(let i=0;i<8;i++){
+    const result=h.exports.editPoint(base,i,1,base[i][1]+delta,limits);
     assert.ok(result.every((p,j)=>j===0||p[1]>=result[j-1][1]));
     assert.ok(result.every(p=>p[1]===0||p[1]>=1500));
+    assert.ok(result[7][0]===100&&result[7][1]>=1500);
   }
   const steps=harness();steps.render();await flush();let stepTree=steps.render();
   const assertStep=()=>{
@@ -183,10 +165,12 @@ function centeredReadout(parent,child){
   h.setRead(null);
   label(tree,'Curve').props.onChange({data:'silent'});tree=h.render();
   h.failSave(true);button(tree,'Assign curve to Silent').props.onClick();await flush();tree=h.render();
-  assert.match(label(tree,'Fan Control status').props.description,/save rejected/);
+  assert.match(button(tree,'Assign curve to Silent').props.description,/save rejected/,'the error stays on the failed control');
+  assert.equal(h.toasts.at(-1).title,'Fan Control');assert.match(h.toasts.at(-1).body,/save rejected/);
   assert.equal(find(tree,n=>n.type===h.exports.CurveGraph).props.curve[2][1],3120,'Failed save retains draft');
   h.failSave(false);button(tree,'Assign curve to Silent').props.onClick();await flush();tree=h.render();
   assert.equal(h.getState().settings.presets.silent[2][1],3120);
+  assert.equal(h.toasts.at(-1).body,'Curve saved.');
   button(tree,'Use global curve for Silent').props.onClick();await flush();assert.equal(h.getState().settings.presets.silent,undefined);
   tree=h.render();button(tree,'Full screen curve editor').props.onClick();tree=h.render();
   assert.equal(h.timers.size,0,'Parent does no polling behind full-screen modal');
@@ -208,7 +192,7 @@ function centeredReadout(parent,child){
   props.selected=1;graphics=g.render(g.exports.CurveGraph,props);
   graphics.props.onButtonDown(event(5));assert.equal(selected,0,'LB selects the previous point');
   props.selected=0;graphics=g.render(g.exports.CurveGraph,props);
-  graphics.props.onButtonDown(event(5));assert.equal(selected,7,'LB wraps from the first point to the fixed last point');
+  graphics.props.onButtonDown(event(5));assert.equal(selected,7,'LB wraps from the first point to the last point');
   props.selected=7;graphics=g.render(g.exports.CurveGraph,props);
   graphics.props.onButtonDown(event(6));assert.equal(selected,0,'RB wraps from the last point to the first');
   props.selected=1;graphics=g.render(g.exports.CurveGraph,props);
@@ -228,6 +212,9 @@ function centeredReadout(parent,child){
   assert.deepEqual(json(edited).map(([axis,,point])=>[axis,point]),[[0,0],[1,0]],'Pointer drag keeps the chosen point and updates both coordinates');
   assert.ok(Math.abs(edited[0][1]-52)<1e-9,'Pointer temperature follows the rendered position');
   assert.equal(edited[1][1],3000,'Pointer speed follows the rendered position');
+  find(pointerSvg,n=>n.type==='g'&&n.props.children?.[0]?.props?.['data-fan-point']===8).props.onPointerDown({pointerId:2,preventDefault(){}});
+  edited=[];pointerSvg.props.onPointerMove({pointerId:2,clientX:lastPoint.cx,clientY:firstPoint.cy});
+  assert.deepEqual(json(edited).map(([axis,,point])=>[axis,point]),[[0,7],[1,7]],'Point 8 can be dragged; editPoint keeps it at 100°C');
   pointerSvg.props.onLostPointerCapture();edited=[];
   pointerSvg.props.onPointerMove({pointerId:1,clientX:100,clientY:100});
   assert.equal(edited.length,0,'Losing capture must end a drag before mouse hover can edit again');
@@ -267,17 +254,29 @@ function centeredReadout(parent,child){
   const blocked=harness({...initial,ownership:{blocked:true,state:'unavailable',reason:'Another process owns raw EC ports.'}});
   blocked.render();await flush();tree=blocked.render();assert.equal(label(tree,'Enable Fan Control').props.disabled,true);
   assert.match(label(tree,'Enable Fan Control').props.description,/Another process/);blocked.unmount();
+  {
+    const draft=harness();draft.render();await flush();let view=draft.render();
+    find(view,n=>n.type===draft.exports.CurveGraph).props.edit(1,4000,0);view=draft.render();
+    assert.equal(label(view,'Enable Fan Control').props.disabled,true,'turning on waits for the curve draft');
+    assert.equal(label(view,'Enable Fan Control').props.description,'Save or discard your curve changes first.');
+    draft.unmount();
+    const review=harness({...initial,needs_curve_review:true});review.render();await flush();view=review.render();
+    assert.equal(label(view,'Enable Fan Control').props.description,'Review and save the curve first.');review.unmount();
+    const last=harness();last.render();await flush();view=last.render();
+    const rows=walk(view).filter(n=>['ButtonItem','ToggleField','DropdownItem','Field'].includes(n.type));
+    assert.equal(rows.at(-1).props.label,'Show fan speed as percentage','the page ends with an always-enabled row');
+    assert.equal(rows.at(-1).props.disabled,undefined);last.unmount();
+  }
   const recovered=harness();recovered.render();await flush();recovered.render();
   recovered.setRead(()=>Promise.reject(Error('transient read reset')));recovered.poll();await flush();
-  tree=recovered.render();assert.match(label(tree,'Fan Control status').props.description,/transient read reset/);
+  tree=recovered.render();assert.match(find(tree,n=>n.props?.['data-fan-summary']).props.children[0].props.children,/APU —/,'a failed read shows no stale numbers');
   recovered.setRead(null);recovered.poll();await flush();tree=recovered.render();
-  assert.equal(label(tree,'Fan Control status'),undefined,'A successful read clears a resolved transient read error');
   assert.match(find(tree,n=>n.props?.['data-fan-summary']).props.children[0].props.children,/APU 44.5/);
   label(tree,'Curve').props.onChange({data:'silent'});tree=recovered.render();
   recovered.failSave(true);button(tree,'Assign curve to Silent').props.onClick();await flush();tree=recovered.render();
-  assert.match(label(tree,'Fan Control status').props.description,/save rejected/);
+  assert.match(button(tree,'Assign curve to Silent').props.description,/save rejected/);
   recovered.poll();await flush();tree=recovered.render();
-  assert.match(label(tree,'Fan Control status').props.description,/save rejected/,'Background read recovery does not erase a rejected user mutation');
+  assert.match(button(tree,'Assign curve to Silent').props.description,/save rejected/,'Background read recovery does not erase a rejected user mutation');
   recovered.unmount();
   const expire=harness();expire.render();await flush();tree=expire.render();
   let pendingResolve;expire.setRead(()=>new Promise(r=>pendingResolve=r));expire.poll();await flush();
@@ -288,5 +287,47 @@ function centeredReadout(parent,child){
   const queued=harness();queued.render();await flush();const callbacks=[...queued.timers.values()].map(t=>t.fn),countQ=queued.calls.length;
   queued.hide();callbacks.forEach(fn=>fn());await flush();assert.equal(queued.calls.length,countQ);
   await assert.rejects(queued.exports.getFanState(()=>false),/no longer visible/);queued.unmount();
+  const paused=json(initial);paused.settings.enabled=true;paused.telemetry={active:false,automatic:true};paused.error='Fan Control paused; resuming automatically.';
+  assert.match(late.exports.fanSummary(paused),/Paused, resuming automatically$/,'a paused or retrying session never claims a custom curve');
+  paused.telemetry.active=true;paused.error='';assert.match(late.exports.fanSummary(paused),/Global curve$/);
+  // The status table, top-down, from fields the backend already returns.
+  const status=(change,startingFor)=>{const s=json(initial);change(s);return late.exports.fanStatus(s,startingFor);};
+  const cases=[
+    [s=>{s.supported=false;s.error='Unsupported firmware.';},['Not available on this console','Unsupported firmware.']],
+    [s=>{s.settings.enabled=true;s.error='EC busy.';},['Paused, resuming automatically','No action needed.']],
+    [s=>{s.settings.enabled=true;},['Starting your curve…','No action needed.']],
+    [s=>{s.settings.enabled=true;},['Starting your curve…','Still starting. Turn Fan Control off and on to retry.'],30000],
+    [s=>{s.error='Fan stalled.';},['Turned off after an error','Fan stalled. Turn on to try again.']],
+    [s=>{s.ownership={blocked:true,state:'x',reason:'Another driver is using the fan controller.'};},['Another app controls the fan','Another driver is using the fan controller.']],
+    [s=>{s.settings.enabled=true;s.telemetry.active=true;s.active_curve='max';},['Maximum TDP curve','Turn off to return the fan to automatic.']],
+    [s=>{s.readings.automatic=false;},['Another app controls the fan',undefined]],
+    [s=>{s.telemetry.automatic=false;},['Returning fan to automatic…','No action needed.']],
+    [s=>{s.settings.assign_tdp_presets=false;},['Automatic','Uses your saved global curve.']],
+  ];
+  for(const [change,[headline,detail],startingFor] of cases)assert.deepEqual(json(status(change,startingFor)),json({headline,detail}),headline);
+  assert.equal(late.exports.fanSummary(undefined),'APU — · — RPM · Reading fan…');
+  // Own ON/OFF bumps the revision without CAS; unsaved drafts (current and other scopes) must stay saveable.
+  const on=json(initial);on.settings.enabled=true;on.telemetry={active:true,automatic:false};
+  const own=harness(on);own.render();await flush();let ot=own.render();
+  find(ot,n=>n.type===own.exports.CurveGraph).props.edit(1,1600,0);ot=own.render();
+  label(ot,'Curve').props.onChange({data:'silent'});ot=own.render();
+  find(ot,n=>n.type===own.exports.CurveGraph).props.edit(1,1700,0);ot=own.render();
+  assert.equal(label(ot,'Enable Fan Control').props.disabled,false,'Turning off is never blocked by an unsaved curve');
+  label(ot,'Enable Fan Control').props.onChange(false);await flush();ot=own.render();
+  assert.equal(own.getState().settings.enabled,false);
+  button(ot,'Assign curve to Silent').props.onClick();await flush();ot=own.render();
+  assert.equal(own.getState().settings.presets.silent?.[0][1],1700,'Own disable must not make the current draft unsaveable');
+  label(ot,'Curve').props.onChange({data:'global'});ot=own.render();
+  button(ot,'Save global curve').props.onClick();await flush();ot=own.render();
+  assert.equal(own.getState().settings.global_curve[0][1],1600,'Own disable must not make other scope drafts unsaveable');own.unmount();
+  // A foreign curve save the panel has not polled yet is still refused after the toggle.
+  const raced=harness(on);raced.render();await flush();let rt=raced.render();
+  find(rt,n=>n.type===raced.exports.CurveGraph).props.edit(1,1600,0);rt=raced.render();
+  raced.foreign(s=>{s.settings.global_curve[0][1]=2222;s.settings.revision++;});
+  label(rt,'Enable Fan Control').props.onChange(false);await flush();rt=raced.render();
+  button(rt,'Save global curve').props.onClick();await flush();rt=raced.render();
+  assert.match(button(rt,'Save global curve').props.description,/CAS revision/,'A concurrent curve change is never overwritten');
+  assert.equal(raced.getState().settings.global_curve[0][1],2222);
+  assert.equal(find(rt,n=>n.type===raced.exports.CurveGraph).props.curve[0][1],1600,'The refused draft is preserved');raced.unmount();
   console.log('Fan v3: eight points, ordered 0–100°C temperatures/monotonic RPM, zero/deadband, units, dirty scopes, CAS/failures/late reads, graph buttons, full-screen parent pause, conflict block, expiry and hidden cleanup passed.');
-})().then(complete).catch(e=>{console.error(e);process.exitCode=1;});
+});

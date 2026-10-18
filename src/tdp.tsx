@@ -11,22 +11,19 @@ import {
 } from "@decky/api";
 import {
   ButtonItem,
-  Field,
-  findModuleExport,
-  Focusable,
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
-  Router,
   SliderField,
   Spinner,
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { confirmAction, detailsRows, errorText, infoRow, runningApp, watchRunningApp, type RunningApp } from "./shared";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const toMw  = (w: number)  => w * 1000;
 const toW   = (mw: number) => Math.round(mw / 1000);
-const fmt   = (v?: number) => v != null ? `${v.toFixed(1)} W` : "-";
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 
 // ── Tuning model ───────────────────────────────────────────────────────────────
@@ -117,7 +114,7 @@ const PRESET_LABELS: Record<PresetKey, string> = {
   silent:      "Silent",
   balanced:    "Balanced",
   performance: "Performance",
-  max:         "Full Power",
+  max:         "Maximum",
   custom:      "Custom",
 };
 
@@ -132,20 +129,6 @@ function detectPreset(spl: number, sppt: number, fppt: number,
   return "custom";
 }
 
-function profileLabel(spl: number, sppt: number, fppt: number, stored?: string,
-                       table: PresetTable = PRESETS): string {
-  const customLabel = `Custom (${spl} +${sppt - spl}/+${fppt - spl})`;
-  if (stored !== undefined) {
-    if (stored === "custom" || stored === "") return customLabel;
-    const value = table[stored as keyof PresetTable];
-    if (value?.spl === spl && value.sppt === sppt && value.fppt === fppt)
-      return PRESET_LABELS[stored as PresetKey];
-    return customLabel;
-  }
-  const key = detectPreset(spl, sppt, fppt, table);
-  return key === "custom" ? customLabel : PRESET_LABELS[key];
-}
-
 function resolvedPreset(spl: number, sppt: number, fppt: number, stored: string | undefined,
                         table: PresetTable): PresetKey {
   if (stored === "custom") return "custom";
@@ -154,15 +137,19 @@ function resolvedPreset(spl: number, sppt: number, fppt: number, stored: string 
     ? stored as PresetKey : detectPreset(spl, sppt, fppt, table);
 }
 
+/** Slider view of saved limits (mW). In simple mode a Custom profile follows the single-dial rule. */
+function savedTuning(limits: { spl: number; sppt: number; fppt: number }, stored: string | undefined,
+                     table: PresetTable, advanced: boolean, caps: Caps, minW: number) {
+  const spl = toW(limits.spl), sppt = toW(limits.sppt), fppt = toW(limits.fppt);
+  const preset = resolvedPreset(spl, sppt, fppt, stored, table);
+  return { preset, tuning: !advanced && preset === "custom" ? simpleTuning(spl, caps, minW) : fromAbsolute(spl, sppt, fppt) };
+}
+
 export const tdpModeLabel = (spl: number, sppt: number, fppt: number, stored?: string) =>
   PRESET_LABELS[resolvedPreset(spl, sppt, fppt, stored, PRESETS)];
 
 const exceedsCaps = (spl: number, sppt: number, fppt: number, caps: Caps) =>
   spl > caps.spl || sppt > caps.sppt || fppt > caps.fppt;
-
-function statusStyle(msg: string) {
-  return msg.startsWith("Error") ? styles.errorBox : { fontSize: "12px", color: OK_COLOR };
-}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface Settings   { spl: number; sppt: number; fppt: number; enabled: boolean;
@@ -180,6 +167,8 @@ interface PowerSource { ac: boolean }
 interface GameProfile {
   error?: string;
   exists: boolean;
+  // False: the profile is kept but unused; the game runs on Global settings.
+  active?: boolean;
   profile: { spl: number; sppt: number; fppt: number; preset?: string };
   ac_separate: boolean;
   ac_profile: { spl: number; sppt: number; fppt: number; ac_preset?: string };
@@ -231,6 +220,7 @@ const applyTdp          = callable<[number, number, number, string, string, stri
 const getTdpInfo        = callable<[], TdpInfo>("get_tdp_info");
 const getGameProfile    = callable<[string], GameProfile>("get_game_profile");
 const deleteGameProfile = callable<[string], TdpResult>("delete_game_profile");
+const setGameProfileActive = callable<[string, boolean], TdpResult>("set_game_profile_active");
 const setPluginEnabled  = callable<[boolean], TdpResult>("set_plugin_enabled");
 const setPanelActive    = callable<[boolean], void>("set_panel_active");
 const setActiveApp      = callable<[string], void>("set_active_app");
@@ -256,102 +246,16 @@ const notify = (title: string, body: string) => {
 };
 
 const notifyFailure = (title: string, err: unknown) => {
-  const body = err instanceof Error ? err.message : String(err ?? "Unknown error");
+  const body = errorText(err ?? "Unknown error");
   console.error("[legiongo2companion] tdp.operation_failed");
   notify(title, body);
 };
 
-// ── Styles - Steam theme variables with hardcoded fallbacks ────────────────────
-
-const OK_COLOR = "var(--gpColor-Green, #4ade80)";
-const BAD_COLOR = "var(--gpColor-Red, #f87171)";
-const WARN_COLOR = "var(--gpColor-Yellow, #fbbf24)";
-const DIM_COLOR = "var(--gpColor-TextMuted, rgba(255,255,255,0.5))";
-
-const styles = {
-  profileTag: {
-    fontSize: "11px",
-    fontWeight: "bold",
-    color: "var(--gpColor-White, #fff)",
-    background: "rgba(74,222,128,0.25)",
-    border: "1px solid rgba(74,222,128,0.5)",
-    borderRadius: "3px",
-    padding: "0px 5px",
-    fontFamily: "monospace",
-  },
-  infoBox: {
-    background: "rgba(251,191,36,0.15)",
-    border: "1px solid rgba(251,191,36,0.4)",
-    borderRadius: "6px",
-    padding: "8px 10px",
-    fontSize: "11px",
-    color: WARN_COLOR,
-    lineHeight: "1.5",
-    marginTop: "4px",
-  },
-  errorBox: {
-    background: "rgba(248,113,113,0.1)",
-    border: "1px solid rgba(248,113,113,0.4)",
-    borderRadius: "6px",
-    padding: "8px 10px",
-    fontSize: "11px",
-    color: BAD_COLOR,
-    lineHeight: "1.5",
-    marginTop: "4px",
-  },
-};
-
-// ── Resume from suspend ────────────────────────────────────────────────────────
-
-/**
- * Subscribe to resume-from-suspend. Returns an unsubscribe function, or null
- * when the client offers no way to hear about it.
- *
- * `SteamClient.System.RegisterForOnResumeFromSuspend` was removed from the
- * Steam client in the September 2025 beta. Optional chaining meant calling it
- * silently did nothing - confirmed on the device, where two suspend cycles
- * produced no callback and no error, and the limits only came back five
- * seconds later when the enforce loop noticed. The replacement lives on a
- * SleepManager module, reachable either as a global or through the webpack
- * exports; the legacy call stays as a fallback for older clients.
- */
-function onResumeFromSuspend(handler: () => void): (() => void) | null {
-  const asUnsub = (reg: any): (() => void) | null => {
-    if (typeof reg === "function") return reg;
-    if (typeof reg?.unregister === "function") return () => reg.unregister();
-    return null;
-  };
-  const isSleepManager = (e: any) =>
-    !!e && typeof e === "object" &&
-    (typeof e.RegisterForNotifyResumeFromSuspend === "function" ||
-      typeof e.NotifyResumeFromSuspend === "function");
-
-  try {
-    const mgr = (window as any).SleepManager ?? findModuleExport(isSleepManager);
-    const unsub = asUnsub(mgr?.RegisterForNotifyResumeFromSuspend?.(handler));
-    if (unsub) return unsub;
-  } catch (e) {
-    console.warn("[legiongo2companion] tdp.resume_lookup_failed");
-  }
-
-  try {
-    const unsub = asUnsub(
-      (window as any).SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
-    if (unsub) return unsub;
-  } catch (e) {
-    console.warn("[legiongo2companion] tdp.legacy_resume_registration_failed");
-  }
-
-  // Said out loud rather than swallowed: this going quiet again is exactly how
-  // the previous registration rotted unnoticed.
-  console.warn("[legotdp] no resume-from-suspend notification available; "
-    + "limits will be restored by the enforce loop instead");
-  return null;
-}
-
 // ── Running app watcher ────────────────────────────────────────────────────────
 
 type GameListener = (game: RunningGame | null) => void;
+const asGame = (app: RunningApp | null): RunningGame | null =>
+  app ? { appId: String(app.appid), name: app.display_name ?? String(app.appid) } : null;
 
 // The backend trusts a frontend-reported appid for 12 seconds. Refresh at half
 // that, so one dropped call is not enough to make it fall back to the /proc scan.
@@ -374,24 +278,12 @@ const PUSH_INTERVAL_MS = 6000;
 class AppWatcher {
   private static listeners: GameListener[] = [];
   private static current: RunningGame | null = null;
-  private static timer: ReturnType<typeof setInterval> | undefined;
-  private static unsubs: Array<() => void> = [];
+  private static unwatch: (() => void) | undefined;
   private static started = false;
   private static busy = false;
   private static lastPush = 0;
   private static reportFailed = false;
   private static generation = 0;
-  private static delayedChecks = new Set<ReturnType<typeof setTimeout>>();
-
-  static activeGame(): RunningGame | null {
-    try {
-      const app = (Router as any)?.MainRunningApp;
-      if (!app?.appid) return null;
-      return { appId: String(app.appid), name: app.display_name ?? String(app.appid) };
-    } catch {
-      return null;
-    }
-  }
 
   static currentGame(): RunningGame | null {
     return this.current;
@@ -407,73 +299,38 @@ class AppWatcher {
   static start() {
     if (this.started) return;
     this.started = true;
-    const generation = ++this.generation;
-    this.current = this.activeGame();
-
-    const steam = (window as any).SteamClient;
-
-    try {
-      const reg = steam?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
-        // Router.MainRunningApp lags the notification slightly.
-        if (!this.started || generation !== this.generation) return;
-        const timer = setTimeout(() => {
-          this.delayedChecks.delete(timer);
-          if (generation === this.generation) void this.check();
-        }, 300);
-        this.delayedChecks.add(timer);
-      });
-      if (reg?.unregister) this.unsubs.push(() => reg.unregister());
-    } catch (e) {
-      console.warn("[legiongo2companion] tdp.app_notifications_unavailable");
-    }
-
-    // The SMU comes back at firmware defaults after sleep. Decky has no backend
-    // resume hook - the loader only calls _migration, _main, _unload and
-    // _uninstall - so this notification is the only way to beat the enforce
-    // loop's five-second tick to it.
-    const offResume = onResumeFromSuspend(() => {
-      if (!this.started || generation !== this.generation) return;
-      void reapply()
-        .then((res) => {
-          if (!res.success) console.warn("[legiongo2companion] tdp.resume_reapply_failed");
-        })
-        .catch(() => console.error("[legiongo2companion] tdp.resume_reapply_failed"));
-    });
-    if (offResume) this.unsubs.push(offResume);
-
-    this.timer = setInterval(() => void this.check(), 2000);
-    void this.check();
+    this.generation += 1;
+    this.current = asGame(runningApp());
+    this.unwatch = watchRunningApp(this);
   }
 
   static stop() {
+    this.unwatch?.();
+    this.unwatch = undefined;
     this.started = false;
     this.generation += 1;
     this.busy = false;
-    for (const timer of this.delayedChecks) clearTimeout(timer);
-    this.delayedChecks.clear();
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
-    for (const off of this.unsubs) {
-      try {
-        off();
-      } catch {
-        /* the subscription may already be gone */
-      }
-    }
-    this.unsubs = [];
     this.listeners = [];
     this.current = null;
-    this.started = false;
     this.lastPush = 0;
     this.reportFailed = false;
   }
 
-  private static async check() {
+  // The SMU comes back at firmware defaults after sleep; beat the enforce
+  // loop's five-second tick to it.
+  static resume() {
+    if (!this.started) return;
+    void reapply()
+      .then((res) => {
+        if (!res.success) console.warn("[legiongo2companion] tdp.resume_reapply_failed");
+      })
+      .catch(() => console.error("[legiongo2companion] tdp.resume_reapply_failed"));
+  }
+
+  static async check(app = runningApp()) {
     if (!this.started || this.busy) return;
     const generation = this.generation;
-    const game = this.activeGame();
+    const game = asGame(app);
     const changed = game?.appId !== this.current?.appId;
     this.current = game;
 
@@ -503,29 +360,28 @@ class AppWatcher {
   }
 }
 
-// ── Live TDP panel ─────────────────────────────────────────────────────────────
+// ── Live TDP readings ──────────────────────────────────────────────────────────
 
 // Must stay comfortably under _PANEL_ACTIVE_TTL_S in main.py (90 s).
 const PANEL_LEASE_MS = 30000;
 
-const LivePanel: FC = () => {
+/** Live limits and package draw while the page is shown; null until the first reading. */
+const useTdpInfo = ({ visible: tabShown = true }: { visible?: boolean } = {}) => {
   const [info, setInfo] = useState<TdpInfo | null>(null);
-  const visible = useQuickAccessVisible();
+  const visible = useQuickAccessVisible() && tabShown;
 
-  // Gated on visibility, not just on mount: the panel stays mounted while the
+  // Gated on visibility, not just on mount: the page stays mounted while the
   // Quick Access Menu is on another tab, and refreshing it there costs a RAPL
   // read every two seconds for nobody to look at. set_panel_active is what
   // gates the backend loop, so nothing is computed while this is unmounted.
   //
   // The backend pushes each refresh rather than answering a poll: it already
-  // recomputed these numbers on exactly this cadence, so asking for them over
-  // RPC was a round trip to be handed something that already existed.
+  // recomputed these numbers on exactly this cadence.
   //
   // The lease is renewed rather than set once. The cleanup below drops it, but
   // it never runs if the frontend is torn down outright - a Steam UI restart -
   // and the backend would then keep refreshing forever. Thirty seconds against
-  // the backend's ninety leaves room for two lost calls, and is still fifteen
-  // times less traffic than the two-second poll this replaced.
+  // the backend's ninety leaves room for two lost calls.
   useEffect(() => {
     if (!visible) return;
     let active = true;
@@ -536,8 +392,7 @@ const LivePanel: FC = () => {
     const lease = setInterval(() => updateLease(true), PANEL_LEASE_MS);
     const onInfo = (next: TdpInfo) => { if (active) setInfo(next); };
     addEventListener<[TdpInfo]>("tdp_info", onInfo);
-    // Seed it: the first push is a full interval away, and the panel would
-    // otherwise show a spinner for two seconds every time it is opened.
+    // Seed it: the first push is a full interval away.
     getTdpInfo().then((v) => { if (active) setInfo(v); }).catch(() => undefined);
     return () => {
       active = false;
@@ -546,38 +401,7 @@ const LivePanel: FC = () => {
       updateLease(false);
     };
   }, [visible]);
-
-  const v = info?.values ?? {};
-  return (
-    <PanelSection title="Current TDP">
-      {!info ? (
-        <PanelSectionRow><Spinner /></PanelSectionRow>
-      ) : !info.success ? (
-        <PanelSectionRow>
-          <Field focusable label="Error" description={info.error ?? "Failed to read TDP"} />
-        </PanelSectionRow>
-      ) : (
-        <>
-          <PanelSectionRow>
-            <Field focusable label="SPL  (Sustained)" description={`Limit: ${fmt(v.spl_limit)}`} />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <Field focusable label="SPPT (Slow)" description={`Limit: ${fmt(v.sppt_limit)}`} />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <Field focusable label="FPPT (Fast)" description={`Limit: ${fmt(v.fppt_limit)}`} />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <Field
-              focusable
-              label="Package draw"
-              description={`${fmt(v.package_draw)}${v.source ? `   -   set via ${v.source}` : ""}`}
-            />
-          </PanelSectionRow>
-        </>
-      )}
-    </PanelSection>
-  );
+  return info;
 };
 
 // ── CPU power controls ────────────────────────────────────────────────────────
@@ -607,65 +431,22 @@ const unavailableCpuPowerControls = (error = ""): CpuPowerControls => ({
   error,
 });
 
-/** Fail closed instead of rendering a false state from a version-skewed backend. */
-function normaliseCpuPowerControls(value: unknown): CpuPowerControls {
-  if (!value || typeof value !== "object") {
-    throw new Error("Backend returned invalid CPU power controls.");
-  }
-  const raw = value as Partial<CpuPowerControls>;
-  if (typeof raw.success !== "boolean" || typeof raw.available !== "boolean" ||
-      typeof raw.error !== "string" || !raw.cpu_boost ||
-      typeof raw.cpu_boost !== "object" || !raw.epp || typeof raw.epp !== "object") {
+/**
+ * The backend ships with this page and canonicalises EPP values itself; fail
+ * closed only on a reply without the structure the editor reads, or one for a
+ * different profile than the editor asked for.
+ */
+function checkedCpuPowerControls(value: unknown, appId: string, acProfile: boolean): CpuPowerControls {
+  const raw = value as CpuPowerControls | null;
+  if (!raw || typeof raw !== "object" || typeof raw.success !== "boolean" || typeof raw.available !== "boolean" ||
+      !raw.cpu_boost || typeof raw.cpu_boost !== "object" || !raw.epp || typeof raw.epp !== "object" ||
+      !Array.isArray(raw.epp.profiles)) {
     throw new Error("Backend returned incompatible CPU power controls.");
   }
-
-  const boost = raw.cpu_boost as Partial<CpuBoostControl>;
-  const epp = raw.epp as Partial<EppControl>;
-  const boostStateValid = typeof boost.enabled === "boolean" || boost.enabled === null;
-  const eppValueValid = typeof epp.value === "string" || epp.value === null;
-  const numericValueValid = epp.numeric_value === null ||
-    (typeof epp.numeric_value === "number" && Number.isInteger(epp.numeric_value) &&
-      epp.numeric_value >= 0 && epp.numeric_value <= 255);
-  if (typeof boost.available !== "boolean" || !boostStateValid ||
-      typeof boost.error !== "string" || typeof epp.available !== "boolean" ||
-      !eppValueValid || !Array.isArray(epp.profiles) ||
-      epp.profiles.some((profile) => typeof profile !== "string") ||
-      typeof epp.numeric_supported !== "boolean" || epp.min !== 0 || epp.max !== 255 ||
-      !numericValueValid || typeof epp.error !== "string") {
-    throw new Error("Backend returned incompatible CPU power controls.");
+  if (raw.profile && (raw.profile.app_id !== appId || raw.profile.ac_profile !== acProfile)) {
+    throw new Error("Backend returned CPU controls for a different profile.");
   }
-
-  const profile = raw.profile;
-  if (profile !== undefined && (!profile || typeof profile !== "object" ||
-      typeof profile.app_id !== "string" || typeof profile.ac_profile !== "boolean" ||
-      typeof profile.active !== "boolean" ||
-      (profile.cpu_boost_enabled !== null && typeof profile.cpu_boost_enabled !== "boolean") ||
-      (profile.epp !== null && typeof profile.epp !== "string"))) {
-    throw new Error("Backend returned incompatible CPU profile controls.");
-  }
-
-  return {
-    success: raw.success,
-    available: raw.available,
-    cpu_boost: {
-      available: boost.available,
-      enabled: boost.enabled ?? null,
-      error: boost.error,
-    },
-    epp: {
-      available: epp.available,
-      value: typeof epp.value === "string" && epp.value.trim() ? epp.value.trim() : null,
-      profiles: Array.from(new Set(epp.profiles.map((profile) => profile.trim()).filter(Boolean))),
-      compatibility_note: typeof epp.compatibility_note === "string" ? epp.compatibility_note : "",
-      numeric_supported: epp.numeric_supported,
-      numeric_value: epp.numeric_value ?? null,
-      min: 0,
-      max: 255,
-      error: epp.error,
-    },
-    error: raw.error,
-    profile,
-  };
+  return raw;
 }
 
 const readableEppProfile = (profile: string | null) => {
@@ -713,20 +494,21 @@ interface CpuPowerControlsSectionProps {
   appId?: string;
   acProfile?: boolean;
   expectedAppId?: string;
-  scopeLabel?: string;
   powerSource?: boolean;
   onBusyChange?: (owner: object, busy: boolean) => void;
+  onCompatibilityNote?: (note: string) => void;
 }
 
 const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
-  appId = "", acProfile = false, expectedAppId = "", scopeLabel = "Global profile",
-  powerSource = false, onBusyChange,
+  appId = "", acProfile = false, expectedAppId = "",
+  powerSource = false, onBusyChange, onCompatibilityNote,
 }: CpuPowerControlsSectionProps = {}) => {
   const [controls, setControls] = useState<CpuPowerControls | null>(null);
   const [loading, setLoading] = useState(false);
   const [changing, setChanging] = useState<CpuPowerAction | null>(null);
   const [eppPending, setEppPending] = useState(false);
   const [requestError, setRequestError] = useState("");
+  const [failedAction, setFailedAction] = useState<CpuPowerAction | null>(null);
   const [eppDraft, setEppDraft] = useState(50);
   const visible = useQuickAccessVisible();
 
@@ -793,10 +575,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
     const mutationEpoch = mutationEpochRef.current;
     setLoading(true);
     try {
-      const next = normaliseCpuPowerControls(await getCpuPowerControls(appId, acProfile));
-      if (next.profile && (next.profile.app_id !== appId || next.profile.ac_profile !== acProfile)) {
-        throw new Error("Backend returned CPU controls for a different profile.");
-      }
+      const next = checkedCpuPowerControls(await getCpuPowerControls(appId, acProfile), appId, acProfile);
       if (!mountedRef.current || !visibleRef.current ||
           readId !== readSequenceRef.current || mutationEpoch !== mutationEpochRef.current ||
           actionRef.current) {
@@ -870,15 +649,13 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
     setLoading(false);
     setChanging(kind);
     setRequestError("");
+    setFailedAction(null);
     let refreshNeeded = false;
 
     try {
-      const next = normaliseCpuPowerControls(await request());
-      if (next.profile && (next.profile.app_id !== appId || next.profile.ac_profile !== acProfile)) {
-        throw new Error("Backend returned CPU controls for a different profile.");
-      }
+      const next = checkedCpuPowerControls(await request(), appId, acProfile);
       if (!mountedRef.current) {
-        if (!next.success) notify("CPU power change failed", next.error || next.epp.error || next.cpu_boost.error);
+        if (!next.success) notify("TDP", next.error || next.epp.error || next.cpu_boost.error);
         return;
       }
       if (actionId !== actionSequenceRef.current) {
@@ -890,11 +667,12 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
         const controlError = kind === "boost" ? next.cpu_boost.error : next.epp.error;
         const message = next.error || controlError || "The backend rejected the change.";
         setRequestError(message);
-        notify(kind === "boost" ? "CPU Boost" : "EPP", message);
+        setFailedAction(kind);
+        notify("TDP", message);
       }
     } catch (error) {
       if (!mountedRef.current) {
-        notifyFailure("CPU power change failed", error);
+        notifyFailure("TDP", error);
         return;
       }
       if (actionId !== actionSequenceRef.current) {
@@ -903,9 +681,9 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
       }
       refreshNeeded = true;
       if (kind === "epp") rollbackEppDraft();
-      const message = error instanceof Error ? error.message : String(error);
-      setRequestError(message);
-      notifyFailure(kind === "boost" ? "CPU Boost change failed" : "EPP change failed", error);
+      setRequestError(errorText(error));
+      setFailedAction(kind);
+      notifyFailure("TDP", error);
     } finally {
       reportBusy(false);
       const current = actionId === actionSequenceRef.current;
@@ -967,8 +745,12 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
     eppTimerRef.current = setTimeout(flush, EPP_DEBOUNCE_MS);
   };
 
+  // The compatibility note is a technical fact; the page shows it under Show details.
+  useEffect(() => { onCompatibilityNote?.(controls?.epp.compatibility_note ?? ""); },
+    [controls?.epp.compatibility_note, onCompatibilityNote]);
+
   if (!controls) return (
-    <PanelSection title="CPU Power Controls">
+    <PanelSection title="CPU">
       <PanelSectionRow><Spinner /></PanelSectionRow>
     </PanelSection>
   );
@@ -979,8 +761,8 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   const busy = loading || changing !== null || eppPending;
   const numericCurrent = parseNumericEpp(epp.value);
   const eppLabel = epp.numeric_supported && numericCurrent != null
-    ? "EPP"
-    : `EPP - ${readableEppProfile(epp.value)}`;
+    ? "CPU energy preference"
+    : `CPU energy preference · ${readableEppProfile(epp.value)}`;
   const biasProfiles = epp.profiles.filter((profile) =>
     Object.prototype.hasOwnProperty.call(EPP_NAMED_VALUES, profile));
   const specialProfiles = epp.profiles.filter((profile) =>
@@ -993,25 +775,24 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
     : biasProfiles.length < 1;
   const driverManagedNumeric = epp.numeric_supported && numericCurrent == null &&
     (epp.value == null || EPP_NAMED_VALUES[epp.value] == null);
+  // A failed change shows on its control; a failed read on CPU Boost, the first row.
   const globalError = requestError || controls.error;
+  const errorFor = (kind: CpuPowerAction) =>
+    (failedAction ?? "boost") === kind ? globalError : "";
+  const PREFERENCE = "Left: faster CPU. Right: more power left for the GPU.";
+  const eppUnavailable = epp.error || "Not supported on this device.";
 
   return (
-    <PanelSection title="CPU Power Controls">
-      <PanelSectionRow>
-        <Field focusable label={scopeLabel} description={controls.profile?.active === false
-          ? "Editing saved CPU Boost and EPP. They apply when this profile becomes active."
-          : "CPU Boost and EPP changes are saved automatically to this profile."} />
-      </PanelSectionRow>
+    <PanelSection title="CPU">
       <PanelSectionRow>
         <ToggleField
           label="CPU Boost"
-          description={
-            !boost.available ? (boost.error || "Not supported by the active CPU frequency driver.")
-            : boost.enabled == null ? (boost.error || "The current boost state could not be read.")
-            : changing === "boost" ? "Applying through the kernel control and verifying its readback..."
-            : boost.enabled ? "On - turbo frequencies are allowed."
-            : "Off - turbo frequencies are disabled."
-          }
+          description={errorFor("boost") || (
+            !boost.available ? (boost.error || "Not supported on this device.")
+            : boost.enabled == null ? (boost.error || "The current state could not be read.")
+            : changing === "boost" ? "Applying…"
+            : boost.enabled ? "Higher CPU clocks; uses more power."
+            : "CPU stays at base clock; saves power.")}
           checked={boost.enabled === true}
           disabled={busy || !boost.available || boost.enabled == null}
           onChange={changeBoost}
@@ -1029,14 +810,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
             valueSuffix="%"
             disabled={loading || changing !== null || !epp.available}
             onChange={scheduleNumericEpp}
-            description={
-              !epp.available ? (epp.error || "EPP is not supported by the active CPU frequency driver.")
-              : changing === "epp" ? "Applying and verifying on every CPU policy..."
-              : eppPending ? "Waiting for the slider to settle before applying..."
-              : driverManagedNumeric
-                ? "Current profile is driver-managed. Move the slider to select an explicit value: 0% = Prefer CPU; 100% = Prefer GPU."
-              : "0% = Prefer CPU; 100% = Prefer GPU. Adjusts CPU energy preference; a lower CPU demand can leave more of the shared power budget for graphics. Applied in 10% steps."
-            }
+            description={errorFor("epp") || (
+              !epp.available ? eppUnavailable
+              : changing === "epp" || eppPending ? "Applying…"
+              : driverManagedNumeric ? "Set by the system. Move the slider to choose."
+              : PREFERENCE)}
           />
         ) : (
           <SliderField
@@ -1051,22 +829,15 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
               const profile = biasProfiles[Math.round(index) - profileOffset];
               if (profile) changeEpp(profile);
             }}
-            description={
-              !epp.available ? (epp.error || "EPP is not supported by the active CPU frequency driver.")
-              : changing === "epp" ? "Applying and verifying on every CPU policy..."
-              : noDiscreteChoice ? "The CPU driver exposes no alternative linear EPP profile."
-              : profileIndex < 0
-                ? `Choose a CPU energy preference: ${biasProfiles.map(readableEppProfile).join(" / ")}`
-              : "Prefer CPU favors CPU performance. Prefer GPU reduces CPU energy demand and can leave more of the shared power budget for graphics."
-            }
+            description={errorFor("epp") || (
+              !epp.available ? eppUnavailable
+              : changing === "epp" ? "Applying…"
+              : noDiscreteChoice ? "No other choice on this device."
+              : profileIndex < 0 ? `Choose: ${biasProfiles.map(readableEppProfile).join(" / ")}`
+              : PREFERENCE)}
           />
         )}
       </PanelSectionRow>
-      {epp.compatibility_note && (
-        <PanelSectionRow>
-          <Field focusable label="EPP compatibility" description={epp.compatibility_note} />
-        </PanelSectionRow>
-      )}
       {!epp.numeric_supported && specialProfiles.map((profile) => (
         <PanelSectionRow key={`epp-${profile}`}>
           <ButtonItem
@@ -1074,26 +845,18 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
             disabled={busy || !epp.available || (controls.profile?.epp ?? epp.value) === profile}
             onClick={() => changeEpp(profile)}
           >
-            {(controls.profile?.epp ?? epp.value) === profile
-              ? `> ${readableEppProfile(profile)} EPP`
-              : `Use ${readableEppProfile(profile)} EPP`}
+            {`Use ${readableEppProfile(profile)}`}
           </ButtonItem>
         </PanelSectionRow>
       ))}
-      {!controls.available && !globalError && (
-        <PanelSectionRow>
-          <Focusable><div style={styles.infoBox}>CPU Boost and EPP are not supported on this device.</div></Focusable>
-        </PanelSectionRow>
-      )}
-      {globalError && (
-        <PanelSectionRow><Focusable><div style={styles.errorBox}>{globalError}</div></Focusable></PanelSectionRow>
-      )}
     </PanelSection>
   );
 };
 
 // ── Main content ───────────────────────────────────────────────────────────────
-export const TdpPage: FC = () => {
+type Scope = "global" | "game" | "game_ac";
+
+export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
   const [ready,    setReady]    = useState(false);
   const [setupErr, setSetupErr] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
@@ -1115,7 +878,9 @@ export const TdpPage: FC = () => {
 
   const [enabled,       setEnabled]       = useState(true);
   const [game,          setGame]          = useState<RunningGame | null>(null);
+  // The running game uses its own profile; an unused one may still exist (profileExists).
   const [perGame,       setPerGame]       = useState(false);
+  const [profileExists, setProfileExists] = useState(false);
 
   const [acOnline,      setAcOnline]      = useState(false);
   const [acSeparate,    setAcSeparate]    = useState(false);
@@ -1128,24 +893,28 @@ export const TdpPage: FC = () => {
   const [savedPreset,   setSavedPreset]   = useState<string | undefined>(undefined);
   const [savedAcPreset, setSavedAcPreset] = useState<string | undefined>(undefined);
 
-  const [status,   setStatus]   = useState<string | null>(null);
   const [operationLoading, setLoading] = useState(false);
   const [profilePending, setProfilePending] = useState(true);
   const [profileError, setProfileError] = useState("");
-  const [profileApplyError, setProfileApplyError] = useState("");
   const [profileAttempt, setProfileAttempt] = useState(0);
   const loading = operationLoading || profilePending || !!profileError;
   const [cpuBusy, setCpuBusy] = useState(false);
+  // Custom sliders are a draft until Apply; the base restores what Discard drops.
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  const draftBaseRef = useRef<{ ac: boolean; tuning: Tuning } | null>(null);
+  // The failed control shows its error until the next successful action.
+  const [failure, setFailure] = useState<{ control: string; text: string } | null>(null);
+  const [details, setDetails] = useState(false);
+  const [cpuNote, setCpuNote] = useState("");
 
   const visible = useQuickAccessVisible();
+  const info = useTdpInfo({ visible: tabShown && ready && enabled });
 
-  const autoAppliedRef = useRef<string | null>(null);
   const noGameSyncedRef = useRef(false);
-  const globalRestorePendingRef = useRef(false);
   const initialPowerReadRef = useRef(false);
   const powerSourceRevisionRef = useRef(0);
   const profileRequestRef = useRef(0);
-  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cpuBusyOwnersRef = useRef(new Set<object>());
   const pageMountedRef = useRef(true);
   const visibleRef = useRef(visible);
@@ -1193,8 +962,8 @@ export const TdpPage: FC = () => {
     if (capsReadRef.current) return capsReadRef.current;
     const request = getCaps();
     capsReadRef.current = request;
-    request.then(() => { if (capsReadRef.current === request) capsReadRef.current = null; },
-      () => { if (capsReadRef.current === request) capsReadRef.current = null; });
+    const done = () => { if (capsReadRef.current === request) capsReadRef.current = null; };
+    request.then(done, done);
     return request;
   };
   const adoptCaps = (c: CapsInfo) => {
@@ -1221,76 +990,73 @@ export const TdpPage: FC = () => {
     return () => { pageMountedRef.current = false; initRevisionRef.current += 1; };
   }, []);
 
-  useEffect(() => () => { if (statusTimerRef.current) clearTimeout(statusTimerRef.current); }, []);
+  // A preset still settling when the page closes is dropped, like a draft.
 
   const caps    = extrasUnlocked && extrasAvailable ? maxCaps : stdCaps;
   const customCaps = advancedTdpControl ? caps : simpleCaps(caps, extrasUnlocked && extrasAvailable);
   const active  = editingAc ? acTuning : tuning;
   const setActive = editingAc ? setAcTuning : setTuning;
-  const handlers = makeTuningHandlers(active, setActive, customCaps, minW);
   const om      = offsetMax(active.spl, caps);
 
-  const showStatus = (msg: string | null) => {
+  const clearDraft = () => { dirtyRef.current = false; draftBaseRef.current = null; setDirty(false); };
+  const editActive = (next: Tuning) => {
+    if (!dirtyRef.current) draftBaseRef.current = { ac: editingAc, tuning: active };
+    dirtyRef.current = true;
+    setDirty(true);
+    setActive(next);
+  };
+  const handlers = makeTuningHandlers(active, editActive, customCaps, minW);
+  /** Run `proceed` now, or after confirming that the unsaved Custom limits are dropped. */
+  const askDiscard = (proceed: () => void) => {
+    if (!dirtyRef.current) return proceed();
+    confirmAction("Discard unsaved changes?", "Your changes to these limits haven't been applied.", "Discard", () => {
+      const base = draftBaseRef.current;
+      if (base) (base.ac ? setAcTuning : setTuning)(base.tuning);
+      clearDraft();
+      proceed();
+    });
+  };
+
+  const done = (body: string) => {
     if (!pageMountedRef.current) return;
-    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-    setStatus(msg);
-    const scope = captureScope();
-    if (msg) statusTimerRef.current = setTimeout(() => { if (scopeCurrent(scope)) setStatus(null); }, 3000);
+    setFailure(null);
+    notify("TDP", body);
   };
-
-  /** Inline status plus a toast: the inline line clears after three seconds and
-   *  lives in a section the user may not be looking at. */
-  const showError = (title: string, e: unknown) => {
-    notifyFailure(title, e);
-    showStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
+  /** A toast, plus the error on the control that failed. */
+  const showError = (control: string, e: unknown) => {
+    notifyFailure("TDP", e);
+    if (pageMountedRef.current) setFailure({ control, text: errorText(e) });
   };
+  const failureFor = (control: string) => failure?.control === control ? failure.text : undefined;
 
-  const applyGameProfile = async (
-    gp: GameProfile,
-    appId: string,
-    statusMsg: string,
-    isCurrent: () => boolean = () => AppWatcher.currentGame()?.appId === appId,
-    onLoaded: () => void = () => {},
-  ) => {
-    if (!isCurrent()) return false;
-    if (!gp.exists || !gp.profile) {
-      if (gp.exists) showStatus("Error: Game profile data is missing or corrupt.");
-      return;
-    }
+  /** Puts a saved game profile in the editor; false when it is missing or corrupt. */
+  const showGameProfile = (gp: GameProfile) => {
+    if (!gp.exists || !gp.profile) return false;
     const p  = gp.profile;
     const ac = gp.ac_profile ?? { spl: p.spl, sppt: p.sppt, fppt: p.fppt, ac_preset: "" };
     const storedPreset = (p.preset as PresetKey | undefined) || undefined;
-    const profilePreset = resolvedPreset(toW(p.spl), toW(p.sppt), toW(p.fppt), storedPreset, presets);
-    const t = !advancedTdpControl && profilePreset === "custom"
-      ? simpleTuning(toW(p.spl), customCaps, minW)
-      : fromAbsolute(toW(p.spl), toW(p.sppt), toW(p.fppt));
-    const acPreset = resolvedPreset(toW(ac.spl), toW(ac.sppt), toW(ac.fppt),
-      ac.ac_preset, presets);
-    const at = !advancedTdpControl && acPreset === "custom"
-      ? simpleTuning(toW(ac.spl), customCaps, minW)
-      : fromAbsolute(toW(ac.spl), toW(ac.sppt), toW(ac.fppt));
+    const battery = savedTuning(p, storedPreset, presets, advancedTdpControl, customCaps, minW);
+    clearDraft();
     setPerGame(true);
-    setTuning(t);
-    setAcTuning(at);
+    setProfileExists(true);
+    setTuning(battery.tuning);
+    setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, customCaps, minW).tuning);
     setAcSeparate(gp.ac_separate);
-    setEditingAc(false);
+    // The editor starts on the source the console runs on now.
+    setEditingAc(gp.ac_separate && acOnline);
     setSavedPreset(storedPreset);
     setSavedAcPreset(gp.ac_separate ? (ac.ac_preset ?? "") : undefined);
-    setPreset(profilePreset);
-    onLoaded();
-    try {
-      if (tdpAvailable) {
-        const result = await applyTdp(p.spl, p.sppt, p.fppt, appId, "", appId);
-        if (!result.success) throw new Error(result.stderr || "TDP apply failed");
-      }
-    } catch (e: unknown) {
-      if (isCurrent()) showError("Could not apply TDP", e);
-      return false;
-    }
-    if (!isCurrent()) return false;
-    setProfileApplyError("");
-    showStatus(statusMsg);
+    setPreset(battery.preset);
     return true;
+  };
+
+  /** Show Global settings after the game stopped using (or lost) its own profile. */
+  const adoptGlobalSettings = (s: Settings) => {
+    const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
+    clearDraft();
+    setTuning(fromAbsolute(w, sw, fw));
+    setPreset(resolvedPreset(w, sw, fw, s.active_preset, presets));
+    setGlobalProfile({ spl: w, sppt: sw, fppt: fw, preset: s.active_preset || undefined });
   };
 
   // ── Init ─────────────────────────────────────────────────────────────────────
@@ -1313,7 +1079,7 @@ export const TdpPage: FC = () => {
           let snapshot: [Settings, PowerSource, boolean, CapsInfo];
           try { snapshot = await Promise.all(reads); }
           catch (error) {
-            if (current()) setSetupErr(error instanceof Error ? error.message : String(error));
+            if (current()) setSetupErr(errorText(error));
             // One rejected read must not start duplicates of the other reads
             // that are still running in this initialization attempt.
             await Promise.allSettled(reads);
@@ -1323,11 +1089,12 @@ export const TdpPage: FC = () => {
           if (!current()) return;
           const machinePresets = c?.presets ?? PRESETS;
           adoptCaps(c);
+          // Fresh caps, not page state; a legacy reply may lack std/max, so read them only for simple Custom.
           const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
           const selected = resolvedPreset(w, sw, fw, s.active_preset, machinePresets);
-          const cap = eu && c.extras !== false ? c.max : c.std;
+          const unlocked = eu && c.extras !== false;
           const view = s.advanced_tdp_control === false && selected === "custom"
-            ? simpleTuning(w, simpleCaps(cap, eu && c.extras !== false), c.min)
+            ? simpleTuning(w, simpleCaps(unlocked ? c.max : c.std, unlocked), c.min)
             : fromAbsolute(w, sw, fw);
           setTuning(view);
           setGlobalProfile({ ...absolute(view), preset: s.active_preset || undefined });
@@ -1345,7 +1112,7 @@ export const TdpPage: FC = () => {
           setSetupErr("TDP and CPU controls are still starting. Retry status if this continues.");
         }
       } catch (error) {
-        if (current()) setSetupErr(error instanceof Error ? error.message : String(error));
+        if (current()) setSetupErr(errorText(error));
       }
     })();
     initReadRef.current = request;
@@ -1400,8 +1167,8 @@ export const TdpPage: FC = () => {
         profileReadyRef.current = null;
         setProfilePending(true);
         setProfileError("");
-        setProfileApplyError("");
         setPerGame(false);
+        setProfileExists(false);
         setAcSeparate(false);
         setEditingAc(false);
         setSavedPreset(undefined);
@@ -1411,11 +1178,12 @@ export const TdpPage: FC = () => {
         setTuning(view);
         setAcTuning(view);
         setPreset(resolvedPreset(global.spl, global.sppt, global.fppt, global.preset, presets));
+        clearDraft();
         operationRef.current += 1;
         operationBusyRef.current = false;
         profileRequestRef.current += 1;
         setLoading(false);
-        showStatus(null);
+        setFailure(null);
       }
       setGame(next);
     };
@@ -1425,9 +1193,9 @@ export const TdpPage: FC = () => {
 
   // ── AC state ──────────────────────────────────────────────────────────────────
   // The enforce loop already reads the charger every five seconds to decide
-  // which profile applies, and now emits when the answer changes - so the panel
-  // subscribes instead of running its own three-second poll. Keep events during
-  // init and hidden time so a slow initial read cannot replace a newer event.
+  // which profile applies, and emits when the answer changes - so the panel
+  // subscribes instead of polling. Keep events during init and hidden time so a
+  // slow initial read cannot replace a newer event.
   useEffect(() => {
     const onPower = (ps: PowerSource) => {
       powerSourceRevisionRef.current += 1;
@@ -1453,27 +1221,25 @@ export const TdpPage: FC = () => {
     return () => { active = false; };
   }, [ready, visible]);
 
-  // ── Auto-apply game profile when game / ready / enabled changes ──────────────
+  // ── Show the game's profile when game / ready / enabled changes ─────────────
+  // The backend applies it: AppWatcher awaits set_active_app, which runs an
+  // enforce pass, before it notifies this page, so the panel only reads here.
   useEffect(() => {
     if (!ready) return;
     const scope = captureScope();
     const request = ++profileRequestRef.current;
-    let profileLoaded = false;
     profileReadyRef.current = null;
     setProfilePending(true);
     setProfileError("");
-    setProfileApplyError("");
     const current = (expected: string) =>
       scopeCurrent(scope) && request === profileRequestRef.current &&
       (AppWatcher.currentGame()?.appId ?? "") === expected;
 
-    const adoptGlobal = async (expected: string, restore: boolean) => {
+    const adoptGlobal = async (expected: string) => {
       const s = await getSettings();
       if (!current(expected)) return;
-      const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
-      const selected = resolvedPreset(w, sw, fw, s.active_preset, presets);
-      const view = !advancedTdpControl && selected === "custom"
-        ? simpleTuning(w, customCaps, minW) : fromAbsolute(w, sw, fw);
+      const { preset: selected, tuning: view } = savedTuning(s, s.active_preset, presets, advancedTdpControl, customCaps, minW);
+      clearDraft();
       setPerGame(false);
       setAcSeparate(false);
       setEditingAc(false);
@@ -1483,13 +1249,6 @@ export const TdpPage: FC = () => {
       setAcTuning(view);
       setPreset(selected);
       setGlobalProfile({ ...absolute(view), preset: s.active_preset || undefined });
-      profileLoaded = true;
-      if (restore && tdpAvailable) {
-        const result = await applyTdp(s.spl, s.sppt, s.fppt, "", s.active_preset || "", expected);
-        if (!current(expected)) return;
-        if (!result.success) throw new Error(result.stderr || "TDP apply failed");
-        globalRestorePendingRef.current = false;
-      }
     };
     const complete = (expected: string) => {
       if (!current(expected)) return;
@@ -1500,23 +1259,16 @@ export const TdpPage: FC = () => {
     const failed = (expected: string, error: unknown) => {
       if (!current(expected)) return;
       setProfilePending(false);
-      const message = error instanceof Error ? error.message : String(error);
-      if (profileLoaded) {
-        profileReadyRef.current = scope;
-        setProfileApplyError(message);
-      }
-      else setProfileError(message);
-      showError("LeGoTDP", error);
+      setProfileError(errorText(error));
+      notifyFailure("TDP", error);
     };
 
     if (!game || !enabled) {
       const expected = game?.appId ?? "";
-      const wasInGame = autoAppliedRef.current !== null;
-      if (enabled && wasInGame) globalRestorePendingRef.current = true;
       if (perGame) setPerGame(false);
-      autoAppliedRef.current = null;
+      if (!game) setProfileExists(false);
       // Initialization already supplies a complete no-game snapshot.
-      if (!game && noGameSyncedRef.current && (!globalRestorePendingRef.current || !tdpAvailable)) {
+      if (!game && noGameSyncedRef.current) {
         complete(expected);
         return;
       }
@@ -1526,7 +1278,7 @@ export const TdpPage: FC = () => {
       setEditingAc(false);
       (async () => {
         try {
-          await adoptGlobal(expected, enabled && globalRestorePendingRef.current);
+          await adoptGlobal(expected);
           complete(expected);
         } catch (e: unknown) {
           if (current(expected)) noGameSyncedRef.current = false;
@@ -1537,34 +1289,23 @@ export const TdpPage: FC = () => {
     }
 
     noGameSyncedRef.current = false;
-    autoAppliedRef.current = game.appId;
 
     (async () => {
       try {
         const requestedGame = game;
         const gp = await getGameProfile(requestedGame.appId);
         if (!current(requestedGame.appId)) return;
-        if (!gp.exists) {
-          if (gp.error) throw new Error(gp.error);
-          await adoptGlobal(requestedGame.appId, true);
-        } else {
-          if (!gp.profile) throw new Error("Game profile data is missing or corrupt.");
-          const applied = await applyGameProfile(
-            gp,
-            requestedGame.appId,
-            `Auto-applied profile for ${requestedGame.name}.`,
-            () => current(requestedGame.appId),
-            () => { if (current(requestedGame.appId)) profileLoaded = true; },
-          );
-          if (!applied) throw new Error("Could not apply the saved game profile.");
+        if (gp.error && !gp.exists) throw new Error(gp.error);
+        if (gp.exists && !gp.profile) throw new Error("Game profile data is missing or corrupt.");
+        // An unused profile is kept for later; the game runs on Global settings.
+        if (gp.exists && gp.active !== false) showGameProfile(gp);
+        else {
+          await adoptGlobal(requestedGame.appId);
+          if (current(requestedGame.appId)) setProfileExists(gp.exists);
         }
         complete(requestedGame.appId);
       } catch (e: unknown) {
-        if (current(game.appId)) {
-          // The failed apply can still have changed firmware before readback
-          // failed. Leaving this game must restore the global target too.
-          failed(game.appId, e);
-        }
+        failed(game.appId, e);
       }
     })();
     return () => { profileRequestRef.current += 1; };
@@ -1576,6 +1317,8 @@ export const TdpPage: FC = () => {
     if (!scope) return;
     const prevPreset = preset;
     const prevTuning = tuning, prevAcTuning = acTuning;
+    // A preset replaces the Custom sliders, so their draft is dropped without asking.
+    clearDraft();
     setPreset(key);
     if (key === "custom") {
       if (!advancedTdpControl) setActive(simpleTuning(active.spl, customCaps, minW));
@@ -1586,172 +1329,139 @@ export const TdpPage: FC = () => {
     const vals = presets[key];
     const next = normalise(fromAbsolute(vals.spl, vals.sppt, vals.fppt), caps, minW);
     if (editingAc) setAcTuning(next); else setTuning(next);
-
-    showStatus(null);
     const appId = (perGame && game) ? game.appId : "";
     const a = absolute(next);
     try {
       if (editingAc && appId) {
         const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, key);
         if (!operationCurrent(scope)) return;
-        if (r.success) {
-          setSavedAcPreset(key);
-        } else {
-          setPreset(prevPreset);
-          setAcTuning(prevAcTuning);
-        }
-        showStatus(r.success ? `AC: ${PRESET_LABELS[key]} saved for ${game!.name}.` : `Error: ${r.stderr || "unknown"}`);
+        if (!r.success) throw new Error(r.stderr || "The preset was not saved.");
+        setSavedAcPreset(key);
+        done(`${PRESET_LABELS[key]} saved for ${game!.name} on charger.`);
       } else {
         const r = await applyTdp(
           toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, key,
           scope.appId);
         if (!operationCurrent(scope)) return;
-        if (r.success) {
-          setProfileApplyError("");
-          if (!appId) setGlobalProfile({ ...a, preset: key });
-          else setSavedPreset(key);
-        } else {
-          setPreset(prevPreset);
-          setTuning(prevTuning);
-        }
-        showStatus(r.success
-          ? (appId ? `${PRESET_LABELS[key]} saved for ${game!.name}.` : `${PRESET_LABELS[key]} applied.`)
-          : `Error: ${r.stderr || "unknown"}`
-        );
+        if (!r.success) throw new Error(r.stderr || "The preset was not applied.");
+        if (!appId) setGlobalProfile({ ...a, preset: key });
+        else setSavedPreset(key);
+        done(appId ? `${PRESET_LABELS[key]} saved for ${game!.name}.` : `${PRESET_LABELS[key]} applied.`);
       }
     } catch (e: unknown) {
       if (!operationCurrent(scope)) return;
       setPreset(prevPreset);
       if (editingAc) setAcTuning(prevAcTuning); else setTuning(prevTuning);
-      showError("LeGoTDP", e);
+      showError("preset", e);
     } finally { finishOperation(scope); }
   };
-
-  // ── Per-game toggle ───────────────────────────────────────────────────────────
-  const handlePerGameToggle = async (checked: boolean) => {
-    const scope = beginOperation(tdpAvailable);
-    if (!scope) return;
+  // ── Settings for {game} ───────────────────────────────────────────────────────
+  const scope: Scope = !perGame ? "global" : acSeparate ? "game_ac" : "game";
+  const applyScope = async (next: Scope) => {
+    if (!game) return;
+    const op = beginOperation(tdpAvailable);
+    if (!op) return;
+    const app = game;
     try {
-    setPerGame(checked);
-    if (!tdpAvailable) {
-      showStatus(checked ? "CPU controls use this game's profile. TDP control is unavailable."
-        : "CPU controls use the global profile. TDP control is unavailable.");
-      return;
-    }
-    if (!checked && game) {
-      const prevAcSeparate = acSeparate, prevEditingAc = editingAc;
-      const prevSavedPreset = savedPreset, prevSavedAcPreset = savedAcPreset;
-      setAcSeparate(false);
-      setEditingAc(false);
-      setSavedPreset(undefined);
-      setSavedAcPreset(undefined);
-      let profileDeleted = false;
-      try {
-        const deleted = await deleteGameProfile(game.appId);
-        if (!operationCurrent(scope)) return;
-        if (!deleted.success) throw new Error(deleted.stderr || "Could not delete profile");
-        profileDeleted = true;
+      // Without a TDP provider the choice only selects which CPU settings to edit.
+      if (!tdpAvailable) { setPerGame(next !== "global"); return; }
+      if (next === "global") {
+        const result = await setGameProfileActive(app.appId, false);
+        if (!operationCurrent(op)) return;
+        if (!result.success) throw new Error(result.stderr || "Could not switch to Global settings.");
+        setPerGame(false); setAcSeparate(false); setEditingAc(false);
+        setSavedPreset(undefined); setSavedAcPreset(undefined);
         const s = await getSettings();
-        if (!operationCurrent(scope)) return;
-        const w = toW(s.spl), sw = toW(s.sppt), fw = toW(s.fppt);
-        setTuning(fromAbsolute(w, sw, fw));
-        setPreset(resolvedPreset(w, sw, fw, s.active_preset, presets));
-        setGlobalProfile({ spl: w, sppt: sw, fppt: fw, preset: s.active_preset || undefined });
-        showStatus("Switched to global settings.");
-      } catch (e: unknown) {
-        if (!operationCurrent(scope)) return;
-        if (!profileDeleted) {
-          setPerGame(true);
-          setAcSeparate(prevAcSeparate); setEditingAc(prevEditingAc);
-          setSavedPreset(prevSavedPreset); setSavedAcPreset(prevSavedAcPreset);
-        }
-        showError("LeGoTDP", e);
+        if (!operationCurrent(op)) return;
+        adoptGlobalSettings(s);
+        done(`${app.name} uses Global settings.`);
+        return;
       }
-      // Cleared last so the auto-apply effect cannot race the delete above.
-      autoAppliedRef.current = profileDeleted ? game.appId : null;
-    } else if (checked && game) {
-      try {
-        const gp = await getGameProfile(game.appId);
-        if (!operationCurrent(scope)) return;
-        if (!gp.exists) {
-          setSavedPreset(undefined);
-          setSavedAcPreset(undefined);
-          showStatus(`No saved profile for ${game.name}. Use sliders to create one.`);
-          autoAppliedRef.current = game.appId;
-        } else {
-          await applyGameProfile(gp, game.appId, `Profile applied for ${game.name}.`, () => operationCurrent(scope));
-        }
-      } catch (e: unknown) {
-        if (!operationCurrent(scope)) return;
-        setPerGame(false);
-        showError("LeGoTDP", e);
+      let profile: GameProfile | null = null;
+      if (!perGame) {
+        const result = await setGameProfileActive(app.appId, true);
+        if (!operationCurrent(op)) return;
+        if (!result.success) throw new Error(result.stderr || "Could not turn on this game's settings.");
+        profile = await getGameProfile(app.appId);
+        if (!operationCurrent(op)) return;
+        if (!profile.exists || !profile.profile) throw new Error("Game profile data is missing or corrupt.");
+        showGameProfile(profile);
       }
-    }
-    } finally { finishOperation(scope); }
+      const separate = profile ? profile.ac_separate : acSeparate;
+      if ((next === "game_ac") !== separate) {
+        // Hand the stored charger values back unchanged, so splitting again restores them.
+        const stored = profile ?? await getGameProfile(app.appId);
+        if (!operationCurrent(op)) return;
+        const ac = stored.ac_profile;
+        if (!stored.exists || !ac) throw new Error("Game profile data is missing or corrupt.");
+        const result = await setGameAcProfile(app.appId, ac.spl, ac.sppt, ac.fppt, next === "game_ac", "");
+        if (!operationCurrent(op)) return;
+        if (!result.success) throw new Error(result.stderr || "Could not change the charger settings.");
+        setAcSeparate(next === "game_ac");
+        setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, customCaps, minW).tuning);
+        setEditingAc(next === "game_ac" && acOnline);
+        setSavedAcPreset(next === "game_ac" ? (ac.ac_preset ?? "") : undefined);
+      }
+      done(next === "game_ac" ? `${app.name} has separate battery and charger settings.`
+        : `Only ${app.name} uses these settings.`);
+    } catch (e: unknown) {
+      if (!operationCurrent(op)) return;
+      showError("scope", e);
+      // A step may have landed before the failure; show what the backend kept.
+      setProfileAttempt(attempt => attempt + 1);
+    } finally { finishOperation(op); }
+  };
+
+  const deleteProfile = async () => {
+    if (!game) return;
+    const op = beginOperation();
+    if (!op) return;
+    const app = game;
+    try {
+      const deleted = await deleteGameProfile(app.appId);
+      if (!operationCurrent(op)) return;
+      if (!deleted.success) throw new Error(deleted.stderr || "Could not delete the profile.");
+      setPerGame(false); setProfileExists(false); setAcSeparate(false); setEditingAc(false);
+      setSavedPreset(undefined); setSavedAcPreset(undefined);
+      const s = await getSettings();
+      if (!operationCurrent(op)) return;
+      adoptGlobalSettings(s);
+      done(`Profile for ${app.name} deleted.`);
+    } catch (e: unknown) {
+      if (operationCurrent(op)) showError("delete", e);
+    } finally { finishOperation(op); }
   };
 
   // ── Enable / disable plugin ───────────────────────────────────────────────────
   const handleEnabledToggle = async (checked: boolean) => {
-    const scope = beginOperation();
-    if (!scope) return;
-    showStatus(null);
+    const op = beginOperation();
+    if (!op) return;
     try {
       const result = await setPluginEnabled(checked);
-      if (!operationCurrent(scope)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change plugin state");
+      if (!operationCurrent(op)) return;
+      if (!result.success) throw new Error(result.stderr || "Could not change TDP control.");
       setEnabled(checked);
-      showStatus(checked ? "Plugin enabled." : "Plugin disabled. Firmware defaults restored.");
+      done(checked ? "TDP control on." : "TDP control off. Lenovo's limits are back.");
     } catch (e: unknown) {
-      if (operationCurrent(scope)) showError("LeGoTDP", e);
-    } finally { finishOperation(scope); }
-  };
-
-  // ── AC separate toggle ────────────────────────────────────────────────────────
-  const handleAcSeparateToggle = async (checked: boolean) => {
-    if (!game) return;
-    const scope = beginOperation();
-    if (!scope) return;
-    const prevSavedAcPreset = savedAcPreset;
-    const prevEditingAc = editingAc;
-    const prevAcTuning = acTuning;
-    setAcSeparate(checked);
-    let use = acTuning;
-    if (checked && savedAcPreset === undefined) {
-      use = tuning;
-      setAcTuning(tuning);
-    }
-    if (!checked) {
-      setEditingAc(false);
-      setSavedAcPreset(undefined);
-    }
-    const a = absolute(use);
-    try {
-      const result = await setGameAcProfile(
-        game.appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), checked, "");
-      if (!operationCurrent(scope)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not save AC profile");
-    } catch (e: unknown) {
-      if (!operationCurrent(scope)) return;
-      setAcSeparate(!checked);
-      setSavedAcPreset(prevSavedAcPreset);
-      setEditingAc(prevEditingAc);
-      setAcTuning(prevAcTuning);
-      showError("LeGoTDP", e);
-    } finally { finishOperation(scope); }
+      if (operationCurrent(op)) showError("enabled", e);
+    } finally { finishOperation(op); }
   };
 
   // ── Extras: unlock extended TDP range ────────────────────────────────────────
   const handleExtrasUnlockedToggle = async (checked: boolean) => {
-    const scope = beginOperation();
-    if (!scope) return;
+    const op = beginOperation();
+    if (!op) return;
     try {
     try {
       const result = await setExtrasUnlockedCall(checked);
-      if (!operationCurrent(scope)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change Extras range");
+      if (!operationCurrent(op)) return;
+      if (!result.success) throw new Error(result.stderr || "Could not change the 50 W setting.");
       setExtrasUnlocked(checked);
+      setFailure(null);
+      // Enabling may have just downloaded the helper, which widens the caps.
+      if (checked) { const c = await readCaps(); if (operationCurrent(op)) adoptCaps(c); }
     } catch (e: unknown) {
-      if (operationCurrent(scope)) showError("LeGoTDP", e);
+      if (operationCurrent(op)) showError("extras", e);
       return;
     }
     if (checked) return;
@@ -1789,20 +1499,22 @@ export const TdpPage: FC = () => {
       if (perGame) setSavedPreset("custom");
     }
     if (acSeparate && atChanged) setSavedAcPreset("custom");
-    } finally { finishOperation(scope); }
+    } finally { finishOperation(op); }
   };
 
   const handleAdvancedTdpControlToggle = async (checked: boolean) => {
-    const scope = beginOperation();
-    if (!scope) return;
+    const op = beginOperation();
+    if (!op) return;
     try {
     try {
       const result = await setAdvancedTdpControlCall(checked);
-      if (!operationCurrent(scope)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change Advanced TDP Control");
+      if (!operationCurrent(op)) return;
+      if (!result.success) throw new Error(result.stderr || "Could not change Separate boost limits.");
       setAdvancedTdpControl(checked);
+      setFailure(null);
+      clearDraft();
     } catch (error) {
-      if (operationCurrent(scope)) showError("LeGoTDP", error);
+      if (operationCurrent(op)) showError("advanced", error);
       return;
     }
     if (!checked) {
@@ -1823,13 +1535,13 @@ export const TdpPage: FC = () => {
     } else {
       try {
         const settings = await getSettings();
-        if (!operationCurrent(scope)) return;
+        if (!operationCurrent(op)) return;
         const global = fromAbsolute(toW(settings.spl), toW(settings.sppt), toW(settings.fppt));
         setGlobalProfile({ ...absolute(global), preset: settings.active_preset });
         if (perGame && game) {
           const appId = game.appId;
           const profile = await getGameProfile(appId);
-          if (!operationCurrent(scope)) return;
+          if (!operationCurrent(op)) return;
           if (profile.exists) {
             const p = profile.profile;
             const ac = profile.ac_profile;
@@ -1840,68 +1552,63 @@ export const TdpPage: FC = () => {
           setTuning(global);
         }
       } catch (error) {
-        if (operationCurrent(scope)) showError("Could not refresh TDP sliders", error);
+        if (operationCurrent(op)) showError("advanced", error);
       }
     }
-    } finally { finishOperation(scope); }
+    } finally { finishOperation(op); }
   };
 
   // ── Apply (Custom mode only) ──────────────────────────────────────────────────
   const apply = async () => {
-    const scope = beginOperation();
-    if (!scope) return;
-    showStatus(null);
+    const op = beginOperation();
+    if (!op) return;
     const appId = (perGame && game) ? game.appId : "";
     const target = advancedTdpControl ? active : simpleTuning(active.spl, customCaps, minW);
     const a = absolute(target);
     try {
       if (editingAc && appId) {
         const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, "custom");
-        if (!operationCurrent(scope)) return;
-        if (r.success) {
-          setAcTuning(target);
-          setSavedAcPreset("custom");
-        }
-        showStatus(r.success ? `AC profile saved for ${game!.name}.` : `Error: ${r.stderr || "unknown"}`);
+        if (!operationCurrent(op)) return;
+        if (!r.success) throw new Error(r.stderr || "The limits were not saved.");
+        setAcTuning(target);
+        setSavedAcPreset("custom");
+        clearDraft();
+        done(`Saved for ${game!.name} on charger.`);
       } else {
         const r = await applyTdp(
           toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, "custom",
-          scope.appId);
-        if (!operationCurrent(scope)) return;
-        if (r.success) {
-          setTuning(target);
-          setProfileApplyError("");
-          if (!appId) setGlobalProfile({ ...a, preset: "custom" });
-          else setSavedPreset("custom");
-        }
-        showStatus(r.success
-          ? (appId ? `Profile saved for ${game!.name}.` : "Custom settings applied.")
-          : `Error: ${r.stderr || "unknown"}`
-        );
+          op.appId);
+        if (!operationCurrent(op)) return;
+        if (!r.success) throw new Error(r.stderr || "The limits were not applied.");
+        setTuning(target);
+        if (!appId) setGlobalProfile({ ...a, preset: "custom" });
+        else setSavedPreset("custom");
+        clearDraft();
+        done(appId ? `Saved for ${game!.name}.` : "Custom limits applied.");
       }
     } catch (e: unknown) {
-      if (operationCurrent(scope)) showError("LeGoTDP", e);
-    } finally { finishOperation(scope); }
+      if (operationCurrent(op)) showError("apply", e);
+    } finally { finishOperation(op); }
   };
 
   const handleHelperRetry = async () => {
-    const scope = beginOperation(false, false);
-    if (!scope) return;
+    const op = beginOperation(false, false);
+    if (!op) return;
     try {
       const result = await retryExtras();
-      if (!operationCurrent(scope)) return;
+      if (!operationCurrent(op)) return;
       if (!result.success) throw new Error(result.error || "Retry failed");
       const c = await readCaps();
-      if (operationCurrent(scope)) adoptCaps(c);
+      if (operationCurrent(op)) { adoptCaps(c); setFailure(null); }
     } catch (error) {
-      if (operationCurrent(scope)) showError("Extras recovery failed", error);
-    } finally { finishOperation(scope); }
+      if (operationCurrent(op)) showError("helper", error);
+    } finally { finishOperation(op); }
   };
 
   // ── Render ────────────────────────────────────────────────────────────────────
   if (!ready && setupErr) return (
     <PanelSection title="TDP status unavailable">
-      <PanelSectionRow><Field focusable label="Error" description={setupErr} /></PanelSectionRow>
+      {infoRow("Error", setupErr)}
       <PanelSectionRow><ButtonItem disabled={initializing} onClick={() => void initialize()}>
         Retry status
       </ButtonItem></PanelSectionRow>
@@ -1914,269 +1621,189 @@ export const TdpPage: FC = () => {
     </PanelSection>
   );
 
+  // What runs now: the game's charger values on AC when it has them, else its battery or the global values.
+  const running = perGame && acSeparate && acOnline ? acTuning : tuning;
+  const runningStored = !perGame ? globalProfile.preset : acSeparate && acOnline ? savedAcPreset : savedPreset;
+  const now = absolute(running);
+  const nowLabel = PRESET_LABELS[resolvedPreset(now.spl, now.sppt, now.fppt, runningStored, presets)];
+  const draw = info?.success && info.values?.package_draw != null ? ` · drawing ${info.values.package_draw.toFixed(1)} W` : "";
+  const enableDescription = failureFor("enabled") ?? (!enabled ? "Off · the console uses Lenovo's power limits."
+    : profilePending || profileError ? "Reading profile…"
+    : `${perGame && game ? game.name : "Global"}: ${nowLabel} · ${now.spl} W${draw}${
+      !extrasUnlocked && exceedsCaps(now.spl, now.sppt, now.fppt, stdCaps) ? " · above Lenovo's limit" : ""}`);
+    const presetDescription = failureFor("preset") ?? (preset === "custom" ? "Set your own limits below."
+    : `${PRESET_LABELS[preset]} · ${presets[preset].spl} W (boost ${presets[preset].sppt}/${presets[preset].fppt} W)`);
+  const scopeDescription = !game ? "" : failureFor("scope") ?? (scope === "global"
+    ? `${game.name} uses Global settings, shared by all games.`
+    : scope === "game" ? `Only ${game.name} uses these settings.`
+    : `${game.name} has separate settings on battery and on charger.`);
+  const sourceDescription = `${acOnline ? "Plugged in now." : "On battery now."}${editingAc === acOnline ? ""
+    : editingAc ? " Changes apply when you plug in." : " Changes apply when you unplug."}`;
+  const v: TdpValues = (info?.success && info.values) || {};
+  const watts = (value?: number) => value == null ? "–" : value.toFixed(0);
+
   return (
     <>
-      <PanelSection title="Profile overview">
-        <PanelSectionRow>
-          <Field focusable label={enabled && perGame && game
-            ? `${game.name}${acSeparate ? ` · ${editingAc ? "AC" : "Battery"}` : ""}`
-            : "Global profile"}
-            description={profilePending || profileError
-              ? "Profile settings have not been confirmed. Waiting for a fresh profile read."
-              : enabled
-              ? `Selected limits: ${active.spl} / ${active.spl + active.spptOff} / ${active.spl + active.fpptOff} W · ${acOnline ? "AC connected" : "Battery power"}`
-              : "TDP control off · using system defaults"} />
-        </PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="LeGoTDP">
+      {(!tdpAvailable || (!extrasAvailable && extrasUnlocked) || profileError) && <PanelSection>
+        {!tdpAvailable ? infoRow("TDP control unavailable", tdpError)
+          : !extrasAvailable && extrasUnlocked ? infoRow("50 W paused",
+            "Firmware limits are active until the 50 W helper is available. Saved profiles are kept.")
+          : null}
+        {profileError && <>
+          {infoRow("Could not load profile", profileError)}
+          <PanelSectionRow><ButtonItem layout="below" onClick={() => {
+            if (profilePending) return;
+            setProfilePending(true); setProfileError("");
+            setProfileAttempt(attempt => attempt + 1);
+          }}>Retry profile</ButtonItem></PanelSectionRow>
+        </>}
+      </PanelSection>}
+
+      <PanelSection title="Power">
         <PanelSectionRow>
           <ToggleField
-            label="Enable"
-            description={
-              enabled ? (
-                <span>
-                  <span style={{ fontSize: "11px", color: DIM_COLOR }}>Global Profile: </span>
-                  <span style={styles.profileTag}>{profileLabel(globalProfile.spl, globalProfile.sppt, globalProfile.fppt, globalProfile.preset, presets)}</span>
-                  {!extrasUnlocked && exceedsCaps(globalProfile.spl, globalProfile.sppt, globalProfile.fppt, stdCaps) && (
-                    <span style={{ fontSize: "11px", color: WARN_COLOR }}> ⚠ exceeds firmware limits</span>
-                  )}
-                </span>
-              ) : "Using system defaults"
-            }
+            label="Enable TDP control"
+            description={enableDescription}
             checked={enabled}
             disabled={cpuBusy || loading || !tdpAvailable}
             onChange={handleEnabledToggle}
           />
         </PanelSectionRow>
-        {status && !enabled && (
-          <PanelSectionRow>
-            <Focusable><div style={statusStyle(status)}>
-              {status}
-            </div></Focusable>
+        {enabled && game && <PanelSectionRow>
+          <DropdownItem
+            label={`Settings for ${game.name}`}
+            description={scopeDescription}
+            selectedOption={scope}
+            rgOptions={[{ data: "global", label: "Global" }, { data: "game", label: "This game" },
+              { data: "game_ac", label: "This game + charger" }]}
+            disabled={cpuBusy || loading}
+            onChange={option => { if (option.data !== scope && !cpuBusyOwnersRef.current.size) askDiscard(() => void applyScope(option.data)); }}
+          />
+        </PanelSectionRow>}
+        {enabled && game && perGame && acSeparate && <PanelSectionRow>
+          <DropdownItem
+            label="Edit settings for"
+            description={sourceDescription}
+            selectedOption={editingAc ? "charger" : "battery"}
+            rgOptions={[{ data: "battery", label: "Battery" }, { data: "charger", label: "Charger" }]}
+            disabled={cpuBusy || loading}
+            onChange={option => {
+              if ((option.data === "charger") === editingAc || cpuBusyOwnersRef.current.size) return;
+              askDiscard(() => { if (!cpuBusyOwnersRef.current.size) setEditingAc(option.data === "charger"); });
+            }}
+          />
+        </PanelSectionRow>}
+        {enabled && PRESET_ORDER.map(key => (
+          <PanelSectionRow key={key}>
+            <ButtonItem
+              layout="below"
+              description={preset === key ? presetDescription : undefined}
+              disabled={preset === key || loading || !tdpAvailable}
+              onClick={() => void handlePresetChange(key)}
+            >
+              {preset === key ? `> ${PRESET_LABELS[key]}` : PRESET_LABELS[key]}
+            </ButtonItem>
           </PanelSectionRow>
-        )}
+        ))}
       </PanelSection>
 
-      {enabled && <>
-        <PanelSection title="Game Profile">
+      {enabled && preset === "custom" && (
+        <PanelSection title={`Custom limits${dirty ? " · unsaved" : ""}`}>
           <PanelSectionRow>
-            <ToggleField
-              label="Per Game Profile"
-              description={
-                game ? (
-                  perGame ? (
-                    <span style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                      <span>{game.name}</span>
-                      <span style={{ display: "flex", flexDirection: "column", gap: "1px" }}>
-                        <span>
-                          <span style={{ fontSize: "11px", color: DIM_COLOR }}>Battery: </span>
-                          <span style={styles.profileTag}>
-                            {profileLabel(absolute(tuning).spl, absolute(tuning).sppt, absolute(tuning).fppt, savedPreset, presets)}
-                          </span>
-                        </span>
-                        {acSeparate && (
-                          <span>
-                            <span style={{ fontSize: "11px", color: DIM_COLOR }}>AC: </span>
-                            <span style={styles.profileTag}>
-                              {profileLabel(absolute(acTuning).spl, absolute(acTuning).sppt, absolute(acTuning).fppt, savedAcPreset, presets)}
-                            </span>
-                          </span>
-                        )}
-                      </span>
-                    </span>
-                  ) : game.name
-                ) : "No game running"
-              }
-              checked={perGame}
-              disabled={!game || cpuBusy || loading}
-              onChange={handlePerGameToggle}
+            <SliderField
+              label={`Sustained power · ${active.spl} W`}
+              value={active.spl} min={minW} max={customCaps.spl} step={1}
+              disabled={loading || !tdpAvailable}
+              onChange={advancedTdpControl ? handlers.onSpl
+                : (value) => editActive(simpleTuning(value, customCaps, minW))}
+              description={advancedTdpControl ? undefined : "Boost follows automatically."}
             />
           </PanelSectionRow>
-          {perGame && (
-            <PanelSectionRow>
-              <ToggleField
-                label="Separate AC Profile"
-                description={acSeparate
-                  ? "AC and battery have independent TDP, CPU Boost and EPP settings"
-                  : "Enable separate TDP, CPU Boost and EPP settings when charging"}
-                checked={acSeparate}
-                disabled={cpuBusy || loading || !tdpAvailable}
-                onChange={handleAcSeparateToggle}
-              />
-            </PanelSectionRow>
-          )}
-          {perGame && acSeparate && (
-            <>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => {
-                  if (!cpuBusyOwnersRef.current.size) setEditingAc(false);
-                }} disabled={!editingAc || cpuBusy || loading}>
-                  {!editingAc ? "> Battery profile" : "Battery profile"}
-                </ButtonItem>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => {
-                  if (!cpuBusyOwnersRef.current.size) setEditingAc(true);
-                }} disabled={editingAc || cpuBusy || loading}>
-                  {editingAc ? "> AC profile" : "AC profile"}
-                </ButtonItem>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <Focusable><div style={{ fontSize: "11px", fontWeight: "bold", color: acOnline ? OK_COLOR : WARN_COLOR }}>
-                  {acOnline ? "Charging (AC)" : "On battery"}
-                </div></Focusable>
-              </PanelSectionRow>
-            </>
-          )}
+          {advancedTdpControl && <>
+          <PanelSectionRow>
+            <SliderField
+              label={`Slow boost · +${active.spptOff} W`}
+              value={active.spptOff} min={0} max={om.sppt || 1} step={1}
+              disabled={om.sppt === 0 || loading || !tdpAvailable}
+              onChange={handlers.onSppt}
+              description={om.sppt === 0 ? "No room left at this power." : `Up to ${active.spl + active.spptOff} W.`}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <SliderField
+              label={`Fast boost · +${active.fpptOff} W`}
+              value={active.fpptOff} min={0} max={om.fppt || 1} step={1}
+              disabled={om.fppt === 0 || loading || !tdpAvailable}
+              onChange={handlers.onFppt}
+              description={om.fppt === 0 ? "No room left at this power." : `Up to ${active.spl + active.fpptOff} W.`}
+            />
+          </PanelSectionRow>
+          </>}
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={apply} disabled={loading || !tdpAvailable}
+              description={failureFor("apply") ?? (dirty ? "Unsaved changes" : undefined)}>
+              {operationLoading ? "Applying…"
+                : editingAc && game ? `Apply for ${game.name} on charger`
+                : perGame && game ? `Apply for ${game.name}`
+                : "Apply"}
+            </ButtonItem>
+          </PanelSectionRow>
         </PanelSection>
+      )}
 
-        <LivePanel />
-
-        <PanelSection title="Preset">
-          {PRESET_ORDER.map(key => (
-            <PanelSectionRow key={key}>
-              <ButtonItem
-                layout="below"
-                disabled={preset === key || loading || !tdpAvailable}
-                onClick={() => handlePresetChange(key)}
-              >
-                {preset === key ? `> ${PRESET_LABELS[key]}` : PRESET_LABELS[key]}
-              </ButtonItem>
-            </PanelSectionRow>
-          ))}
-          {status && preset !== "custom" && (
-            <PanelSectionRow>
-              <Focusable><div style={statusStyle(status)}>
-                {status}
-              </div></Focusable>
-            </PanelSectionRow>
-          )}
-        </PanelSection>
-
-        {preset === "custom" && (
-          <>
-            <PanelSection title={editingAc ? "TDP Limits (AC)" : "TDP Limits"}>
-              <PanelSectionRow>
-                <SliderField
-                  label={advancedTdpControl ? `SPL (TDP) - ${active.spl} W` : `TDP - ${active.spl} W`}
-                  value={active.spl} min={minW} max={customCaps.spl} step={1}
-                  disabled={loading || !tdpAvailable}
-                  onChange={advancedTdpControl ? handlers.onSpl
-                    : (value) => setActive(simpleTuning(value, customCaps, minW))}
-                  description={advancedTdpControl ? "Sustained power limit - the main TDP dial"
-                    : `SPPT follows at +10 W (up to ${customCaps.sppt} W); FPPT at +15 W (up to ${customCaps.fppt} W)`}
-                />
-              </PanelSectionRow>
-              {advancedTdpControl && <>
-              <PanelSectionRow>
-                <SliderField
-                  label={`SPPT +${active.spptOff} W  =  ${active.spl + active.spptOff} W`}
-                  value={active.spptOff} min={0} max={om.sppt || 1} step={1}
-                  disabled={om.sppt === 0 || loading || !tdpAvailable}
-                  onChange={handlers.onSppt}
-                  description={om.sppt === 0
-                    ? "No headroom left at this SPL"
-                    : `Slow limit headroom above SPL (max +${om.sppt} W here)`}
-                />
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <SliderField
-                  label={`FPPT +${active.fpptOff} W  =  ${active.spl + active.fpptOff} W`}
-                  value={active.fpptOff} min={0} max={om.fppt || 1} step={1}
-                  disabled={om.fppt === 0 || loading || !tdpAvailable}
-                  onChange={handlers.onFppt}
-                  description={om.fppt === 0
-                    ? "No headroom left at this SPL"
-                    : `Fast limit headroom above SPL (max +${om.fppt} W here)`}
-                />
-              </PanelSectionRow>
-              </>}
-            </PanelSection>
-
-            <PanelSection title="Action">
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={apply} disabled={loading || !tdpAvailable}>
-                  {loading ? "Applying..."
-                    : editingAc && game ? `Save AC for ${game.name}`
-                    : perGame && game ? `Apply & Save for ${game.name}`
-                    : "Apply TDP"}
-                </ButtonItem>
-              </PanelSectionRow>
-              {status && (
-                <PanelSectionRow>
-                  <Focusable><div style={statusStyle(status)}>
-                    {status}
-                  </div></Focusable>
-                </PanelSectionRow>
-              )}
-            </PanelSection>
-          </>
-        )}
-      </>}
-
-      {(profileError || profileApplyError) && <PanelSection title={profileError ? "Profile unavailable" : "Profile apply failed"}>
-        <PanelSectionRow><Field focusable label={profileError ? "Could not load profile" : "Could not apply TDP profile"}
-          description={profileError || profileApplyError} /></PanelSectionRow>
-        <PanelSectionRow><ButtonItem onClick={() => {
-          if (profilePending) return;
-          setProfilePending(true); setProfileError(""); setProfileApplyError("");
-          setProfileAttempt(attempt => attempt + 1);
-        }}>Retry profile</ButtonItem></PanelSectionRow>
-      </PanelSection>}
       {!profilePending && !profileError && <CpuPowerControlsSection
         key={`${enabled}:${game?.appId ?? ""}:${perGame}:${acSeparate && editingAc}`}
         appId={enabled && perGame && game ? game.appId : ""}
         acProfile={!!(enabled && perGame && game && acSeparate && editingAc)}
         expectedAppId={game?.appId ?? ""}
-        scopeLabel={enabled && perGame && game
-          ? `${game.name}${acSeparate ? ` - ${editingAc ? "AC" : "Battery"}` : ""} profile`
-          : "Global profile"}
         powerSource={acOnline}
         onBusyChange={onCpuBusyChange}
+        onCompatibilityNote={setCpuNote}
       />}
-      {(!tdpAvailable || (!extrasAvailable && (helperRetryAvailable || extrasUnlocked))) && (
-        <PanelSection title={tdpAvailable ? "Extras temporarily unavailable" : "TDP temporarily unavailable"}>
-          <PanelSectionRow>
-            <Field focusable label={tdpAvailable ? "Saved profiles are preserved" : "TDP control unavailable"}
-              description={tdpAvailable
-                ? "Firmware limits are active until the verified Extras helper is available again."
-                : `${tdpError} CPU Boost and EPP availability is shown in CPU Power Controls.`} />
-          </PanelSectionRow>
-          {helperRetryAvailable && (
-          <PanelSectionRow>
-            <ButtonItem disabled={operationLoading} onClick={handleHelperRetry}>Retry Extras download</ButtonItem>
-          </PanelSectionRow>
-          )}
-        </PanelSection>
-      )}
-      <PanelSection title="Extras">
+
+      <PanelSection title="More">
         <PanelSectionRow>
           <ToggleField
-            label="Advanced TDP Control"
-            description="Show separate SPPT and FPPT sliders in Custom mode"
+            label="Separate boost limits"
+            description={failureFor("advanced") ?? "Set slow and fast boost yourself in Custom."}
             checked={advancedTdpControl}
             disabled={loading || !tdpAvailable}
             onChange={handleAdvancedTdpControlToggle}
           />
         </PanelSectionRow>
-        {extrasAvailable && <>
-          <PanelSectionRow>
-            <Focusable><div style={styles.infoBox}>
-              Unlocking 50 W overrides the manufacturer's TDP safety limits.
-            </div></Focusable>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ToggleField
-              label={`Unlock Custom TDP to ${maxCaps.spl} W`}
-              description={extrasUnlocked
-                ? `Custom sliders extended to ${maxCaps.spl} W - applied via ryzenadj instead of firmware`
-                : `Enable to allow Custom sliders up to ${maxCaps.spl} W`}
-              checked={extrasUnlocked}
-              disabled={loading || !tdpAvailable}
-              onChange={handleExtrasUnlockedToggle}
-            />
-          </PanelSectionRow>
-        </>}
+        {(extrasAvailable || helperRetryAvailable) && <PanelSectionRow>
+          <ToggleField
+            label={`Allow up to ${FALLBACK_MAX.spl} W`}
+            description={failureFor("extras") ?? (extrasUnlocked
+              ? `Custom goes up to ${FALLBACK_MAX.spl} W. Turning off lowers profiles above ${stdCaps.spl} W.`
+              : extrasAvailable ? "Beyond Lenovo's limits. Hotter, louder, shorter battery."
+              : "Downloads a verified helper from GitHub first.")}
+            checked={extrasUnlocked}
+            disabled={loading || !tdpAvailable}
+            onChange={checked => checked ? confirmAction(`Allow up to ${FALLBACK_MAX.spl} W?`,
+              "This goes beyond Lenovo's power limits. The console runs hotter and louder, and the battery drains faster."
+                + (extrasAvailable ? "" : " Companion first downloads the verified RyzenAdj helper from GitHub."),
+              `Allow ${FALLBACK_MAX.spl} W`, () => void handleExtrasUnlockedToggle(true))
+              : void handleExtrasUnlockedToggle(false)}
+          />
+        </PanelSectionRow>}
+        {enabled && game && profileExists && <PanelSectionRow>
+          <ButtonItem layout="below" disabled={loading} description={failureFor("delete")}
+            onClick={() => confirmAction(`Delete profile for ${game.name}?`,
+              `Its power, CPU Boost and energy settings are removed. ${game.name} will use Global settings.`,
+              "Delete", () => void deleteProfile())}>
+            {`Delete profile for ${game.name}`}
+          </ButtonItem>
+        </PanelSectionRow>}
+        {helperRetryAvailable && (!tdpAvailable || (!extrasAvailable && extrasUnlocked)) && <PanelSectionRow>
+          <ButtonItem layout="below" disabled={operationLoading} description={failureFor("helper")}
+            onClick={handleHelperRetry}>Retry helper download</ButtonItem>
+        </PanelSectionRow>}
+        {detailsRows(details, () => setDetails(value => !value), [
+          ["Limits now", info?.success ? `SPL ${watts(v.spl_limit)} · SPPT ${watts(v.sppt_limit)} · FPPT ${watts(v.fppt_limit)} W` : "—"],
+          ["Set by", v.source || "—"],
+          ...(cpuNote ? [["CPU energy", cpuNote] as [string, string]] : []),
+        ])}
       </PanelSection>
     </>
   );

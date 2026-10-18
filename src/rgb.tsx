@@ -6,15 +6,14 @@ import {
   ButtonItem,
   DropdownItem,
   DropdownOption,
-  Field,
   gamepadSliderClasses,
   PanelSection,
   PanelSectionRow,
   SliderField,
-  Spinner,
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
 
 interface RgbSettings {
   configured: boolean;
@@ -70,11 +69,10 @@ interface RgbResult {
   status?: RgbStatus;
 }
 
-let rgbMutationChain: Promise<void> = Promise.resolve();
-let rgbMutationsPending = 0;
+const mutations = mutationQueue();
 const readRgbStatus = callable<[], RgbStatus>("rgb_get_status");
 export const getRgbStatus = async () => {
-  if (rgbMutationsPending) await rgbMutationChain;
+  if (mutations.pending) await mutations.tail;
   return readRgbStatus();
 };
 const setControlEnabled = callable<[boolean], RgbResult>("rgb_set_control_enabled");
@@ -93,15 +91,17 @@ const EFFECT_LABELS: Record<string, string> = {
   rainbow: "Rainbow",
 };
 
+type Gesture = "color" | "brightness" | "speed";
+
 const effectLabel = (effect?: string) => EFFECT_LABELS[effect ?? ""] ?? "Custom";
 
 export const rgbSummary = (status?: RgbStatus) => {
-  if (!status?.settings) return "Joystick rings and power button";
+  if (!status?.settings) return "Stick lights and power button light";
   const lighting = status.settings.control_enabled
     ? status.settings.rings_enabled
       ? effectLabel(status.settings.effect)
-      : "Rings off"
-    : "RGB control off";
+      : "Stick lights off"
+    : "Lighting control off";
   const power = status.power_led?.current;
   return `${lighting} · Power light ${power == null ? "unknown" : power ? "on" : "off"}`;
 };
@@ -151,17 +151,18 @@ const RGBSliderStyles: FC<{ hue: number; saturation: number }> = ({
   `}</style>
 );
 
-export const RgbPage: FC = () => {
-  const visible = useQuickAccessVisible();
+export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+  const visible = useQuickAccessVisible() && tabShown;
   const [status, setStatus] = useState<RgbStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  // The control whose last change failed shows that error until the next change.
+  const [failed, setFailed] = useState<{control: string; text: string} | null>(null);
   const pendingCount = useRef(0);
-  const pendingWrites = useRef<Record<string, () => void>>({});
-  const colorTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const brightnessTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const speedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Debounced slider gestures, one per kind: timer, flush callback and version.
+  const pendingWrites = useRef<Partial<Record<Gesture, () => void>>>({});
+  const gestureTimers = useRef<Partial<Record<Gesture, ReturnType<typeof setTimeout>>>>({});
+  const gestureVersions = useRef<Partial<Record<Gesture, number>>>({});
   const mounted = useRef(true);
   const isVisible = useRef(visible);
   const readRevision = useRef(0);
@@ -170,21 +171,16 @@ export const RgbPage: FC = () => {
   const drafts = useRef<Partial<RgbSettings>>({});
   const draftVersions = useRef<Partial<Record<keyof RgbSettings, number>>>({});
   const draftSequence = useRef(0);
-  const colorVersion = useRef(0);
-  const brightnessVersion = useRef(0);
-  const speedVersion = useRef(0);
   isVisible.current = visible;
   useEffect(() => { mounted.current = true; return () => {
     mounted.current = false; readRevision.current += 1;
   }; }, []);
 
-  const timersPending = () => colorTimer.current != null || brightnessTimer.current != null || speedTimer.current != null;
+  const timersPending = () => Object.keys(gestureTimers.current).length > 0;
 
   const flushPendingWrites = useCallback(() => {
-    for (const timer of [colorTimer, brightnessTimer, speedTimer]) {
-      if (timer.current != null) clearTimeout(timer.current);
-      timer.current = undefined;
-    }
+    for (const timer of Object.values(gestureTimers.current)) clearTimeout(timer);
+    gestureTimers.current = {};
     const writes = Object.values(pendingWrites.current);
     pendingWrites.current = {};
     for (const flush of writes) flush();
@@ -197,7 +193,7 @@ export const RgbPage: FC = () => {
     try {
       // An older page may still be flushing accepted slider/button edits.
       // Its complete mutation tail must precede this page's status snapshot.
-      if (rgbMutationsPending) await rgbMutationChain;
+      if (mutations.pending) await mutations.tail;
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       const next = await getRgbStatus();
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
@@ -235,7 +231,8 @@ export const RgbPage: FC = () => {
     } : current);
   }, []);
 
-  const enqueue = useCallback((operation: () => Promise<RgbResult>, fields: Array<keyof RgbSettings> = [], persistAfterClose = false) => {
+  const enqueue = useCallback((operation: () => Promise<RgbResult>, control: string,
+    fields: Array<keyof RgbSettings> = [], persistAfterClose = false) => {
     // Debounced gestures accepted while mounted still flush on close. New
     // callbacks from a discarded page must not initiate hardware changes.
     if (!mounted.current && !persistAfterClose) return Promise.resolve();
@@ -248,11 +245,11 @@ export const RgbPage: FC = () => {
       }
     };
     pendingCount.current += 1;
-    rgbMutationsPending += 1;
     if (mounted.current) setBusy(true);
     const run = async () => {
       let needsRefresh = false;
-      if (mounted.current) { setError(""); setNotice(""); }
+      if (mounted.current) { setError(""); setFailed(null); }
+      const fail = (text: string) => { setFailed({ control, text }); toaster.toast({ title: "Lighting", body: text }); };
       try {
         const result = await operation();
         if (!mounted.current) return;
@@ -261,19 +258,15 @@ export const RgbPage: FC = () => {
           setStatus({ ...result.status, settings: { ...result.status.settings, ...drafts.current } });
         } else if (result.status) setStatus(result.status);
         else needsRefresh = true;
-        if (result.success) setNotice("The lighting state was applied and saved.");
-        else {
-          setError(result.error || "The hardware did not confirm the change.");
-          toaster.toast({ title: "Lighting change failed", body: result.error || "The hardware did not confirm the change." });
-        }
+        if (!result.success) fail(result.error || "The lights did not confirm the change.");
+        else if (control === "restore") toaster.toast({ title: "Lighting", body: "Original lighting restored." });
       } catch {
         needsRefresh = true;
         if (!mounted.current) return;
         settleDrafts();
-        setError("The backend call ended before the lighting state was verified.");
-        toaster.toast({ title: "Lighting change failed", body: "The save could not be confirmed. Reopen Lighting to check the current state." });
+        fail("The change could not be confirmed. Reopen Lighting to check the current state.");
       } finally {
-        rgbMutationsPending -= 1;
+        mutations.done();
         pendingCount.current -= 1;
         if (mounted.current && pendingCount.current === 0) {
           setBusy(false);
@@ -281,69 +274,31 @@ export const RgbPage: FC = () => {
         }
       }
     };
-    const queued = rgbMutationChain.then(run, run);
-    rgbMutationChain = queued.catch(() => undefined);
-    return queued;
+    return mutations.push(run);
   }, [flushPendingWrites, refresh]);
 
-  const scheduleColor = useCallback((hue: number, saturation: number) => {
+  // Show a slider gesture now; save only its final value after a short pause.
+  // A superseded or already flushed callback cannot write again.
+  const schedule = useCallback((gesture: Gesture, patch: Partial<RgbSettings>, write: () => Promise<RgbResult>) => {
     if (!mounted.current) return;
-    updateLocal({ hue, saturation });
-    if (colorTimer.current) clearTimeout(colorTimer.current);
-    const version = ++colorVersion.current;
+    updateLocal(patch);
+    const previous = gestureTimers.current[gesture];
+    if (previous != null) clearTimeout(previous);
+    const version = gestureVersions.current[gesture] = (gestureVersions.current[gesture] ?? 0) + 1;
     let flushed = false;
     const flush = () => {
-      if (flushed || version !== colorVersion.current) return;
+      if (flushed || version !== gestureVersions.current[gesture]) return;
       flushed = true;
-      colorTimer.current = undefined;
-      delete pendingWrites.current.color;
-      void enqueue(() => setColor(hue, saturation), ["hue", "saturation"], true);
+      delete gestureTimers.current[gesture];
+      delete pendingWrites.current[gesture];
+      void enqueue(write, gesture, Object.keys(patch) as Array<keyof RgbSettings>, true);
     };
-    pendingWrites.current.color = flush;
-    colorTimer.current = setTimeout(flush, 450);
+    pendingWrites.current[gesture] = flush;
+    gestureTimers.current[gesture] = setTimeout(flush, 450);
   }, [enqueue, updateLocal]);
+  const scheduleColor = (hue: number, saturation: number) => schedule("color", { hue, saturation }, () => setColor(hue, saturation));
 
-  const scheduleBrightness = useCallback((brightness: number) => {
-    if (!mounted.current) return;
-    updateLocal({ brightness });
-    if (brightnessTimer.current) clearTimeout(brightnessTimer.current);
-    const version = ++brightnessVersion.current;
-    let flushed = false;
-    const flush = () => {
-      if (flushed || version !== brightnessVersion.current) return;
-      flushed = true;
-      brightnessTimer.current = undefined;
-      delete pendingWrites.current.brightness;
-      void enqueue(() => setBrightness(brightness), ["brightness"], true);
-    };
-    pendingWrites.current.brightness = flush;
-    brightnessTimer.current = setTimeout(flush, 450);
-  }, [enqueue, updateLocal]);
-
-  const scheduleSpeed = useCallback((speed: number) => {
-    if (!mounted.current) return;
-    updateLocal({ speed });
-    if (speedTimer.current != null) clearTimeout(speedTimer.current);
-    const version = ++speedVersion.current;
-    let flushed = false;
-    const flush = () => {
-      if (flushed || version !== speedVersion.current) return;
-      flushed = true;
-      speedTimer.current = undefined;
-      delete pendingWrites.current.speed;
-      void enqueue(() => setSpeed(speed), ["speed"], true);
-    };
-    pendingWrites.current.speed = flush;
-    speedTimer.current = setTimeout(flush, 450);
-  }, [enqueue, updateLocal]);
-
-  if (!status?.settings) {
-    return <PanelSection><PanelSectionRow>{error
-      ? <Field focusable label="Lighting status unavailable" description={error} />
-      : <Spinner />}</PanelSectionRow>
-      {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
-    </PanelSection>;
-  }
+  if (!status?.settings) return statusPlaceholder({ label: "Lighting status unavailable", error, onRetry: () => void refresh() });
 
   const settings = status.settings;
   const rgb = status.rgb;
@@ -361,52 +316,43 @@ export const RgbPage: FC = () => {
   const powerChecked = settings.power_led_managed
     ? settings.power_led_enabled
     : power?.current ?? true;
-  const canRestore = settings.control_enabled || settings.power_led_managed;
+  const failure = (control: string) => failed?.control === control ? failed.text : undefined;
+  const swatch = <span aria-label="Stick light color" style={{ display: "inline-block", width: "0.8em", height: "0.8em",
+    borderRadius: "50%", marginRight: "6px", verticalAlign: "middle",
+    background: hsvCss(settings.hue, settings.saturation, settings.brightness) }} />;
 
   return (
     <>
-      {status.recovery_required && (
-        <PanelSection title="Recovery required">
-          <PanelSectionRow>
-            <Field
-              focusable
-              label="Lighting controls are temporarily locked"
-              description="Companion is restoring the last complete hardware state after an interrupted change."
-            />
-          </PanelSectionRow>
-        </PanelSection>
-      )}
-
-      <PanelSection title="RGB basic settings">
+      <PanelSection title="Lighting">
+        {status.recovery_required ? infoRow("Lighting is restoring its last state", "Controls unlock when it finishes.")
+          : error && infoRow("Lighting status not updated", error)}
         <PanelSectionRow>
           <ToggleField
-            label="Enable RGB control"
-            description="Let Companion manage the joystick-ring lights and restore their saved state after startup or wake."
+            label="Enable lighting control"
+            description={failure("enabled") ?? (rgb?.supported === true
+              ? "Companion sets the stick lights and restores them after sleep."
+              : `Not available: ${rgb?.reason ?? "the controller lights were not detected."}`)}
             checked={settings.control_enabled}
             disabled={blocked || rgb?.supported !== true}
-            onChange={(value) => void enqueue(() => setControlEnabled(value))}
+            onChange={(value) => void enqueue(() => setControlEnabled(value), "enabled")}
           />
         </PanelSectionRow>
-        {rgb?.supported !== true && (
-          <PanelSectionRow>
-            <Field focusable label="Joystick-ring control unavailable" description={rgb?.reason ?? "The controller interface was not detected."} />
-          </PanelSectionRow>
-        )}
         {settings.control_enabled && (
           <PanelSectionRow>
             <ToggleField
-              label="Joystick ring lights"
-              description="Turn both controller rings on or off."
+              label="Stick lights"
+              description={failure("rings") ?? (rgb?.drift ? "Restoring saved state…" : undefined)}
               checked={settings.rings_enabled}
               disabled={blocked}
-              onChange={(value) => void enqueue(() => setRingsEnabled(value))}
+              onChange={(value) => void enqueue(() => setRingsEnabled(value), "rings")}
             />
           </PanelSectionRow>
         )}
-        {settings.control_enabled && settings.rings_enabled && (
+        {settings.control_enabled && settings.rings_enabled && <>
           <PanelSectionRow>
             <DropdownItem
-              label="Lighting effect"
+              label="Effect"
+              description={failure("effect")}
               strDefaultLabel={effectLabel(settings.effect)}
               selectedOption={"data" in (selectedEffect ?? {}) ? selectedEffect?.data : settings.effect}
               rgOptions={effectOptions}
@@ -414,24 +360,9 @@ export const RgbPage: FC = () => {
               onChange={(option) => {
                 const effect = String(option.data);
                 updateLocal({ effect });
-                void enqueue(() => setEffect(effect), ["effect"]);
+                void enqueue(() => setEffect(effect), "effect", ["effect"]);
               }}
             />
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-      {settings.control_enabled && settings.rings_enabled && (
-        <PanelSection title="Primary Zone">
-          <PanelSectionRow>
-            <Field focusable label="Selected color" description={usesColor ? "Preview for both controller rings. Used by Solid and Breathing effects." : "This hardware effect cycles its own colors."}>
-              <span aria-label="Selected joystick ring color preview" style={{ display: "flex", gap: "12px" }}>
-                {["Left", "Right"].map(side => <span key={side} role="img" aria-label={`${side} joystick ring preview`}
-                  style={{ display: "block", width: "1.8em", height: "1.8em", borderRadius: "50%",
-                    border: `3px solid ${hsvCss(settings.hue, settings.saturation, settings.brightness)}`,
-                    opacity: settings.control_enabled && settings.rings_enabled ? 1 : 0.35 }} />)}
-              </span>
-            </Field>
           </PanelSectionRow>
           {usesColor && (
             <>
@@ -439,6 +370,7 @@ export const RgbPage: FC = () => {
                 <SliderField
                   className="LegionGo2RgbHue"
                   label="Hue"
+                  description={failure("color") ?? <span>{swatch}Both stick lights.</span>}
                   value={settings.hue}
                   min={0}
                   max={359}
@@ -469,6 +401,7 @@ export const RgbPage: FC = () => {
             <SliderField
               className="LegionGo2RgbBrightness"
               label="Brightness"
+              description={failure("brightness")}
               value={settings.brightness}
               min={0}
               max={100}
@@ -476,14 +409,14 @@ export const RgbPage: FC = () => {
               showValue
               valueSuffix="%"
               disabled={blocked}
-              onChange={(value) => scheduleBrightness(Math.round(value))}
+              onChange={(value) => { const brightness = Math.round(value); schedule("brightness", { brightness }, () => setBrightness(brightness)); }}
             />
           </PanelSectionRow>
           {usesSpeed && (
             <PanelSectionRow>
               <SliderField
                 label="Speed"
-                description={settings.speed <= 25 ? "Slow" : settings.speed >= 75 ? "Fast" : "Medium"}
+                description={failure("speed")}
                 value={settings.speed <= 25 ? 0 : settings.speed >= 75 ? 100 : 50}
                 min={0}
                 max={100}
@@ -496,59 +429,33 @@ export const RgbPage: FC = () => {
                   { notchIndex: 2, label: "Fast", value: 100 },
                 ]}
                 disabled={blocked}
-                onChange={(value) => scheduleSpeed(Math.round(value))}
+                onChange={(value) => { const speed = Math.round(value); schedule("speed", { speed }, () => setSpeed(speed)); }}
               />
             </PanelSectionRow>
           )}
           <RGBSliderStyles hue={settings.hue} saturation={settings.saturation} />
-        </PanelSection>
-      )}
+        </>}
+      </PanelSection>
 
       <PanelSection title="Power button">
         <PanelSectionRow>
           <ToggleField
             label="Power button light"
-            description={power?.supported
-              ? `Use the power-button LED state on this audited Go 2 BIOS${power.bios ? ` (${power.bios})` : ""}.`
-              : power?.reason ?? "The power-button interface is unavailable."}
+            description={failure("power") ?? (power?.supported
+              ? `Turn the light in the power button on or off.${power.drift ? " Restoring saved state…" : ""}`
+              : power?.reason ?? "The power button light is unavailable.")}
             checked={powerChecked}
             disabled={blocked || power?.supported !== true}
-            onChange={(value) => void enqueue(() => setPowerLed(value))}
+            onChange={(value) => void enqueue(() => setPowerLed(value), "power")}
           />
         </PanelSectionRow>
-        {power?.drift && (
-          <PanelSectionRow>
-            <Field focusable label="Power light setting drifted" description="Companion will restore the saved state automatically." />
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-      <PanelSection title="Safety">
+        {/* The page's last row is always enabled; the backend refuses it during recovery. */}
         <PanelSectionRow>
-          <Field
-            focusable
-            label="Hardware effects only"
-            description="Animations run in controller firmware. Companion performs no frame-by-frame RGB work and only checks for drift once per minute."
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={blocked || !canRestore}
-            onClick={() => void enqueue(restoreOriginal)}
-          >
-            Restore lighting state from before Companion
+          <ButtonItem layout="below" description={failure("restore") ?? "Returns the lights to how they were before Companion."}
+            onClick={() => void enqueue(restoreOriginal, "restore")}>
+            Restore original lighting
           </ButtonItem>
         </PanelSectionRow>
-        {(error || notice || rgb?.drift) && (
-          <PanelSectionRow>
-            <Field
-              focusable
-              label={error ? "Could not complete" : rgb?.drift ? "Restoring saved RGB state" : "Result"}
-              description={error || (rgb?.drift ? "A different component changed the joystick rings; Companion will reconcile them." : notice)}
-            />
-          </PanelSectionRow>
-        )}
       </PanelSection>
     </>
   );

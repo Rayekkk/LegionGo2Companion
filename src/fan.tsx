@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
-import { callable, useQuickAccessVisible } from "@decky/api";
-import { ButtonItem, Field, PanelSection, PanelSectionRow, ToggleField, Focusable, GamepadButton,
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, GamepadButton,
   DropdownItem, Dropdown, DialogHeader, DialogBody, DialogLabel,
   DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
+import { errorText, infoRow } from "./shared";
 
 export type Curve = [number, number][];
 export interface FanState {
@@ -34,7 +35,7 @@ const setEnabled = (enabled: boolean) => timed(() => requestEnabled(enabled));
 const saveCurve = (scope: string, curve: Curve | null, revision: number) => timed(() => requestCurve(scope, curve, revision));
 const saveUnit = (unit: "rpm" | "percent", revision: number) => timed(() => requestUnit(unit, revision));
 const saveAssignments = (enabled: boolean, revision: number) => timed(() => requestAssignments(enabled, revision));
-const ASSIGNMENT_NOTE = "Applies to Companion TDP presets, not SteamOS QAM Performance profiles.";
+const ASSIGNMENT_NOTE = "Each Companion TDP preset can have its own curve (not Steam's Performance setting). Others use the global curve.";
 let chain: Promise<void> = Promise.resolve();
 export const getFanState = async (wanted = () => true) => {
   await chain;
@@ -68,23 +69,44 @@ export const fanReadingLabel = (state?: FanState, now = Date.now()) => {
       !Number.isFinite(r.apu_temperature) || !Number.isInteger(r.rpm)) return `APU — · ${state ? speedLabel(undefined, state) : "— RPM"}`;
   return `APU ${r.apu_temperature!.toFixed(1)}°C · ${speedLabel(r.rpm, state!)}`;
 };
-export const fanMode = (state?: FanState) => !state ? "Reading fan state…"
-  : state.error ? "Fan Control needs attention" : !state.supported ? "Fan Control unavailable"
-  : !state.settings.enabled && state.ownership?.blocked ? "Fan Control blocked"
-  : state.settings.enabled ? `${title(state.active_curve)} custom curve`
-  : state.readings?.valid && state.readings.automatic === false ? "External fan control"
-  : state.telemetry && !state.telemetry.automatic ? "Fan recovery pending" : "Firmware automatic";
+const STARTING_STUCK_MS = 30000;
+/**
+ * One status for every fan view, evaluated top-down from fields the backend
+ * already returns: a headline, and the line the toggle shows (detail).
+ * `startingFor` is how long the curve has been starting, for the stuck hint.
+ */
+export const fanStatus = (state?: FanState, startingFor = 0): { headline: string; detail?: string } => {
+  if (!state) return { headline: "Reading fan…" };
+  if (!state.supported) return { headline: "Not available on this console", detail: state.error || undefined };
+  const enabled = state.settings.enabled;
+  // Pause/retry keeps Fan Control on and reports why; a latched fault turns it off.
+  if (enabled && state.error) return { headline: "Paused, resuming automatically", detail: "No action needed." };
+  if (enabled && !state.telemetry?.active) return { headline: "Starting your curve…", detail: startingFor >= STARTING_STUCK_MS
+    ? "Still starting. Turn Fan Control off and on to retry." : "No action needed." };
+  if (!enabled && state.error) return { headline: "Turned off after an error", detail: `${state.error} Turn on to try again.` };
+  if (!enabled && state.ownership?.blocked) return { headline: "Another app controls the fan", detail: state.ownership.reason };
+  if (enabled) return { headline: state.active_curve === "global" ? "Global curve" : `${title(state.active_curve)} TDP curve`,
+    detail: "Turn off to return the fan to automatic." };
+  if (state.readings?.valid && state.readings.automatic === false) return { headline: "Another app controls the fan" };
+  if (state.telemetry && !state.telemetry.automatic) return { headline: "Returning fan to automatic…", detail: "No action needed." };
+  return { headline: "Automatic", detail: state.settings.assign_tdp_presets
+    ? "Global curve with optional Companion TDP assignments." : "Uses your saved global curve." };
+};
+export const fanMode = (state?: FanState) => fanStatus(state).headline;
 export const fanSummary = (state?: FanState) => `${fanReadingLabel(state)} · ${fanMode(state)}`;
+const notify = (body: string) => toaster.toast({ title: "Fan Control", body });
 
 export function editPoint(curve: Curve, index: number, axis: 0 | 1, value: number, limits: FanState["limits"]): Curve {
   const next = clone(curve);
-  if (!Number.isFinite(value) || index < 0 || index >= curve.length-1 || !Number.isInteger(index)) return next;
+  const last = index === curve.length-1;
+  if (!Number.isFinite(value) || index < 0 || index >= curve.length || !Number.isInteger(index) || last && axis === 0) return next;
   if (axis === 0) {
     next[index][0] = Math.max(index ? curve[index-1][0]+1 : 0, Math.min(curve[index+1][0]-1, Math.round(value)));
   } else {
     let rpm = Math.round(value/limits.step)*limits.step;
     if (rpm > 0 && rpm < limits.min_rpm) rpm = value > curve[index][1] ? limits.min_rpm : 0;
-    next[index][1] = Math.max(index ? curve[index-1][1] : 0, Math.min(curve[index+1][1], limits.max_rpm, rpm));
+    // The 100°C point stays at 100°C and can never stop.
+    next[index][1] = Math.max(index ? curve[index-1][1] : 0, last ? limits.min_rpm : 0, Math.min(last ? limits.max_rpm : curve[index+1][1], limits.max_rpm, rpm));
   }
   return next;
 }
@@ -147,7 +169,7 @@ export const CurveGraph: FC<{curve: Curve; selected: number; status: FanState; d
     <div data-fan-controller-hint="true" style={{padding:"6px 10px",fontSize:fullscreen ? 16 : 12,color:steering ? "#66c0f4" : "#dcdedf"}}>
       {steering ? "Editing · LB/RB point · ←/→ 1°C · ↑/↓ speed · B finish" : "Focus graph and press A to edit with controller"}
     </div>
-    <svg ref={svg} data-fan-graph="true" data-fan-graph-layout={fullscreen ? "dialog" : "qam"} role="img" aria-label="Eight-point fan curve. Drag points or press A and use D-pad. LB/RB selects a point. Point eight is fixed at 100°C and full speed."
+    <svg ref={svg} data-fan-graph="true" data-fan-graph-layout={fullscreen ? "dialog" : "qam"} role="img" aria-label="Eight-point fan curve. Drag points or press A and use D-pad. LB/RB selects a point. Point eight stays at 100°C and cannot go below the minimum running speed."
       viewBox={`0 0 ${layout.width} ${layout.height}`} style={{width:"100%",display:"block",touchAction:"none",...(fullscreen ? {height:"calc(100% - 36px)"} : {})}}
       onPointerMove={move} onPointerUp={event => {drag.current=null;event.currentTarget.releasePointerCapture?.(event.pointerId);}}
       onPointerCancel={() => {drag.current=null;}} onLostPointerCapture={() => {drag.current=null;}}>
@@ -160,13 +182,13 @@ export const CurveGraph: FC<{curve: Curve; selected: number; status: FanState; d
       <path d={`M${left} ${bottom-rise}V${bottom}H${left+span}`} stroke="currentColor" fill="none" opacity=".6" />
       <polyline points={curve.map(([t,r])=>`${x(t)},${y(r)}`).join(" ")} stroke="#66c0f4" strokeWidth={fullscreen ? 2.5*layout.scale : 2.5} fill="none" />
       {curve.map(([t,r],i)=><g key={i} onPointerDown={event=>{
-        event.preventDefault();select(i);if(!disabled && i<7){drag.current={point:i,pointer:event.pointerId};svg.current?.setPointerCapture(event.pointerId);}
+        event.preventDefault();select(i);if(!disabled){drag.current={point:i,pointer:event.pointerId};svg.current?.setPointerCapture(event.pointerId);}
       }}><circle data-fan-point={i+1} cx={x(t)} cy={y(r)} r={fullscreen ? 22*layout.scale : 16} fill="transparent" />
         <circle cx={x(t)} cy={y(r)} r={fullscreen ? (i===selected ? 8 : 5)*layout.scale : i===selected ? 7 : 4} fill={i===selected ? "#fff" : "#66c0f4"} stroke="#66c0f4" strokeWidth={fullscreen ? 2*layout.scale : 2} /></g>)}
       {fresh && <g data-fan-live-marker="true" style={{pointerEvents:"none"}}><circle cx={x(Math.min(100,Math.max(0,status.readings!.apu_temperature!)))}
         cy={y(Math.min(status.limits.max_rpm,Math.max(0,status.readings!.rpm!)))} r="6" fill="#f5c96b" stroke="#111" strokeWidth="2" />
         <text x={left} y={fullscreen ? 24 : 18} fill="#f5c96b" fontSize={font}>{`Live tach · ${fanReadingLabel(status)}`}</text></g>}
-      <text x={left} y={fullscreen ? 299 : 240} fill="currentColor" fontSize={font}>{`Point ${selected+1}/8 · ${curve[selected][0]}°C · ${speedLabel(curve[selected][1],status)}${selected===7 ? " · fixed" : ""}`}</text>
+      <text x={left} y={fullscreen ? 299 : 240} fill="currentColor" fontSize={font}>{`Point ${selected+1}/8 · ${curve[selected][0]}°C · ${speedLabel(curve[selected][1],status)}${selected===7 ? " · speed only" : ""}`}</text>
     </svg>
   </Focusable>;
 };
@@ -208,8 +230,10 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   const modal = useRef<ReturnType<typeof showModal> | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
+  // The control whose last change failed shows that error until the next change.
+  const [failed, setFailed] = useState<{control: string; text: string} | null>(null);
   const [readError, setReadError] = useState("");
+  const startingSince = useRef<number | null>(null);
   const [readingNow, setReadingNow] = useState(Date.now());
   const dirtyRef = useRef(false), mounted = useRef(false), baseRevision = useRef(0);
   const mutationEpoch = useRef(0), busyRef = useRef(false), acceptedRevision = useRef(-1);
@@ -260,10 +284,10 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     void poll();
     return () => { cancelled = true; if (timer !== undefined) clearTimeout(timer); };
   }, [visible]);
-  const mutate = async (operation: () => Promise<FanState>, saved=false) => {
+  const mutate = async (operation: () => Promise<FanState>, control: string, saved=false) => {
     if (busyRef.current) return;
     busyRef.current = true; mutationEpoch.current += 1;
-    setBusy(true); setNotice("");
+    setBusy(true); setFailed(null);
     const committedRevision = saved ? baseRevision.current : undefined;
     try {
       const next = await ordered(operation);
@@ -274,17 +298,20 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
           }
           dirtyRef.current = false; setDirty(false); delete drafts.current[scopeRef.current];
         }
-        accept(next); setNotice(saved ? "Curve saved and read back." : "Fan state confirmed.");
+        accept(next);
+        if (saved) notify("Curve saved.");
       }
-    } catch (e) { if (mounted.current) setNotice(String(e)); }
+    } catch (e) {
+      if (mounted.current) { setFailed({control, text: errorText(e)}); notify(errorText(e)); }
+    }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
-  const feedback = notice || readError;
-  if (!status || !draft) return <div ref={pageRoot}>{fullscreen ? <DialogBody>{feedback || "Reading fan state…"}</DialogBody>
-    : <PanelSection><PanelSectionRow><Field focusable label="Fan Control" description={feedback || "Reading fan state…"} /></PanelSectionRow></PanelSection>}</div>;
-  const telemetry = status.telemetry, limits = status.limits;
+  const failure = (control: string) => failed?.control === control ? failed.text : undefined;
+  if (!status || !draft) return <div ref={pageRoot}>{fullscreen ? <DialogBody>{readError || "Reading fan…"}</DialogBody>
+    : <PanelSection>{infoRow("Fan Control", readError || "Reading fan…")}</PanelSection>}</div>;
+  const limits = status.limits;
   const edit = (axis: 0 | 1, value: number, point=selected) => {
-    if (busyRef.current || point===7) return;
+    if (busyRef.current || point===7 && axis===0) return;
     setDraft(previous => previous && editPoint(previous,point,axis,value,limits));dirtyRef.current=true;setDirty(true);
   };
   const choose = (next: string) => {
@@ -294,7 +321,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     const stored=drafts.current[next];const changed=!!stored?.dirty;
     setDirty(changed);dirtyRef.current=changed;
     setDraft(clone(changed ? stored.curve : status.settings.presets[next] ?? status.settings.global_curve));
-    baseRevision.current=changed ? stored.revision : status.settings.revision;setNotice("");
+    baseRevision.current=changed ? stored.revision : status.settings.revision;setFailed(null);
   };
   const discard = () => {delete drafts.current[scope];dirtyRef.current=false;setDirty(false);
     setDraft(clone(status.settings.presets[scope] ?? status.settings.global_curve));baseRevision.current=status.settings.revision;};
@@ -305,22 +332,29 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   const applyTemplate = (name: string) => {
     const points=status.templates?.[name];if(busyRef.current || !points)return;
     setDraft(clone(points));setSelected(0);dirtyRef.current=true;setDirty(true);
-    setNotice(`${title(name)} starting curve loaded. Edit or save to apply.`);
+    notify(`${title(name)} loaded. Save to use it.`);
   };
   const displayedStep = speedEditStep(rpmStep,status);
+  // Drafts based on `expected` stay saveable after this UI's own settings-only change.
+  const rebase = (expected: number, revision: number) => {
+    if(baseRevision.current===expected)baseRevision.current=revision;
+    for(const entry of Object.values(drafts.current))if(entry.revision===expected)entry.revision=revision;
+  };
   const switchUnit = (percent: boolean) => {
     const expected=status.settings.revision;
-    void mutate(async()=>{const next=await saveUnit(percent ? "percent" : "rpm",expected);
-      if(baseRevision.current===expected)baseRevision.current=next.settings.revision;
-      for(const entry of Object.values(drafts.current))if(entry.revision===expected)entry.revision=next.settings.revision;
-      return next;});
+    void mutate(async()=>{const next=await saveUnit(percent ? "percent" : "rpm",expected);rebase(expected,next.settings.revision);return next;},"unit");
   };
   const switchAssignments = (enabled: boolean) => {
     const expected=status.settings.revision;
-    void mutate(async()=>{const next=await saveAssignments(enabled,expected);
-      if(baseRevision.current===expected)baseRevision.current=next.settings.revision;
-      for(const entry of Object.values(drafts.current))if(entry.revision===expected)entry.revision=next.settings.revision;
-      return next;});
+    void mutate(async()=>{const next=await saveAssignments(enabled,expected);rebase(expected,next.settings.revision);return next;},"assign");
+  };
+  const curvesOf = (state: FanState) => JSON.stringify([state.settings.global_curve,state.settings.presets]);
+  const toggle = (enabled: boolean) => {
+    const expected=status.settings.revision, curves=curvesOf(status);
+    void mutate(async()=>{const next=await setEnabled(enabled);
+      // fan_set_enabled has no expected revision: rebase only when its own +1 is the sole change.
+      if(next.settings.revision===expected+1 && curvesOf(next)===curves)rebase(expected,next.settings.revision);
+      return next;},"enabled");
   };
   const openFull = () => {
     if (busyRef.current || fullscreen) return;
@@ -338,10 +372,19 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   const graph=<CurveGraph curve={draft} selected={selected} status={status} disabled={busy} fullscreen={fullscreen}
     rpmStep={unit === "percent" ? displayedStep*limits.max_rpm/100 : displayedStep} select={setSelected} edit={edit} />;
   const saveDisabled=busy || (!dirty && !status.needs_curve_review && (scope==='global' || !!status.settings.presets[scope]));
-  const save=()=>void mutate(()=>saveCurve(scope,clone(draft),baseRevision.current),true);
+  const save=()=>void mutate(()=>saveCurve(scope,clone(draft),baseRevision.current),"save",true);
+  const useGlobal=()=>void mutate(()=>saveCurve(scope,null,baseRevision.current),"save",true);
+  const now=Math.max(readingNow,Date.now());
+  // Time spent in "Starting your curve…", for the stuck hint after 30 s.
+  const starting=status.supported && status.settings.enabled && !status.error && !status.telemetry?.active;
+  if(!starting)startingSince.current=null;else if(startingSince.current===null)startingSince.current=now;
+  const fanState=fanStatus(status,starting ? now-(startingSince.current ?? now) : 0);
+  const enableDescription=failure("enabled") ?? (!status.settings.enabled && (dirty || status.needs_curve_review)
+    ? (status.needs_curve_review ? "Review and save the curve first." : "Save or discard your curve changes first.")
+    : fanState.detail);
   if(fullscreen) return <div ref={pageRoot} data-fan-page="true" data-fan-dialog-body="true" style={{minHeight:0,flex:1,display:"flex",flexDirection:"column",gap:12}}>
     <DialogBody style={{minHeight:0,flex:1,overflowY:"auto",margin:0,padding:0,display:"flex",flexDirection:"column",gap:8}}>
-      <div data-fan-dialog-status="true" title="APU temperature uses the higher of CPU Tctl and GPU edge.">{fanReadingLabel(status,Math.max(readingNow,Date.now()))} · {fanMode(status)}</div>
+      <div data-fan-dialog-status="true">{fanReadingLabel(status,now)} · {fanState.headline}</div>
       <Focusable flow-children="row" data-fan-controls="true" style={{display:"grid",gridTemplateColumns:`repeat(${assignmentMode ? 4 : 3},minmax(0,1fr))`,gap:16,margin:0,flexShrink:0}}>
         {assignmentMode && <div><DialogLabel>Curve</DialogLabel><Dropdown menuLabel="Curve" selectedOption={scope} rgOptions={curveOptions} disabled={busy} onChange={option=>choose(option.data)} /></div>}
         <div><DialogLabel>Starting curve</DialogLabel><Dropdown menuLabel="Starting curve" selectedOption={matchingTemplate} rgOptions={templateOptions} disabled={busy} onChange={option=>applyTemplate(option.data)} /></div>
@@ -350,9 +393,9 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
       </Focusable>
       {assignmentMode && <div data-fan-assignment-note="true" style={{color:"#66c0f4",fontSize:13}}>{ASSIGNMENT_NOTE}</div>}
       <div data-fan-dialog-graph="true" style={{minHeight:260,flex:"1 0 260px",maxHeight:480}}>{graph}</div>
-      {feedback && <div role="status">{feedback}</div>}
-      {scope!=="global" && status.settings.presets[scope] && <DialogButton disabled={busy || dirty} onClick={()=>void mutate(()=>saveCurve(scope,null,baseRevision.current),true)}>Use global curve for {title(scope)}</DialogButton>}
-      <div style={{fontSize:13,color:"#afb7c0"}}>7 editable points · 100°C / full speed is fixed{dirty ? " · Unsaved changes" : ""}</div>
+      {failed && <div role="status">{failed.text}</div>}
+      {scope!=="global" && status.settings.presets[scope] && <DialogButton disabled={busy || dirty} onClick={useGlobal}>Use global curve for {title(scope)}</DialogButton>}
+      <div style={{fontSize:13,color:"#afb7c0"}}>8 points · the 100°C point can't go below {speedLabel(limits.min_rpm,status)}{dirty ? " · Unsaved changes" : ""}</div>
     </DialogBody>
     <DialogFooter style={{display:"flex",gap:12,margin:0,padding:0,flexShrink:0}}>
       <Focusable flow-children="row" data-fan-footer="true" style={{display:"flex",gap:12,width:"100%"}}>
@@ -364,42 +407,37 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   </div>;
   return <div ref={pageRoot} data-fan-page="true">
     <PanelSection>
-      <div data-fan-summary="true" title="APU temperature uses the higher of CPU Tctl and GPU edge." style={{textAlign:"center",padding:"4px 0 12px"}}>
-        <div style={{fontSize:20,fontWeight:600}}>{fanReadingLabel(status,Math.max(readingNow,Date.now()))}</div>
-        <div style={{fontSize:13,color:"#afb7c0",marginTop:4}}>{fanMode(status)}</div>
+      <div data-fan-summary="true" style={{textAlign:"center",padding:"4px 0 12px"}}>
+        <div style={{fontSize:20,fontWeight:600}}>{fanReadingLabel(status,now)}</div>
+        <div style={{fontSize:13,color:"#afb7c0",marginTop:4}}>{fanState.headline}</div>
       </div>
       <PanelSectionRow><ToggleField label="Enable Fan Control" checked={status.settings.enabled}
         disabled={busy || !status.supported || (!status.settings.enabled && !!status.ownership?.blocked) || ((dirty || status.needs_curve_review) && !status.settings.enabled)}
-        description={status.ownership?.blocked && !status.settings.enabled ? status.ownership.reason : assignmentMode ? "Global curve with optional Companion TDP assignments." : "Uses your saved global curve."}
-        onChange={enabled => void mutate(() => setEnabled(enabled))} /></PanelSectionRow>
-      {(status.error || telemetry?.error || status.readings?.error) && <PanelSectionRow><Field focusable label="Fan Control needs attention"
-        description={status.error || telemetry?.error || status.readings?.error} /></PanelSectionRow>}
-      {feedback && <PanelSectionRow><Field focusable label="Fan Control status" description={feedback} /></PanelSectionRow>}
+        description={enableDescription}
+        onChange={toggle} /></PanelSectionRow>
     </PanelSection>
     <PanelSection title={dirty ? "Curve · unsaved" : undefined}>
       {assignmentMode && <PanelSectionRow><DropdownItem label="Curve" selectedOption={scope} disabled={busy}
-        rgOptions={["global",...status.presets].map(p=>({data:p,label:`${title(p)}${p!=="global" && !status.settings.presets[p] ? " · inherits global" : ""}${drafts.current[p]?.dirty ? " · unsaved" : ""}`}))}
-        onChange={option=>choose(option.data)} /></PanelSectionRow>}
+        rgOptions={curveOptions} onChange={option=>choose(option.data)} /></PanelSectionRow>}
       <PanelSectionRow><DropdownItem label="Starting curve" selectedOption={matchingTemplate} disabled={busy}
         rgOptions={templateOptions} onChange={option=>applyTemplate(option.data)} /></PanelSectionRow>
       <PanelSectionRow>{graph}</PanelSectionRow>
       <PanelSectionRow><DropdownItem label="Speed edit step" selectedOption={displayedStep} disabled={busy}
-        rgOptions={(unit === "percent" ? PERCENT_EDIT_STEPS : RPM_EDIT_STEPS).map(step=>({data:step,label:unit === "percent" ? `${step}%` : `${step} RPM`}))}
+        rgOptions={stepOptions}
         onChange={option=>setRpmStep(unit === "percent" ? Math.round(option.data*limits.max_rpm/100) : option.data)} /></PanelSectionRow>
-      {!fullscreen && <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={openFull}>Full screen curve editor</ButtonItem></PanelSectionRow>}
-      <PanelSectionRow><ButtonItem layout="below" disabled={busy || (!dirty && !status.needs_curve_review && (scope === 'global' || !!status.settings.presets[scope]))}
-        onClick={() => void mutate(() => saveCurve(scope, clone(draft), baseRevision.current), true)}>
+      <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={openFull}>Full screen curve editor</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={saveDisabled} onClick={save} description={failure("save")}>
         {scope === "global" ? "Save global curve" : `Assign curve to ${title(scope)}`}</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy || !dirty} onClick={discard}>Discard changes</ButtonItem></PanelSectionRow>
       {scope !== "global" && status.settings.presets[scope] && <PanelSectionRow><ButtonItem layout="below" disabled={busy || dirty}
-        onClick={() => void mutate(() => saveCurve(scope, null, baseRevision.current), true)}>Use global curve for {title(scope)}</ButtonItem></PanelSectionRow>}
+        onClick={useGlobal}>Use global curve for {title(scope)}</ButtonItem></PanelSectionRow>}
     </PanelSection>
     <PanelSection title="Settings">
-      <PanelSectionRow><ToggleField label="Show fan speed as percentage" checked={unit === "percent"} disabled={busy}
-        description="RPM or percent in every fan view." onChange={switchUnit} /></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Assign curves to TDP presets" checked={assignmentMode} disabled={busy || !!status.needs_curve_review}
-        description="Keep using the global curve, or enable optional preset assignments." onChange={switchAssignments} /></PanelSectionRow>
-      <PanelSectionRow><Field focusable label="TDP curve assignments" description={<span data-fan-assignment-note="true" style={{color:"#66c0f4"}}>{ASSIGNMENT_NOTE}</span>} /></PanelSectionRow>
+        description={failure("assign") ?? <span data-fan-assignment-note="true">{ASSIGNMENT_NOTE}</span>} onChange={switchAssignments} /></PanelSectionRow>
+      {/* The page's last row is never disabled; mutate() ignores it while another change runs. */}
+      <PanelSectionRow><ToggleField label="Show fan speed as percentage" checked={unit === "percent"}
+        description={failure("unit") ?? "RPM or percent in every fan view."} onChange={switchUnit} /></PanelSectionRow>
     </PanelSection>
   </div>;
 };

@@ -1,73 +1,38 @@
-const complete = require('./frontend_test_guard.cjs')();
-const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const assert = require('node:assert/strict');
-const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_modules/typescript'));
-const source = ts.transpileModule(fs.readFileSync(path.join(root, 'src/battery.tsx'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
+const { assert, run, settle: wait, mount, deferred, nodes: walk, text: content } = require('./frontend_harness.cjs');
 const base = (changes = {}) => ({ success: true, supported: true, managed: false,
   enabled: false, requested_enabled: null, capacity: 98, charging_status: 'Not charging',
   backend: 'charge_types', current_mode: 'Fast', baseline: null, options: ['Fast', 'Standard', 'Long_Life'],
   error: '', reason: '', recovery_pending: false, ...changes });
 const controllerBase = (changes = {}) => ({available: true, left: 87, right: 64,
   connection_left: 'attached', connection_right: 'attached', reason: '', ...changes});
-const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve=yes; reject=no; });
-  return { promise, resolve, reject }; };
-const settle = async () => { for (let i=0; i<30; i++) await Promise.resolve(); };
+const settle = () => wait(30);
 function harness(initial=base(), initialControllers=controllerBase()) {
-  const slots=[], effects=new Map(), scheduled=[], timers=new Map(), calls=[];
-  let cursor=0, visible=true, timerId=0, response=initial, controllerResponse=initialControllers, tree, writes=0;
-  const methods={battery_get_status:()=>response,battery_get_controller_levels:()=>controllerResponse};
-  const same=(a,b)=>a && a.length===b.length && b.every((v,i)=>Object.is(v,a[i]));
-  const hooks={
-    useState(value) { const i=cursor++; if(!(i in slots))slots[i]=typeof value==='function'?value():value;
-      return [slots[i], v=>{writes++;slots[i]=typeof v==='function'?v(slots[i]):v;}]; },
-    useRef(value) { const i=cursor++; if(!(i in slots))slots[i]={current:value}; return slots[i]; },
-    useCallback(fn,deps) {const i=cursor++;if(!slots[i]||!same(slots[i].deps,deps))slots[i]={fn,deps};return slots[i].fn;},
-    useEffect(fn,deps) {const i=cursor++,old=effects.get(i);if(!old||!same(old.deps,deps))scheduled.push(()=>{
-      old?.cleanup?.();effects.set(i,{deps,cleanup:fn()});});},
-  };
-  const mod={exports:{}}, jsx={jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})};
-  vm.runInNewContext(source,{module:mod,exports:mod.exports,console,
-    setInterval:fn=>{timers.set(++timerId,fn);return timerId;},clearInterval:id=>timers.delete(id),
-    require:name=>{
-      if(name==='react')return hooks;if(name==='react/jsx-runtime')return jsx;
-      if(name==='@decky/ui')return new Proxy({},{get:(_,k)=>k});
-      if(name==='@decky/api')return {useQuickAccessVisible:()=>visible,callable:name=>(...args)=>{
-        calls.push({name,args});assert.ok(methods[name],`Unexpected battery RPC: ${name}`);
-        return Promise.resolve().then(()=>methods[name](...args));}};
-      throw Error(name);
-    },
-  });
-  function render(){cursor=0;tree=mod.exports.BatteryPage();scheduled.splice(0).forEach(f=>f());return tree;}
-  function unmount(){for(const effect of effects.values())effect.cleanup?.();effects.clear();}
-  return {methods,calls,timers,render,unmount,summary:mod.exports.batterySummary,
-    setResponse:value=>{response=value;},setVisible:value=>{visible=value;return render();},
-    get tree(){return tree;},tick(){for(const fn of [...timers.values()])fn();},
-    get writes(){return writes;},
+  let response=initial, controllerResponse=initialControllers, tree;const toasts=[];
+  const h=mount('battery.tsx',{component:'BatteryPage',strict:true,api:{toaster:{toast:t=>toasts.push(t)}},responses:{
+    battery_get_status:()=>response,battery_get_controller_levels:()=>controllerResponse}});
+  const render=()=>tree=h.render();
+  return {methods:h.responses,calls:h.calls,timers:h.timers,render,unmount:h.unmount,summary:h.exports.batterySummary,
+    setResponse:value=>{response=value;},setVisible:value=>{h.setVisible(value);return render();},
+    get tree(){return tree;},tick(){h.fire('interval');},toasts,
+    details(){button({tree},'Show details').props.onClick();return render();},
+    get writes(){return h.writes;},
     async ready(){render();await settle();return render();}};
 }
-function walk(node,out=[]) {if(!node||typeof node!=='object')return out;
-  if(Array.isArray(node)){node.forEach(n=>walk(n,out));return out;}
-  out.push(node);walk(node.props?.children,out);return out;}
-function content(node) {if(node==null||node===false)return '';if(typeof node!=='object')return String(node);
-  if(Array.isArray(node))return node.map(content).join(' ');
-  return [node.props?.title,node.props?.label,node.props?.description,node.props?.children].map(content).join(' ');}
 const toggle=h=>walk(h.tree).find(n=>n.type==='ToggleField');
 const button=(h,label)=>walk(h.tree).find(n=>n.type==='ButtonItem'&&content(n).includes(label));
 const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
 
-(async()=>{
+run(async()=>{
   {
     const h=harness(),old=deferred();h.methods.battery_get_controller_levels=()=>old.promise;
     await h.ready();h.setVisible(false);h.setResponse(base({capacity:55}));h.setVisible(true);
-    await settle();h.render();assert.match(content(h.tree),/Battery: 55%/);
+    await settle();h.render();assert.match(content(h.tree),/Battery 55%/);
     assert.equal(count(h,'battery_get_controller_levels'),1,'Reopening must not queue another controller read before the old one finishes.');
     h.methods.battery_get_controller_levels=()=>controllerBase({left:88});
     old.resolve(controllerBase({left:42}));await settle();h.render();
     assert.equal(count(h,'battery_get_controller_levels'),2);
-    assert.match(content(h.tree),/Left controller: 88%/);
-    assert.doesNotMatch(content(h.tree),/Left controller: 42%/);
+    assert.match(content(h.tree),/Controllers: left 88%/);
+    assert.doesNotMatch(content(h.tree),/left 42%/);
     h.unmount();
   }
   {
@@ -78,7 +43,7 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
   {
     const h=harness();h.methods.battery_get_controller_levels=()=>{throw Error('HID unavailable');};
     await h.ready();assert.ok(toggle(h));assert.equal(toggle(h).props.disabled,false);
-    assert.match(content(h.tree),/Unknown/);h.unmount();
+    assert.match(content(h.tree),/Controllers: left — · right —/);h.unmount();
   }
   {
     const h=harness(),levels=deferred();
@@ -93,7 +58,7 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
     h.tick();await settle();
     assert.equal(count(h,'battery_get_controller_levels'),1,'Slow controller sampling remains bounded during independent status polling.');
     levels.resolve(controllerBase({left:42}));await settle();h.render();
-    assert.match(content(h.tree),/Left controller: 42%/);
+    assert.match(content(h.tree),/Controllers: left 42%/);
     assert.equal(toggle(h).props.checked,true,'A controller reply cannot replace the console mutation result.');
     h.unmount();
   }
@@ -102,7 +67,7 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
     h.methods.battery_get_controller_levels=()=>levels.promise;
     h.methods.battery_get_status=()=>{if(fail)throw Error('battery unavailable');return base();};
     await h.ready();assert.match(content(h.tree),/Status unavailable/);
-    fail=false;button(h,'Check Again').props.onClick();await settle();h.render();
+    fail=false;button(h,'Check again').props.onClick();await settle();h.render();
     assert.ok(toggle(h),'Retrying console status must not wait for the old controller request.');
     assert.equal(count(h,'battery_get_controller_levels'),1,'A console read error must not duplicate an in-flight controller read.');
     levels.resolve(controllerBase());await settle();h.unmount();
@@ -110,25 +75,24 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
   // Opening a page only reads the actual firmware state; it never adopts a setting.
   let h=harness();await h.ready();
   assert.equal(toggle(h).props.checked,false);assert.equal(toggle(h).props.disabled,false);
-  assert.match(content(h.tree),/Companion control: released/);
-  assert.match(content(h.tree),/Battery: 98%/);
-  assert.match(content(h.tree),/Left controller: 87%/);
-  assert.match(content(h.tree),/Right controller: 64%/);
-  assert.match(content(h.tree),/Attached to the console/);
+  assert.match(content(h.tree),/Battery 98% · Not charging/);
+  assert.match(content(h.tree),/Controllers: left 87% · right 64%/);
+  assert.equal(toggle(h).props.description,'Stops charging at about 80% to protect the battery.');
+  assert.doesNotMatch(content(h.tree),/Saved choice/,'technical facts stay folded');
+  h.details();assert.match(content(h.tree),/Charging mode reported Fast/);
+  assert.match(content(h.tree),/Saved choice None · Companion is not managing charging/);
+  assert.equal(button(h,'Restore previous charging mode'),undefined,'nothing to restore while unmanaged');
   assert.equal(count(h,'battery_get_status'),1);assert.equal(count(h,'battery_get_controller_levels'),1);h.unmount();
 
   // A valid controller-reported level remains visible after physical detachment.
   h=harness(base(),controllerBase({left:55,right:0,connection_right:'detached'}));await h.ready();
-  assert.match(content(h.tree),/Left controller: 55%/);
-  assert.match(content(h.tree),/Right controller: 0%/);
-  assert.match(content(h.tree),/Detached · controller-reported level/);h.unmount();
+  assert.match(content(h.tree),/Controllers: left 55% · right 0% \(detached\)/);h.unmount();
   h=harness(base(),controllerBase({left:null,connection_left:'detached'}));await h.ready();
-  assert.match(content(h.tree),/Left controller: Not connected/);h.unmount();
+  assert.match(content(h.tree),/Controllers: left — · right 64%/);h.unmount();
   h=harness(base(),controllerBase({available:false,left:null,right:null,
     connection_left:null,connection_right:null,reason:'No controller battery report was received.'}));await h.ready();
-  assert.match(content(h.tree),/Left controller: Unknown/);
-  assert.match(content(h.tree),/Right controller: Unknown/);
-  assert.match(content(h.tree),/No controller battery report was received/);h.unmount();
+  assert.match(content(h.tree),/Controllers: left — · right —/);
+  h.details();assert.match(content(h.tree),/No controller battery report was received/);h.unmount();
 
   // A commit failure must retain the restored state, without a Saved confirmation.
   h=harness();await h.ready();
@@ -136,40 +100,45 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
     success:false,error:'Settings commit failed; previous settings restored.',status:base(),};};
   toggle(h).props.onChange(true);await settle();h.render();
   assert.equal(toggle(h).props.checked,false);assert.equal(toggle(h).props.disabled,false);
-  assert.match(content(h.tree),/Settings commit failed/);
-  assert.doesNotMatch(content(h.tree),/Preference confirmed|preference saved/);
+  assert.match(toggle(h).props.description,/Settings commit failed/,'the failure stays on the toggle');
+  assert.deepEqual(h.toasts.map(t=>t.title),['Battery']);assert.match(h.toasts[0].body,/Settings commit failed/);
   // Retrying remains possible after a recoverable operation error.
   const committed=base({managed:true,enabled:true,requested_enabled:true,current_mode:'Long_Life',baseline:'Fast'});
   h.methods.battery_set_enabled=()=>({success:true,status:committed});
   toggle(h).props.onChange(true);await settle();h.render();
-  assert.equal(toggle(h).props.checked,true);assert.match(content(h.tree),/Preference confirmed/);
+  assert.equal(toggle(h).props.checked,true);assert.equal(h.toasts.at(-1).body,'Battery protection on.');
+  assert.doesNotMatch(toggle(h).props.description,/commit failed/,'success clears the failure');
+  h.details();assert.ok(button(h,'Restore previous charging mode'),'managed charging can be handed back from Details');
   assert.equal(count(h,'battery_set_enabled'),2);h.unmount();
 
   // An interrupted first takeover is recoverable even though managed is still false.
   const interrupted=base({success:false,enabled:true,current_mode:'Long_Life',recovery_pending:true,
     error:'Hardware rollback failed; recovery remains pending.'});
   h=harness(interrupted);await h.ready();
-  assert.equal(toggle(h).props.disabled,true);assert.match(content(h.tree),/Recovery pending/);
+  assert.equal(toggle(h).props.disabled,true);
+  assert.match(content(h.tree),/A charging change didn't finish Restore the previous charging mode before changing it again\./);
   assert.match(h.summary(interrupted),/needs recovery/);
-  assert.match(content(h.tree),/Current protection: On/);
+  assert.equal(toggle(h).props.checked,true);
   h.methods.battery_release_control=()=>({success:true,status:base()});
-  button(h,'Recover and Release Control').props.onClick();await settle();h.render();
+  button(h,'Restore previous charging mode').props.onClick();await settle();h.render();
   assert.equal(count(h,'battery_release_control'),1);assert.equal(toggle(h).props.disabled,false);
-  assert.doesNotMatch(content(h.tree),/Recovery pending/);h.unmount();
+  assert.equal(h.toasts.at(-1).body,'Previous charging mode restored.');
+  assert.doesNotMatch(content(h.tree),/didn't finish/);h.unmount();
 
   // Failed recovery remains actionable, while unknown actual values are never Off.
   h=harness(interrupted);await h.ready();
   h.methods.battery_release_control=()=>({success:false,error:'Firmware is unavailable.',status:interrupted});
-  button(h,'Recover and Release Control').props.onClick();await settle();h.render();
-  assert.match(content(h.tree),/Firmware is unavailable/);assert.ok(button(h,'Recover and Release Control'));
+  button(h,'Restore previous charging mode').props.onClick();await settle();h.render();
+  assert.match(button(h,'Restore previous charging mode').props.description,/Firmware is unavailable/);
   h.unmount();h=harness(base({enabled:null,capacity:null,current_mode:null}));await h.ready();
-  assert.match(content(h.tree),/Current protection: Unknown/);assert.match(content(h.tree),/Battery: Unknown/);
-  assert.doesNotMatch(content(h.tree),/Current protection: Off|Battery: 0%/);h.unmount();
+  assert.match(toggle(h).props.description,/Current state unknown\.$/);assert.equal(toggle(h).props.disabled,true);
+  assert.match(content(h.tree),/Battery — · Not charging/);
+  assert.doesNotMatch(content(h.tree),/Battery 0%/);h.unmount();
 
   // Requested and actual state remain separate when firmware drift is detected.
   h=harness(base({managed:true,enabled:false,requested_enabled:true,baseline:'Fast'}));await h.ready();
-  assert.equal(toggle(h).props.checked,true);assert.match(content(h.tree),/Current protection: Off/);
-  assert.match(content(h.tree),/Saved preference: On/);assert.match(content(h.tree),/does not match/);
+  assert.equal(toggle(h).props.checked,true);assert.match(toggle(h).props.description,/Waiting for the battery to confirm…$/);
+  h.details();assert.match(content(h.tree),/Saved choice On/);
   assert.match(h.summary(base({managed:true,requested_enabled:true})),/saved choice pending/);h.unmount();
 
   // A stale status response cannot replace a mutation result; rapid clicks serialize.
@@ -180,7 +149,7 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
   assert.equal(count(h,'battery_set_enabled'),0,'Earlier read must finish before writing');
   oldRead.resolve(base());await settle();assert.equal(count(h,'battery_set_enabled'),1);
   mutation.resolve({success:true,status:committed});await settle();h.render();
-  assert.equal(toggle(h).props.checked,true);assert.match(content(h.tree),/Current protection: On/);h.unmount();
+  assert.equal(toggle(h).props.checked,true);assert.doesNotMatch(toggle(h).props.description,/Waiting/);h.unmount();
 
   // Hidden/unmounted pages have no polling, and a new visible lease reads again.
   h=harness();await h.ready();const initialReads=count(h,'battery_get_status');
@@ -189,4 +158,4 @@ const count=(h,name)=>h.calls.filter(c=>c.name===name).length;
   h.setVisible(true);await settle();h.render();assert.equal(count(h,'battery_get_status'),initialReads+1);
   h.unmount();assert.equal(h.timers.size,0);
   console.log('Battery UI keeps actual/saved states distinct, reports rollback/recovery, prevents stale saves, and stops hidden polling.');
-})().then(complete).catch(error=>{console.error(error);process.exitCode=1;});
+});

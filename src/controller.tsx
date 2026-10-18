@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable } from "@decky/api";
-import { ButtonItem, DropdownItem, DropdownOption, Field, PanelSection, PanelSectionRow, Spinner } from "@decky/ui";
+import { callable, toaster } from "@decky/api";
+import { ButtonItem, DropdownItem, DropdownOption, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { FirmwarePanel } from "./firmware";
+import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder } from "./shared";
 
 export type GyroSource = "system" | "combined" | "left" | "right";
 type Vector = { x: number | null; y: number | null; z: number | null };
@@ -20,7 +21,6 @@ export interface ControllerStatus {
   error: string;
   physical: { path: string; pid: string; driver: string } | null;
   virtual: { path: string; pid: string } | null;
-  iio: { name: string; path: string; frequency: number | string | null; scale: number | string | null; raw: Vector }[];
   diagnostics_active: boolean;
   recovery_pending?: boolean;
   imu?: { available: boolean; actual: { left: boolean; right: boolean } | null; reason?: string };
@@ -54,11 +54,10 @@ interface ControllerDiagnostics {
   virtual: Stream<{ gyro: Vector | null; touchpad: Touchpad | null }>;
 }
 
-let controllerMutationChain: Promise<void> = Promise.resolve();
-let controllerMutationsPending = 0;
+const mutations = mutationQueue();
 const readControllerStatus = callable<[], ControllerStatus>("controller_get_status");
 export const getControllerStatus = async () => {
-  if (controllerMutationsPending) await controllerMutationChain;
+  if (mutations.pending) await mutations.tail;
   return readControllerStatus();
 };
 const startDiagnostics = callable<[], ControllerDiagnostics>("controller_start_diagnostics");
@@ -69,7 +68,7 @@ const releaseControl = callable<[], ControllerStatus>("controller_release_contro
 
 const sourceLabels: Record<GyroSource, string> = {
   system: "System default",
-  combined: "Both controllers (average)",
+  combined: "Both controllers",
   left: "Left controller",
   right: "Right controller",
 };
@@ -86,21 +85,20 @@ export const controllerSummary = (status?: ControllerStatus) => {
 };
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+/** "X 12 · Y -3 · Z 840" in raw sensor counts, or a dash when nothing arrived. */
 const vectorText = (value: Vector | null | undefined) => value
-  ? ["x", "y", "z"].map((axis) => `${axis.toUpperCase()} ${finite(value[axis as keyof Vector]) ? value[axis as keyof Vector] : "unknown"}`).join(" · ")
-  : "No reading received";
-const touchText = (value: Touchpad | null | undefined) => !value || typeof value.is_touching !== "boolean"
-  ? "No touchpad reading received"
-  : !value.is_touching
-    ? "No touch detected"
-    : `Touch detected · X ${finite(value.x) ? value.x.toFixed(3) : "unknown"} · Y ${finite(value.y) ? value.y.toFixed(3) : "unknown"}`;
+  ? ["x", "y", "z"].map((axis) => `${axis.toUpperCase()} ${finite(value[axis as keyof Vector]) ? value[axis as keyof Vector] : "—"}`).join(" · ")
+  : "—";
+const touchText = (value: Touchpad | null | undefined) => !value || typeof value.is_touching !== "boolean" ? "—"
+  : !value.is_touching ? "no touch"
+  : `touch at ${finite(value.x) ? value.x.toFixed(2) : "—"},${finite(value.y) ? value.y.toFixed(2) : "—"}`;
+/** Report rate for a test row description; a silent stream is not evidence of a faulty sensor. */
 const streamText = (stream: Stream<unknown>) => {
-  const details = !stream.received
-    ? "No packets received yet. This does not establish that the sensor is faulty."
-    : `${stream.reports} reports · ${finite(stream.rate_hz) ? `${stream.rate_hz.toFixed(1)} Hz` : "rate unknown"} · ${finite(stream.age_ms) ? `last packet ${(stream.age_ms / 1000).toFixed(1)} s ago` : "packet age unknown"}`;
-  return stream.error ? `${stream.error} ${details}` : details;
+  const rate = !stream.received ? "No reports yet."
+    : `${stream.reports} reports · ${finite(stream.rate_hz) ? `${stream.rate_hz.toFixed(1)} Hz` : "rate unknown"}`;
+  return stream.error ? `${stream.error} ${rate}` : rate;
 };
-const errorText = (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback;
+const notify = (body: string) => toaster.toast({ title: "Gyro & touchpad", body });
 const reportingLabel = (value: unknown) => value === true ? "On" : value === false ? "Off" : "Unknown";
 
 export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
@@ -110,7 +108,8 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
   const [stopping, setStopping] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [testError, setTestError] = useState("");
+  const [details, setDetails] = useState(false);
   const mounted = useRef(false);
   const isVisible = useRef(visible);
   const generation = useRef(0);
@@ -141,7 +140,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       if (mounted.current && isVisible.current && generation.current === activeGeneration) setDiagnostics(final);
     }).catch(() => {
       if (mounted.current && isVisible.current && generation.current === activeGeneration) {
-        setError("The stop request was not confirmed. The passive test expires automatically when its short lease ends.");
+        setTestError("The stop request was not confirmed. The test ends by itself within seconds.");
       }
     }).finally(() => {
       if (stopInFlight.current === request) stopInFlight.current = null;
@@ -163,7 +162,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
     if (!mounted.current || !isVisible.current || saving.current || statusRead.current || startInFlight.current || token.current) return;
     const revision = ++statusRevision.current;
     const request = (async () => {
-      if (controllerMutationsPending) await controllerMutationChain;
+      if (mutations.pending) await mutations.tail;
       if (!mounted.current || !isVisible.current || revision !== statusRevision.current) return;
       return getControllerStatus();
     })();
@@ -176,7 +175,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       }
     } catch (failure) {
       if (mounted.current && isVisible.current && revision === statusRevision.current) {
-        setError(errorText(failure, "Controller status is unavailable. Retrying while this page is open."));
+        setError(errorText(failure, "") || "Controller status is unavailable. Retrying while this page is open.");
       }
     } finally {
       if (statusRead.current === request) statusRead.current = null;
@@ -217,7 +216,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
         diagnosticTimer.current = setTimeout(() => void poll(), 350);
       } catch (failure) {
         if (!valid()) return;
-        setError(errorText(failure, "The passive controller test could not continue."));
+        setTestError(errorText(failure, "") || "The controller test could not continue.");
         stop("Test stopped after a diagnostic error.");
       }
     };
@@ -230,8 +229,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
     const revision = ++diagnosticRevision.current;
     statusRevision.current += 1;
     setStarting(true);
-    setError("");
-    setNotice("");
+    setTestError("");
     setDiagnostics(null);
     try {
       await statusRead.current?.catch(() => undefined);
@@ -249,7 +247,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       }
     } catch (failure) {
       if (mounted.current && isVisible.current && revision === diagnosticRevision.current) {
-        setError(errorText(failure, "The passive controller test could not start."));
+        setTestError(errorText(failure, "") || "The controller test could not start.");
       }
     } finally {
       startInFlight.current = false;
@@ -262,52 +260,54 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
     // Visibility gates polling, not the user's explicit selection callback.
     if (!mounted.current || saving.current || startInFlight.current || stopInFlight.current || token.current) return;
     saving.current = true;
-    controllerMutationsPending += 1;
     const previousRead = statusRead.current;
     const activeGeneration = generation.current;
     statusRevision.current += 1;
     setBusy(true);
     setError("");
-    setNotice("");
+    const fail = (text: string) => { setError(text); notify(text); };
     const run = async () => {
       try {
         await previousRead?.catch(() => undefined);
         const next = await operation();
         if (!mounted.current || generation.current !== activeGeneration) return;
         setStatus(next);
-        if (next.error || next.conflict) setError(next.error || next.reason || "Another controller configuration is active.");
-        else setNotice(message);
+        if (next.error || next.conflict) fail(next.error || next.reason || "Another controller configuration is active.");
+        else notify(message);
       } catch (failure) {
         if (mounted.current && generation.current === activeGeneration) {
-          setError(errorText(failure, "The requested gyro source could not be confirmed."));
+          fail(errorText(failure, "") || "The gyro source change could not be confirmed.");
         }
       } finally {
-        controllerMutationsPending -= 1;
+        mutations.done();
         saving.current = false;
         if (mounted.current && generation.current === activeGeneration) setBusy(false);
       }
     };
-    const queued = controllerMutationChain.then(run, run);
-    controllerMutationChain = queued.catch(() => undefined);
-    await queued;
+    await mutations.push(run);
   }, []);
 
-  if (!status) return <><PanelSection title="Controller">
-    <PanelSectionRow>{error ? <Field focusable label="Status unavailable" description={error} /> : <Spinner />}</PanelSectionRow>
-    {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Check Again</ButtonItem></PanelSectionRow>}
-  </PanelSection><FirmwarePanel visible={visible} /></>;
+  if (!status) return <>
+    {statusPlaceholder({ title: "Controller", label: "Status unavailable", error, onRetry: () => void refresh(), retryLabel: "Check Again" })}
+    <FirmwarePanel visible={visible} />
+  </>;
 
   const testing = starting || stopping || !!diagnostics?.active;
   const blocked = busy || testing;
-  const actualSource = sourceLabel(status.applied_source);
   const pending = status.gyro_source !== "system" && !status.controlled;
+  const remaining = diagnostics?.active && finite(diagnostics.remaining_s) ? Math.ceil(diagnostics.remaining_s) : null;
+  const physical = diagnostics?.physical.sample, steam = diagnostics?.virtual.sample;
 
   return <>
-    <PanelSection title="Gyro source">
+    <PanelSection title="Gyro & touchpad">
+      {status.recovery_pending ? infoRow("A controller change didn't finish", "Restore the previous settings first.")
+        : status.conflict ? infoRow("Another app changed the controller settings", status.reason || "Restore the previous settings to take them back.")
+        : !status.available && infoRow("Gyro not available", status.reason || "The controller was not detected.")}
       <PanelSectionRow>
         <DropdownItem
-          label="Controller motion source"
-          description="Select Left, Right or Both to enable gyro reporting and use that source in Steam. System default restores the previous settings and releases Companion control."
+          label="Gyro source"
+          description={busy ? "Applying…" : (error || status.error) ? (error || status.error)
+            : `Which controller's motion Steam uses. System default hands control back to SteamOS.${pending ? " Not confirmed yet…" : ""}`}
           strDefaultLabel={sourceLabel(status.gyro_source)}
           selectedOption={status.gyro_source}
           rgOptions={sourceOptions}
@@ -315,80 +315,40 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
           onChange={(option) => {
             const source = String(option.data);
             if (!(source in sourceLabels)) return;
-            void apply(() => setGyroSource(source as GyroSource), "Gyro source preference saved.");
+            void apply(() => setGyroSource(source as GyroSource), `Gyro source: ${sourceLabels[source as GyroSource]}.`);
           }}
         />
       </PanelSectionRow>
-      <PanelSectionRow>
-        <Field
-          focusable
-          label={`Current motion route: ${actualSource}`}
-          description={pending
-            ? `Saved choice: ${sourceLabel(status.gyro_source)}. It has not yet been confirmed as applied.`
-            : status.controlled
-              ? "The saved gyro reporting and motion route are applied. Use the test below to check sensor readings."
-              : "Companion is not maintaining a gyro-source override."}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow><Field focusable label={`Gyro reporting: left ${reportingLabel(status.imu?.actual?.left)} · right ${reportingLabel(status.imu?.actual?.right)}`}
-        description="Reporting must be enabled for controller motion to reach Steam. Both controllers uses their average; it does not use the sensor inside the console body." /></PanelSectionRow>
-      {(!status.available || status.conflict || status.reason) && <PanelSectionRow>
-        <Field focusable label={status.conflict ? "Configuration conflict" : !status.available ? "Controller unavailable" : "Controller status"} description={status.reason} />
-      </PanelSectionRow>}
-      {status.recovery_pending && <PanelSectionRow><Field focusable label="Recovery pending"
-        description="An earlier change did not finish. The previous controller settings are retained for recovery. Release Companion Control to restore them." /></PanelSectionRow>}
-      {(status.controlled || status.gyro_source !== "system" || status.conflict || status.recovery_pending) && <PanelSectionRow>
-        <ButtonItem layout="below" disabled={blocked} onClick={() => void apply(releaseControl, "Companion gyro control released.")}>
-          Release Companion Control
+      {(status.recovery_pending || status.conflict) && <PanelSectionRow>
+        <ButtonItem layout="below" disabled={blocked} onClick={() => void apply(releaseControl, "Previous controller settings restored.")}>
+          Restore previous controller settings
         </ButtonItem>
       </PanelSectionRow>}
-    </PanelSection>
-
-    <PanelSection title="Passive controller test">
-      <PanelSectionRow>
-        <Field
-          focusable
-          label="Compare physical and Steam readings"
-          description="Move each controller and touch the touchpad during a 30-second test. It observes existing reports without enabling sensors or changing controller mode. It stops when this page is hidden."
-        />
-      </PanelSectionRow>
       <PanelSectionRow>
         <ButtonItem
           layout="below"
+          description={testError || (diagnostics && !diagnostics.active && diagnostics.reason)
+            || "Move the controllers and touch the touchpad for 30 s to see live readings."}
           disabled={busy || starting || stopping || (!diagnostics?.active && !status.physical)}
           onClick={() => diagnostics?.active ? stop() : void start()}
         >
-          {starting ? "Starting Test…" : stopping ? "Stopping Test…" : diagnostics?.active ? "Stop Test" : "Start 30-Second Test"}
+          {starting ? "Starting test…" : stopping ? "Stopping test…"
+            : diagnostics?.active ? `Stop test${remaining !== null ? ` · ${remaining} s left` : ""}` : "Start controller test"}
         </ButtonItem>
       </PanelSectionRow>
-      {diagnostics && <PanelSectionRow>
-        <Field
-          focusable
-          label={diagnostics.active ? `Test running · ${finite(diagnostics.remaining_s) ? Math.ceil(diagnostics.remaining_s) : "unknown"} s remaining` : "Test finished"}
-          description={diagnostics.reason || "Raw gyro values are sensor counts, not degrees per second. Physical and virtual readings may use different scales."}
-        />
-      </PanelSectionRow>}
+      {diagnostics && <>
+        {infoRow("Left gyro", `${vectorText(physical?.gyro_left)} · ${streamText(diagnostics.physical)}`)}
+        {infoRow("Right gyro", vectorText(physical?.gyro_right))}
+        {infoRow("Steam gyro", `${vectorText(steam?.gyro)} · ${streamText(diagnostics.virtual)}`)}
+        {infoRow("Touchpad", `Physical: ${touchText(physical?.touchpad)} · Steam: ${touchText(steam?.touchpad)}`)}
+      </>}
+      {detailsRows(details, () => setDetails(value => !value), [
+        ["Motion route", sourceLabel(status.applied_source)],
+        ["Gyro reporting", `left ${reportingLabel(status.imu?.actual?.left)} · right ${reportingLabel(status.imu?.actual?.right)}`],
+        ["Physical controller", status.physical ? status.physical.path : "—"],
+        ["Steam controller", status.virtual ? status.virtual.path : "—"],
+      ])}
     </PanelSection>
-
-    {diagnostics && <>
-      <PanelSection title="Physical controllers">
-        <PanelSectionRow><Field focusable label="Controller reports" description={streamText(diagnostics.physical)} /></PanelSectionRow>
-        <PanelSectionRow><Field focusable label="Left gyro · raw counts" description={vectorText(diagnostics.physical.sample?.gyro_left)} /></PanelSectionRow>
-        <PanelSectionRow><Field focusable label="Right gyro · raw counts" description={vectorText(diagnostics.physical.sample?.gyro_right)} /></PanelSectionRow>
-        <PanelSectionRow><Field focusable label="Physical touchpad" description={touchText(diagnostics.physical.sample?.touchpad)} /></PanelSectionRow>
-      </PanelSection>
-      <PanelSection title="Existing Steam controller">
-        <PanelSectionRow><Field focusable label="Virtual controller reports" description={streamText(diagnostics.virtual)} /></PanelSectionRow>
-        <PanelSectionRow><Field focusable label="Steam gyro · raw counts" description={vectorText(diagnostics.virtual.sample?.gyro)} /></PanelSectionRow>
-        <PanelSectionRow><Field focusable label="Steam touchpad" description={touchText(diagnostics.virtual.sample?.touchpad)} /></PanelSectionRow>
-      </PanelSection>
-    </>}
-
-    {(error || status.error || notice || busy) && <PanelSection title={busy ? "Applying" : error || status.error ? "Needs attention" : "Saved"}>
-      <PanelSectionRow>
-        <Field focusable label={busy ? "Updating the gyro source" : error || status.error ? "Controller status" : "Preference confirmed"} description={busy ? "Waiting for the controller to confirm the change." : error || status.error || notice} />
-      </PanelSectionRow>
-    </PanelSection>}
     <FirmwarePanel visible={visible} />
   </>;
 };

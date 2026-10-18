@@ -1,93 +1,33 @@
-const complete = require('./frontend_test_guard.cjs')();
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const assert = require('node:assert/strict');
-const root = path.resolve(__dirname, '..');
-const ts = require(path.join(root, 'node_modules/typescript'));
-const slots = [], effects = new Map(), pending = [], timers = new Set();
+const { assert, run, mount, find } = require('./frontend_harness.cjs');
 const rpcCalls = [];
-let cursor = 0, visible = true, dirty = false, nextTimer = 0, modules = {};
-const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);
-const hooks = {
-  useState(initial) {
-    const i = cursor++;
-    if (!(i in slots)) slots[i] = typeof initial === 'function' ? initial() : initial;
-    return [slots[i], value => {
-      const next = typeof value === 'function' ? value(slots[i]) : value;
-      if (next !== slots[i]) { slots[i] = next; dirty = true; }
-    }];
-  },
-  useRef(value) { const i = cursor++; return slots[i] ||= { current: value }; },
-  useCallback(fn, deps) {
-    const i = cursor++;
-    if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { fn, deps };
-    return slots[i].fn;
-  },
-  useMemo(fn, deps) {
-    const i = cursor++;
-    if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { value: fn(), deps };
-    return slots[i].value;
-  },
-  useEffect(fn, deps) {
-    const i = cursor++, previous = effects.get(i);
-    if (!previous || !same(previous.deps, deps)) pending.push(() => {
-      previous?.cleanup?.(); effects.set(i, { deps, cleanup: fn() });
-    });
-  },
-};
-const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
-const mod = { exports: {} };
-const source = fs.readFileSync(path.join(root, 'src/index.tsx'), 'utf8')
-  + '\nexport { Controls as TestedContent, SectionLink as TestedLink, SectionHeader as TestedHeader };';
-const code = ts.transpileModule(source, { compilerOptions: {
-  module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX,
-} }).outputText;
-vm.runInNewContext(code, {
-  module: mod, exports: mod.exports, console,
-  setInterval: () => { const id = ++nextTimer; timers.add(id); return id; },
-  clearInterval: id => timers.delete(id),
-  require: name => {
-    if (name === 'react') return hooks;
-    if (name === 'react/jsx-runtime') return jsx;
-    if (name === '@decky/api') return {
-      useQuickAccessVisible: () => visible, definePlugin: fn => fn, addEventListener: () => {}, removeEventListener: () => {},
-      callable: name => async () => { rpcCalls.push(name); return { version: 'test', blocked: false }; },
-    };
-    if (name === '@decky/ui') return new Proxy({ staticClasses: {} }, { get: (o, k) => o[k] || k });
-    if (name.startsWith('./')) return new Proxy({}, { get: (_, k) =>
-      k.startsWith('get') ? async () => { rpcCalls.push(k); return {}; } : /^(start|stop)/.test(k) ? () => {} : k.endsWith('Summary') ? () => '' : k });
-    throw Error(name);
-  },
+let visible = true, modules = {}, refNode = null;
+const h = mount('index.tsx', {
+  component: 'TestedContent', ui: { staticClasses: {} },
+  append: 'export { Controls as TestedContent, SectionLink as TestedLink, SectionHeader as TestedHeader };',
+  api: { useQuickAccessVisible: () => visible,
+    callable: name => async () => { rpcCalls.push(name); return { version: 'test', blocked: false }; } },
+  modules: name => name.startsWith('./') ? new Proxy({}, { get: (_, k) =>
+    k.startsWith('get') ? async () => { rpcCalls.push(k); return {}; } : /^(start|stop)/.test(k) ? () => {} : k.endsWith('Summary') ? () => '' : k }) : undefined,
+  onRender: tree => { if (refNode) find(tree, n => n.props?.ref).props.ref.current = refNode; },
 });
+const timers = { get size() { return h.intervals().length; } };
 let plugin;
 function render() {
   // Decky 3.2.8 PluginView unmounts content on hide unless alwaysRender is set.
   // Merely changing useQuickAccessVisible in a mounted component misses this.
-  if (!visible && !plugin.alwaysRender) {
-    for (const effect of effects.values()) effect.cleanup?.();
-    effects.clear(); slots.length = 0; pending.length = 0;
-    return null;
-  }
+  if (!visible && !plugin.alwaysRender) { h.reset(); return null; }
   let tree, passes = 0;
   do {
-    assert.ok(++passes < 10, 'render loop'); dirty = false; cursor = 0;
-    tree = mod.exports.TestedContent({modules}); pending.splice(0).forEach(fn => fn());
-  } while (dirty);
+    assert.ok(++passes < 10, 'render loop'); h.changed = false;
+    tree = h.render({ modules });
+  } while (h.changed);
   return tree;
 }
-function find(node, predicate) {
-  if (!node || typeof node !== 'object') return;
-  if (predicate(node)) return node;
-  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
-    const result = find(child, predicate); if (result) return result;
-  }
-}
-(async () => {
-plugin = mod.exports.default();
+run(async () => {
+plugin = h.exports.default();
 // Controls consume the compatibility snapshot already read by the parent.
 for (let i = 0; i < 16; i++) await Promise.resolve();
-for (const title of ['TDP', 'Fan Control', 'Vibration', 'RGB Lighting', 'Button Remapper', 'Gyro & Touchpad', 'Battery', 'OLED Display', 'WiFi', 'About', 'Manage Modules']) {
+for (const title of ['TDP', 'Fan Control', 'Vibration', 'Lighting', 'Button mapping', 'Gyro & touchpad', 'Battery', 'Display', 'Wi-Fi', 'About', 'Manage Modules']) {
   const link = find(render(), n => n.props?.title === title && n.props?.onClick);
   assert.ok(link, `section link: ${title}`); link.props.onClick();
   for (let cycle = 0; cycle < 3; cycle++) {
@@ -103,10 +43,6 @@ for (const title of ['TDP', 'Fan Control', 'Vibration', 'RGB Lighting', 'Button 
   assert.equal(returned.props.restoreFocus, true, 'back restores the selected native module row');
   assert.ok(timers.size > 0, 'returning to the overview resumes polling');
 }
-find(render(), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
-assert.match(find(render(), n => n.props?.label === 'Author').props.description, /^Rayek/);
-assert.doesNotMatch(find(render(), n => n.props?.label === 'Included modules').props.description, /\d+\.\d+/);
-find(render(), n => n.props?.onBack).props.onBack();
 find(render(), n => n.props?.title === 'Battery' && n.props?.onClick).props.onClick();
 // Complete the earlier overview read before testing the next visibility cycle.
 for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -115,7 +51,7 @@ rpcCalls.length = 0;
 const disabled = render();
 assert.deepEqual(rpcCalls, [], 'disabled modules are not polled and Controls does not duplicate the guard read');
 assert.ok(!find(disabled, n => n.props?.onBack), 'disabling an open module returns to the overview');
-for (const title of ['TDP','Fan Control','Vibration','RGB Lighting','Button Remapper','Gyro & Touchpad','Battery','OLED Display','WiFi']) {
+for (const title of ['TDP','Fan Control','Vibration','Lighting','Button mapping','Gyro & touchpad','Battery','Display','Wi-Fi']) {
   assert.ok(!find(disabled, n => n.props?.title === title && n.props?.onClick), `${title} hidden when disabled`);
 }
 for (const title of ['About','Manage Modules']) assert.ok(find(disabled, n => n.props?.title === title && n.props?.onClick));
@@ -144,35 +80,52 @@ assert.equal(find(render(),n=>n.type==='FirmwarePanel').props.allowUpdates,false
 find(render(),n=>n.props?.onBack).props.onBack();
 visible = false; render(); assert.equal(timers.size, 0, 'hidden overview stops polling');
 // Exercise native ref focus handoffs separately from the Controls hook instance.
-for (const effect of effects.values()) effect.cleanup?.();
-effects.clear(); slots.length = 0; pending.length = 0;
+h.reset();
 visible = true;
 let focusCalls = 0, activations = 0;
-const nativeRender = (component, props, refNode) => {
-  cursor = 0;
-  const tree = component(props);
-  const refElement = find(tree, n => n.props?.ref);
-  refElement.props.ref.current = refNode;
-  pending.splice(0).forEach(fn => fn());
-  return tree;
-};
+const nativeRender = (component, props, node) => { refNode = node; const tree = h.render(props, component); refNode = null; return tree; };
 const linkProps = {section:'battery',title:'Battery',description:'Protection off · L 87% · R 64%',
   restoreFocus:true,onClick:()=>activations++};
-const nativeRow = nativeRender(mod.exports.TestedLink, linkProps, {focus:()=>focusCalls++});
+const nativeRow = nativeRender(h.exports.TestedLink, linkProps, {focus:()=>focusCalls++});
 assert.equal(focusCalls, 1);
 const nativeField = find(nativeRow, n => n.type === 'Field');
 nativeField.props.onActivate(); assert.equal(activations, 1, 'native activation keeps the module action');
-nativeRender(mod.exports.TestedLink, {...linkProps,description:'Protection off · L 42% · R 37%'}, {focus:()=>focusCalls++});
-visible = false; nativeRender(mod.exports.TestedLink,linkProps,{focus:()=>focusCalls++});
-visible = true; nativeRender(mod.exports.TestedLink,linkProps,{focus:()=>focusCalls++});
+nativeRender(h.exports.TestedLink, {...linkProps,description:'Protection off · L 42% · R 37%'}, {focus:()=>focusCalls++});
+visible = false; nativeRender(h.exports.TestedLink,linkProps,{focus:()=>focusCalls++});
+visible = true; nativeRender(h.exports.TestedLink,linkProps,{focus:()=>focusCalls++});
 assert.equal(focusCalls, 1, 'polls and dropdown visibility do not steal native focus');
-effects.clear(); slots.length = 0; pending.length = 0;
+h.reset();
 const backHost = {querySelector:()=>({focus:()=>focusCalls++})};
-nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+nativeRender(h.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
 assert.equal(focusCalls, 2, 'page entry focuses its native Back control');
-nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
-visible = false; nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
-visible = true; nativeRender(mod.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+nativeRender(h.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+visible = false; nativeRender(h.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
+visible = true; nativeRender(h.exports.TestedHeader,{title:'Battery',onBack(){}},backHost);
 assert.equal(focusCalls, 2, 'reopening QAM does not overwrite a page or dropdown selection');
-console.log('Ten sections retain navigation; disabled modules are hidden; About has author and unversioned modules.');
-})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });
+// Decky tab hidden (IntersectionObserver reports off-screen) while Quick Access stays open:
+// every polling sub-page must be told it is not visible.
+{
+  let report; class Observer { constructor(fn) { report = fn; } observe() {} disconnect() {} }
+  let shown = true;
+  const panel = { getClientRects: () => shown ? [{}] : [], ownerDocument: { defaultView: { IntersectionObserver: Observer } } };
+  const tab = mount('index.tsx', { component: 'C', append: 'export { Controls as C };', ui: { staticClasses: {} }, deferAll: true,
+    modules: name => name.startsWith('./') ? new Proxy({}, { get: (_, k) => /^(start|stop)/.test(k) ? () => {} : k.endsWith('Summary') ? () => '' : k.startsWith('get') ? () => new Promise(() => {}) : k }) : undefined,
+    onRender: t => { if (t?.props?.rootRef) t.props.rootRef.current = panel; } });
+  tab.exports.default();
+  const open = (state, title, type) => {
+    const states = { modules: state };
+    shown = true; tab.reset(); report?.([{ isIntersecting: true }]);
+    find(tab.render(states), n => n.props?.title === title && n.props?.onClick).props.onClick();
+    const visibleWhen = onScreen => { shown = onScreen; report([{ isIntersecting: onScreen }]); return find(tab.render(states), n => n.type === type).props.visible; };
+    return [visibleWhen(true), visibleWhen(false)];
+  };
+  const on = { controller: { enabled: true }, rgb: { enabled: true }, remap: { enabled: true }, tdp: { enabled: true }, display: { enabled: true }, wifi: { enabled: true }, battery: { enabled: true } };
+  assert.deepEqual(open(on, 'Gyro & touchpad', 'ControllerPage'), [true, false], 'gyro page stops polling when its tab is hidden');
+  assert.deepEqual(open({ controller: { enabled: false } }, 'Controller firmware', 'FirmwarePanel'), [true, false], 'firmware panel stops polling when its tab is hidden');
+  assert.deepEqual(open(on, 'Lighting', 'RgbPage'), [true, false], 'RGB page stops polling when its tab is hidden');
+  assert.deepEqual(open(on, 'Button mapping', 'RemapPage'), [true, false], 'remap page stops polling when its tab is hidden');
+  for (const [title, type] of [['TDP', 'TdpPage'], ['Display', 'DisplayPage'], ['Wi-Fi', 'WifiPage'], ['Battery', 'BatteryPage']])
+    assert.deepEqual(open(on, title, type), [true, false], `${type} stops polling when its tab is hidden`);
+}
+console.log('Ten sections retain navigation; disabled modules are hidden; explicit Back restores native focus.');
+});

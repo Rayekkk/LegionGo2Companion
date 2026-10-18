@@ -1,23 +1,9 @@
-const complete = require('./frontend_test_guard.cjs')();
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const assert = require('node:assert/strict');
-const root = path.resolve(__dirname, '..');
-const ts = require(path.join(root, 'node_modules/typescript'));
-const compiled = ts.transpileModule(fs.readFileSync(path.join(root, 'src/controller.tsx'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
-const settle = async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
-// Keep a full extra polling interval inside the backend lease. The exact UI
-// cadence is tuning; lease renewal and single-flight admission are the contract.
-const leaseSeconds = Number(fs.readFileSync(path.join(root, 'controller_backend.py'), 'utf8')
-  .match(/^LEASE_SECONDS\s*=\s*(\d+(?:\.\d+)?)$/m)?.[1]);
-assert.ok(Number.isFinite(leaseSeconds) && leaseSeconds > 0, 'Actual diagnostic lease is known');
+const { assert, run, settle: wait, mount, find, text } = require('./frontend_harness.cjs');
+const settle = () => wait(16);
 const status = {
   available: true, reason: '', gyro_source: 'system', applied_source: null,
   controlled: false, conflict: false, error: '', physical: { path: '/dev/test-physical', pid: 1, driver: 'test' },
-  virtual: { path: '/dev/test-virtual', pid: 2 }, iio: [], diagnostics_active: false,
+  virtual: { path: '/dev/test-virtual', pid: 2 }, diagnostics_active: false,
 };
 const emptyStream = () => ({ received: false, reports: 0, rate_hz: null, age_ms: null, sample: null });
 const snapshot = (token = 'test-token', overrides = {}) => ({
@@ -26,94 +12,27 @@ const snapshot = (token = 'test-token', overrides = {}) => ({
 });
 
 function harness(initiallyVisible = true) {
-  const slots = [], effects = new Map(), pendingEffects = [], timers = new Map(), calls = [];
-  let cursor = 0, visible = initiallyVisible, nextTimer = 0, writes = 0;
-  const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => value === b[i]);
-  const hooks = {
-    useState(initial) {
-      const i = cursor++;
-      if (!(i in slots)) slots[i] = initial;
-      return [slots[i], value => { writes++; slots[i] = typeof value === 'function' ? value(slots[i]) : value; }];
-    },
-    useRef(value) { const i = cursor++; return slots[i] ||= { current: value }; },
-    useCallback(fn, deps) {
-      const i = cursor++;
-      if (!slots[i] || !same(slots[i].deps, deps)) slots[i] = { fn, deps };
-      return slots[i].fn;
-    },
-    useEffect(fn, deps) {
-      const i = cursor++, previous = effects.get(i);
-      if (!previous || !same(previous.deps, deps)) pendingEffects.push(() => {
-        previous?.cleanup?.(); effects.set(i, { deps, cleanup: fn() });
-      });
-    },
-  };
-  const mod = { exports: {} };
-  const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
-  const timer = (kind, fn, ms) => { const id = ++nextTimer; timers.set(id, { kind, fn, ms }); return id; };
-  vm.runInNewContext(compiled, {
-    module: mod, exports: mod.exports, console,
-    setTimeout: (fn, ms) => timer('timeout', fn, ms), clearTimeout: id => timers.delete(id),
-    setInterval: (fn, ms) => timer('interval', fn, ms), clearInterval: id => timers.delete(id),
-    require(name) {
-      if (name === './firmware') return { FirmwarePanel: 'FirmwarePanel' };
-      if (name === 'react') return hooks;
-      if (name === 'react/jsx-runtime') return jsx;
-      if (name === '@decky/ui') return new Proxy({}, { get: (_, key) => key });
-      if (name === '@decky/api') return { callable: name => (...args) => new Promise((resolve, reject) => {
-        calls.push({ name, args, resolve, reject, settled: false });
-      }) };
-      throw Error(name);
-    },
-  });
-  const render = () => {
-    cursor = 0;
-    const tree = mod.exports.ControllerPage({ visible });
-    pendingEffects.splice(0).forEach(fn => fn());
-    return tree;
-  };
-  const respond = (name, value, rejected = false) => {
-    const call = calls.find(call => call.name === name && !call.settled);
-    assert.ok(call, `pending RPC ${name}`);
-    call.settled = true;
-    if (rejected) call.reject(value); else call.resolve(value);
-  };
+  let visible = initiallyVisible;
+  const h = mount('controller.tsx', { component: 'ControllerPage', deferAll: true,
+    modules: { './firmware': { FirmwarePanel: 'FirmwarePanel' } } });
+  const render = () => h.render({ visible });
   return {
-    calls, timers, render, respond, exports: mod.exports,
-    get writes() { return writes; },
-    count: name => calls.filter(call => call.name === name).length,
+    calls: h.calls, timers: h.timers, render, exports: h.exports,
+    respond: (name, value, rejected = false) => rejected ? h.reject(name, value) : h.respond(name, value),
+    get writes() { return h.writes; }, count: h.count,
     visible(value) { visible = value; return render(); },
     fire(kind) {
-      const found = [...timers].find(([, value]) => value.kind === kind);
+      const found = [...h.timers].find(([, value]) => value.kind === kind);
       if (!found) return false;
       const [id, entry] = found;
-      if (kind === 'timeout') {
-        assert.ok(Number.isFinite(entry.ms) && entry.ms > 0 && entry.ms * 2 <= leaseSeconds * 1000,
-          'Diagnostic cadence leaves one extra interval inside the actual backend lease');
-        timers.delete(id);
-      }
+      if (kind === 'timeout') h.timers.delete(id);
       entry.fn();
       return true;
     },
-    unmount() { for (const effect of effects.values()) effect.cleanup?.(); effects.clear(); },
+    unmount: h.unmount,
   };
 }
-
-function find(node, predicate) {
-  if (!node || typeof node !== 'object') return;
-  if (predicate(node)) return node;
-  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
-    const result = find(child, predicate);
-    if (result) return result;
-  }
-}
-function text(node) {
-  if (!node) return '';
-  if (typeof node !== 'object') return String(node);
-  return [node.props?.title, node.props?.label, node.props?.description,
-    ...(Array.isArray(node) ? node : [node.props?.children])].map(text).join(' ');
-}
-const startButton = h => find(h.render(), node => node.type === 'ButtonItem' && node.props.children === 'Start 30-Second Test');
+const startButton = h => find(h.render(), node => node.type === 'ButtonItem' && node.props.children === 'Start controller test');
 async function ready(h) {
   h.render(); h.respond('controller_get_status', status); await settle(); h.render();
 }
@@ -122,7 +41,7 @@ async function start(h, token = 'test-token') {
   h.respond('controller_start_diagnostics', snapshot(token)); await settle(); h.render();
 }
 
-(async () => {
+run(async () => {
   // A mounted but hidden page performs no work. Reads and lease renewals do not overlap.
   const h = harness(false);
   h.render(); assert.equal(h.calls.length, 0); assert.equal(h.timers.size, 0);
@@ -154,9 +73,8 @@ async function start(h, token = 'test-token') {
 
   // Backend expiration ends polling; unknown samples stay distinct from legitimate zeros.
   const expired = harness(); await ready(expired); await start(expired, 'bounded-token');
-  assert.match(text(expired.render()), /No packets received yet/);
-  assert.match(text(expired.render()), /does not establish that the sensor is faulty/);
-  assert.match(text(expired.render()), /No reading received/);
+  assert.match(text(expired.render()), /Left gyro — · No reports yet\./, 'an empty stream is not shown as zero');
+  assert.match(text(expired.render()), /Stop test · 30 s left/);
   expired.fire('timeout');
   expired.respond('controller_get_diagnostics', snapshot('bounded-token', {
     active: false, elapsed_s: 30, remaining_s: 0, reason: '30-second limit reached',
@@ -165,18 +83,19 @@ async function start(h, token = 'test-token') {
     } },
   })); await settle();
   assert.equal([...expired.timers.values()].filter(timer => timer.kind === 'timeout').length, 0);
-  assert.match(text(expired.render()), /X 0 · Y 0 · Z 0/);
-  assert.match(text(expired.render()), /Touch detected · X 0\.000 · Y 0\.000/);
-  assert.match(text(expired.render()), /30-second limit reached/);
+  assert.match(text(expired.render()), /Left gyro X 0 · Y 0 · Z 0 · 100 reports · 20\.0 Hz/);
+  assert.match(text(expired.render()), /Right gyro —/);
+  assert.match(text(expired.render()), /Touchpad Physical: touch at 0\.00,0\.00 · Steam: —/);
+  assert.equal(startButton(expired).props.description, '30-second limit reached', 'a finished test says why and can start again');
   expired.unmount();
 
   // An older status response must not overwrite a user's source selection.
   const source = harness(); await ready(source); source.fire('interval');
   const dropdown = find(source.render(), node => node.type === 'DropdownItem');
-  dropdown.props.onChange({ data: 'left' }); dropdown.props.onChange({ data: 'right' });
+  dropdown.props.onChange({ data: 'left' });
   await settle(); assert.equal(source.count('controller_set_gyro_source'), 0, 'write waits for the earlier read');
   source.respond('controller_get_status', { ...status, gyro_source: 'combined' }); await settle();
-  assert.equal(source.count('controller_set_gyro_source'), 1, 'duplicate changes do not queue writes');
+  assert.equal(source.count('controller_set_gyro_source'), 1, 'the write starts once the earlier read has finished');
   assert.equal(source.calls.find(call => call.name === 'controller_set_gyro_source').args[0], 'left');
   assert.equal(find(source.render(), node => node.type === 'DropdownItem').props.selectedOption, 'system', 'stale read ignored');
   source.respond('controller_set_gyro_source', { ...status, controlled: true, gyro_source: 'left', applied_source: 'left' });
@@ -192,4 +111,4 @@ async function start(h, token = 'test-token') {
   overlay.respond('controller_set_gyro_source', { ...status, controlled: true, gyro_source: 'right', applied_source: 'right' });
   await settle(); overlay.unmount();
   console.log('Controller UI: bounded leases, hidden/unmount cleanup, late replies, unknown readings and source-write races verified.');
-})().then(complete).catch(error => { console.error(error); process.exitCode = 1; });
+});

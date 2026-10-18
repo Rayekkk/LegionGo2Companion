@@ -5,13 +5,12 @@
 import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
-  Field,
   PanelSection,
   PanelSectionRow,
-  Spinner,
   ToggleField,
 } from "@decky/ui";
-import { FC, Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { confirmAction, detailsRows, errorText, infoRow, statusPlaceholder } from "./shared";
 
 type PanelMode = "gamma22" | "pq" | "hybrid";
 
@@ -93,38 +92,34 @@ const runSetup = callable<[string], State>("display_run_setup");
 const setPanelMode = callable<[string], State>("display_set_panel_mode");
 const restartSession = callable<[], State>("display_restart_session");
 const resetDisplaySettings = callable<[], State>("display_reset_settings");
-const notify = (title: string, body: string) =>
-  toaster.toast({ title, body, duration: 5000 });
+const notify = (body: string) =>
+  toaster.toast({ title: "Display", body, duration: 5000 });
 
 // ── Mode picker ────────────────────────────────────────────────────────────────
 const ProCon: FC<{ mode: PanelMode }> = ({ mode }) => (
-  <div style={{ fontSize: "0.75em", lineHeight: 1.35, padding: "0 16px 10px" }}>
-    <div style={{ color: "#5ee07a" }}>{`+ ${MODE_INFO[mode].pro}`}</div>
-    <div style={{ color: "#ff7b72" }}>{`- ${MODE_INFO[mode].con}`}</div>
-  </div>
+  <span style={{ display: "block", lineHeight: 1.35 }}>
+    <span style={{ display: "block", color: "#5ee07a" }}>{`+ ${MODE_INFO[mode].pro}`}</span>
+    <span style={{ display: "block", color: "#ff7b72" }}>{`- ${MODE_INFO[mode].con}`}</span>
+  </span>
 );
 
-/** One button plus the two lines that justify it. */
+/** One button; the two lines that justify it are its description, so they cost no focus stop. */
 const ModeChoice: FC<{
   mode: PanelMode;
   busy: boolean;
   onPick: (m: PanelMode) => void;
-}> = ({ mode, busy, onPick }) => (
-  <Fragment>
-    <PanelSectionRow>
-      <ButtonItem layout="below" onClick={() => onPick(mode)} disabled={busy}>
-        {modeLabel(mode)}
-      </ButtonItem>
-    </PanelSectionRow>
-    <PanelSectionRow>
-      <ProCon mode={mode} />
-    </PanelSectionRow>
-  </Fragment>
+  label?: string;
+}> = ({ mode, busy, onPick, label }) => (
+  <PanelSectionRow>
+    <ButtonItem layout="below" onClick={() => onPick(mode)} disabled={busy} description={<ProCon mode={mode} />}>
+      {label ?? modeLabel(mode)}
+    </ButtonItem>
+  </PanelSectionRow>
 );
 
 // ── Main content ───────────────────────────────────────────────────────────────
-export const DisplayPage: FC = () => {
-  const visible = useQuickAccessVisible();
+export const DisplayPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+  const visible = useQuickAccessVisible() && tabShown;
   const [state, setState] = useState<State | null>(null);
   const [statusError, setStatusError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -132,7 +127,7 @@ export const DisplayPage: FC = () => {
   // point, and afterwards the mode is a decision already made.
   const [showOthers, setShowOthers] = useState(false);
   const [showSwitch, setShowSwitch] = useState(false);
-  const [showReset, setShowReset] = useState(false);
+  const [details, setDetails] = useState(false);
   const mounted = useRef(true);
   const isVisible = useRef(visible);
   const writing = useRef(false);
@@ -191,8 +186,10 @@ export const DisplayPage: FC = () => {
     return () => { clearInterval(id); readRevision.current += 1; };
   }, [visible, refresh]);
 
-  const beginWrite = () => {
-    if (!mounted.current || !isVisible.current || !statusTrusted.current || writing.current) return false;
+  // A confirmation takes focus from the Quick Access menu, so its OK usually runs while the
+  // panel is hidden and its status untrusted; it acts on what the dialog showed.
+  const beginWrite = (confirmed = false) => {
+    if (!mounted.current || writing.current || (!confirmed && (!isVisible.current || !statusTrusted.current))) return false;
     writing.current = true; readRevision.current += 1; setBusy(true);
     return true;
   };
@@ -230,46 +227,30 @@ export const DisplayPage: FC = () => {
     [acceptState, acceptWriteState, refresh],
   );
 
-  const setup = useCallback(async (mode: PanelMode) => {
+  // First setup and later mode changes share one write path; only the RPC and the failure title differ.
+  const writeMode = useCallback(async (write: (mode: string) => Promise<State>, mode: PanelMode, confirmed = false) => {
     if (nativeFixBlocked(latestState.current)) return;
-    if (!beginWrite()) return;
+    if (!beginWrite(confirmed)) return;
     const visit = visitRevision.current;
     let failed = false;
     try {
-      const next = await runSetup(mode);
+      const next = await write(mode);
       acceptWriteState(next, visit);
-      if (next.setup_error) notify("Setup failed", next.setup_error);
+      if (next.setup_error) notify(next.setup_error);
     } catch (e) {
       failed = true;
       failedWrite();
-      notify("Setup failed", e instanceof Error ? e.message : String(e));
+      notify(errorText(e));
     } finally {
       finishWrite();
       if (failed) void refresh();
     }
   }, [acceptWriteState, refresh]);
-
-  const changeMode = useCallback(async (mode: PanelMode) => {
-    if (nativeFixBlocked(latestState.current)) return;
-    if (!beginWrite()) return;
-    const visit = visitRevision.current;
-    let failed = false;
-    try {
-      const next = await setPanelMode(mode);
-      acceptWriteState(next, visit);
-      if (next.setup_error) notify("Could not change mode", next.setup_error);
-    } catch (e) {
-      failed = true;
-      failedWrite();
-      notify("Could not change mode", e instanceof Error ? e.message : String(e));
-    } finally {
-      finishWrite();
-      if (failed) void refresh();
-    }
-  }, [acceptWriteState, refresh]);
+  const setup = (mode: PanelMode) => writeMode(runSetup, mode, true);
+  const changeMode = (mode: PanelMode) => writeMode(setPanelMode, mode);
 
   const restart = useCallback(async () => {
-    if (!beginWrite()) return;
+    if (!beginWrite(true)) return;
     const visit = visitRevision.current;
     try {
       // If this returns at all, the session did not go down - so surface
@@ -286,7 +267,7 @@ export const DisplayPage: FC = () => {
 
   const reset = useCallback(async () => {
     if (nativeFixBlocked(latestState.current)) return;
-    if (!beginWrite()) return;
+    if (!beginWrite(true)) return;
     const visit = visitRevision.current;
     let failed = false;
     try {
@@ -294,130 +275,96 @@ export const DisplayPage: FC = () => {
       if (mounted.current) {
         acceptWriteState(next, visit);
         if (!next.reset_error && visit === visitRevision.current) {
-          setShowOthers(false); setShowSwitch(false); setShowReset(false);
+          setShowOthers(false); setShowSwitch(false);
         }
       }
-      if (next.reset_error) notify("Reset incomplete", next.reset_error);
+      if (next.reset_error) notify(next.reset_error);
     } catch (error) {
       failed = true;
       failedWrite();
-      notify("Reset incomplete", error instanceof Error ? error.message : String(error));
+      notify(errorText(error));
     } finally { finishWrite(); if (failed) void refresh(); }
   }, [acceptWriteState, refresh]);
 
-  if (!state || !statusTrusted.current) {
-    return (
-      <PanelSection>
-        <PanelSectionRow>
-          {statusError ? <Field focusable label="Display status unavailable" description={statusError} /> : <Spinner />}
-        </PanelSectionRow>
-        {statusError && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
-      </PanelSection>
-    );
-  }
+  const confirmRestart = () => confirmAction("Restart Gaming Mode?",
+    "Steam and any running game will close and reopen. Save your game first.", "Restart", () => void restart());
+  const confirmSetup = (mode: PanelMode) => confirmAction(`Install display fix for ${MODE_INFO[mode].label}?`,
+    "If you already have a display script for this screen, it's kept as a .backup file. Gaming Mode needs a restart afterwards.",
+    "Install", () => void setup(mode));
+  const confirmReset = () => confirmAction("Reset display fix?",
+    "Companion removes its display changes and restores your previous display script, if there was one. Gaming Mode may need a restart.",
+    "Reset", () => void reset());
+
+  if (!state || !statusTrusted.current)
+    return statusPlaceholder({ label: "Display status unavailable", error: statusError, onRetry: () => void refresh() });
 
   if (state.settings_error) return <PanelSection title="Display settings unavailable">
-    <PanelSectionRow><Field focusable label="Display controls are paused" description={state.settings_error} /></PanelSectionRow>
+    {infoRow("Display controls are paused", state.settings_error)}
   </PanelSection>;
 
   if (state.reset_in_progress) return <PanelSection title="Finish display reset">
-    <PanelSectionRow><Field focusable label="Display controls are paused"
-      description={state.reset_error || "An earlier reset did not finish. Retry to restore the display and remove the Companion script."} /></PanelSectionRow>
-    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Retry Display Reset</ButtonItem></PanelSectionRow>
+    {infoRow("Display controls are paused",
+      state.reset_error || "An earlier reset did not finish. Retry to restore the display and remove the Companion script.")}
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Retry display reset</ButtonItem></PanelSectionRow>
   </PanelSection>;
 
-  const edidPanel = <PanelSection title="EDID for games">
-    <PanelSectionRow>
-      <ToggleField
-        label="Enabled"
-        description="Drop the DisplayID block from the EDID gamescope hands to games, which DXVK cannot parse."
-        checked={state.edid_fix}
-        disabled={busy}
-        onChange={(v) => toggle(setEdidFix, "edid_fix", v)}
-      />
-    </PanelSectionRow>
-    <PanelSectionRow>
-      <Field label="Status" description={state.edid_reason} focusable>
-        {state.edid_patched ? "Applied" : "Standby"}
-      </Field>
-    </PanelSectionRow>
-    {state.edid_patched && state.edid_game_nits > 0 && <PanelSectionRow>
-      <Field label="Games read" focusable
-        description="Without this they fall back to DXVK's 1499 nit placeholder and generic primaries.">
-        {`${state.edid_game_nits.toFixed(0)} nits`}
-      </Field>
-    </PanelSectionRow>}
-  </PanelSection>;
-
-  if (nativeFixBlocked(state)) return <>
-    <PanelSection title="Display fix">
-      <PanelSectionRow><Field focusable
-        label={state.native_support_detected ? "Native display support detected" : "Display fix cleanup pending"}
-        description={state.native_support_reason || (state.native_support_detected
-          ? "The system provides the display support previously supplied by Companion."
-          : "An earlier handover to native display support still needs cleanup.")} />
-      </PanelSectionRow>
-      <PanelSectionRow><Field focusable label="Companion display fix disabled"
-        description="PQ, Gamma 2.2, Hybrid switching and brightness forwarding are unavailable. EDID correction remains independent below." />
-      </PanelSectionRow>
-      {state.native_cleanup_error ? <PanelSectionRow><Field focusable label="Display fix cleanup needs attention"
-        description={`${state.native_cleanup_error} Companion will retry automatically.`} />
-      </PanelSectionRow> : state.native_cleanup_pending && <PanelSectionRow><Field focusable
-        label="Removing the Companion display fix"
-        description="Cleanup has not finished. Companion will retry automatically; the display fix remains disabled." />
-      </PanelSectionRow>}
-      {state.native_restart_pending && <>
-        <PanelSectionRow><Field focusable label="Restart Gaming Mode to finish cleanup"
-          description="Restart Gaming Mode to finish withdrawing the Companion display script from the current session. This closes Steam and brings it back." />
-        </PanelSectionRow>
-        {state.restart_error && <PanelSectionRow><Field focusable label="Could not restart" description={state.restart_error} /></PanelSectionRow>}
-        <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={restart}>Restart Game Mode</ButtonItem></PanelSectionRow>
-      </>}
-    </PanelSection>
-    {edidPanel}
+  const edidToggle = <PanelSectionRow>
+    <ToggleField
+      label="Fix HDR brightness in games"
+      description={`Games see the screen's real HDR brightness. Restart the game after changing.${state.edid_patched
+        ? state.edid_game_nits > 0 ? ` Games see ${state.edid_game_nits.toFixed(0)} nits.` : ""
+        : state.edid_fix ? " Not active yet." : ""}`}
+      checked={state.edid_fix}
+      disabled={busy}
+      onChange={(v) => toggle(setEdidFix, "edid_fix", v)}
+    />
+  </PanelSectionRow>;
+  const restartRow = (label: string) => <>
+    {infoRow(label, state.restart_error
+      ? `${state.restart_error}. Restart from the Steam menu (Power → Switch to Desktop and back) or reboot.`
+      : "Steam closes and reopens.")}
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={confirmRestart}>Restart Gaming Mode</ButtonItem></PanelSectionRow>
+  </>;
+  // Never disabled: it sits just above the last row, and reset() refuses while a write runs.
+  const resetRow = <PanelSectionRow><ButtonItem layout="below" onClick={confirmReset}
+    description={state.reset_error || "Removes Companion's display changes and restores your previous script."}>
+    Reset display fix
+  </ButtonItem></PanelSectionRow>;
+  const detailsPanel = detailsRows(details, () => setDetails(value => !value), [
+    ...(state.native_support_reason ? [["SteamOS support", state.native_support_reason] as [string, string]] : []),
+    ["Panel", `${state.panel_desc || "Unknown panel"}${state.backlight ? ` · backlight ${state.backlight}` : ""}${
+      state.max_nits ? ` · up to ${state.max_nits.toFixed(0)} nits` : ""}`],
+    ["Brightness", state.reason || "—"],
+    ["HDR info", state.edid_reason || "—"],
+  ]);
+  const switchRows = (onPick: (mode: PanelMode) => void) => <>
+    {showSwitch && MODE_ORDER.filter((m) => m !== state.panel_mode).map((m) => (
+      <ModeChoice key={m} mode={m} label={`Use ${MODE_INFO[m].label}`} busy={busy} onPick={onPick} />
+    ))}
   </>;
 
-  const resetPanel = <PanelSection title="Reset display fix">
-    <PanelSectionRow><Field focusable label="Restore previous display handling"
-      description="Withdraws brightness, HDR and EDID adjustments, removes the Companion display script and clears this module's settings. A previous third-party script is restored from its backup. Gaming Mode may need a restart." /></PanelSectionRow>
-    {state.reset_error && <PanelSectionRow><Field focusable label="Reset incomplete" description={state.reset_error} /></PanelSectionRow>}
-    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => setShowReset(value => !value)}>
-      {showReset ? "Cancel Reset" : "Reset Display Fix"}
-    </ButtonItem></PanelSectionRow>
-    {showReset && <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Confirm Display Reset</ButtonItem></PanelSectionRow>}
+  if (nativeFixBlocked(state)) return <PanelSection title="Display">
+    {infoRow(state.native_support_detected ? "SteamOS supports this screen" : "Display fix cleanup pending",
+      state.native_support_detected
+        ? "Companion's display fix is off. The HDR game fix below still works."
+        : "An earlier handover to SteamOS display support still needs cleanup.")}
+    {state.native_cleanup_error
+      ? infoRow("Display fix cleanup needs attention", `${state.native_cleanup_error} Companion will retry automatically.`)
+      : state.native_cleanup_pending && infoRow("Removing the Companion display fix",
+        "Cleanup has not finished. Companion will retry automatically.")}
+    {state.native_restart_pending && restartRow("Restart Gaming Mode to finish cleanup")}
+    {edidToggle}
+    {detailsPanel}
   </PanelSection>;
 
   // The mode and brightness controls need the Companion display script.
-  // EDID correction stays available independently of this setup.
+  // The HDR game fix stays available independently of this setup.
   if (!state.panel_mode) {
     return (
-      <>
-      <PanelSection title="Choose a display mode">
-        {state.reset_restart_pending && <>
-          <PanelSectionRow><Field focusable label="Display fix reset"
-            description="Companion controls have been withdrawn. Restart Gaming Mode to unload the display script before choosing a new mode." /></PanelSectionRow>
-          {state.restart_error && <PanelSectionRow><Field focusable label="Could not restart" description={state.restart_error} /></PanelSectionRow>}
-          <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={restart}>Restart Game Mode</ButtonItem></PanelSectionRow>
-        </>}
-        <PanelSectionRow>
-          <Field
-            focusable
-            description={
-              "How should the Legion Go 2 panel be driven? This installs a " +
-              "gamescope display script and replaces any script you already " +
-              "have for this panel - the old one is kept as a .backup file. " +
-              "You can change your choice at any time."
-            }
-          />
-        </PanelSectionRow>
-        <ModeChoice mode={RECOMMENDED} busy={busy || !!state.reset_restart_pending} onPick={setup} />
-
-        {state.setup_error && (
-          <PanelSectionRow>
-            <Field focusable label="Setup failed" description={state.setup_error} />
-          </PanelSectionRow>
-        )}
-
+      <PanelSection title="Display">
+        {state.reset_restart_pending && restartRow("Restart Gaming Mode to finish the reset")}
+        {infoRow("Choose a display mode", state.setup_error || "You can change it later.")}
+        <ModeChoice mode={RECOMMENDED} busy={busy || !!state.reset_restart_pending} onPick={confirmSetup} />
         <PanelSectionRow>
           <ButtonItem
             layout="below"
@@ -427,206 +374,76 @@ export const DisplayPage: FC = () => {
             {showOthers ? "Hide other options" : "Other options"}
           </ButtonItem>
         </PanelSectionRow>
-
         {showOthers &&
           MODE_ORDER.filter((m) => m !== RECOMMENDED).map((m) => (
-            <ModeChoice key={m} mode={m} busy={busy || !!state.reset_restart_pending} onPick={setup} />
+            <ModeChoice key={m} mode={m} busy={busy || !!state.reset_restart_pending} onPick={confirmSetup} />
           ))}
+        {edidToggle}
+        {detailsPanel}
       </PanelSection>
-      {edidPanel}
-      </>
     );
   }
 
   if (!state.setup_done) {
     return (
-      <>
-      <PanelSection title="Setup">
-        <PanelSectionRow>
-          <Field
-            focusable
-            label={`Display script required (${MODE_INFO[state.panel_mode].label})`}
-            description={
-              "The script for this mode is not in place. Installing it replaces " +
-              "any script you already have for this panel - the old one is kept " +
-              "alongside it as a .backup file."
-            }
-          />
-        </PanelSectionRow>
-        {state.setup_note && (
-          <PanelSectionRow>
-            <Field focusable label="Status" description={state.setup_note} />
-          </PanelSectionRow>
-        )}
+      <PanelSection title="Display">
+        {infoRow(`Display script needed (${MODE_INFO[state.panel_mode].label})`,
+          state.setup_error || state.setup_note || "Install it to use this mode.")}
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={() => setup(state.panel_mode as PanelMode)}
+            onClick={() => confirmSetup(state.panel_mode as PanelMode)}
             disabled={busy}
           >
-            {busy ? "Installing..." : "Setup Display Fix"}
+            {busy ? "Installing…" : "Install display fix"}
           </ButtonItem>
         </PanelSectionRow>
+        {edidToggle}
+        {resetRow}
+        {detailsPanel}
       </PanelSection>
-      {edidPanel}
-      {resetPanel}
-      </>
     );
   }
 
+  const modeNow = state.panel_mode === "hybrid"
+    ? `Now: Hybrid${state.gamescope_reachable ? ` (screen in ${state.hdr_now ? "PQ" : "Gamma 2.2"})` : ""}`
+    : `Now: ${MODE_INFO[state.panel_mode].label}`;
+  const changeButton = <PanelSectionRow>
+    <ButtonItem layout="below" description={modeNow} onClick={() => setShowSwitch((v) => !v)} disabled={busy}>
+      {showSwitch ? "Cancel" : "Change display mode"}
+    </ButtonItem>
+  </PanelSectionRow>;
+
   if (state.restart_pending) {
     return (
-      <>
-      <PanelSection title="Restart needed">
-        <PanelSectionRow>
-          <Field
-            focusable
-            label="Display script installed"
-            description={
-              "gamescope only reads display scripts when it starts, so Game Mode " +
-              "has to restart before anything changes. This closes Steam and " +
-              "brings it straight back."
-            }
-          />
-        </PanelSectionRow>
-        {state.restart_error && (
-          <PanelSectionRow>
-            <Field
-              focusable
-              label="Could not restart"
-              description={
-                `${state.restart_error}. Restart Game Mode yourself - Steam menu, ` +
-                "Power, Switch to Desktop and back, or just reboot."
-              }
-            />
-          </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={restart} disabled={busy}>
-            Restart Game Mode
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => setShowSwitch((v) => !v)}
-            disabled={busy}
-          >
-            {showSwitch ? "Keep Current Choice" : "Change Display Mode"}
-          </ButtonItem>
-        </PanelSectionRow>
-        {showSwitch &&
-          MODE_ORDER.filter((m) => m !== state.panel_mode).map((m) => (
-            <ModeChoice key={m} mode={m} busy={busy} onPick={changeMode} />
-          ))}
+      <PanelSection title="Display">
+        {restartRow("Restart Gaming Mode to finish")}
+        {changeButton}
+        {switchRows(changeMode)}
+        {edidToggle}
+        {resetRow}
+        {detailsPanel}
       </PanelSection>
-      {edidPanel}
-      {resetPanel}
-      </>
     );
   }
 
   return (
-    <>
-      <PanelSection title="Display">
-        <PanelSectionRow>
-          <Field
-            focusable
-            label={state.panel_desc || "unknown"}
-            description={
-              state.backlight
-                ? `backlight: ${state.backlight}` +
-                  (state.max_nits ? ` · up to ${state.max_nits.toFixed(0)} nits` : "")
-                : undefined
-            }
-          />
-        </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Display mode">
-        <PanelSectionRow>
-          <Field label="Mode" focusable>
-            {MODE_INFO[state.panel_mode].label}
-          </Field>
-        </PanelSectionRow>
-
-        {state.panel_mode === "hybrid" && (
-          <PanelSectionRow>
-            <Field label="Panel now" description={state.hybrid_reason} focusable>
-              {!state.gamescope_reachable
-                ? "Unknown"
-                : state.hdr_now ? "PQ" : "Gamma 2.2"}
-            </Field>
-          </PanelSectionRow>
-        )}
-
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => setShowSwitch((v) => !v)}
-            disabled={busy}
-          >
-            {showSwitch ? "Cancel" : "Switch Display Mode"}
-          </ButtonItem>
-        </PanelSectionRow>
-
-        {showSwitch &&
-          MODE_ORDER.filter((m) => m !== state.panel_mode).map((m) => (
-            <ModeChoice
-              key={m}
-              mode={m}
-              busy={busy}
-              onPick={(picked) => {
-                setShowSwitch(false);
-                changeMode(picked);
-              }}
-            />
-          ))}
-      </PanelSection>
-
-      <PanelSection title="Brightness slider">
-        {state.panel_ok ? (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="Enabled"
-                description="Forward the Steam brightness slider to gamescope while the panel runs in HDR/PQ."
-                checked={state.enabled}
-                disabled={busy}
-                onChange={(v) => toggle(setEnabled, "enabled", v)}
-              />
-            </PanelSectionRow>
-
-            <PanelSectionRow>
-              <Field label="Status" description={state.reason} focusable>
-                {state.active ? "Active" : "Standby"}
-              </Field>
-            </PanelSectionRow>
-
-            {state.active && (
-              <PanelSectionRow>
-                <Field label="Level" focusable>
-                  {`${state.nits.toFixed(1)} / ${state.max_nits.toFixed(0)} nits`}
-                </Field>
-              </PanelSectionRow>
-            )}
-          </>
-        ) : (
-          <PanelSectionRow>
-            <Field
-              focusable
-              label="Not applicable"
-              description={
-                "This half only runs on panels known to ignore the backlight in " +
-                "HDR/PQ, so nothing is being changed."
-              }
-            />
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-      {edidPanel}
-      {resetPanel}
-    </>
+    <PanelSection title="Display">
+      {changeButton}
+      {switchRows((picked) => { setShowSwitch(false); changeMode(picked); })}
+      {state.panel_ok && <PanelSectionRow>
+        <ToggleField
+          label="Brightness slider in HDR"
+          description={`Lets the Steam brightness slider dim the screen in PQ.${!state.enabled ? ""
+            : state.active ? ` Working now (${state.nits.toFixed(0)} nits).` : " Not needed in the current mode."}`}
+          checked={state.enabled}
+          disabled={busy}
+          onChange={(v) => toggle(setEnabled, "enabled", v)}
+        />
+      </PanelSectionRow>}
+      {edidToggle}
+      {resetRow}
+      {detailsPanel}
+    </PanelSection>
   );
 };

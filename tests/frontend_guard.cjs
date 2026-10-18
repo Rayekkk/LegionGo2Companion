@@ -1,87 +1,76 @@
-const complete = require('./frontend_test_guard.cjs')();
-const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const assert = require('node:assert/strict');
-const root = path.resolve(__dirname, '..'), ts = require(path.join(root, 'node_modules/typescript'));
-const slots = [], effects = new Map(), pending = [], events = new Map(), watchers = [];
-let cursor = 0, response = { version: 'test', blocked: true, standalone_plugins: ['LeGoTDP'] };
-const hooks = {
-  useState(initial) { const i=cursor++; if (!(i in slots)) slots[i]=initial;
-    return [slots[i], v=>slots[i]=typeof v==='function'?v(slots[i]):v]; },
-  useCallback(fn) { cursor++; return fn; },
-  useEffect(fn,deps) { const i=cursor++,old=effects.get(i);
-    if(!old||deps.some((v,j)=>v!==old.deps[j]))pending.push(()=>{old?.cleanup?.();effects.set(i,{deps,cleanup:fn()});}); },
-};
-const mod={exports:{}},jsx={jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})};
-const source=fs.readFileSync(path.join(root,'src/index.tsx'),'utf8')+'\nexport {Content as TestContent,refreshGuard as testRefreshGuard};';
-vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,
-  target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.ReactJSX}}).outputText,{
-  module:mod,exports:mod.exports,console,setInterval:()=>1,clearInterval(){},
-  require:name=>{
-    if(name==='react')return hooks;if(name==='react/jsx-runtime')return jsx;
-    if(name==='@decky/api')return {definePlugin:fn=>fn,useQuickAccessVisible:()=>true,
-      callable:name=>async()=>{assert.equal(name,'get_version','blocked view only calls the guard');return typeof response === 'function' ? response() : response;},
-      addEventListener:(name,fn)=>{events.set(name,fn);return fn;},removeEventListener:name=>events.delete(name)};
-    if(name==='@decky/ui')return new Proxy({staticClasses:{}},{get:(o,k)=>o[k]||k});
-    if(name==='./updates')return {startUpdates(){},stopUpdates(){},UpdateSection:'UpdateSection'};
-    if(name.startsWith('./'))return new Proxy({},{get:(_,k)=>/^(start|stop)/.test(k)?()=>watchers.push(k):k});
-    throw Error(name);
-  }
+const { assert, run, settle, mount, text } = require('./frontend_harness.cjs');
+const watchers = [];
+let response = { version: 'test', blocked: true, latched: true, standalone_plugins: ['LeGoTDP'] };
+const h = mount('index.tsx', {
+  component: 'TestContent', append: 'export { Content as TestContent, refreshGuard as testRefreshGuard };',
+  ui: { staticClasses: {} },
+  responses: { get_version: () => typeof response === 'function' ? response() : response },
+  strict: true,
+  modules: name => name === './updates' ? { startUpdates() {}, stopUpdates() {}, UpdateSection: 'UpdateSection' }
+    : name.startsWith('./') ? new Proxy({}, { get: (_, k) => /^(start|stop)/.test(k) ? () => watchers.push(k) : k }) : undefined,
 });
-const settle=async()=>{for(let i=0;i<10;i++)await Promise.resolve();};
-function render(){cursor=0;const t=mod.exports.TestContent();pending.splice(0).forEach(f=>f());return t;}
-function text(node){if(!node)return '';if(typeof node!=='object')return String(node);
- return [node.props?.title,node.props?.label,node.props?.description,...(Array.isArray(node)?node:[node.props?.children])].map(text).join(' ');}
-function reset(){for(const e of effects.values())e.cleanup?.();effects.clear();slots.length=0;pending.length=0;}
-(async()=>{
- let plugin=mod.exports.default();await settle();let tree=render();await settle();tree=render();
- assert.match(text(tree),/Companion paused/);assert.match(text(tree),/LeGoTDP/);
- assert.match(text(tree),/uninstall/);assert.match(text(tree),/restart Decky/);assert.deepEqual(watchers,[]);
- const outcome=tree.props.children.find(child=>child?.type==='FirmwarePanel');
- assert.ok(outcome,'the paused screen still exposes the independent firmware outcome');
- assert.equal(outcome.props.visible,true);assert.equal(outcome.props.allowUpdates,false);
- response={version:'test',blocked:true,standalone_plugins:[],restart_required:true};
- events.get('companion_guard')(response);tree=render();assert.match(text(tree),/Ready for a restart/);
- events.get('companion_guard')({version:'old reply',blocked:false});assert.match(text(render()),/Ready for a restart/);
- plugin.onDismount();reset();watchers.length=0;
- response={version:'test',blocked:false,standalone_plugins:[]};plugin=mod.exports.default();await settle();
- tree=render();await settle();tree=render();assert.equal(tree.type.name,'Controls');
- assert.deepEqual(watchers,['startTdpWatcher','startVibrationWatcher']);
- events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:false},vibration:{enabled:false}}});
- assert.deepEqual(watchers.slice(-2),['stopTdpWatcher','stopVibrationWatcher']);
- events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:false}}});
- assert.equal(watchers.at(-1),'startTdpWatcher');
- events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:true}}});
- assert.equal(watchers.at(-1),'startVibrationWatcher');
-  events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:true,ready:true},vibration:{enabled:true,ready:false,maintenance:true}}});
-  assert.equal(watchers.at(-1),'stopVibrationWatcher','maintenance pauses automatic profile writes without changing saved enabled intent');
-  tree=render();assert.equal(tree.props.modules.vibration.enabled,true);assert.equal(tree.props.modules.vibration.maintenance,true);
-  events.get('companion_guard')({version:'test',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:true}}});
-  assert.equal(watchers.at(-1),'startVibrationWatcher');
- events.get('companion_guard')({version:'test',blocked:true,standalone_plugins:['LeGo Vibe Control']});
- tree=render();assert.match(text(tree),/LeGo Vibe Control/);assert.notEqual(tree.type.name,'Controls');
- assert.deepEqual(watchers.slice(-2),['stopTdpWatcher','stopVibrationWatcher']);
- plugin.onDismount();reset();assert.equal(events.size,0);
- let finishOldRead;
- response = () => new Promise(resolve => { finishOldRead = resolve; });
- watchers.length = 0; plugin = mod.exports.default(); render();
- events.get('companion_guard')({version:'new',blocked:false,modules:{tdp:{enabled:false},vibration:{enabled:false}}});
- finishOldRead({version:'stale',blocked:false,modules:{tdp:{enabled:true},vibration:{enabled:true}}});
- await settle();tree=render();assert.equal(tree.props.modules.tdp.enabled,false);
- assert.deepEqual(watchers,[], 'an earlier poll must not re-enable modules disabled by an event');
- plugin.onDismount();reset();
- for(const invalid of [null,undefined,false,[],{blocked:'false'}]) {
-  response={version:'test',blocked:false};watchers.length=0;
-  plugin=mod.exports.default();await settle();render();await settle();
-  assert.equal(render().type.name,'Controls');
-  response=invalid;await mod.exports.testRefreshGuard();await settle();
-  assert.notEqual(render().type.name,'Controls','A malformed guard read must pause stale hardware controls');
-  assert.deepEqual(watchers.slice(-2),['stopTdpWatcher','stopVibrationWatcher']);
-  response={version:'test',blocked:false};await mod.exports.testRefreshGuard();await settle();
-  assert.equal(render().type.name,'Controls','A malformed response must not latch a real plugin conflict');
-  assert.doesNotThrow(()=>events.get('companion_guard')(invalid),'Malformed events must not escape into Decky');
-  assert.notEqual(render().type.name,'Controls');
-  events.get('companion_guard')(response);assert.equal(render().type.name,'Controls');
-  plugin.onDismount();reset();
- }
- console.log('Guard hides every hardware page, stops reports, explains conflicts and requires a fresh start.');
-})().then(complete).catch(e=>{console.error(e);process.exitCode=1;});
+const guard = value => h.listeners.companion_guard(value);
+const render = () => h.render();
+run(async () => {
+  let plugin = h.exports.default(); await settle(); let tree = render(); await settle(); tree = render();
+  assert.match(text(tree), /Companion paused/); assert.match(text(tree), /LeGoTDP/);
+  assert.deepEqual(watchers, []);
+  const outcome = tree.props.children.find(child => child?.type === 'FirmwarePanel');
+  assert.ok(outcome, 'the paused screen still exposes the independent firmware outcome');
+  assert.equal(outcome.props.visible, true); assert.equal(outcome.props.allowUpdates, false);
+  response = { version: 'test', blocked: true, latched: true, standalone_plugins: [], restart_required: true };
+  guard(response); tree = render(); assert.match(text(tree), /Ready for a restart/);
+  assert.doesNotMatch(text(tree), /are gone/, 'a failed startup scan latches without any conflict ever having existed');
+  guard({ version: 'old reply', blocked: false }); assert.match(text(render()), /Ready for a restart/);
+  plugin.onDismount(); h.reset(); watchers.length = 0;
+  response = { version: 'test', blocked: false, standalone_plugins: [] }; plugin = h.exports.default(); await settle();
+  tree = render(); await settle(); tree = render(); assert.equal(tree.type.name, 'Controls');
+  assert.deepEqual(watchers, ['startTdpWatcher', 'startVibrationWatcher']);
+  guard({ version: 'test', blocked: false, modules: { tdp: { enabled: false }, vibration: { enabled: false } } });
+  assert.deepEqual(watchers.slice(-2), ['stopTdpWatcher', 'stopVibrationWatcher']);
+  guard({ version: 'test', blocked: false, modules: { tdp: { enabled: true }, vibration: { enabled: false } } });
+  assert.equal(watchers.at(-1), 'startTdpWatcher');
+  guard({ version: 'test', blocked: false, modules: { tdp: { enabled: true }, vibration: { enabled: true } } });
+  assert.equal(watchers.at(-1), 'startVibrationWatcher');
+  guard({ version: 'test', blocked: false, modules: { tdp: { enabled: true, ready: true }, vibration: { enabled: true, ready: false, maintenance: true } } });
+  assert.equal(watchers.at(-1), 'stopVibrationWatcher', 'maintenance pauses automatic profile writes without changing saved enabled intent');
+  tree = render(); assert.equal(tree.props.modules.vibration.enabled, true); assert.equal(tree.props.modules.vibration.maintenance, true);
+  guard({ version: 'test', blocked: false, modules: { tdp: { enabled: true }, vibration: { enabled: true } } });
+  assert.equal(watchers.at(-1), 'startVibrationWatcher');
+  // One failed scan pauses the panel; the next clean scan (event or poll) must resume it.
+  guard({ version: 'test', blocked: true, latched: false, guard_error: 'denied', standalone_plugins: [] });
+  assert.match(text(render()), /Companion paused/); assert.deepEqual(watchers.slice(-2), ['stopTdpWatcher', 'stopVibrationWatcher']);
+  guard({ version: 'test', blocked: false, latched: false, modules: { tdp: { enabled: true }, vibration: { enabled: true } } });
+  assert.equal(render().type.name, 'Controls', 'a transient scan error must not latch the panel');
+  assert.deepEqual(watchers.slice(-2), ['startTdpWatcher', 'startVibrationWatcher']);
+  guard({ version: 'test', blocked: true, latched: false, guard_error: 'denied', standalone_plugins: [] });
+  response = { version: 'test', blocked: false, latched: false, modules: { tdp: { enabled: true }, vibration: { enabled: true } } };
+  await h.exports.testRefreshGuard(); await settle(); assert.equal(render().type.name, 'Controls', 'a healthy poll resumes after a transient error');
+  guard({ version: 'test', blocked: true, latched: true, standalone_plugins: ['LeGo Vibe Control'] });
+  tree = render(); assert.match(text(tree), /LeGo Vibe Control/); assert.notEqual(tree.type.name, 'Controls');
+  assert.deepEqual(watchers.slice(-2), ['stopTdpWatcher', 'stopVibrationWatcher']);
+  plugin.onDismount(); h.reset(); assert.equal(Object.keys(h.listeners).length, 0);
+  let finishOldRead;
+  response = () => new Promise(resolve => { finishOldRead = resolve; });
+  watchers.length = 0; plugin = h.exports.default(); render();
+  guard({ version: 'new', blocked: false, modules: { tdp: { enabled: false }, vibration: { enabled: false } } });
+  finishOldRead({ version: 'stale', blocked: false, modules: { tdp: { enabled: true }, vibration: { enabled: true } } });
+  await settle(); tree = render(); assert.equal(tree.props.modules.tdp.enabled, false);
+  assert.deepEqual(watchers, [], 'an earlier poll must not re-enable modules disabled by an event');
+  plugin.onDismount(); h.reset();
+  for (const invalid of [null, undefined, false, [], { blocked: 'false' }]) {
+    response = { version: 'test', blocked: false }; watchers.length = 0;
+    plugin = h.exports.default(); await settle(); render(); await settle();
+    assert.equal(render().type.name, 'Controls');
+    response = invalid; await h.exports.testRefreshGuard(); await settle();
+    assert.notEqual(render().type.name, 'Controls', 'A malformed guard read must pause stale hardware controls');
+    assert.deepEqual(watchers.slice(-2), ['stopTdpWatcher', 'stopVibrationWatcher']);
+    response = { version: 'test', blocked: false }; await h.exports.testRefreshGuard(); await settle();
+    assert.equal(render().type.name, 'Controls', 'A malformed response must not latch a real plugin conflict');
+    assert.doesNotThrow(() => guard(invalid), 'Malformed events must not escape into Decky');
+    assert.notEqual(render().type.name, 'Controls');
+    guard(response); assert.equal(render().type.name, 'Controls');
+    plugin.onDismount(); h.reset();
+  }
+  console.log('Guard hides every hardware page, stops reports, explains conflicts and requires a fresh start.');
+});

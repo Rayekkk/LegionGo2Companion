@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { addEventListener, removeEventListener, callable, definePlugin, useQuickAccessVisible } from "@decky/api";
+import { addEventListener, removeEventListener, callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   Field,
@@ -28,12 +28,26 @@ import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySumma
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
+import { confirmAction, errorText, infoRow } from "./shared";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
 type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
-const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP & CPU", fan: "Fan Control", vibration: "Vibration", display: "OLED Display", wifi: "WiFi", rgb: "RGB Lighting", remap: "Button Remapper", battery: "Battery", controller: "Gyro & Touchpad"};
+// Key order is the menu and Manage Modules order.
+const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP", fan: "Fan Control", vibration: "Vibration", rgb: "Lighting",
+  remap: "Button mapping", controller: "Gyro & touchpad", battery: "Battery", display: "Display", wifi: "Wi-Fi"};
+const moduleDescriptions: Record<ModuleKey, string> = {
+  tdp: "Power limits and CPU settings. Off: Lenovo's default limits return.",
+  fan: "Your own fan curve. Off: the fan returns to automatic.",
+  vibration: "Controller and touchpad vibration.",
+  rgb: "Stick lights and power button light.",
+  remap: "The two extra buttons on the left controller.",
+  controller: "Gyro source and controller test.",
+  battery: "Charge limit of about 80%.",
+  display: "OLED brightness and HDR fixes. Changes need a Gaming Mode restart.",
+  wifi: "Wi-Fi band preference.",
+};
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
 const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
@@ -90,11 +104,15 @@ interface GuardStatus {
   version: string;
   standalone_plugins?: string[];
   blocked: boolean;
+  latched?: boolean;
   restart_required?: boolean;
   guard_error?: string;
   message?: string;
 }
 const getVersion = callable<[], GuardStatus>("get_version");
+// Injected by rollup from package.json; shown until the backend reports its own version.
+declare const __PLUGIN_VERSION__: string;
+const PLUGIN_VERSION = __PLUGIN_VERSION__;
 let guardStatus: GuardStatus | null = null;
 const guardListeners = new Set<(status: GuardStatus) => void>();
 let tdpWatcherEnabled = false;
@@ -112,15 +130,15 @@ const pauseUnavailableGuard = () => {
   stopTdpWatcher(); stopVibrationWatcher();
   overviewPaused = true;
   clearOverview();
-  guardListeners.forEach(listener => listener({version: "2.1.0", blocked: true,
+  guardListeners.forEach(listener => listener({version: PLUGIN_VERSION, blocked: true,
     guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
 };
 const updateGuard = (status: GuardStatus) => {
   if (!frontendActive) return;
   guardRevision += 1;
   if (!validGuard(status)) { pauseUnavailableGuard(); return; }
-  // A late successful response must never unlock a latched conflict in this load.
-  if (guardStatus?.blocked && !status.blocked) return;
+  // A late response must never unlock a latched conflict in this load; a transient scan error may clear.
+  if (guardStatus?.latched && !status.latched) return;
   guardStatus = status;
   overviewPaused = status.blocked;
   if (status.blocked) clearOverview();
@@ -188,7 +206,7 @@ const overviewSources: OverviewSource[] = [
   { key: "controller", module: "controller", read: async () => ({ controller: await getControllerStatus() }) },
 ].map(source => ({ ...source, revision: 0, pending: null,
   lastReadAt: null, failures: 0, pendingSince: null } as OverviewSource));
-let overviewCache: Overview = { version: "2.1.0" };
+let overviewCache: Overview = { version: PLUGIN_VERSION };
 let overviewModules = EMPTY_MODULES;
 let overviewPaused = true;
 const overviewListeners = new Set<(overview: Overview) => void>();
@@ -229,7 +247,7 @@ const invalidateOverviewReads = () => {
 const clearOverview = () => {
   invalidateOverviewReads();
   overviewSources.forEach(source => { source.lastReadAt = null; });
-  overviewCache = { version: "2.1.0" };
+  overviewCache = { version: PLUGIN_VERSION };
 };
 const configureOverviewModules = (modules: ModuleStates) => {
   for (const source of overviewSources) {
@@ -396,18 +414,15 @@ const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBac
   </PanelSection>;
 };
 
-const watts = (value?: number) => value == null ? "–" : String(Math.round(value / 1000));
-
 const tdpSummary = (settings?: TdpSettings) => {
-  if (!settings) return "Power limits, profiles and CPU controls";
-  const spl = settings.enabled === false ? settings.spl : settings.active_spl ?? settings.spl;
-  const sppt = settings.enabled === false ? settings.sppt : settings.active_sppt ?? settings.sppt;
-  const fppt = settings.enabled === false ? settings.fppt : settings.active_fppt ?? settings.fppt;
+  if (!settings) return "Power limits and CPU settings";
+  if (settings.enabled === false) return "Off · Lenovo defaults";
+  const spl = settings.active_spl ?? settings.spl, sppt = settings.active_sppt ?? settings.sppt;
+  const fppt = settings.active_fppt ?? settings.fppt;
+  if (spl == null || sppt == null || fppt == null) return "Custom";
   const global = spl === settings.spl && sppt === settings.sppt && fppt === settings.fppt;
-  const mode = settings.enabled === false ? "Off" : spl != null && sppt != null && fppt != null
-    ? tdpModeLabel(Math.round(spl / 1000), Math.round(sppt / 1000), Math.round(fppt / 1000),
-      global ? settings.active_preset : undefined) : "Custom";
-  return `${mode} · ${watts(spl)} / ${watts(sppt)} / ${watts(fppt)} W`;
+  const [w, sw, fw] = [spl, sppt, fppt].map(value => Math.round(value / 1000));
+  return `${tdpModeLabel(w, sw, fw, global ? settings.active_preset : undefined)} · ${w} W`;
 };
 
 const VIBE_LEVELS = ["Off", "Low", "Medium", "High"];
@@ -423,61 +438,64 @@ const vibrationSummary = (overview: Overview) => {
 };
 
 const displaySummary = (state?: DisplayState) => {
+  const hdrFix = state?.edid_patched ? " · HDR game fix on" : "";
   if (state?.native_support_detected || state?.native_cleanup_pending) {
-    const status = state.native_cleanup_error ? "Display fix cleanup needs attention"
-      : state.native_cleanup_pending ? "Display fix cleanup pending"
-      : state.native_restart_pending ? "Restart required"
-      : "Native display support";
-    return `${status} · ${state.edid_patched ? "EDID fixed" : "EDID standby"}`;
+    if (state.native_cleanup_error) return "Display fix cleanup needs attention";
+    if (state.native_cleanup_pending) return "Display fix cleanup pending";
+    if (state.native_restart_pending) return "Restart Gaming Mode to finish";
+    return `SteamOS display support${hdrFix}`;
   }
-  if (!state?.setup_done) return "Choose Hybrid, PQ or Gamma 2.2";
-  const mode = state.panel_mode === "gamma22"
-    ? "Gamma 2.2"
-    : state.panel_mode === "pq" ? "PQ" : "Hybrid";
-  const fixes = [state.active ? "brightness active" : "brightness standby"];
-  if (state.edid_patched) fixes.push("EDID fixed");
-  return `${mode} · ${fixes.join(" · ")}`;
+  if (!state?.setup_done) return "Choose a display mode";
+  const mode = state.panel_mode === "gamma22" ? "Gamma 2.2" : state.panel_mode === "pq" ? "PQ" : "Hybrid";
+  return `${mode}${hdrFix}`;
 };
 
 const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
   const [busy, setBusy] = useState<ModuleKey | "restart" | null>(null);
-  const [error, setError] = useState("");
+  // The failed control shows its error until the next action.
+  const [error, setError] = useState<{key: ModuleKey | "restart"; text: string} | null>(null);
   const writing = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const change = async (name: ModuleKey, enabled: boolean) => {
     if (!mounted.current || writing.current) return;
-    writing.current = true; setBusy(name); setError("");
+    writing.current = true; setBusy(name); setError(null);
     try {
       const next = await setModuleEnabled(name, enabled);
       if (guardStatus) updateGuard({...guardStatus, modules: next});
     } catch (failure) {
-      if (mounted.current) setError(failure instanceof Error ? failure.message : "The module change could not be confirmed.");
+      if (mounted.current) fail(name, errorText(failure, "The module change could not be confirmed."));
       void refreshGuard();
     } finally { writing.current = false; if (mounted.current) setBusy(null); }
   };
   const restart = async () => {
     if (!mounted.current || writing.current) return;
-    writing.current = true; setBusy("restart"); setError("");
+    writing.current = true; setBusy("restart"); setError(null);
     try {
       const result = await restartModulesSession();
-      if (!result.success && mounted.current) setError(result.error || result.message || "Gaming Mode restart failed.");
+      if (!result.success && mounted.current) fail("restart", result.error || result.message || "Gaming Mode restart failed.");
     } catch {
-      if (mounted.current) setError("Could not confirm the Gaming Mode restart.");
+      if (mounted.current) fail("restart", "Could not confirm the Gaming Mode restart.");
     } finally { writing.current = false; if (mounted.current) setBusy(null); }
   };
+  const fail = (key: ModuleKey | "restart", text: string) => {
+    setError({key, text});
+    toaster.toast({title: key === "restart" ? "Gaming Mode" : moduleLabels[key], body: text});
+  };
   return <PanelSection title="Manage Modules">
-    <PanelSectionRow><Field focusable label="Choose your modules" description="Disabling stops the module, withdraws its hardware controls and hides its page. Saved preferences return when you enable it again. OLED can require a Gaming Mode restart." /></PanelSectionRow>
+    {infoRow("Choose your modules", "Turning a module off stops it and hides it. Its settings are kept.")}
     {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
       <ToggleField label={moduleLabels[name]} checked={modules[name]?.maintenance ? modules[name]?.enabled === true : moduleEnabled(modules, name)} disabled={busy !== null || !!modules[name]?.pending || !!modules[name]?.maintenance}
-        description={busy === name ? "Applying and verifying the change…" : modules[name]?.error || modules[name]?.note || (moduleEnabled(modules, name) ? "Enabled" : "Disabled — hidden from the main menu")}
+        description={busy === name ? "Applying…" : (error?.key === name && error.text) || modules[name]?.error || modules[name]?.note || moduleDescriptions[name]}
         onChange={enabled => void change(name, enabled)} />
-      {modules[name]?.pending && !modules[name]?.maintenance && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} Cleanup</ButtonItem>}
+      {modules[name]?.pending && !modules[name]?.maintenance && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} cleanup</ButtonItem>}
       {modules[name]?.enabled && modules[name]?.ready === false && !modules[name]?.pending && !modules[name]?.maintenance &&
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, true)}>Retry {moduleLabels[name]} Start</ButtonItem>}
+        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, true)}>Retry {moduleLabels[name]} start</ButtonItem>}
     </PanelSectionRow>)}
-    {error && <PanelSectionRow><Field focusable label="Could not confirm" description={error} /></PanelSectionRow>}
-    {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" disabled={busy !== null} onClick={() => void restart()}>Restart Gaming Mode (closes games)</ButtonItem></PanelSectionRow>}
+    {/* The last row stays enabled; restart() ignores presses while another change runs. */}
+    {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" description={error?.key === "restart" ? error.text : undefined}
+      onClick={() => confirmAction("Restart Gaming Mode?", "Steam and any running game will close and reopen. Save your game first.",
+        "Restart", () => void restart())}>{busy === "restart" ? "Restarting…" : "Restart Gaming Mode"}</ButtonItem></PanelSectionRow>}
   </PanelSection>;
 };
 
@@ -485,6 +503,7 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
   const visible = useQuickAccessVisible();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [onScreen, setOnScreen] = useState(true);
+  const pageVisible = visible && onScreen; // QAM open and the Companion tab actually shown
   const panelOnScreen = () => !panelRef.current || panelRef.current.getClientRects().length > 0;
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
   const [overview, setOverview] = useState<Overview>(overviewCache);
@@ -553,25 +572,20 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
 
   if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
-      {Object.values(modules).some(state => state?.maintenance) && <PanelSectionRow><Field focusable label="Controller controls paused" description="Firmware maintenance is in progress. Saved controller settings have not been changed." /></PanelSectionRow>}
-      {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title="TDP" {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}
-      {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title="Fan Control" {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}
-      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title="Vibration" {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}
-      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title="RGB Lighting" {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}
-      {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title="Button Remapper" {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}
+      {Object.values(modules).some(state => state?.maintenance) && infoRow("Controller controls paused", "Firmware maintenance is in progress. Saved controller settings have not been changed.")}
+      {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}
+      {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}
+      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}
+      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}
+      {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title={moduleLabels.remap} {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}
       <SectionLink section="controller" restoreFocus={focusSection === "controller"}
-        title={moduleEnabled(modules, "controller") ? "Gyro & Touchpad" : "Controller firmware"}
+        title={moduleEnabled(modules, "controller") ? moduleLabels.controller : "Controller firmware"}
         {...(moduleEnabled(modules, "controller") ? summary("controller", controllerSummary(overview.controller))
           : { description: "Controller update status and Lenovo firmware updates" })}
         onClick={() => openSection("controller")} />
-      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title="Battery" {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}
-      {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title="OLED Display" {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}
-      {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title="WiFi" {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}
-    </PanelSection>
-    <PanelSection title="Device">
-      <PanelSectionRow>
-        <Field focusable label="Lenovo Legion Go 2" description="OLED · SteamOS · Z2 Extreme support" />
-      </PanelSectionRow>
+      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title={moduleLabels.battery} {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}
+      {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title={moduleLabels.display} {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}
+      {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title={moduleLabels.wifi} {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}
     </PanelSection>
     <PanelSection title="Plugin">
       <SectionLink section="modules" restoreFocus={focusSection === "modules"} title="Manage Modules" description="Enable, disable and hide individual hardware modules" onClick={() => openSection("modules")} />
@@ -584,49 +598,28 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     </PanelSection>
   </PageShell>;
 
-  const title = activeSection === "tdp"
-    ? "TDP"
-    : activeSection === "fan" ? "Fan Control"
-    : activeSection === "vibration"
-      ? "Vibration"
-      : activeSection === "display"
-        ? "OLED Display"
-      : activeSection === "wifi"
-        ? "WiFi"
-      : activeSection === "rgb"
-        ? "RGB Lighting"
-      : activeSection === "remap"
-        ? "Button Remapper"
-      : activeSection === "controller"
-        ? moduleEnabled(modules, "controller") ? "Gyro & Touchpad" : "Controller firmware"
-      : activeSection === "battery"
-        ? "Battery"
-      : activeSection === "modules" ? "Manage Modules" : "About";
+  const title = activeSection === "modules" ? "Manage Modules"
+    : activeSection === "about" ? "About"
+    : activeSection === "controller" && !moduleEnabled(modules, "controller") ? "Controller firmware"
+    : moduleLabels[activeSection];
 
   return <PageShell rootRef={panelRef}>
     <SectionHeader title={title} onBack={() => setActiveSection(null)} />
     {activeSection === "modules" && <ModulesPage modules={modules} />}
-    {activeSection === "tdp" && <TdpPage />}
+    {activeSection === "tdp" && <TdpPage visible={onScreen} />}
     {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
     {activeSection === "vibration" && <VibrationPage />}
-    {activeSection === "display" && <DisplayPage />}
-    {activeSection === "wifi" && <WifiPage />}
-    {activeSection === "rgb" && <RgbPage />}
-    {activeSection === "remap" && <RemapPage />}
-    {activeSection === "controller" && (moduleEnabled(modules, "controller") ? <ControllerPage visible={visible} />
-      : <FirmwarePanel visible={visible} allowUpdates={!Object.values(modules).some(state => state?.maintenance)} />)}
-    {activeSection === "battery" && <BatteryPage />}
+    {activeSection === "display" && <DisplayPage visible={onScreen} />}
+    {activeSection === "wifi" && <WifiPage visible={onScreen} />}
+    {activeSection === "rgb" && <RgbPage visible={onScreen} />}
+    {activeSection === "remap" && <RemapPage visible={onScreen} />}
+    {activeSection === "controller" && (moduleEnabled(modules, "controller") ? <ControllerPage visible={pageVisible} />
+      : <FirmwarePanel visible={pageVisible} allowUpdates={!Object.values(modules).some(state => state?.maintenance)} />)}
+    {activeSection === "battery" && <BatteryPage visible={onScreen} />}
     {activeSection === "about" && <>
       <PanelSection title="Legion Go 2 Companion">
-        <PanelSectionRow>
-          <Field focusable label={`Version ${overview.version}`} description="All-in-one hardware controls for Decky Loader." />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <Field focusable label="Included modules" description="LeGoTDP · Fan Control · LeGo Vibe Control · LeGo2 Brightness Fix · WiFi Optimizer Go 2 · RGB Lighting · Button Remapper · Gyro & Touchpad · Battery" />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <Field focusable label="Author" description="Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice." />
-        </PanelSectionRow>
+        {infoRow(`Version ${overview.version}`, "All-in-one hardware controls for Decky Loader.")}
+        {infoRow("Author", "Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice.")}
       </PanelSection>
       <UpdateSection currentVersion={overview.version} />
     </>}
@@ -648,20 +641,17 @@ const Content: FC = () => {
   }, [visible]);
 
   if (!status) return <PageShell><PanelSection title="Checking installed plugins">
-    <PanelSectionRow><Field focusable label="Checking compatibility" description="Hardware controls will appear after the check completes." /></PanelSectionRow>
+    {infoRow("Checking compatibility", "Hardware controls will appear after the check completes.")}
   </PanelSection></PageShell>;
   if (status.blocked) return <PageShell>
     <PanelSection title="Companion paused">
-      <PanelSectionRow><Field focusable label="All modules are paused"
-        description="All hardware controls, including gyro diagnostics and battery protection, are unavailable while a standalone plugin is installed." /></PanelSectionRow>
-      {!!status.standalone_plugins?.length && <PanelSectionRow>
-        <Field focusable label="Installed standalone plugins" description={status.standalone_plugins.join(", ")} />
-      </PanelSectionRow>}
-      <PanelSectionRow><Field focusable label={status.restart_required ? "Ready for a restart" : "How to resume"}
-        description={status.guard_error || (status.restart_required
-          ? "The conflicting plugins are gone. Restart Decky or the console to start Companion safely."
-          : "In Decky Settings, uninstall the plugins listed above and keep their saved settings. Then restart Decky or the console. Disabling a plugin is not enough; it must be uninstalled.")} /></PanelSectionRow>
-      <PanelSectionRow><Field focusable label="Your settings are kept" description="This safeguard does not erase Companion profiles or the standalone settings available for import." /></PanelSectionRow>
+      {infoRow("All modules are paused",
+        "All hardware controls, including gyro diagnostics and battery protection, are unavailable while a standalone plugin is installed.")}
+      {!!status.standalone_plugins?.length && infoRow("Installed standalone plugins", status.standalone_plugins.join(", "))}
+      {infoRow(status.restart_required ? "Ready for a restart" : "How to resume", status.guard_error || (status.restart_required
+        ? "Companion stays paused for safety and no conflicting plugin is installed now. Restart Decky or the console to start Companion safely."
+        : "In Decky Settings, uninstall the plugins listed above and keep their saved settings. Then restart Decky or the console. Disabling a plugin is not enough; it must be uninstalled."))}
+      {infoRow("Your settings are kept", "This safeguard does not erase Companion profiles or the standalone settings available for import.")}
       <PanelSectionRow><ButtonItem layout="below" onClick={() => void refreshGuard()}>Check again</ButtonItem></PanelSectionRow>
     </PanelSection>
     <FirmwarePanel visible={visible} allowUpdates={false} />
@@ -678,18 +668,23 @@ const Icon: FC = () => (
   </svg>
 );
 
-export default definePlugin(() => {
-  startUpdates();
-  frontendActive = true;
+// A plugin load or unload discards the previous session's guard and overview state.
+const resetSession = () => {
   guardRevision += 1;
   guardRead = null;
   guardStatus = null;
   clearOverview();
   overviewPaused = true;
-  overviewModules = EMPTY_MODULES;
   overviewListeners.clear();
   overviewPollers.clear();
   overviewVisibleStarted = null; overviewVisibleSpent = 0;
+};
+
+export default definePlugin(() => {
+  startUpdates();
+  frontendActive = true;
+  resetSession();
+  overviewModules = EMPTY_MODULES;
   overviewSources.forEach(source => { source.pending = null; });
   const listener = addEventListener<[GuardStatus]>("companion_guard", updateGuard);
   void refreshGuard();
@@ -704,17 +699,10 @@ export default definePlugin(() => {
     onDismount() {
       stopUpdates();
       frontendActive = false;
-      guardRevision += 1;
-      guardRead = null;
-      clearOverview();
-      overviewPaused = true;
-      overviewListeners.clear();
-      overviewPollers.clear();
-      overviewVisibleStarted = null; overviewVisibleSpent = 0;
+      resetSession();
       tdpWatcherEnabled = vibeWatcherEnabled = false;
       removeEventListener("companion_guard", listener);
       guardListeners.clear();
-      guardStatus = null;
       stopTdpWatcher();
       stopVibrationWatcher();
     },

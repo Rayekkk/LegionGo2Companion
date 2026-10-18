@@ -17,6 +17,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const output = resolve(root, "dist");
 if (dirname(output) !== root) throw new Error("Build output must stay within the project");
 const manifest = JSON.parse(readFileSync(resolve(root, "plugin.json"), "utf8"));
+const { version } = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 
 export default {
   input: resolve(root, "src/index.tsx"),
@@ -30,7 +31,8 @@ export default {
       "@decky/ui": "DFL", "@decky/manifest": JSON.stringify(manifest),
     }),
     replace({ preventAssignment: false,
-      "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "production") }),
+      "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "production"),
+      __PLUGIN_VERSION__: JSON.stringify(version) }),
     importAssets({ publicPath: `http://127.0.0.1:1337/plugins/${manifest.name}/` }),
   ],
   treeshake: { preset: "smallest", pureExternalImports: { pure: ["@decky/ui", "@decky/api"] } },

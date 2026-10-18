@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, useQuickAccessVisible } from "@decky/api";
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
   DropdownOption,
-  Field,
   PanelSection,
   PanelSectionRow,
-  Spinner,
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
 
 interface ActionOption {
   id: string;
@@ -41,51 +40,19 @@ interface RemapResult {
 }
 
 // Accepted edits survive page close. Every later menu/page snapshot follows them.
-let remapMutationChain: Promise<void> = Promise.resolve();
-let remapMutationsPending = 0;
+const mutations = mutationQueue();
 const readRemapStatus = callable<[], RemapStatus>("remap_get_status");
 export const getRemapStatus = async () => {
-  if (remapMutationsPending) await remapMutationChain;
+  if (mutations.pending) await mutations.tail;
   return readRemapStatus();
 };
 const setRemapEnabled = callable<[boolean], RemapResult>("remap_set_enabled");
 const setRemapAction = callable<[string, string], RemapResult>("remap_set_action");
 const restoreRemapDefaults = callable<[], RemapResult>("remap_restore_defaults");
 
-const fallbackLabels: Record<string, string> = {
-  default: "Default",
-  keyboard: "On-screen keyboard",
-  screenshot: "Screenshot",
-  steam: "Steam menu",
-  quick_access: "Quick access menu",
-  show_desktop: "Show desktop",
-  alt_tab: "Switch window (Alt+Tab)",
-  escape: "Escape",
-  enter: "Enter",
-  page_up: "Page Up",
-  page_down: "Page Down",
-  insert: "Insert",
-  home: "Home",
-  end: "End",
-  f1: "F1",
-  f2: "F2",
-  f3: "F3",
-  f4: "F4",
-  f5: "F5",
-  f6: "F6",
-  f7: "F7",
-  f8: "F8",
-  f9: "F9",
-  f10: "F10",
-  f11: "F11",
-  f12: "F12",
-  disabled: "Disabled",
-};
-
+// Every status lists all actions with labels, and saved actions are always one of them.
 const actionLabel = (status: RemapStatus | undefined, action: string) =>
-  status?.actions.find((candidate) => candidate.id === action)?.label
-    ?? fallbackLabels[action]
-    ?? "Unknown";
+  status?.actions.find((candidate) => candidate.id === action)?.label ?? "Unknown";
 
 export const remapSummary = (status?: RemapStatus) => {
   if (!status?.supported) return status?.reason || "Desktop and Page button actions";
@@ -93,12 +60,13 @@ export const remapSummary = (status?: RemapStatus) => {
   return `Desktop: ${actionLabel(status, status.desktop_action)} · Page: ${actionLabel(status, status.page_action)}`;
 };
 
-export const RemapPage: FC = () => {
-  const visible = useQuickAccessVisible();
+export const RemapPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+  const visible = useQuickAccessVisible() && tabShown;
   const [status, setStatus] = useState<RemapStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  // The control whose last change failed shows that error until the next change.
+  const [failed, setFailed] = useState<{control: string; text: string} | null>(null);
   const pending = useRef(0);
   const mounted = useRef(true);
   const isVisible = useRef(visible);
@@ -115,7 +83,7 @@ export const RemapPage: FC = () => {
     readInFlight.current = true;
     const revision = readRevision.current;
     try {
-      if (remapMutationsPending) await remapMutationChain;
+      if (mutations.pending) await mutations.tail;
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
       const next = await getRemapStatus();
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return;
@@ -123,7 +91,7 @@ export const RemapPage: FC = () => {
       setError(next.error || "");
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current)
-        setError("Button-remapper status is unavailable. Retrying while this page is open.");
+        setError("Button mapping status is unavailable. Retrying while this page is open.");
     } finally {
       readInFlight.current = false;
       if (refreshAfterRead.current) { refreshAfterRead.current = false; void refresh(); }
@@ -138,39 +106,40 @@ export const RemapPage: FC = () => {
     return () => { clearInterval(timer); readRevision.current += 1; };
   }, [refresh, visible]);
 
-  const enqueue = useCallback((operation: () => Promise<RemapResult>, message: string) => {
+  const enqueue = useCallback((operation: () => Promise<RemapResult>, message: string, control: string) => {
     if (!mounted.current) return Promise.resolve();
     readRevision.current += 1;
     pending.current += 1;
-    remapMutationsPending += 1;
     const run = async () => {
-      if (mounted.current) { setBusy(true); setNotice(""); setError(""); }
+      let needsRefresh = false;
+      if (mounted.current) { setBusy(true); setError(""); setFailed(null); }
+      const fail = (text: string) => { setFailed({control, text}); toaster.toast({ title: "Button mapping", body: text }); };
       try {
         const result = await operation();
         if (!mounted.current) return;
         if (result.status) setStatus(result.status);
-        if (result.success) setNotice(message);
-        else setError(result.error || "InputPlumber did not confirm the requested mapping.");
+        else needsRefresh = true;
+        if (result.success) toaster.toast({ title: "Button mapping", body: message });
+        else fail(result.error || "The controller did not confirm the new mapping.");
       } catch {
-        if (mounted.current) setError("The backend call ended before InputPlumber confirmed the mapping.");
+        needsRefresh = true;
+        if (mounted.current) fail("The mapping could not be confirmed. Check the buttons before trying again.");
       } finally {
-        remapMutationsPending -= 1;
+        mutations.done();
         pending.current -= 1;
-        if (mounted.current && !pending.current) setBusy(false);
+        if (mounted.current && !pending.current) {
+          setBusy(false);
+          if (needsRefresh) { // Drop the optimistic dropdown value; a read already in flight predates this write.
+            if (readInFlight.current) refreshAfterRead.current = true;
+            void refresh();
+          }
+        }
       }
     };
-    const queued = remapMutationChain.then(run, run);
-    remapMutationChain = queued.catch(() => undefined);
-    return queued;
-  }, []);
+    return mutations.push(run);
+  }, [refresh]);
 
-  if (!status) {
-    return <PanelSection><PanelSectionRow>{error
-      ? <Field focusable label="Button-remapper status unavailable" description={error} />
-      : <Spinner />}</PanelSectionRow>
-      {error && <PanelSectionRow><ButtonItem layout="below" onClick={() => void refresh()}>Retry status</ButtonItem></PanelSectionRow>}
-    </PanelSection>;
-  }
+  if (!status) return statusPlaceholder({ label: "Button mapping status unavailable", error, onRetry: () => void refresh() });
 
   const options: DropdownOption[] = status.actions.map((action) => ({
     data: action.id,
@@ -178,11 +147,12 @@ export const RemapPage: FC = () => {
   }));
   const blocked = busy || !status.supported;
 
+  const failure = (control: string) => failed?.control === control ? failed.text : undefined;
   const dropdown = (button: "desktop" | "page", value: string, label: string, description: string) => (
     <PanelSectionRow>
       <DropdownItem
         label={label}
-        description={description}
+        description={failure(button) ?? description}
         strDefaultLabel={actionLabel(status, value)}
         selectedOption={value}
         rgOptions={options}
@@ -196,82 +166,41 @@ export const RemapPage: FC = () => {
           } : current);
           void enqueue(
             () => setRemapAction(button, action),
-            `${label} now uses ${actionLabel(status, action)}.`,
+            `${label}: ${actionLabel(status, action)}.`,
+            button,
           );
         }}
       />
     </PanelSectionRow>
   );
 
-  return <>
-    <PanelSection title="Button remapping">
+  return <PanelSection title="Button mapping">
+    {!status.supported ? infoRow("Button mapping unavailable", status.reason || "A compatible controller was not detected.")
+      : error && infoRow("Button mapping status not updated", error)}
+    <PanelSectionRow>
+      <ToggleField
+        label="Enable button mapping"
+        description={failure("enabled") ?? `Change what the two extra buttons on the left controller do.${
+          status.enabled && !status.active ? " Waiting to reapply…" : ""}`}
+        checked={status.enabled}
+        disabled={blocked}
+        onChange={(enabled) => void enqueue(
+          () => setRemapEnabled(enabled),
+          enabled ? "Button mapping on." : "Button mapping off. The previous controller profile is back.",
+          "enabled",
+        )}
+      />
+    </PanelSectionRow>
+    {status.supported && <>
+      {dropdown("desktop", status.desktop_action, "Desktop button", "Default: SteamOS behaviour.")}
+      {dropdown("page", status.page_action, "Page button", "Default: takes a screenshot.")}
+      {/* The page's last row: always enabled; the mutation queue orders presses. */}
       <PanelSectionRow>
-        <ToggleField
-          label="Enable button remapping"
-          description="Let Companion configure the two extra buttons through SteamOS InputPlumber. All other controller mappings are preserved."
-          checked={status.enabled}
-          disabled={blocked}
-          onChange={(enabled) => void enqueue(
-            () => setRemapEnabled(enabled),
-            enabled ? "Button remapping enabled." : "The previous InputPlumber profile was restored.",
-          )}
-        />
+        <ButtonItem layout="below" description={failure("defaults")}
+          onClick={() => void enqueue(() => restoreRemapDefaults(), "Defaults restored.", "defaults")}>
+          Restore defaults
+        </ButtonItem>
       </PanelSectionRow>
-      {!status.supported && (
-        <PanelSectionRow>
-          <Field focusable label="Remapping unavailable" description={status.reason || "A compatible InputPlumber controller was not detected."} />
-        </PanelSectionRow>
-      )}
-      {status.supported && (
-        <PanelSectionRow>
-          <Field
-            focusable
-            label={status.active ? "Active" : status.enabled ? "Waiting to reapply" : "System defaults"}
-            description={status.reason}
-          />
-        </PanelSectionRow>
-      )}
-    </PanelSection>
-
-    {status.supported && <PanelSection title="Extra left-controller buttons">
-      {dropdown(
-        "desktop",
-        status.desktop_action,
-        "Desktop button",
-        "The upper extra button. Default keeps its current SteamOS behavior.",
-      )}
-      {dropdown(
-        "page",
-        status.page_action,
-        "Page button",
-        "The lower extra button. Its system default takes a screenshot.",
-      )}
-      {status.enabled && (
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={busy}
-            onClick={() => void enqueue(
-              () => restoreRemapDefaults(),
-              "Both buttons use their SteamOS defaults.",
-            )}
-          >
-            Restore Default Actions
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
-    </PanelSection>}
-
-    {(notice || error) && <PanelSection title={error ? "Could not apply mapping" : "Saved"}>
-      <PanelSectionRow>
-        <Field focusable label={error ? "InputPlumber kept the last safe profile" : "Mapping confirmed"} description={error || notice} />
-      </PanelSectionRow>
-    </PanelSection>}
-
-    {status.inputplumber_version && <PanelSection title="System interface">
-      <PanelSectionRow>
-        <Field focusable label={status.inputplumber_version} description="Companion uses the existing SteamOS remapping service; no additional input daemon is installed." />
-      </PanelSectionRow>
-    </PanelSection>}
-  </>;
+    </>}
+  </PanelSection>;
 };

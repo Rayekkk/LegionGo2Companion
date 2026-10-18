@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Rayekkk
 
 import { callable } from "@decky/api";
-import { ButtonItem, Field, PanelSection, PanelSectionRow } from "@decky/ui";
+import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
+import { errorText, infoRow } from "./shared";
 
 interface UpdateCheck {
   success: boolean;
@@ -60,10 +61,6 @@ export function stopUpdates() {
   publish({ busy: null });
 }
 
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
-}
-
 function statusText(check: UpdateCheck | undefined, currentVersion: string): [string, string] {
   if (!check) return ["GitHub releases", `Installed version: ${currentVersion}. Check for updates when you need them.`];
   if (check.no_release) return ["No public release yet", `Installed version: ${currentVersion}. A download will appear after a release is published on GitHub.`];
@@ -80,25 +77,19 @@ function statusText(check: UpdateCheck | undefined, currentVersion: string): [st
 
 export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }) => {
   const [view, setView] = useState<UpdateState>(() => state);
-  const busyRef = useRef(state.busy !== null);
   const mounted = useRef(true);
 
   useEffect(() => {
     mounted.current = true;
-    const update = (next: UpdateState) => {
-      busyRef.current = next.busy !== null;
-      setView(next);
-    };
-    listeners.add(update);
-    update(state);
-    return () => { mounted.current = false; listeners.delete(update); };
+    listeners.add(setView);
+    setView(state);
+    return () => { mounted.current = false; listeners.delete(setView); };
   }, []);
 
   const run = async (kind: "check" | "download", expected?: string) => {
-    if (!mounted.current || !active || busyRef.current || state.busy !== null) return;
+    if (!mounted.current || !active || state.busy !== null) return;
     if (kind === "download" && (!state.check?.update_available || !state.check.download_available
       || !expected || state.check.latest_version !== expected)) return;
-    busyRef.current = true;
     const requestGeneration = generation;
     publish({ ...state, busy: kind, error: undefined });
     try {
@@ -118,7 +109,7 @@ export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }
     } catch (error) {
       if (active && requestGeneration === generation) {
         console.warn(`[legiongo2companion] updates.${kind}_failed`);
-        publish({ ...state, error: errorMessage(error, "The request failed. Try again.") });
+        publish({ ...state, error: errorText(error, "") || "The request failed. Try again." });
       }
     } finally {
       if (active && requestGeneration === generation) publish({ ...state, busy: null });
@@ -129,17 +120,17 @@ export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }
   const [label, description] = statusText(view.check, installed);
   const canDownload = view.check?.update_available && view.check.download_available && view.check.latest_version;
   return <PanelSection title="Updates">
-    <PanelSectionRow><Field focusable label={label} description={description} /></PanelSectionRow>
+    {infoRow(label, description)}
     <PanelSectionRow><ButtonItem layout="below" disabled={view.busy !== null} onClick={() => void run("check")}>
-      {view.busy === "check" ? "Checking GitHub…" : "Check for Updates"}
+      {view.busy === "check" ? "Checking GitHub…" : "Check for updates"}
     </ButtonItem></PanelSectionRow>
     {canDownload && <PanelSectionRow><ButtonItem layout="below" disabled={view.busy !== null} onClick={() => void run("download", view.check!.latest_version)}>
       {view.busy === "download" ? "Downloading ZIP…" : `Download ${view.check!.latest_version}`}
     </ButtonItem></PanelSectionRow>}
-    {view.error && <PanelSectionRow><Field focusable label="Could not complete" description={view.error} /></PanelSectionRow>}
-    {view.download?.path && <PanelSectionRow><Field focusable label={`Version ${view.download.version} downloaded`}
-      description={<><div style={{ overflowWrap: "anywhere" }}>{view.download.path}</div><div style={{ marginTop: 6 }}>
-        ZIP saved. Install it through Decky Settings → Developer. Review your module settings after installation.
-      </div></>} /></PanelSectionRow>}
+    {view.error && infoRow("Could not complete", view.error)}
+    {view.download?.path && infoRow(`${view.download.version} downloaded`,
+      <span style={{ overflowWrap: "anywhere" }}>
+        {`Saved to ${view.download.path}. Install it from Decky settings → Developer → Install plugin from ZIP.`}
+      </span>)}
   </PanelSection>;
 };

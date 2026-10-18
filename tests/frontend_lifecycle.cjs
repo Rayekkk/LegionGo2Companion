@@ -1,100 +1,64 @@
-const complete = require('./frontend_test_guard.cjs')();
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const assert = require('node:assert/strict');
-const root = path.resolve(__dirname, '..');
-const ts = require(path.join(root, 'node_modules/typescript'));
-const settle = async () => { for (let i=0;i<12;i++) await Promise.resolve(); };
+const { assert, run, settle: wait, mount: load, label: find, button: findButton, component: findComponent } = require('./frontend_harness.cjs');
+const settle = () => wait(12);
+const anyNode = (node, test) => !node || typeof node !== 'object' ? undefined : !Array.isArray(node) && test(node) ? node
+  : (Array.isArray(node) ? node : [node.props?.children, node.props?.description]).reduce((hit, child) => hit ?? anyNode(child, test), undefined);
+const scopeMenu = tree => anyNode(tree, n => n.type === 'DropdownItem' && /^Settings for /.test(n.props?.label));
 function mount(file, component, responses, initialProps = {}) {
-  const slots = [], effects = new Map(), pendingEffects = [];
-  const callbacks = {}, router = {MainRunningApp:{appid:111}};
-  const timers = new Map(), calls = []; let cursor=0, nextTimer=0, visible=true, props=initialProps;
-  const hooks = {
-    useState(initial) { const i=cursor++; if (!(i in slots)) slots[i]=initial;
-      return [slots[i], value => slots[i]=typeof value==='function' ? value(slots[i]) : value]; },
-    useRef(value) { const i=cursor++; return slots[i] ||= {current:value}; },
-    useCallback(fn, deps) { const i=cursor++, prev=slots[i];
-      if (!prev || !deps || deps.some((x,j)=>x!==prev.deps[j])) slots[i]={fn,deps};
-      return slots[i].fn; },
-    useEffect(fn, deps) { const i=cursor++, prev=effects.get(i);
-      if (!prev || !deps || deps.some((x,j) => x!==prev.deps[j])) pendingEffects.push(() => {
-        prev?.cleanup?.(); effects.set(i,{deps,cleanup:fn()}); }); },
+  const router = {MainRunningApp:{appid:111}};
+  const h = load(file, {component:'TestedComponent', props:initialProps, responses,
+    append:`export {${component} as TestedComponent${file==='tdp.tsx'?', AppWatcher':''}};`,
+    // Confirmations are answered with OK here; frontend_tdp_recovery checks that nothing runs before it.
+    ui:{Router:router,findModuleExport:()=>undefined,showModal:node=>node.props.onOK()}});
+  return {calls:h.calls,callbacks:h.listeners,
+    // Only one-shot timers matter here; intervals are never fired by these scenarios.
+    timers:{get size(){return h.timeouts().length;},values:()=>h.timeouts().values()},
+    startWatcher(){h.exports.AppWatcher.start();},
+    setGame(appid){router.MainRunningApp=appid?{appid,display_name:`Game ${appid}`}:null;return h.exports.AppWatcher.check();},
+    render:nextProps=>nextProps?h.render(nextProps):h.render(),
+    hide:h.hide,show:h.show,unmount:h.unmount,fire:h.fire,
   };
-  const api = {useQuickAccessVisible:()=>visible,
-    addEventListener(name,callback){callbacks[name]=callback;},
-    removeEventListener(name,callback){if(callbacks[name]===callback)delete callbacks[name];},
-    toaster:{toast(){}}, callable:name=>async(...args)=> {
-      calls.push({name,args}); const response=responses[name];
-      return typeof response === 'function' ? await response(...args) : structuredClone(response === undefined ? {success:true} : response);
-    }};
-  const jsx={jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props}),Fragment:'Fragment'};
-  const mod={exports:{}};
-  const code=ts.transpileModule(fs.readFileSync(path.join(root,'src',file),'utf8')+
-    `\nexport {${component} as TestedComponent${file==='tdp.tsx'?', AppWatcher':''}};`,
-    {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.ReactJSX}}).outputText;
-  vm.runInNewContext(code,{module:mod,exports:mod.exports,console,window:{},
-    setTimeout:(fn,delay)=>{let id=++nextTimer;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id),
-    setInterval:()=>999,clearInterval(){},
-    require:name=>{
-      if(name==='react')return hooks;
-      if(name==='react/jsx-runtime')return jsx;
-      if(name==='@decky/api')return api;
-      if(name==='@decky/ui')return new Proxy({Router:router,findModuleExport:()=>undefined},
-        {get:(o,k)=>k in o?o[k]:k});
-      throw Error(name);
-    }});
-  return {calls,timers,callbacks,
-    startWatcher(){mod.exports.AppWatcher.start();},
-    setGame(appid){router.MainRunningApp=appid?{appid,display_name:`Game ${appid}`}:null;return mod.exports.AppWatcher.check();},
-    render(nextProps){if(nextProps)props=nextProps;cursor=0;const tree=mod.exports.TestedComponent(props);pendingEffects.splice(0).forEach(fn=>fn());return tree;},
-    hide(){visible=false;return this.render();},
-    show(){visible=true;return this.render();},
-    unmount(){for(const e of effects.values())e.cleanup?.();effects.clear();},
-  };
-}
-function find(node,label){
-  if(!node||typeof node!=='object')return;
-  if(node.props?.label===label)return node;
-  for(const child of Array.isArray(node)?node:[node.props?.children]){const match=find(child,label);if(match)return match;}
-}
-function findComponent(node,name){
-  if(!node||typeof node!=='object')return;
-  if(typeof node.type==='function'&&node.type.name===name)return node;
-  for(const child of Array.isArray(node)?node:[node.props?.children]){const match=findComponent(child,name);if(match)return match;}
-}
-function findButton(node,text){
-  if(!node||typeof node!=='object')return;
-  if(node.type==='ButtonItem'&&node.props?.children===text)return node;
-  for(const child of Array.isArray(node)?node:[node.props?.children]){const match=findButton(child,text);if(match)return match;}
 }
 async function watcherLogging(file){
- const records=[],timers=new Map();let now=100000,fail=true,calls=0,seq=0;
+ const records=[];let fail=true,calls=0;
  const secret='private-secret-marker /home/private/full-path private-serial-marker';
- const mod={exports:{}};
- const code=ts.transpileModule(fs.readFileSync(path.join(root,'src',file),'utf8')+'\nexport {AppWatcher as TestedWatcher};',
-  {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.ReactJSX}}).outputText;
  const logger=Object.fromEntries(['debug','log','info','warn','error'].map(level=>[level,(...args)=>records.push({level,text:args.map(String).join(' ')})]));
- vm.runInNewContext(code,{module:mod,exports:mod.exports,console:logger,Date:class extends Date{static now(){return now;}},
-  setInterval:fn=>{timers.set(++seq,fn);return seq;},clearInterval:id=>timers.delete(id),setTimeout:()=>++seq,clearTimeout(){},
+ const h=load(file,{append:'export {AppWatcher as TestedWatcher};',clock:100000,globals:{console:logger},
   window:{SteamClient:{GameSessions:{RegisterForAppLifetimeNotifications(){return{unregister(){}};}}},SleepManager:{RegisterForNotifyResumeFromSuspend(){return()=>{};}}},
-  require(name){
-   if(name==='@decky/api')return{callable:()=>async()=>{calls++;if(fail)throw new Error(secret);return{};},toaster:{toast(){}}};
-   if(name==='@decky/ui')return{Router:{MainRunningApp:{appid:111}},findModuleExport(){}};
-   return{};
-  }});
- const watcher=mod.exports.TestedWatcher;watcher.start();await settle();
- for(let i=0;i<9;i++){now+=2000;for(const fn of timers.values())fn();await settle();}
+  api:{callable:()=>async()=>{calls++;if(fail)throw new Error(secret);return{};}},
+  ui:{Router:{MainRunningApp:{appid:111}},findModuleExport(){}}});
+ const watcher=h.exports.TestedWatcher;watcher.start();await settle();
+ for(let i=0;i<9;i++){h.advance(2000);h.fire('interval');await settle();}
  assert.equal(records.length,1,`${file} coalesces repeated foreground reporting failures`);
  assert.equal(records[0].level,'warn');
- fail=false;now+=2000;for(const fn of timers.values())fn();await settle();watcher.stop();
+ fail=false;h.advance(2000);h.fire('interval');await settle();watcher.stop();
  assert.equal(calls,11,'Logging never suppresses the actual report retry.');
  assert.equal(records.length,2);assert.equal(records[1].level,'info');
  assert.ok(records[1].text.endsWith('foreground_reporting_restored'));
  assert.ok(!JSON.stringify(records).includes(secret),'Raw exception objects/paths/tokens stay out of frontend logs.');
 }
-(async()=>{
- await watcherLogging('tdp.tsx');await watcherLogging('vibration.tsx');
+// TDP and vibration share one poll: one interval and one set of Steam
+// subscriptions; a stopped module gets neither ticks nor resume callbacks.
+async function sharedWatcher(){
+ const h=load('tdp.tsx',{append:'export {AppWatcher as TestedWatcher}; export * as shared from "./shared";',clock:100000,
+  window:{SteamClient:{GameSessions:{RegisterForAppLifetimeNotifications(fn){h.listeners.lifetime=fn;return{unregister(){}};}}},
+   SleepManager:{RegisterForNotifyResumeFromSuspend(fn){h.listeners.resume=fn;return()=>{};}}},
+  ui:{Router:{MainRunningApp:{appid:111}},findModuleExport(){}}});
+ const tdp=h.exports.TestedWatcher,seen=[];let resumed=0;
+ const other={async check(app){seen.push(app&&String(app.appid));},resume(){resumed++;}};
+ tdp.start();const off=h.exports.shared.watchRunningApp(other);await settle();
+ assert.equal(h.intervals().length,1,'one poll timer serves both modules');
+ h.advance(6000);h.fire('interval');await settle();
+ assert.deepEqual(seen,['111','111']);assert.equal(h.calls.filter(c=>c.name==='set_active_app').length,2,'TDP heartbeat still due every 6 s');
+ h.listeners.resume();await settle();
+ assert.equal(resumed,1);assert.equal(h.calls.filter(c=>c.name==='reapply').length,1,'resume reapplies TDP');
+ tdp.stop();h.advance(6000);h.fire('interval');h.listeners.resume();await settle();
+ assert.equal(h.calls.filter(c=>c.name==='set_active_app').length,2,'a stopped module receives no ticks');
+ assert.equal(h.calls.filter(c=>c.name==='reapply').length,1,'a stopped module receives no resume');
+ assert.equal(resumed,2);assert.equal(h.intervals().length,1,'the other module keeps polling');
+ off();assert.equal(h.timers.size,0,'the last module out stops the poll');
+}
+run(async()=>{
+ await watcherLogging('tdp.tsx');await watcherLogging('vibration.tsx');await sharedWatcher();
  const values={level:2,mode:1,touchpadIntensity:2,touchpadEnabled:true};
  const initialVibe={
    vibe_is_ready:{ready:true},vibe_get_settings:{settings:values,app_id:'0',profile_id:'0',overwrite:false},
@@ -122,10 +86,10 @@ async function watcherLogging(file){
  base.hide();base.show();await settle();
  assert.equal(count(base,'get_power_source'),2,'Reopening still refreshes power source.');
  await base.setGame(111);base.render();await settle();base.render();
- assert.equal(count(base,'get_game_profile'),1);assert.equal(count(base,'apply_tdp'),1);
+ assert.equal(count(base,'get_game_profile'),1);
  await base.setGame(null);base.render();await settle();base.render();
  assert.equal(count(base,'get_settings'),2,'Leaving a game still reloads global settings.');
- assert.equal(count(base,'apply_tdp'),2,'Leaving a game still reapplies the global profile.');
+ assert.equal(count(base,'apply_tdp'),0,'The backend, not the panel, applies game and global limits.');
  base.unmount();
  const simple=mount('tdp.tsx','TdpPage',{
    ...initialTdp,
@@ -142,31 +106,30 @@ async function watcherLogging(file){
  let simplePage=simple.render();
  const hasSection=(node,title)=>!!node && typeof node==='object' && (node.props?.title===title
    || (Array.isArray(node)?node:[node.props?.children]).some(child=>hasSection(child,title)));
- for(const title of ['Game Profile','Preset','Extras'])assert.ok(hasSection(simplePage,title),`TDP section: ${title}`);
- assert.ok(findComponent(simplePage,'LivePanel'));
+ for(const title of ['Power','More'])assert.ok(hasSection(simplePage,title),`TDP section: ${title}`);
  assert.ok(findComponent(simplePage,'CpuPowerControlsSection'));
- assert.equal(find(simplePage,'TDP - 20 W').props.max,35);
+ assert.equal(find(simplePage,'Sustained power · 20 W').props.max,35);
  const sliderLabels=(node)=>Array.isArray(node)?node.flatMap(sliderLabels):
    !node||typeof node!=='object'?[]:
    [...(node.type==='SliderField'?[node.props.label]:[]),
      ...sliderLabels(node.props?.children)].flat();
- assert.equal(sliderLabels(simplePage).filter(x=>x.startsWith('SPPT')||x.startsWith('FPPT')).length,0);
- find(simplePage,'TDP - 20 W').props.onChange(35);
+ assert.equal(sliderLabels(simplePage).filter(x=>x.startsWith('Slow boost')||x.startsWith('Fast boost')).length,0);
+ find(simplePage,'Sustained power · 20 W').props.onChange(35);
  simplePage=simple.render();
- await findButton(simplePage,'Apply TDP').props.onClick();await settle();
+ await findButton(simplePage,'Apply').props.onClick();await settle();
  assert.deepEqual(simple.calls.filter(x=>x.name==='apply_tdp').at(-1).args.slice(0,3),
    [35000,37000,45000]);
- find(simple.render(),'Unlock Custom TDP to 50 W').props.onChange(true);await settle();
+ find(simple.render(),'Allow up to 50 W').props.onChange(true);await settle();
  simplePage=simple.render();
- assert.equal(find(simplePage,'TDP - 35 W').props.max,50);
- find(simplePage,'TDP - 35 W').props.onChange(50);
- await findButton(simple.render(),'Apply TDP').props.onClick();await settle();
+ assert.equal(find(simplePage,'Sustained power · 35 W').props.max,50);
+ find(simplePage,'Sustained power · 35 W').props.onChange(50);
+ await findButton(simple.render(),'Apply').props.onClick();await settle();
  assert.deepEqual(simple.calls.filter(x=>x.name==='apply_tdp').at(-1).args.slice(0,3),
    [50000,50000,50000]);
- find(simple.render(),'Advanced TDP Control').props.onChange(true);await settle();
+ find(simple.render(),'Separate boost limits').props.onChange(true);await settle();
  simplePage=simple.render();
- assert.equal(sliderLabels(simplePage).filter(x=>x.startsWith('SPPT')||x.startsWith('FPPT')).length,2);
- await findButton(simplePage,'Performance').props.onClick();await settle();
+ assert.equal(sliderLabels(simplePage).filter(x=>x.startsWith('Slow boost')||x.startsWith('Fast boost')).length,2);
+ findButton(simplePage,'Performance').props.onClick();await settle();
  assert.deepEqual(simple.calls.filter(x=>x.name==='apply_tdp').at(-1).args.slice(0,3),
    [20000,32000,35000]);
  simple.unmount();
@@ -194,36 +157,28 @@ async function watcherLogging(file){
  driver.render();await settle();driver.callbacks.device({found:true,paths:['new-device']});
  finishModes({mode:['fps']});await settle();seeded=driver.render();await settle();
  assert.equal(count(driver,'vibe_get_driver_status'),1);
- findButton(seeded,'Show driver details').props.onClick();seeded=driver.render();
+ findButton(seeded,'Show details').props.onClick();seeded=driver.render();
  assert.ok(JSON.stringify(seeded).includes('new-device'),'New device event survives slow init.');driver.unmount();
  // Readiness retries cannot outlive either page, even when a cancelled timer
  // callback was already queued by the browser before cleanup ran.
  for(const [file,component,read] of [
-   ['tdp.tsx','TdpPage','is_ready'],['vibration.tsx','LGoVibeControl','vibe_is_ready'],
+   ['vibration.tsx','LGoVibeControl','vibe_is_ready'], // TDP: frontend_tdp_recovery
  ]){
    const h=mount(file,component,{[read]:{ready:false}});h.render();await settle();
    const retry=[...h.timers.values()];assert.equal(retry.length,1);h.unmount();
    assert.equal(h.timers.size,0,`${component} cancels readiness retries.`);
    retry[0].fn();await settle();assert.equal(count(h,read),1,`${component} rejects a queued retry after unmount.`);
  }
- const vibe=mount('vibration.tsx','LGoVibeControl',{
-   vibe_is_ready:{ready:true},vibe_get_settings:{settings:values,app_id:'111',profile_id:'111',overwrite:true},
-   vibe_get_driver_status:{found:true,paths:['test']},vibe_get_capabilities:{mode:['fps','racing']},
-   vibe_set_intensity:{success:true,settings:{...values,level:3}}
- });
- vibe.render();await settle();let tree=vibe.render();
- const labels=[]; function all(n){if(!n||typeof n!=='object')return;if(n.props?.label)labels.push(n.props.label);for(const x of Array.isArray(n)?n:[n.props?.children])all(x);}all(tree);
- const slider=find(tree,'Vibration Intensity')||find(tree,'Intensity');
- assert.ok(slider,JSON.stringify(labels));slider.props.onChange(3);vibe.unmount();await settle();
- const save=vibe.calls.find(c=>c.name==='vibe_set_intensity');assert.ok(save);assert.deepEqual(Array.from(save.args),[3,'111','111']);
- assert.equal(vibe.timers.size,0);
+ let tree;
  const compatibilityNote='This kernel supports EPP presets only. Saved EPP 77 uses balance performance.';
+ const notes=[];
  const legacy=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:'',
    cpu_boost:{available:true,enabled:false,error:''},
    epp:{available:true,error:'',min:0,max:255,value:'balance_performance',numeric_value:128,numeric_supported:false,
-        profiles:['default','performance','balance_performance','balance_power','power'],compatibility_note:compatibilityNote}}});
- legacy.render();await settle();const legacyTree=legacy.render();
- assert.equal(find(legacyTree,'EPP compatibility').props.description,compatibilityNote);
+        profiles:['default','performance','balance_performance','balance_power','power'],compatibility_note:compatibilityNote}}},
+   {onCompatibilityNote:note=>notes.push(note)});
+ legacy.render();await settle();legacy.render();
+ assert.equal(notes.at(-1),compatibilityNote,'The compatibility note is handed to the page for Show details.');
  assert.equal(legacy.calls.filter(c=>c.name==='set_epp').length,0);
  legacy.unmount();
  const presetState=(requested='performance')=>({success:true,available:true,error:'',
@@ -236,25 +191,25 @@ async function watcherLogging(file){
    get_cpu_power_controls:presetState(),set_epp:(value)=>presetState(value),
  });
  presets.render();await settle();tree=presets.render();
- assert.match(find(tree,'EPP - Prefer CPU').props.description,/CPU energy demand/);
- findButton(tree,'Use System default EPP').props.onClick();await settle();tree=presets.render();
+ assert.equal(find(tree,'CPU energy preference · Prefer CPU').props.description,'Left: faster CPU. Right: more power left for the GPU.');
+ findButton(tree,'Use System default').props.onClick();await settle();tree=presets.render();
  assert.equal(presets.calls.find(c=>c.name==='set_epp').args[0],'default');
- assert.equal(findButton(tree,'> System default EPP').props.disabled,true);
- const defaultSlider=find(tree,'EPP - Balanced · Prefer CPU');assert.equal(defaultSlider.props.value,1);
+ assert.equal(findButton(tree,'Use System default').props.disabled,true);
+ const defaultSlider=find(tree,'CPU energy preference · Balanced · Prefer CPU');assert.equal(defaultSlider.props.value,1);
  // The explicit preset must save even when it matches default's live readback.
  defaultSlider.props.onChange(1);await settle();tree=presets.render();
  assert.equal(presets.calls.filter(c=>c.name==='set_epp').length,2);
  assert.equal(presets.calls.filter(c=>c.name==='set_epp')[1].args[0],'balance_performance');
- assert.equal(findButton(tree,'Use System default EPP').props.disabled,false);
- find(tree,'EPP - Balanced · Prefer CPU').props.onChange(3);await settle();tree=presets.render();
+ assert.equal(findButton(tree,'Use System default').props.disabled,false);
+ find(tree,'CPU energy preference · Balanced · Prefer CPU').props.onChange(3);await settle();tree=presets.render();
  assert.equal(presets.calls.filter(c=>c.name==='set_epp')[2].args[0],'power');
- assert.ok(find(tree,'EPP - Prefer GPU'));
+ assert.ok(find(tree,'CPU energy preference · Prefer GPU'));
  presets.unmount();
  for(const leave of ['unmount','hide']){
    const epp=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:"",
       cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'128',numeric_value:128,numeric_supported:true,profiles:[]}},
       set_epp:{success:true,available:true,error:"",cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'204',numeric_value:204,numeric_supported:true,profiles:[]}}});
-   epp.render();await settle();tree=epp.render();const slider=find(tree,'EPP');assert.ok(slider);slider.props.onChange(80);
+   epp.render();await settle();tree=epp.render();const slider=find(tree,'CPU energy preference');assert.ok(slider);slider.props.onChange(80);
    epp[leave]();await settle();assert.equal(epp.calls.filter(c=>c.name==='set_epp').length,1);
    assert.equal(epp.calls.find(c=>c.name==='set_epp').args[0],'204');epp.unmount();
  }
@@ -270,7 +225,7 @@ async function watcherLogging(file){
      get_cpu_power_controls:cpuState(),set_epp:cpuState(),
    },{appId:'111',acProfile:false,expectedAppId:'111'});
    h.render();await settle();
-   const slider=find(h.render(),'EPP');slider.props.onChange(20);
+   const slider=find(h.render(),'CPU energy preference');slider.props.onChange(20);
    const old=[...h.timers.values()][0].fn;
    if (duplicate) {
      old();await settle();old();await settle();
@@ -319,7 +274,7 @@ async function watcherLogging(file){
    assert.equal(find(h.render(),'CPU Boost'),undefined,'The old context is never accepted.');
    pending.shift()(cpuState({app_id:next.appId,ac_profile:next.acProfile,active:false,cpu_boost_enabled:false,epp:'51'}));
    await settle();const nextTree=h.render();
-   assert.equal(find(nextTree,'CPU Boost').props.checked,false);assert.equal(find(nextTree,'EPP').props.value,20);
+   assert.equal(find(nextTree,'CPU Boost').props.checked,false);assert.equal(find(nextTree,'CPU energy preference').props.value,20);
    h.unmount();
  }
  for(const leave of ['hide','unmount']){
@@ -346,7 +301,7 @@ async function watcherLogging(file){
    find(tree,'CPU Boost').props.onChange(false);await settle();tree=cpu.render();
    assert.deepEqual(Array.from(cpu.calls.find(c=>c.name==='set_cpu_boost').args),
      [false,context.appId,context.acProfile,context.expectedAppId]);
-   find(tree,'EPP').props.onChange(80);cpu.hide();await settle();
+   find(tree,'CPU energy preference').props.onChange(80);cpu.hide();await settle();
    assert.deepEqual(Array.from(cpu.calls.find(c=>c.name==='set_epp').args),
      ['204',context.appId,context.acProfile,context.expectedAppId]);
    cpu.unmount();assert.equal(cpu.timers.size,0);
@@ -354,18 +309,17 @@ async function watcherLogging(file){
  // The AC editor must display saved AC values while battery remains active.
  const acState=cpuState({app_id:'111',ac_profile:true,active:false,cpu_boost_enabled:false,epp:'204'});
  const acResponses={get_cpu_power_controls:acState,set_epp:acState};
- const acProps={appId:'111',acProfile:true,expectedAppId:'111',scopeLabel:'Example - AC profile',powerSource:false};
+ const acProps={appId:'111',acProfile:true,expectedAppId:'111',powerSource:false};
  const ac=mount('tdp.tsx','CpuPowerControlsSection',acResponses,acProps);
  ac.render();await settle();tree=ac.render();
  assert.equal(find(tree,'CPU Boost').props.checked,false);
- assert.equal(find(tree,'EPP').props.value,80);
- assert.match(find(tree,acProps.scopeLabel).props.description,/Editing saved/);
+ assert.equal(find(tree,'CPU energy preference').props.value,80);
  // A charger event rereads capabilities/live state without changing the editor.
  acResponses.get_cpu_power_controls={...acState,profile:{...acState.profile,active:true}};
  ac.render({...acProps,powerSource:true});await settle();tree=ac.render();
  assert.equal(ac.calls.filter(c=>c.name==='get_cpu_power_controls').length,2);
  assert.equal(find(tree,'CPU Boost').props.checked,true);
- assert.equal(find(tree,'EPP').props.value,50);
+ assert.equal(find(tree,'CPU energy preference').props.value,50);
  assert.ok(ac.calls.filter(c=>c.name==='get_cpu_power_controls').every(c=>c.args[0]==='111'&&c.args[1]===true));
  ac.unmount();
  // A pending slider flushed by a scope remount keeps the original game/AC
@@ -378,7 +332,7 @@ async function watcherLogging(file){
    const old=mount('tdp.tsx','CpuPowerControlsSection',{
      get_cpu_power_controls:cpuState(),set_epp:()=>new Promise(resolve=>{finishOld=resolve;}),
    },{appId:'111',acProfile:false,expectedAppId:'111',onBusyChange:(owner,value)=>busy.push({owner,value})});
-   old.render();await settle();find(old.render(),'EPP').props.onChange(80);old.unmount();
+   old.render();await settle();find(old.render(),'CPU energy preference').props.onChange(80);old.unmount();
    assert.deepEqual(Array.from(old.calls.find(c=>c.name==='set_epp').args),['204','111',false,'111']);
    assert.equal(old.timers.size,0);
    assert.equal(busy.at(-1).value,true,'A flushed old editor remains busy until its save finishes.');
@@ -386,11 +340,11 @@ async function watcherLogging(file){
      get_cpu_power_controls:cpuState({app_id:nextContext.appId,ac_profile:nextContext.acProfile,
        active:false,cpu_boost_enabled:false,epp:'51'}),
    },nextContext);
-   next.render();await settle();assert.equal(find(next.render(),'EPP').props.value,20);
+   next.render();await settle();assert.equal(find(next.render(),'CPU energy preference').props.value,20);
    finishOld(cpuState({...cpuState().profile,epp:'204'}));await settle();
    assert.equal(busy.at(-1).value,false);
    assert.ok(busy.every(item=>item.owner===busy[0].owner));
-   assert.equal(find(next.render(),'EPP').props.value,20);assert.equal(next.calls.length,1);
+   assert.equal(find(next.render(),'CPU energy preference').props.value,20);assert.equal(next.calls.length,1);
    next.unmount();
  }
  // Mismatched profile replies must never become actionable controls.
@@ -411,18 +365,19 @@ async function watcherLogging(file){
  const firstOwner={},secondOwner={};
  reportBusy(firstOwner,true);reportBusy(secondOwner,true);reportBusy(firstOwner,false);
  tree=page.render();
- assert.equal(find(tree,'Enable').props.disabled,true);
- assert.equal(find(tree,'Per Game Profile').props.disabled,true);
- assert.equal(find(tree,'Separate AC Profile').props.disabled,true);
+ assert.equal(find(tree,'Enable TDP control').props.disabled,true);
+ assert.equal(scopeMenu(tree).props.disabled,true);
+ assert.equal(find(tree,'Edit settings for').props.disabled,true);
  const beforeBlocked=page.calls.length;
- await find(tree,'Per Game Profile').props.onChange(false);
- await find(tree,'Separate AC Profile').props.onChange(false);
- await find(tree,'Enable').props.onChange(false);
+ await scopeMenu(tree).props.onChange({data:'global'});
+ find(tree,'Edit settings for').props.onChange({data:'charger'});
+ await find(tree,'Enable TDP control').props.onChange(false);
  assert.equal(page.calls.length,beforeBlocked,'Handlers guard pending saves even before a disabled button repaints.');
+ assert.equal(find(page.render(),'Edit settings for').props.selectedOption,'battery');
  reportBusy(secondOwner,false);tree=page.render();
- assert.equal(find(tree,'Per Game Profile').props.disabled,false);
- await find(tree,'Per Game Profile').props.onChange(false);await settle();
- assert.equal(page.calls.filter(c=>c.name==='delete_game_profile').length,1);
+ assert.equal(scopeMenu(tree).props.disabled,false);
+ await scopeMenu(tree).props.onChange({data:'global'});await settle();
+ assert.equal(page.calls.filter(c=>c.name==='set_game_profile_active').length,1);
  page.unmount();
- console.log('Vibration and EPP save on close; CPU edits preserve global/game/battery/AC scope and ignore stale replies.');
-})().then(complete).catch(e=>{console.error(e);process.exitCode=1;});
+ console.log('EPP saves on close; CPU edits preserve global/game/battery/AC scope and ignore stale replies.');
+});
