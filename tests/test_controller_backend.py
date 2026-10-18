@@ -609,6 +609,18 @@ class CaptureTests(unittest.TestCase):
         reader.assert_called_once_with(7, 256)
         close.assert_called_once_with(7)
 
+    def test_firmware_gate_read_never_trusts_a_cached_attach_state(self):
+        report = bytearray(b"\x04\x3c\x74" + bytes(61))
+        report[5], report[7], report[12], report[13] = 84, 61, 2, 2
+        detached = bytearray(report); detached[12] = 3
+        with patch.object(module, "_hid_inventory", return_value=(PHYSICAL, None)), \
+                patch.object(module, "_open_reader", return_value=7), \
+                patch.object(module.select, "select", return_value=([7], [], [])), \
+                patch.object(module.os, "read", side_effect=[bytes(report), bytes(detached)]), \
+                patch.object(module.os, "close"):
+            self.assertEqual(self.backend._controller_batteries()["connection_left"], "attached")
+            self.assertEqual(self.backend._controller_batteries(max_age=0)["connection_left"], "detached")
+
     def test_battery_read_timeout_is_nonfatal_and_closes(self):
         with patch.object(module, "_hid_inventory", return_value=(PHYSICAL, None)), \
                 patch.object(module, "_open_reader", return_value=7), \

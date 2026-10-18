@@ -300,7 +300,7 @@ class Plugin:
         self._closing = False
         self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
         self._updates = None
-        self._firmware = FirmwarePreparation(pads=lambda: self._controller._controller_batteries())
+        self._firmware = FirmwarePreparation(pads=lambda: self._controller._controller_batteries(max_age=0))
         self._desktop = None
         self._desktop_install = None
         self._desktop_lock = asyncio.Lock()

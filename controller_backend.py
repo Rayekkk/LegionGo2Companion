@@ -356,11 +356,13 @@ class Plugin:
                 "reason": "" if left is not None or right is not None
                 else "The controller report did not include battery levels."}
 
-    def _controller_batteries(self) -> dict:
-        """Read one verified native report without keeping the HID device open."""
+    def _controller_batteries(self, max_age: float = BATTERY_CACHE_SECONDS) -> dict:
+        """Read one verified native report without keeping the HID device open.
+
+        max_age=0 forces a fresh report (the firmware gate must not trust a cached attach state)."""
         with self._battery_lock:
             now = _capture_time()
-            if self._battery_cache and now - self._battery_cache[0] < BATTERY_CACHE_SECONDS:
+            if self._battery_cache and now - self._battery_cache[0] < max_age:
                 return copy.deepcopy(self._battery_cache[1])
 
             # Reuse a recent diagnostics sample when one already exists instead
@@ -369,7 +371,7 @@ class Plugin:
                 stream = self._capture.get("physical") if self._capture else None
                 sample = copy.deepcopy(stream.get("sample")) if stream else None
                 last = stream.get("last") if stream else None
-            if sample is not None and isinstance(last, (int, float)) and now - last < BATTERY_CACHE_SECONDS:
+            if sample is not None and isinstance(last, (int, float)) and now - last < max_age:
                 result = self._battery_result(sample)
                 self._battery_cache = (now, copy.deepcopy(result))
                 return result
