@@ -56,6 +56,9 @@ WIFI_BACKEND_CONF = "/etc/NetworkManager/conf.d/99-valve-wifi-backend.conf"
 NM_DEFAULT_CONF = "/usr/lib/NetworkManager/conf.d/10-steamos-defaults.conf"
 BAZZITE_IWD_CONF = "/etc/NetworkManager/conf.d/iwd.conf"
 IWD_MAIN_CONF = "/etc/iwd/main.conf"
+# Snapshot key prefix and iwd [Rank] key; only the 2.4 GHz key is ever written.
+IWD_RANK_KEYS = (("", "BandModifier2_4GHz"), ("five_", "BandModifier5GHz"),
+                 ("six_", "BandModifier6GHz"))
 
 BAND_POLICY_OFF = "off"
 BAND_POLICY_SIX_ONLY = "six_ghz_only"
@@ -101,6 +104,8 @@ BAND_POLICY_JOURNAL_FILE = os.path.join(
     BAND_POLICY_STATE_DIR, "band-policy-transaction.json"
 )
 BAND_POLICY_LOCK_FILE = os.path.join(BAND_POLICY_RUNTIME_DIR, "band-policy.lock")
+JOURNAL_PHASES = frozenset(("pending", "applying", "verified", "committed",
+                            "rolling_back", "rolled_back", "rollback_failed"))
 DECKY_PLUGIN_DIR = getattr(decky, "DECKY_PLUGIN_DIR", os.path.dirname(__file__))
 
 DEFAULT_SETTINGS = {
@@ -196,26 +201,12 @@ class Plugin:
                 "returncode": result.returncode,
             }
         except subprocess.TimeoutExpired:
-            return {
-                "success": False,
-                "stdout": "",
-                "stderr": "Command timed out",
-                "returncode": -1,
-            }
+            stderr = "Command timed out"
         except FileNotFoundError:
-            return {
-                "success": False,
-                "stdout": "",
-                "stderr": f"Command not found: {cmd[0]}",
-                "returncode": -1,
-            }
+            stderr = f"Command not found: {cmd[0]}"
         except Exception as e:
-            return {
-                "success": False,
-                "stdout": "",
-                "stderr": str(e),
-                "returncode": -1,
-            }
+            stderr = str(e)
+        return {"success": False, "stdout": "", "stderr": stderr, "returncode": -1}
 
     # ---- Band policy helpers -------------------------------------------------
 
@@ -505,10 +496,7 @@ class Plugin:
             self._remove_band_policy_journal()
             return {**outcome, "frequency": after["frequency"], "reselected": True}
         except Exception as exc:
-            rollback = self._restore_band_policy_transaction(journal, str(exc))
-            if rollback.get("success"):
-                self._cancel_band_policy_rollback(journal)
-                self._remove_band_policy_journal()
+            rollback = self._roll_back_failed_transaction(journal, str(exc))
             return {**outcome, "success": False, "error": "automatic_reselection_failed",
                     "rolled_back": rollback.get("success", False)}
 
@@ -717,18 +705,8 @@ class Plugin:
                 os.close(fd)
 
     def _nmcli_get(self, uuid: str, key: str, timeout: int = 4) -> tuple[str, dict]:
-        result = self._run_cmd(
-            [
-                "/usr/bin/nmcli",
-                "-g",
-                key,
-                "con",
-                "show",
-                "uuid",
-                uuid,
-            ],
-            timeout=timeout,
-        )
+        result = self._run_cmd(["/usr/bin/nmcli", "-g", key, "con", "show", "uuid", uuid],
+                               timeout=timeout)
         value = result.get("stdout", "").strip()
         if value == "--":
             value = ""
@@ -819,73 +797,25 @@ class Plugin:
         return Plugin._nmcli_unescape(str(value or "")).strip().lower()
 
     def _get_iwd_rank_modifier_snapshot(self) -> dict:
-        """Read only the iwd key owned by this feature.
+        """Read only the [Rank] band keys; other iwd settings may change while a
+        policy is active, so the complete file is never stored or restored."""
+        text, exists = "", True
+        unsafe = os.path.islink(IWD_MAIN_CONF)
+        if not unsafe:
+            try:
+                text = self._read_bounded_regular_text(IWD_MAIN_CONF)
+            except FileNotFoundError:
+                exists = False
+            except (OSError, UnicodeError, ValueError, UnsafeSettingsPath):
+                unsafe = True
 
-        The complete file is deliberately not stored or restored: another
-        service or the user may update unrelated iwd settings while a policy
-        is active.
-        """
-        if os.path.islink(IWD_MAIN_CONF):
-            return {
-                "file_exists": True,
-                "empty_file_content": None,
-                "rank_section_present": False,
-                "rank_section_count": 0,
-                "modifier_present": False,
-                "modifier_count": 0,
-                "modifier_value": "",
-                "ambiguous": True,
-                "unsafe_symlink": True,
-                "five_modifier_present": False,
-                "five_modifier_count": 0,
-                "five_modifier_value": "",
-                "six_modifier_present": False,
-                "six_modifier_count": 0,
-                "six_modifier_value": "",
-            }
-        try:
-            text = self._read_bounded_regular_text(IWD_MAIN_CONF)
-            exists = True
-        except FileNotFoundError:
-            text = ""
-            exists = False
-        except (OSError, UnicodeError, ValueError, UnsafeSettingsPath):
-            return {
-                "file_exists": True,
-                "empty_file_content": None,
-                "rank_section_present": False,
-                "rank_section_count": 0,
-                "modifier_present": False,
-                "modifier_count": 0,
-                "modifier_value": "",
-                "ambiguous": True,
-                "unsafe_symlink": True,
-                "five_modifier_present": False,
-                "five_modifier_count": 0,
-                "five_modifier_value": "",
-                "six_modifier_present": False,
-                "six_modifier_count": 0,
-                "six_modifier_value": "",
-            }
-
-        in_rank = False
         rank_count = 0
-        modifier_count = 0
-        modifier_value = ""
-        five_modifier_count = 0
-        five_modifier_value = ""
-        six_modifier_count = 0
-        six_modifier_value = ""
+        counts = {prefix: 0 for prefix, _ in IWD_RANK_KEYS}
+        values = {prefix: "" for prefix, _ in IWD_RANK_KEYS}
         section_re = re.compile(r"^\s*\[([^]]+)]\s*(?:[#;].*)?$")
-        key_24_re = re.compile(
-            r"^\s*BandModifier2_4GHz\s*=\s*([^#;]*?)\s*(?:[#;].*)?$"
-        )
-        key_5_re = re.compile(
-            r"^\s*BandModifier5GHz\s*=\s*([^#;]*?)\s*(?:[#;].*)?$"
-        )
-        key_6_re = re.compile(
-            r"^\s*BandModifier6GHz\s*=\s*([^#;]*?)\s*(?:[#;].*)?$"
-        )
+        key_res = {prefix: re.compile(rf"^\s*{key}\s*=\s*([^#;]*?)\s*(?:[#;].*)?$")
+                   for prefix, key in IWD_RANK_KEYS}
+        in_rank = False
         for raw_line in text.splitlines():
             section_match = section_re.match(raw_line)
             if section_match:
@@ -894,81 +824,46 @@ class Plugin:
                     rank_count += 1
                 continue
             if in_rank:
-                key_24_match = key_24_re.match(raw_line)
-                if key_24_match:
-                    modifier_count += 1
-                    if modifier_count == 1:
-                        modifier_value = key_24_match.group(1).strip()
-                key_5_match = key_5_re.match(raw_line)
-                if key_5_match:
-                    five_modifier_count += 1
-                    if five_modifier_count == 1:
-                        five_modifier_value = key_5_match.group(1).strip()
-                key_6_match = key_6_re.match(raw_line)
-                if key_6_match:
-                    six_modifier_count += 1
-                    if six_modifier_count == 1:
-                        six_modifier_value = key_6_match.group(1).strip()
+                for prefix, key_re in key_res.items():
+                    key_match = key_re.match(raw_line)
+                    if key_match:
+                        counts[prefix] += 1
+                        if counts[prefix] == 1:
+                            values[prefix] = key_match.group(1).strip()
 
-        return {
+        snapshot = {
             "file_exists": exists,
-            # Retain only an otherwise empty file's bytes.  This is enough to
-            # distinguish "absent" from "present but empty" without snapshotting
-            # unrelated iwd configuration.
-            "empty_file_content": text if exists and not text.strip() else None,
+            # Only an otherwise empty file's bytes: enough to tell "absent" from
+            # "present but empty" without snapshotting unrelated iwd settings.
+            "empty_file_content": text if exists and not unsafe and not text.strip() else None,
             "rank_section_present": rank_count > 0,
             "rank_section_count": rank_count,
-            "modifier_present": modifier_count > 0,
-            "modifier_count": modifier_count,
-            "modifier_value": modifier_value,
-            "ambiguous": rank_count > 1 or modifier_count > 1,
-            # Read-only safety input: this feature never writes or owns the
-            # 5 GHz modifier, but iwd 3.12 refuses a Rank configuration that
-            # disables both 2.4 and 5 GHz.
-            "five_modifier_present": five_modifier_count > 0,
-            "five_modifier_count": five_modifier_count,
-            "five_modifier_value": five_modifier_value,
-            "six_modifier_present": six_modifier_count > 0,
-            "six_modifier_count": six_modifier_count,
-            "six_modifier_value": six_modifier_value,
+            "ambiguous": unsafe or rank_count > 1 or counts[""] > 1,
         }
+        if unsafe:
+            snapshot["unsafe_symlink"] = True
+        # The 5/6 GHz keys are read-only safety inputs: this feature never
+        # writes them, but iwd refuses a Rank config disabling 2.4 and 5 GHz.
+        for prefix, count in counts.items():
+            snapshot[f"{prefix}modifier_present"] = count > 0
+            snapshot[f"{prefix}modifier_count"] = count
+            snapshot[f"{prefix}modifier_value"] = values[prefix]
+        return snapshot
 
     @staticmethod
-    def _iwd_five_ghz_modifier_error(snapshot: dict) -> str:
-        count = int(snapshot.get("five_modifier_count") or 0)
-        if count > 1:
-            return "The iwd config contains duplicate BandModifier5GHz keys."
-        if not snapshot.get("five_modifier_present"):
+    def _iwd_band_modifier_error(snapshot: dict, band: str) -> str:
+        """Refuse a duplicate, non-numeric or non-positive 5 GHz ("five") or 6 GHz ("six") modifier."""
+        key = "BandModifier5GHz" if band == "five" else "BandModifier6GHz"
+        if int(snapshot.get(f"{band}_modifier_count") or 0) > 1:
+            return f"The iwd config contains duplicate {key} keys."
+        if not snapshot.get(f"{band}_modifier_present"):
             return ""
-        raw_value = str(snapshot.get("five_modifier_value") or "").strip()
         try:
-            value = float(raw_value)
+            value = float(str(snapshot.get(f"{band}_modifier_value") or "").strip())
         except (TypeError, ValueError):
-            return "The iwd BandModifier5GHz value is not numeric."
+            return f"The iwd {key} value is not numeric."
         if not math.isfinite(value) or value <= 0:
-            return (
-                "BandModifier5GHz must remain above zero before high-band "
-                "preference can be enabled."
-            )
-        return ""
-
-    @staticmethod
-    def _iwd_six_ghz_modifier_error(snapshot: dict) -> str:
-        count = int(snapshot.get("six_modifier_count") or 0)
-        if count > 1:
-            return "The iwd config contains duplicate BandModifier6GHz keys."
-        if not snapshot.get("six_modifier_present"):
-            return ""
-        raw_value = str(snapshot.get("six_modifier_value") or "").strip()
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            return "The iwd BandModifier6GHz value is not numeric."
-        if not math.isfinite(value) or value <= 0:
-            return (
-                "BandModifier6GHz must remain above zero before high-band "
-                "preference can be enabled."
-            )
+            return f"{key} must remain above zero before high-band preference can be enabled."
         return ""
 
     def _set_iwd_rank_modifier(
@@ -1208,9 +1103,8 @@ class Plugin:
     ) -> dict:
         """Return fresh, exact BSS candidates without changing the connection.
 
-        The manual action needs a BSSID, not merely a band count.  Stop after
-        the first successful scan that finds a high-band BSS so a normal case
-        performs one scan instead of the previous broad + per-band + DFS loop.
+        The manual action needs a BSSID, not merely a band count; stop after
+        the first successful scan that finds a high-band BSS.
         """
         result = {
             "scan_ok": False,
@@ -1466,8 +1360,8 @@ class Plugin:
         policy_state = settings.get("band_policy_state") or {}
         applied_state = policy_state.get("applied") or {}
         iwd_snapshot = self._get_iwd_rank_modifier_snapshot()
-        five_modifier_error = self._iwd_five_ghz_modifier_error(iwd_snapshot)
-        six_modifier_error = self._iwd_six_ghz_modifier_error(iwd_snapshot)
+        five_modifier_error = self._iwd_band_modifier_error(iwd_snapshot, "five")
+        six_modifier_error = self._iwd_band_modifier_error(iwd_snapshot, "six")
         external_band_while_off = current_policy == BAND_POLICY_OFF and bool(band)
         external_iwd_while_off = (
             current_policy == BAND_POLICY_OFF
@@ -1477,13 +1371,9 @@ class Plugin:
             current_policy in IWD_BAND_POLICIES
             and bool(band)
         )
-        expected_six_iwd = {
-            "modifier_present": applied_state.get("iwd_modifier_present", False),
-            "modifier_value": applied_state.get("iwd_modifier_value", ""),
-        }
         external_iwd_during_six = (
             current_policy == BAND_POLICY_SIX_ONLY
-            and not self._iwd_snapshot_matches(iwd_snapshot, expected_six_iwd)
+            and not self._iwd_snapshot_matches(iwd_snapshot, self._applied_iwd(applied_state))
         )
         fixed_channel = channel not in ("", "0")
         fixed_bssid = bool(bssid)
@@ -1610,8 +1500,7 @@ class Plugin:
         os.chmod(directory, 0o700)
         self._atomic_write_json(target, journal)
         phase = journal.get('phase')
-        known_phases = {'pending', 'applying', 'verified', 'committed', 'rolling_back', 'rolled_back', 'rollback_failed'}
-        phase = phase if isinstance(phase, str) and phase in known_phases else 'unknown'
+        phase = phase if isinstance(phase, str) and phase in JOURNAL_PHASES else 'unknown'
         store = 'band_policy'
         operation = journal.get('operation')
         operation = operation if isinstance(operation, str) and operation in {'manual_high_band_reconnect', 'automatic_high_band_reconnect'} else store
@@ -1644,14 +1533,7 @@ class Plugin:
             conflicts = journal.get("rollback_conflicts") or []
             detail = "; ".join(str(item) for item in conflicts)
             return ["band policy rollback failed" + (f": {detail}" if detail else "")]
-        if phase not in (
-            "pending",
-            "applying",
-            "rolling_back",
-            "verified",
-            "committed",
-            "rolled_back",
-        ):
+        if phase not in JOURNAL_PHASES:
             return [f"band policy journal has unknown phase: {phase or 'missing'}"]
         return []
 
@@ -1717,17 +1599,8 @@ class Plugin:
         if not unit:
             return
         for suffix in ("timer", "service"):
-            self._run_cmd(
-                ["/usr/bin/systemctl", "stop", f"{unit}.{suffix}"], timeout=4
-            )
-        self._run_cmd(
-            [
-                "/usr/bin/systemctl",
-                "reset-failed",
-                f"{unit}.service",
-            ],
-            timeout=4,
-        )
+            self._run_cmd(["/usr/bin/systemctl", "stop", f"{unit}.{suffix}"], timeout=4)
+        self._run_cmd(["/usr/bin/systemctl", "reset-failed", f"{unit}.service"], timeout=4)
 
     def _profile_is_active(self, uuid: str, iface: str | None = None) -> bool:
         if not uuid:
@@ -1748,12 +1621,10 @@ class Plugin:
     def _get_iwd_profile_conflict(self, uuid: str, *, allow_disabled_duplicates: bool = False) -> str:
         """Reject ambiguous saved PSK/SAE profiles without reading credentials.
 
-        iwd has one KnownNetwork per SSID/security family, while NM may have
-        several UUIDs with different settings or credentials for that ESS.
-        Restarting iwd cannot preserve their independent credential stores.
-        A restart rebuilds NM's mirror binding. Only that path can allow
-        disabled duplicates when the target is the sole public metadata match.
-        A profile-only mutation may still use an older cached mirror binding.
+        iwd keeps one KnownNetwork per SSID/security family, while NM may hold
+        several UUIDs with different credentials for it. Only an iwd restart
+        rebuilds NM's mirror binding, so only that path may allow disabled
+        duplicates when the target is the sole public metadata match.
         """
         unavailable = "Saved WiFi profiles could not be verified before restarting iwd."
         listed = self._run_cmd([
@@ -1928,16 +1799,7 @@ class Plugin:
             iface = bound_iface or self._get_wifi_interface()
             if iface:
                 state_result = self._run_cmd(
-                    [
-                        "/usr/bin/nmcli",
-                        "-g",
-                        "GENERAL.STATE",
-                        "device",
-                        "show",
-                        iface,
-                    ],
-                    timeout=3,
-                )
+                    ["/usr/bin/nmcli", "-g", "GENERAL.STATE", "device", "show", iface], timeout=3)
                 state_match = re.match(
                     r"\s*(\d+)", str(state_result.get("stdout") or "")
                 )
@@ -1948,15 +1810,7 @@ class Plugin:
                 remaining_activation = deadline - time.monotonic() - 3.0
                 if state_result.get("success") and state in (30, 100) and remaining_activation > 0:
                     last_result = self._run_cmd(
-                        [
-                            "/usr/bin/nmcli",
-                            "con",
-                            "up",
-                            "uuid",
-                            uuid,
-                            "ifname",
-                            iface,
-                        ],
+                        ["/usr/bin/nmcli", "con", "up", "uuid", uuid, "ifname", iface],
                         # Keep time for native iwd recovery after the CLI
                         # exits. Its error can precede a successful fallback.
                         timeout=min(activation_timeout, remaining_activation),
@@ -2292,10 +2146,7 @@ class Plugin:
             }
         except Exception as exc:
             diagnostic_event('wifi', 'manual_reconnect_failed', level='error', stage='apply', code=type(exc).__name__)
-            rollback = self._restore_band_policy_transaction(journal, str(exc))
-            if rollback.get("success"):
-                self._cancel_band_policy_rollback(journal)
-                self._remove_band_policy_journal()
+            rollback = self._roll_back_failed_transaction(journal, str(exc))
             return {
                 "success": False,
                 "error": "manual_reconnect_failed",
@@ -2350,6 +2201,14 @@ class Plugin:
             and str(left.get("modifier_value") or "")
             == str(right.get("modifier_value") or "")
         )
+
+    @staticmethod
+    def _applied_iwd(applied: dict) -> dict:
+        """The iwd modifier recorded in a policy state's "applied" section."""
+        return {
+            "modifier_present": applied.get("iwd_modifier_present", False),
+            "modifier_value": applied.get("iwd_modifier_value", ""),
+        }
 
     def _restart_selected_iwd(self) -> dict:
         """Reload a running, selected manager without starting an inactive one."""
@@ -2531,6 +2390,14 @@ class Plugin:
             "conflicts": conflicts,
         }
 
+    def _roll_back_failed_transaction(self, journal: dict, reason: str) -> dict:
+        """Undo a failed operation; the journal and watchdog stay unless that succeeded."""
+        rollback = self._restore_band_policy_transaction(journal, reason)
+        if rollback.get("success"):
+            self._cancel_band_policy_rollback(journal)
+            self._remove_band_policy_journal()
+        return rollback
+
     @staticmethod
     def _band_policy_rollback_retryable(journal: dict) -> bool:
         mutations = journal.get("mutations")
@@ -2634,11 +2501,7 @@ class Plugin:
                 return "The profile band was changed outside Legion Go 2 Companion."
         if state.get("owns_iwd"):
             current_iwd = self._get_iwd_rank_modifier_snapshot()
-            expected_iwd = {
-                "modifier_present": applied.get("iwd_modifier_present", False),
-                "modifier_value": applied.get("iwd_modifier_value", ""),
-            }
-            if not self._iwd_snapshot_matches(current_iwd, expected_iwd):
+            if not self._iwd_snapshot_matches(current_iwd, self._applied_iwd(applied)):
                 original = (state.get("original") or {}).get("iwd")
                 # An explicit user transition may recover an OS rollback to
                 # the recorded baseline. Background/status checks remain strict;
@@ -2657,11 +2520,7 @@ class Plugin:
         applied = state.get("applied") or {}
         if mode == BAND_POLICY_SIX_ONLY and target in IWD_BAND_POLICIES:
             current_iwd = self._get_iwd_rank_modifier_snapshot()
-            observed_iwd = {
-                "modifier_present": applied.get("iwd_modifier_present", False),
-                "modifier_value": applied.get("iwd_modifier_value", ""),
-            }
-            if not self._iwd_snapshot_matches(current_iwd, observed_iwd):
+            if not self._iwd_snapshot_matches(current_iwd, self._applied_iwd(applied)):
                 return (
                     "The iwd band setting changed after 6 GHz only was enabled. "
                     "Disable the current policy before replacing it."
@@ -2782,8 +2641,6 @@ class Plugin:
                             val = val.strip()
                             if val in ("iwd", "wpa_supplicant"):
                                 return val
-            except FileNotFoundError:
-                continue
             except Exception:
                 continue
         # With no authoritative config, competing managers are ambiguous.
@@ -2885,7 +2742,7 @@ class Plugin:
 
     def _get_device_info_sync(self) -> dict:
         try:
-            product, device_family, device_label = self._detect_device_family()
+            _, device_family, device_label = self._detect_device_family()
             return {
                 "success": True,
                 "driver": self._detect_wifi_driver(),
@@ -3170,7 +3027,7 @@ class Plugin:
             return {
                 "success": False,
                 "error": "invalid_saved_band_policy",
-                "message": "Saved band policy is invalid. Reset it before continuing.",
+                "message": "Saved band policy is not recognized; no network changes were made.",
                 "band_policy": current_mode,
                 "rolled_back": False,
             }
@@ -3387,9 +3244,8 @@ class Plugin:
 
         iwd_before = self._get_iwd_rank_modifier_snapshot()
         if mode in IWD_BAND_POLICIES:
-            modifier_error = self._iwd_five_ghz_modifier_error(iwd_before)
-            if not modifier_error:
-                modifier_error = self._iwd_six_ghz_modifier_error(iwd_before)
+            modifier_error = (self._iwd_band_modifier_error(iwd_before, "five")
+                              or self._iwd_band_modifier_error(iwd_before, "six"))
             if modifier_error:
                 return {
                     "success": False,
@@ -3672,12 +3528,7 @@ class Plugin:
             }
         except Exception as e:
             diagnostic_event('wifi', 'band_policy_failed', level='error', stage='apply', code=type(e).__name__)
-            rollback = self._restore_band_policy_transaction(
-                journal, str(e)
-            )
-            if rollback.get("success"):
-                self._cancel_band_policy_rollback(journal)
-                self._remove_band_policy_journal()
+            rollback = self._roll_back_failed_transaction(journal, str(e))
             return {
                 "success": False,
                 "error": "band_policy_apply_failed",

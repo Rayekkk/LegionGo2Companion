@@ -268,12 +268,15 @@ class IwdMainConfEditorTests(unittest.TestCase):
         self.assertTrue(self.plugin._get_iwd_rank_modifier_snapshot()["ambiguous"])
 
     def test_high_band_modifiers_at_or_below_zero_are_refused(self):
-        for key, check in (("BandModifier5GHz", wifi.Plugin._iwd_five_ghz_modifier_error),
-                           ("BandModifier6GHz", wifi.Plugin._iwd_six_ghz_modifier_error)):
+        for key, band in (("BandModifier5GHz", "five"), ("BandModifier6GHz", "six")):
             for value, refused in (("1.0", False), ("0", True), ("0.0", True), ("-1", True), ("fast", True)):
                 with self.subTest(key=key, value=value):
                     self.iwd.write_bytes(f"[Rank]\n{key}={value}\n".encode())
-                    self.assertEqual(bool(check(self.plugin._get_iwd_rank_modifier_snapshot())), refused)
+                    error = wifi.Plugin._iwd_band_modifier_error(
+                        self.plugin._get_iwd_rank_modifier_snapshot(), band)
+                    self.assertEqual(bool(error), refused)
+                    if refused:
+                        self.assertIn(key, error)
 
 
 if __name__ == "__main__":
