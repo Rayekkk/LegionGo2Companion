@@ -12,8 +12,6 @@ interface UpdateCheck {
   latest_version?: string;
   update_available: boolean;
   download_available: boolean;
-  release_url?: string;
-  asset_name?: string;
   size?: number;
   checked_at?: number;
   no_release?: boolean;
@@ -24,7 +22,6 @@ interface UpdateDownload {
   success: boolean;
   path?: string;
   version?: string;
-  sha256?: string;
   error?: string;
 }
 

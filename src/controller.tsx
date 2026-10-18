@@ -21,7 +21,6 @@ export interface ControllerStatus {
   error: string;
   physical: { path: string; pid: string; driver: string } | null;
   virtual: { path: string; pid: string } | null;
-  diagnostics_active: boolean;
   recovery_pending?: boolean;
   imu?: { available: boolean; actual: { left: boolean; right: boolean } | null; reason?: string };
 }
@@ -30,24 +29,19 @@ interface Stream<T> {
   received: boolean;
   reports: number;
   rate_hz: number | null;
-  age_ms: number | null;
   sample: T | null;
   error?: string;
-  invalid_reports?: number;
 }
 
 interface ControllerDiagnostics {
   token: string;
   active: boolean;
   reason: string;
-  elapsed_s: number;
   remaining_s: number;
   physical: Stream<{
     touchpad: Touchpad | null;
     gyro_left: Vector | null;
     gyro_right: Vector | null;
-    battery_left: number | null;
-    battery_right: number | null;
     connection_left: string | null;
     connection_right: string | null;
   }>;

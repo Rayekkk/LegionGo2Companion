@@ -51,7 +51,6 @@ interface State {
   native_restart_pending?: boolean;
   // Setup gate
   panel_mode: PanelMode | null;
-  active_mode: PanelMode | null;
   setup_done: boolean;
   setup_note: string;
   setup_error: string;
@@ -61,9 +60,7 @@ interface State {
   reset_in_progress?: boolean;
   reset_restart_pending?: boolean;
   reset_error?: string;
-  reset_note?: string;
   // Hybrid half
-  hybrid_reason: string;
   hdr_now: boolean;
   gamescope_reachable: boolean;
   // Brightness half

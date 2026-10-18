@@ -48,13 +48,6 @@ function findSection(node, title, action = 'onClick') {
     const found = findSection(child, title, action); if (found) return found;
   }
 }
-function findPanel(node, title) {
-  if (!node || typeof node !== 'object') return;
-  if (node.type === 'PanelSection' && node.props?.title === title) return node;
-  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
-    const result = findPanel(child, title); if (result) return result;
-  }
-}
 function findModeChoice(node) {
   if (!node || typeof node !== 'object') return;
   if (typeof node.type === 'function' && node.type.name === 'ModeChoice') return node;
@@ -76,4 +69,4 @@ const cases = [
 const nativeDisplay = { ...display, panel_mode: null, active_mode: null, setup_done: false,
   native_support_detected: true, native_support_reason: 'Complete upstream display support is present.',
   native_cleanup_pending: false, native_cleanup_error: '', native_restart_pending: false };
-module.exports = { assert, run, settle, find, findButton, harness, findSection, findPanel, findModeChoice, rgb, remap, display, wifi, cases, nativeDisplay };
+module.exports = { assert, run, settle, find, findButton, harness, findSection, findModeChoice, rgb, remap, display, wifi, cases, nativeDisplay };

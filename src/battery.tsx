@@ -24,7 +24,6 @@ export interface BatteryStatus {
   backend: "charge_types";
   options?: string[];
   current_mode?: string | null;
-  baseline?: string | null;
   recovery_pending?: boolean;
 }
 

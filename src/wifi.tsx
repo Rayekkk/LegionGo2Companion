@@ -18,11 +18,8 @@ interface WifiLiveStatus {
   connection_state?: "connected" | "connecting" | "disconnected" | "unknown";
   connection_uuid?: string;
   band_policy?: WifiSettings["band_policy"];
-  saved_policy_inactive?: boolean;
   band_policy_restore_available?: boolean;
   six_ghz_only_supported?: boolean;
-  signal_dbm?: string;
-  tx_bitrate?: string;
   frequency?: string;
   channel?: string;
   wifi_backend?: string;

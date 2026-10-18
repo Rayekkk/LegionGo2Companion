@@ -27,8 +27,6 @@ export interface RemapStatus {
   desktop_action: string;
   page_action: string;
   actions: ActionOption[];
-  inputplumber_version?: string;
-  profile_name?: string;
   reason?: string;
   error?: string;
 }

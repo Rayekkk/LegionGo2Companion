@@ -16,7 +16,6 @@ import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
 
 interface RgbSettings {
-  configured: boolean;
   control_enabled: boolean;
   rings_enabled: boolean;
   effect: string;
@@ -57,7 +56,6 @@ export interface RgbStatus {
     current?: boolean | null;
     managed?: boolean;
     drift?: boolean;
-    bios?: string;
   };
   recovery_required?: boolean;
   error?: string;

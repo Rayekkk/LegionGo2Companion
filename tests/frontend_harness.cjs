@@ -155,4 +155,4 @@ function mount(file, options = {}) {
   return h;
 }
 
-module.exports = { assert, run, settle, deferred, mount, find, nodes, label, button, buttonText, component, text, transpile };
+module.exports = { assert, run, settle, deferred, mount, find, nodes, label, button, component, text };
