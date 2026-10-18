@@ -604,6 +604,7 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | Display controls are locked | Read the SteamOS-support or cleanup message and use the requested restart. |
 | Recovery required, settings damaged or cleanup incomplete | Keep the saved settings and backups; follow the page's reason and retry button. Deleting them can remove what is needed to restore your previous state. |
 | A plugin conflict persists | Renamed copies of the old plugins still count; keep backups outside Decky's plugin folder. If the plugin folder cannot be read, restore access to it. |
+| The plugin folder was deleted by hand and the display or Wi-Fi still acts as if Companion were set | Install Companion again and uninstall it in Decky Settings; uninstalling restores what it changed. By hand: delete `~/.config/gamescope/scripts/lenovo.legiongo2.oled.lua` (rename a `lenovo.legiongo2.oled.lua.backup` next to it back to that name, if present), remove the `BandModifier2_4GHz` line from `[Rank]` in `/etc/iwd/main.conf` (iwd backend only), then restart the console. |
 
 </details>
 
