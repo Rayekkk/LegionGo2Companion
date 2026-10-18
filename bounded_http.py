@@ -24,6 +24,49 @@ GITHUB_HOSTS = frozenset({"api.github.com", "github.com", "codeload.github.com",
 ASSET_HOSTS = frozenset({"objects.githubusercontent.com", "release-assets.githubusercontent.com"})
 MAX_BODY = 48 * 1024 * 1024
 MAX_REQUEST = 2 * 1024 * 1024
+CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",   # Arch, SteamOS, Debian
+    "/etc/ssl/cert.pem",                    # Alpine, macOS, also present on SteamOS
+    "/etc/pki/tls/certs/ca-bundle.crt",     # Fedora, RHEL
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+)
+_tls_context = None
+
+
+def tls_context():
+    """One verified TLS context for every GitHub download in the plugin.
+
+    The frozen loader can start with an empty default store; then the OS bundle
+    (it gets security updates) wins over certifi. Verification is never turned
+    off: this runs as root and what comes back is installed or executed.
+    """
+    global _tls_context
+    if _tls_context is not None:
+        return _tls_context
+    from diagnostics import event  # not at import time: the fetch worker runs isolated
+    context = ssl.create_default_context()
+    if not context.cert_store_stats().get("x509_ca"):
+        candidates = list(CA_BUNDLES)
+        try:
+            import certifi
+            candidates.append(certifi.where())
+        except Exception:
+            pass
+        for path in candidates:
+            try:
+                if path and os.path.exists(path):
+                    context.load_verify_locations(cafile=path)
+            except OSError as exc:
+                event('updates', 'tls_bundle_failed', level='warning', error=exc, repeat=60)
+                continue
+            if context.cert_store_stats().get("x509_ca"):
+                event('updates', 'tls_ready', scope='fallback_trust_store',
+                      count=context.cert_store_stats()['x509_ca'])
+                break
+        else:
+            event('updates', 'tls_unavailable', level='error')
+    _tls_context = context
+    return context
 
 
 def checked_url(url, initial_url, policy):

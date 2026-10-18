@@ -160,7 +160,14 @@ def load_json_object(path: str, *, missing_ok: bool = False) -> dict[str, Any] |
     return payload
 
 
-def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
+def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600, *,
+                        keep_existing: bool = False, strict_sync: bool = False) -> None:
+    """Atomically replace a regular file.
+
+    `keep_existing` keeps the mode and owner of the file being replaced (system
+    files such as /etc/iwd/main.conf); `strict_sync` makes a failed directory
+    fsync an error instead of a warning (recovery journals).
+    """
     directory = _validate_directory(os.path.dirname(path))
     leaf = _validate_leaf(os.path.basename(path))
     temporary = f".{leaf}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
@@ -177,6 +184,8 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
             if existing is not None and not stat.S_ISREG(existing.st_mode):
                 raise UnsafeSettingsPath(
                     f"settings target is not a regular file: {path}")
+            if keep_existing and existing is not None:
+                mode = stat.S_IMODE(existing.st_mode)
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(temporary_path, flags, mode)
@@ -203,12 +212,15 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
             existing = None
         if existing is not None and not stat.S_ISREG(existing.st_mode):
             raise UnsafeSettingsPath(f"settings target is not a regular file: {path}")
+        if keep_existing and existing is not None:
+            mode, owner = stat.S_IMODE(existing.st_mode), existing
+        else:
+            owner = os.fstat(dir_fd)
 
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         tmp_fd = os.open(temporary, flags, mode, dir_fd=dir_fd)
         os.fchmod(tmp_fd, mode)
-        owner = os.fstat(dir_fd)
         if hasattr(os, "fchown"):
             try:
                 os.fchown(tmp_fd, owner.st_uid, owner.st_gid)
@@ -230,6 +242,8 @@ def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600) -> None:
         try:
             os.fsync(dir_fd)
         except OSError as exc:
+            if strict_sync:
+                raise
             # The new primary is already visible and its bytes were fsynced.
             # Raising here would falsely restore the old in-memory settings
             # and invite callers to roll hardware back against the new file.
@@ -398,7 +412,7 @@ class AtomicSettingsManager:
                 _atomic_write_bytes(self.backup_path, encoded)
                 self._storage_hardened = True
                 transition("settings", "backup_refresh", True, store=self._store_name,
-                           outcome="confirmed")
+                           outcome="confirmed", initial=False)
             except Exception as exc:
                 # The primary transaction is already durable.  Reporting this as
                 # a failed user operation would invite a hardware rollback even

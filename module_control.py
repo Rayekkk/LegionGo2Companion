@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Explicit module withdrawal; never use uninstall hooks that erase settings."""
 import asyncio
-import os
 import module_runtime
 
 def capture_intent(name):
@@ -24,8 +23,7 @@ def capture_intent(name):
         import wifi_backend as b
         s = b._load_settings()
         return {'band_policy': s.get('band_policy', b.BAND_POLICY_OFF),
-                'enabled': s.get('band_preference_enabled') is True,
-                'power_save_disabled': s.get('power_save_disabled') is True}
+                'enabled': s.get('band_preference_enabled') is True}
     if name == 'display':
         import display_backend as b
         return {'panel_mode': b.settings.getSetting('panel_mode', None)}
@@ -53,8 +51,6 @@ async def restore_intent(name, component, intent):
             # Resume records written by older Companion versions contain only
             # the preference boolean, never the exact band policy.
             check(await component.set_band_preference(True))
-        if intent.get('power_save_disabled') is True:
-            check(await component.set_power_save(True))
     elif name == 'display' and intent.get('panel_mode') in ('gamma22', 'pq', 'hybrid'):
         result = await component.set_panel_mode(intent['panel_mode'])
         # Native retirement only disables the legacy display controls. Keep
@@ -70,7 +66,9 @@ async def withdraw(name, component):
     if name == 'display':
         await component.cleanup_native_display()
     try:
-        await component._unload()
+        # Display ends in its uninstall state; a plain unload first would restore
+        # the Hybrid PQ baseline only to switch back to gamma 2.2 (two modesets).
+        await (component._unload(uninstalling=True) if name == 'display' else component._unload())
     finally:
         await module_runtime.drain(name)
     check = module_runtime.require_success
@@ -88,8 +86,8 @@ async def withdraw(name, component):
         check(await component.set_enabled(False))
     elif name == 'vibration':
         import vibration_backend as backend
-        if not await backend._offload(backend._apply_settings, dict(backend.DEFAULT_PROFILE), None, True):
-            raise RuntimeError('The controller did not confirm default vibration settings.')
+        if not await backend._offload(backend._restore_baseline):
+            raise RuntimeError('The controller did not confirm the restored vibration settings.')
     elif name == 'rgb':
         check(await component.restore_original())
     elif name == 'remap':
@@ -99,15 +97,8 @@ async def withdraw(name, component):
     elif name == 'battery':
         check(await component.release_control())
     elif name == 'wifi':
-        import wifi_backend as backend
-        check(await component.set_band_policy(backend.BAND_POLICY_OFF))
-        check(await component.set_power_save(False))
-        check(await asyncio.to_thread(component._restore_legacy_bssid_lock))
-        check(await asyncio.to_thread(component._remove_dispatcher))
-        try:
-            os.remove(backend.ENFORCED_FILE)
-        except FileNotFoundError:
-            pass
+        for result in (await component._release_all()).values():
+            check(result)
     elif name == 'display':
         import display_backend as backend
         native_active = getattr(component, 'native_display_active', lambda: False)
@@ -124,8 +115,6 @@ async def withdraw(name, component):
 
         if native_active():
             return await finish_native()
-        await component._unload(uninstalling=True)
-        await module_runtime.drain(name)
 
         def finish_legacy():
             # A concurrent state read can detect a package update while unload

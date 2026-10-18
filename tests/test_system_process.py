@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-import test_integration
+import support
 import remap_backend as remap
 import wifi_backend as wifi
 import tdp_backend as tdp
@@ -21,8 +21,7 @@ class SystemProcessTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), \
              patch.object(subprocess, 'run', return_value=child) as run, \
              patch.object(os.path, 'isfile', return_value=True), \
-             patch.object(remap, '_version_cache', None), \
-             patch.object(remap, '_inputplumber_signature', return_value=(1, 2)):
+             patch.object(remap, '_version_cache', None):
             self.assertEqual(remap._run_busctl(['--version']), 'ok')
             remap._inputplumber_version()
             self.assertTrue(wifi.Plugin()._run_cmd(['nmcli', '--version'])['success'])
@@ -43,9 +42,9 @@ class SystemProcessTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(system_env(), {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
 
-    def test_fan_system_python_and_firmware_busctl_do_not_inherit_frozen_loader_libraries(self):
+    def test_fan_system_python_and_fwupd_do_not_inherit_frozen_loader_libraries(self):
         import fan_backend as fan
-        import controller_firmware_input as firmware_input
+        import controller_firmware as firmware
         blocked = {'LD_LIBRARY_PATH': '/tmp/_MEI/bundled', 'LD_PRELOAD': '/tmp/unrelated.so',
                    'LD_AUDIT': '/tmp/audit.so', 'LD_LIBRARY_PATH_ORIG': '/tmp/old',
                    'PYTHONPATH': '/tmp/unrelated', 'PATH': '/usr/bin'}
@@ -58,14 +57,13 @@ class SystemProcessTests(unittest.TestCase):
                 patch.object(fan.socket, 'SOCK_SEQPACKET', 5, create=True), \
                 patch.object(fan.socket, 'socketpair', return_value=(parent, child)), \
                 patch.object(fan.subprocess, 'Popen', return_value=Mock()) as launch, \
-                patch.object(client, '_receive', side_effect=ready), \
-                patch.object(client, '_start_heartbeat'):
+                patch.object(client, '_receive', side_effect=ready):
             client.start()
             environment = launch.call_args.kwargs['env']
             for name in blocked.keys()-{'PATH'}:
                 self.assertNotIn(name, environment)
-            with patch.object(firmware_input.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'{}', b'')) as run:
-                self.assertEqual(firmware_input._bus(['--version']), {})
+            with patch.object(firmware.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'{}', b'')) as run:
+                firmware._run_tool([firmware.FWUPDMGR, '--version'], 5)
                 for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH_ORIG'):
                     self.assertNotIn(name, run.call_args.kwargs['env'])
             self.assertEqual(dict(os.environ), blocked)

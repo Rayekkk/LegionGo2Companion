@@ -8,16 +8,13 @@ import os
 from pathlib import Path
 import re
 import secrets
-import ssl
 import stat
 import threading
 import time
 import urllib.error
-import urllib.parse
-import urllib.request
 import zipfile
 from diagnostics import event
-from bounded_http import checked_url as _http_url, open_http
+from bounded_http import checked_url as _http_url, open_http, tls_context
 
 REPOSITORY = "Rayekkk/LegionGo2Companion"
 PLUGIN_NAME = "Legion Go 2 Companion"
@@ -25,8 +22,8 @@ ARCHIVE_ROOT = "LegionGo2Companion"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASE_BASE = f"https://github.com/{REPOSITORY}/releases"
 MAX_METADATA = 1024 * 1024
-# The native Qt runtime includes desktop tray support. Expansion remains bounded.
-MAX_DOWNLOAD = 48 * 1024 * 1024
+# Same as 2.1.0: its updater must be able to download this release.
+MAX_DOWNLOAD = 32 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 1024
 REQUEST_TIMEOUT = 6
@@ -35,10 +32,6 @@ DOWNLOAD_SECONDS = 120
 CACHE_SECONDS = 60
 ERROR_CACHE_SECONDS = 20
 CLICK_CACHE_SECONDS = 2
-CA_BUNDLES = (
-    "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem",
-    "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/ca-bundle.pem",
-)
 _VERSION = re.compile(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})")
 _DIGEST = re.compile(r"sha256:([0-9a-fA-F]{64})")
 
@@ -51,24 +44,6 @@ def _version(value):
 
 def _checked_url(url, initial_url, metadata=False):
     return _http_url(url, initial_url, "metadata" if metadata else "archive")
-
-
-class _ReleaseRedirect(urllib.request.HTTPRedirectHandler):
-    max_redirections = 5
-    max_repeats = 2
-
-    def __init__(self, initial_url, metadata):
-        self.initial_url = initial_url
-        self.metadata = metadata
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        try:
-            _checked_url(newurl, self.initial_url, self.metadata)
-        except Exception:
-            if fp is not None:
-                fp.close()
-            raise
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _read_chunks(response, limit, deadline, cancel=None):
@@ -104,7 +79,6 @@ class CompanionUpdates:
         self.user_uid = user_uid
         self.user_gid = user_gid
         self._lock = threading.Lock()
-        self._ssl_context = None
         self._cached = None
         self._cache_at = 0.0
         self._release = None
@@ -129,20 +103,6 @@ class CompanionUpdates:
         _version(version)
         return version
 
-    def _tls(self):
-        if self._ssl_context is None:
-            context = ssl.create_default_context()
-            if not context.cert_store_stats().get("x509_ca"):
-                for bundle in CA_BUNDLES:
-                    try:
-                        context.load_verify_locations(cafile=bundle)
-                    except (OSError, ssl.SSLError):
-                        continue
-                    if context.cert_store_stats().get("x509_ca"):
-                        break
-            self._ssl_context = context
-        return self._ssl_context
-
     def _open(self, url, *, metadata):
         self._ensure_open()
         _checked_url(url, url, metadata)
@@ -150,7 +110,7 @@ class CompanionUpdates:
             "User-Agent": "LegionGo2Companion-release-check",
             "Accept": "application/vnd.github+json" if metadata else "application/octet-stream",
             "X-GitHub-Api-Version": "2022-11-28",
-        }, context=self._tls(), timeout=REQUEST_TIMEOUT,
+        }, context=tls_context(), timeout=REQUEST_TIMEOUT,
             limit=MAX_METADATA if metadata else MAX_DOWNLOAD,
             total_seconds=METADATA_SECONDS if metadata else DOWNLOAD_SECONDS,
             policy="metadata" if metadata else "archive", cancel=self._ensure_open)

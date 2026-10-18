@@ -5,8 +5,10 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_integration
+import support
 import main
+import test_modules as fixtures
+from companion_updates import CompanionUpdates
 
 
 class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -91,7 +93,7 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_conflict_signals_network_stop_without_waiting_for_download(self):
         plugin = self.make_plugin()
         with patch.object(main, '_installed_standalone_plugins', return_value=['LeGoTDP']):
-            await plugin._inspect_guard()
+            await main.Plugin._check_guard(plugin)  # make_plugin stubs the instance method
         self.assertTrue(plugin._guard_blocked)
         plugin._updates.close.assert_called_once()
 
@@ -134,13 +136,87 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_decky_account_is_used_instead_of_root_or_first_login(self):
         plugin = main.Plugin()
         account = Mock(pw_dir='/home/player', pw_uid=1001, pw_gid=1001)
-        with patch.object(test_integration.decky, 'DECKY_USER', 'player', create=True), \
+        with patch.object(support.decky, 'DECKY_USER', 'player', create=True), \
              patch('pwd.getpwnam', return_value=account) as lookup, \
              patch.object(main, 'CompanionUpdates') as updater:
             plugin._ensure_updates()
             plugin._ensure_updates()
             lookup.assert_called_once_with('player')
             updater.assert_called_once_with(main.PLUGIN_DIR, '/home/player', 1001, 1001)
+
+
+class UpdateCloseResponsivenessTests(unittest.IsolatedAsyncioTestCase):
+    setUp = fixtures.ModuleGateTests.setUp
+    make_plugin = fixtures.ModuleGateTests.make_plugin
+    asyncTearDown = fixtures.ModuleGateTests.asyncTearDown
+
+    def slow_close(self, observations):
+        updater = CompanionUpdates(self.folder.name, '', -1, -1)
+        self.plugin._updates = updater
+        loop = asyncio.get_running_loop()
+        close = updater.close
+
+        def waiting_close():
+            heartbeat = threading.Event()
+            loop.call_soon_threadsafe(heartbeat.set)
+            observations.append(heartbeat.wait(.5))
+            close()
+
+        return updater, waiting_close
+
+    async def test_unload_publication_barrier_does_not_block_the_event_loop(self):
+        observations = []
+        updater, closing = self.slow_close(observations)
+        self.plugin._modules_started = True
+        with patch.object(updater, 'close', side_effect=closing):
+            await self.plugin._unload()
+        self.assertEqual(observations, [True], 'Waiting for archive publication must leave the event loop free.')
+        self.assertTrue(updater._closed.is_set())
+        for name in main.MODULE_NAMES:
+            getattr(self.plugin, '_' + name)._unload.assert_awaited_once()
+
+    async def test_conflict_publication_barrier_does_not_block_the_event_loop(self):
+        observations = []
+        updater, closing = self.slow_close(observations)
+        with patch.object(updater, 'close', side_effect=closing), \
+                patch.object(main, '_installed_standalone_plugins', return_value=['LeGoTDP']):
+            await self.plugin._check_guard()
+        self.assertEqual(observations, [True], 'A conflict must not synchronously wait for the archive rename.')
+        self.assertTrue(self.plugin._guard_blocked)
+        self.assertTrue(updater._closed.is_set())
+
+    async def test_repeated_unload_cancellation_finishes_publication_and_module_cleanup(self):
+        updater = CompanionUpdates(self.folder.name, '', -1, -1)
+        self.plugin._updates = updater
+        self.plugin._modules_started = True
+        entered, release = threading.Event(), threading.Event()
+        close = updater.close
+
+        def waiting_close():
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError('Test did not release the publication barrier.')
+            close()
+
+        with patch.object(updater, 'close', side_effect=waiting_close):
+            task = asyncio.create_task(self.plugin._unload())
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                task.cancel()
+                await asyncio.sleep(0)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done(), 'Cancellation cannot abandon archive publication or hardware cleanup.')
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(updater._closed.is_set())
+        self.assertFalse(self.plugin._modules_started)
+        for name in main.MODULE_NAMES:
+            getattr(self.plugin, '_' + name)._unload.assert_awaited_once()
 
 
 if __name__ == '__main__':

@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 import asyncio
+import os
 import tempfile
 import threading
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
-import test_integration
+from unittest.mock import AsyncMock, patch, Mock
+from contextlib import ExitStack
+from pathlib import Path
+from types import SimpleNamespace
+import support
 import main
 import module_runtime
 import module_control
+import display_backend as display
+from safe_settings import AtomicSettingsManager
+import rgb_backend as rgb
+import fan_backend
 
 
 class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +40,27 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.plugin._unload()
         self.intent.stop(); self.guard.stop(); self.directory.stop(); self.folder.cleanup()
+
+    async def test_start_and_stop_log_a_summary_not_a_record_per_healthy_module(self):
+        import collections, json, diagnostics
+        records = []
+        self.plugin._battery._main.side_effect = RuntimeError('fixture failure')
+        self.plugin._start_desktop = AsyncMock()
+        with patch.object(diagnostics, '_sink', lambda text, level: records.append(json.loads(text))), \
+                patch.object(diagnostics, '_seen', collections.OrderedDict()), \
+                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'), \
+                patch.object(main, '_runtime_identity', return_value={'model': '83N0'}):
+            await self.plugin._main()
+            await self.plugin._unload()
+        self.assertEqual([(r['component'], r['event']) for r in records],
+                         [('plugin', 'startup'), ('plugin', 'runtime'), ('battery', 'module_start_failed'),
+                          ('battery', 'module_stopped'), ('battery', 'module_stage_failed'),
+                          ('plugin', 'startup_complete'),
+                          ('plugin', 'shutdown_started'), ('plugin', 'shutdown_completed')])
+        summary = records[5]['context']
+        self.assertEqual(summary['failed'], 'battery')
+        self.assertEqual(summary['ready'], ','.join(name for name in main.MODULE_NAMES if name != 'battery'))
+        self.assertEqual(records[1]['context']['model'], '83N0')
 
     async def test_disabled_module_is_persisted_gated_and_skipped_on_restart(self):
         with patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as stop:
@@ -233,16 +262,22 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
             finish.set()
             self.assertTrue((await task)['success'])
 
-    async def test_cancelled_request_finishes_cleanup_before_releasing_gate(self):
+    async def test_enabling_extras_download_does_not_block_other_tdp_rpcs(self):
         entered, finish = asyncio.Event(), asyncio.Event()
-        async def stop(*args): entered.set(); await finish.wait(); return ''
-        with patch.object(main, 'withdraw', side_effect=stop):
-            task = asyncio.create_task(self.plugin.modules_set_enabled('rgb', False))
-            await entered.wait(); task.cancel(); await asyncio.sleep(0)
-            self.assertTrue(self.plugin._guard_lock.locked())
+        async def slow_enable(enabled):
+            entered.set()
+            await finish.wait()
+            return {'success': True}
+        self.plugin._tdp.set_extras_unlocked = AsyncMock(side_effect=slow_enable)
+        self.plugin._tdp.set_active_app = AsyncMock(return_value={'success': True})
+        task = asyncio.create_task(self.plugin.set_extras_unlocked(True))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertFalse(self.plugin._rpc_locks['tdp'].locked())
+            self.assertTrue((await asyncio.wait_for(self.plugin.set_active_app('123'), 1))['success'])
+        finally:
             finish.set()
-            with self.assertRaises(asyncio.CancelledError): await task
-        self.assertFalse(self.plugin._module_status()['rgb']['pending'])
+            self.assertTrue((await task)['success'])
 
     async def test_invalid_enabled_and_unknown_module_are_rejected(self):
         for name, value in [('unknown', False), ('rgb', 0), ('rgb', 'false')]:
@@ -268,6 +303,42 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         fresh = self.make_plugin()
         self.assertTrue(fresh._module_state['battery']['pending'])
         self.assertTrue(fresh._module_state['battery']['resume']['enabled'])
+
+    async def test_controller_modules_wait_for_an_updater_left_by_a_previous_process(self):
+        # fwupdtool outlives a plugin restart; the new process must not write the controllers meanwhile.
+        self.addCleanup(module_runtime.resume_controller)
+        self.plugin._module_state['controller'] = {'enabled': True, 'resume': {'source': 'right'}}
+        self.plugin._controller.set_gyro_source = AsyncMock()
+        finished = threading.Event()
+        controllers = [getattr(self.plugin, '_' + name) for name in sorted(module_runtime.CONTROLLER_MODULES)]
+        with patch.object(main, 'updater_running', side_effect=lambda: not finished.is_set()), \
+                patch.object(main, 'UPDATER_POLL_S', 0.01), \
+                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+            await self.plugin._main()
+            await asyncio.sleep(0.05)
+            for component in controllers:
+                component._main.assert_not_awaited()
+            self.plugin._controller.set_gyro_source.assert_not_awaited()
+            self.plugin._tdp._main.assert_awaited_once(); self.plugin._battery._main.assert_awaited_once()
+            self.assertTrue(self.plugin._module_status()['vibration']['maintenance'])
+            with self.assertRaises(module_runtime.ControllerPaused):
+                await self.plugin.rgb_get_status()
+            finished.set()
+            await asyncio.wait_for(self.plugin._updater_wait, 5)
+        self.assertFalse(module_runtime.is_paused('rgb'))
+        for component in controllers:
+            component._main.assert_awaited_once()
+        self.plugin._controller.set_gyro_source.assert_awaited_once_with('right')
+        self.plugin._tdp._main.assert_awaited_once()
+
+    async def test_updater_that_never_ends_keeps_controllers_paused(self):
+        self.addCleanup(module_runtime.resume_controller)
+        with patch.object(main, 'updater_running', return_value=True), patch.object(main, 'UPDATER_WAIT_S', 0), \
+                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+            await self.plugin._main()
+            await asyncio.wait_for(self.plugin._updater_wait, 5)
+        self.assertTrue(module_runtime.is_paused('vibration'))
+        self.plugin._vibration._main.assert_not_awaited()
 
     async def test_interrupted_reenable_finishes_saved_intent_on_startup(self):
         self.plugin._module_state['controller'] = {'enabled': True, 'resume': {'source': 'right'}}
@@ -301,6 +372,18 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         await fresh._unload()
         again = self.make_plugin()
         self.assertTrue(all(not x['enabled'] for x in again._module_status().values()))
+
+    async def test_old_logs_are_pruned_at_startup_with_wifi_disabled(self):
+        self.plugin._module_state['wifi'] = {'enabled': False}
+        with tempfile.TemporaryDirectory() as logs:
+            for age in range(15):
+                path = Path(logs, f'{age:02}.log')
+                path.write_text('x')
+                os.utime(path, (1_000_000 - age, 1_000_000 - age))
+            with patch.object(main.decky, 'DECKY_PLUGIN_LOG_DIR', logs, create=True),                     patch.object(main.diagnostics, 'configure'),                     patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+                await self.plugin._main()
+            self.assertEqual(sorted(p.name for p in Path(logs).glob('*.log')), [f'{i:02}.log' for i in range(10)])
+        self.plugin._wifi._main.assert_not_awaited()
 
     async def test_cleanup_commit_failure_does_not_prevent_other_modules_starting(self):
         self.plugin._module_state['wifi'] = {'enabled': False, 'pending': True}
@@ -350,7 +433,7 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
              patch.object(display_backend, '_uninstall_script') as uninstall:
             note = await module_control.withdraw('display', c)
         self.assertEqual(restored, ['edid'])
-        c._unload.assert_awaited_once_with()
+        c._unload.assert_awaited_once_with(uninstalling=True)
         write.assert_not_called()
         uninstall.assert_not_called()
         self.assertIn('Restart', note)
@@ -374,7 +457,7 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
             detected = True
             return {'native_support_detected': True}
 
-        async def unload():
+        async def unload(uninstalling=False):
             self.assertTrue(detected, 'Legacy unload must not run before native discovery')
             events.append('unload')
 
@@ -450,10 +533,442 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
         c._unload.assert_awaited_once()
 
     async def test_wifi_cleanup_keeps_saved_profiles(self):
-        c = types.SimpleNamespace(_unload=AsyncMock(), set_band_policy=AsyncMock(return_value={'success':True}),
-            set_power_save=AsyncMock(return_value={'success':True}),
-            _restore_legacy_bssid_lock=lambda: {'success':True}, _remove_dispatcher=lambda: {'success':True})
-        with patch.object(module_control.os, 'remove') as remove:
+        import wifi_backend
+        c = wifi_backend.Plugin()
+        with patch.object(c, '_unload', AsyncMock()), \
+                patch.object(c, 'set_band_policy', AsyncMock(return_value={'success':True})), \
+                patch.object(wifi_backend.os, 'remove') as remove:
             await module_control.withdraw('wifi', c)
-        self.assertEqual(remove.call_count, 1)
-        self.assertNotIn('settings.json', str(remove.call_args))
+        remove.assert_not_called()
+
+
+class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_display_start_is_gated_and_retries_after_storage_recovers(self):
+        with tempfile.TemporaryDirectory() as raw, ExitStack() as stack:
+            stack.enter_context(patch.object(main.decky, 'DECKY_PLUGIN_SETTINGS_DIR', raw))
+            stack.enter_context(patch.object(main, '_installed_standalone_plugins', return_value=[]))
+            store = AtomicSettingsManager('display_settings', raw)
+            store.replace(dict(display.DEFAULT_SETTINGS))
+            stack.enter_context(patch.object(display, 'settings', store))
+            state = dict(display.Plugin._state, settings_error='', setup_error='')
+            stack.enter_context(patch.object(display.Plugin, '_state', state))
+            stack.enter_context(patch.object(display.Plugin, '_task', None))
+            stack.enter_context(patch.object(display.Plugin, '_prop_task', None))
+            loader = main.Plugin()
+            with patch.object(display.Plugin, '_read_settings', side_effect=OSError('disk unavailable')):
+                with self.assertRaisesRegex(OSError, 'disk unavailable'):
+                    await loader._start_module('display')
+                status = loader._module_status()['display']
+                self.assertTrue(status['enabled'])
+                self.assertFalse(status['ready'])
+                self.assertIn('disk unavailable', status['error'])
+                with self.assertRaisesRegex(RuntimeError, 'could not start'):
+                    await loader.display_get_state()
+                self.assertIsNone(loader._display._task)
+                self.assertIsNone(loader._display._prop_task)
+            for name, value in (('_refresh_native_support', None), ('_refresh_setup', None),
+                                ('_release', True), ('_edid_restore', True), ('_edid_pass', None)):
+                stack.enter_context(patch.object(display.Plugin, name, return_value=value))
+            stack.enter_context(patch.object(display.Plugin, '_session_props', return_value={}))
+            stack.enter_context(patch.object(display, '_pick_display', return_value=False))
+            stack.enter_context(patch.object(display, '_read_bytes', return_value=None))
+            stack.enter_context(patch.object(display, '_identify_panel', return_value=(False, 'fixture')))
+            stack.enter_context(patch.object(display, '_find_backlight', return_value=''))
+            stack.enter_context(patch.object(display, '_watch_properties', new=AsyncMock()))
+            stack.enter_context(patch.object(loader._display, '_loop', new=AsyncMock()))
+            stack.enter_context(patch.object(main, 'restore_intent', new=AsyncMock()))
+            try:
+                result = await loader.modules_set_enabled('display', True)
+                self.assertTrue(result['display']['ready'])
+                self.assertEqual(result['display']['error'], '')
+                self.assertEqual(state['settings_error'], '')
+                self.assertEqual(state['setup_error'], '')
+                self.assertIsNotNone(loader._display._task)
+                self.assertIsNotNone(loader._display._prop_task)
+                self.assertEqual((await loader.display_get_state())['settings_error'], '')
+            finally:
+                await loader._display._unload()
+                await module_runtime.drain('display')
+
+
+class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
+    setUp = ModuleGateTests.setUp
+    make_plugin = ModuleGateTests.make_plugin
+    asyncTearDown = ModuleGateTests.asyncTearDown
+
+    async def test_slow_wifi_does_not_delay_independent_rgb_read(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow():
+            entered.set()
+            await release.wait()
+            return {'success': True}
+        self.plugin._wifi.get_status.side_effect = slow
+        task = asyncio.create_task(self.plugin.wifi_get_status())
+        await entered.wait()
+        try:
+            result = await asyncio.wait_for(self.plugin.rgb_get_status(), .5)
+            self.assertTrue(result['success'])
+        finally:
+            release.set()
+            await task
+
+    async def test_failed_resume_drains_worker_before_reporting_error(self):
+        entered, release = threading.Event(), threading.Event()
+        writes = []
+        def worker():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test worker timeout')
+            writes.append('finished')
+        component = rgb.Plugin()
+        async def start():
+            rgb._drift_task = asyncio.create_task(module_runtime.offload('rgb', worker))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        component._main = start
+        self.plugin._rgb = component
+        self.plugin._module_state['rgb'] = {'enabled': False, 'resume': {'control_enabled': True}}
+        self.plugin._save_modules()
+        with patch.object(rgb, '_drift_task', None), \
+                patch.object(main, 'restore_intent', new=AsyncMock(side_effect=RuntimeError('resume failed'))):
+            task = asyncio.create_task(self.plugin.modules_set_enabled('rgb', True))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                for _ in range(25):
+                    await asyncio.sleep(0)
+                self.assertFalse(task.done(), 'failed resume must wait for its hardware worker')
+            finally:
+                release.set()
+                with self.assertRaisesRegex(RuntimeError, 'resume failed'):
+                    await task
+                await module_runtime.drain('rgb')
+        self.assertEqual(writes, ['finished'])
+        self.assertFalse(module_runtime._workers.get('rgb'))
+
+    async def test_same_module_calls_remain_serial(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow():
+            entered.set()
+            await release.wait()
+            return {'success': True}
+        self.plugin._rgb.get_status.side_effect = slow
+        self.plugin._rgb.set_brightness = AsyncMock(return_value={'success': True})
+        first = asyncio.create_task(self.plugin.rgb_get_status())
+        await entered.wait()
+        second = asyncio.create_task(self.plugin.rgb_set_brightness(80))
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.plugin._rgb.set_brightness.assert_not_awaited()
+        finally:
+            release.set()
+            await asyncio.gather(first, second)
+        self.plugin._rgb.set_brightness.assert_awaited_once_with(80)
+
+    async def test_inputplumber_and_controller_battery_reads_share_resource_lock(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow():
+            entered.set()
+            await release.wait()
+            return {'success': True}
+        self.plugin._remap.get_status.side_effect = slow
+        self.plugin._controller.get_battery_levels = AsyncMock(return_value={'available': True})
+        first = asyncio.create_task(self.plugin.remap_get_status())
+        await entered.wait()
+        second = asyncio.create_task(self.plugin.battery_get_controller_levels())
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.plugin._controller.get_battery_levels.assert_not_awaited()
+        finally:
+            release.set()
+            await asyncio.gather(first, second)
+        self.plugin._controller.get_battery_levels.assert_awaited_once()
+
+    async def test_cancelled_rpc_remains_tracked_until_shutdown_drains_it(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow():
+            entered.set()
+            await release.wait()
+            return {'success': True}
+        self.plugin._rgb.get_status.side_effect = slow
+        rpc = asyncio.create_task(self.plugin.rgb_get_status())
+        await entered.wait()
+        rpc.cancel()
+        stopping = asyncio.create_task(self.plugin._unload())
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertFalse(rpc.done())
+            self.assertFalse(stopping.done())
+            self.assertTrue(self.plugin._rpc_jobs)
+        finally:
+            release.set()
+            await stopping
+            with self.assertRaises(asyncio.CancelledError):
+                await rpc
+        self.assertFalse(self.plugin._rpc_jobs)
+
+    async def test_cleanup_error_still_drains_an_offloaded_worker(self):
+        entered, release = threading.Event(), threading.Event()
+        def worker():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test worker timeout')
+        job = asyncio.create_task(module_runtime.offload('rgb', worker))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        self.plugin._rgb._unload.side_effect = RuntimeError('unload failed')
+        cleanup = asyncio.create_task(self.plugin._stop_component('rgb'))
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertFalse(cleanup.done())
+        finally:
+            release.set()
+            with self.assertRaisesRegex(RuntimeError, 'unload failed'):
+                await cleanup
+            await job
+        self.assertFalse(module_runtime._workers.get('rgb'))
+
+    async def test_normal_shutdown_drains_cancelled_background_workers(self):
+        entered, release = threading.Event(), threading.Event()
+        def worker():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test worker timeout')
+        job = asyncio.create_task(module_runtime.offload('rgb', worker))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        job.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await job
+        self.plugin._modules_started = True
+        stopping = asyncio.create_task(self.plugin._unload())
+        try:
+            for _ in range(30):
+                await asyncio.sleep(0)
+            self.assertFalse(stopping.done(), 'normal unload must drain background writes too')
+        finally:
+            release.set()
+            await stopping
+            await module_runtime.drain('rgb')
+
+    async def test_cancelled_drain_does_not_hide_running_thread(self):
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def worker():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test worker timeout')
+            finished.set()
+        job = asyncio.create_task(module_runtime.offload('rgb', worker))
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        draining = asyncio.create_task(module_runtime.drain('rgb'))
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+            draining.cancel()
+            for _ in range(10):
+                await asyncio.sleep(0)
+            self.assertFalse(draining.done(), 'cancellation must wait for actual worker completion')
+            self.assertTrue(module_runtime._workers.get('rgb'))
+            self.assertFalse(finished.is_set())
+        finally:
+            release.set()
+            await asyncio.gather(draining, job, return_exceptions=True)
+            await module_runtime.drain('rgb')
+        self.assertTrue(finished.is_set())
+
+    async def test_module_status_does_not_wait_for_slow_hardware_rpc(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow_read():
+            entered.set()
+            await release.wait()
+            return {'success': True}
+        self.plugin._wifi.get_status = slow_read
+        hardware = asyncio.create_task(self.plugin.wifi_get_status())
+        await asyncio.wait_for(entered.wait(), 1)
+        status = asyncio.create_task(self.plugin.modules_get_status())
+        try:
+            done, _ = await asyncio.wait([status], timeout=.2)
+            self.assertIn(status, done, 'Management status must not drain unrelated hardware reads.')
+            self.assertTrue(status.result()['wifi']['enabled'])
+        finally:
+            release.set()
+            await asyncio.gather(hardware, status, return_exceptions=True)
+
+    async def test_module_status_reports_pending_cleanup_without_waiting_for_it(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow_cleanup(*args):
+            entered.set()
+            await release.wait()
+            return 'restored'
+        with patch.object(main, 'withdraw', new=slow_cleanup):
+            change = asyncio.create_task(self.plugin.modules_set_enabled('wifi', False))
+            await asyncio.wait_for(entered.wait(), 1)
+            status = asyncio.create_task(self.plugin.modules_get_status())
+            try:
+                done, _ = await asyncio.wait([status], timeout=.2)
+                self.assertIn(status, done, 'Pending restoration must remain visible while the management gate is held.')
+                self.assertTrue(status.result()['wifi']['pending'])
+            finally:
+                release.set()
+                await asyncio.gather(change, status, return_exceptions=True)
+
+    async def test_module_mutation_still_waits_for_admitted_hardware_rpc(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow_read():
+            entered.set()
+            await release.wait()
+            return {'success': True}
+        self.plugin._wifi.get_status = slow_read
+        hardware = asyncio.create_task(self.plugin.wifi_get_status())
+        await asyncio.wait_for(entered.wait(), 1)
+        with patch.object(main, 'withdraw', new=AsyncMock(return_value='restored')) as cleanup:
+            change = asyncio.create_task(self.plugin.modules_set_enabled('wifi', False))
+            try:
+                done, _ = await asyncio.wait([change], timeout=.05)
+                self.assertFalse(done)
+                cleanup.assert_not_awaited()
+            finally:
+                release.set()
+                await asyncio.gather(hardware, change)
+            cleanup.assert_awaited_once()
+
+
+class ModuleEventLoopTests(unittest.IsolatedAsyncioTestCase):
+    setUp = ModuleGateTests.setUp
+    make_plugin = ModuleGateTests.make_plugin
+    asyncTearDown = ModuleGateTests.asyncTearDown
+
+    def held_io(self, observations, result=None):
+        loop = asyncio.get_running_loop()
+        def run():
+            heartbeat = threading.Event()
+            loop.call_soon_threadsafe(heartbeat.set)
+            observations.append(heartbeat.wait(2))
+            return result
+        return run
+
+    async def test_slow_session_status_probe_keeps_event_loop_responsive(self):
+        self.plugin._module_state['display'] = {'enabled': False, 'session': 100.0}
+        observed = []
+        with patch.object(display, '_gamescope_start_time', side_effect=self.held_io(observed, 200.0)):
+            for operation in (self.plugin.modules_get_status, self.plugin.get_version, self.plugin._publish_modules):
+                await operation()
+        self.assertEqual(observed, [True, True, True], 'Status probes must allow an event-loop heartbeat while I/O waits.')
+
+    async def test_display_withdrawal_session_probe_keeps_event_loop_responsive(self):
+        observed = []
+        with patch.object(display, '_gamescope_start_time', side_effect=self.held_io(observed, 200.0)), \
+                patch.object(main, 'withdraw', new=AsyncMock(return_value='Restart Game Mode')):
+            result = await self.plugin.modules_set_enabled('display', False)
+        self.assertTrue(observed)
+        self.assertTrue(all(observed), 'Recording the withdrawn session must also allow a heartbeat.')
+        self.assertEqual(self.plugin._module_state['display']['session'], 200.0)
+        self.assertFalse(result['display']['enabled'])
+
+    async def test_cancelled_module_change_finishes_commit_before_withdrawal(self):
+        entered, release = threading.Event(), threading.Event()
+        original_commit = self.plugin._module_store.commit
+        def commit():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test commit timeout')
+            return original_commit()
+        with patch.object(self.plugin._module_store, 'commit', side_effect=commit), \
+                patch.object(main, 'withdraw', new=AsyncMock(return_value='restored')) as withdrawal:
+            task = asyncio.create_task(self.plugin.modules_set_enabled('battery', False))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                for _ in range(2):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                withdrawal.assert_not_awaited()
+            finally:
+                release.set()
+                result = await asyncio.gather(task, return_exceptions=True)
+        self.assertIsInstance(result[0], asyncio.CancelledError)
+        withdrawal.assert_awaited_once()
+        saved = self.make_plugin()._module_state['battery']
+        self.assertFalse(saved['enabled'])
+        self.assertFalse(saved.get('pending'))
+
+
+class DisplayWithdrawalTests(unittest.IsolatedAsyncioTestCase):
+    def component(self, probe, session):
+        return types.SimpleNamespace(
+            cleanup_native_display=AsyncMock(return_value={}), _unload=AsyncMock(),
+            native_display_active=lambda: False, _release=lambda: True,
+            _edid_restore=lambda: True, _session_props=probe,
+            _ownership_session_current=session)
+
+    async def test_withdrawal_ignores_stale_internal_output_snapshot(self):
+        reads = []
+        def probe(names, *, fresh=False):
+            reads.append(fresh)
+            return {display.ATOM_IS_EXTERNAL: '1' if fresh else '0'}
+        c = self.component(probe, lambda: True)
+        with patch.object(display, '_write_atom_int', return_value=True) as write, \
+                patch.object(display, '_uninstall_script', return_value='removed'):
+            await module_control.withdraw('display', c)
+        self.assertEqual(reads, [True])
+        write.assert_called_once_with(display.ATOM_FORCE_HDR_SUPPORT, 0)
+
+    async def test_new_session_during_probe_prevents_atom_writes(self):
+        c = self.component(Mock(return_value={display.ATOM_IS_EXTERNAL: '0'}),
+                           Mock(side_effect=[True, False]))
+        with patch.object(display, '_write_atom_int', return_value=True) as write, \
+                patch.object(display, '_uninstall_script', return_value='removed') as uninstall:
+            await module_control.withdraw('display', c)
+        write.assert_not_called()
+        uninstall.assert_called_once()
+
+    async def test_unknown_output_keeps_cleanup_pending(self):
+        for props in ({}, {display.ATOM_IS_EXTERNAL: 'invalid'}):
+            c = self.component(Mock(return_value=props), lambda: True)
+            with self.subTest(props=props), \
+                    patch.object(display, '_write_atom_int', return_value=True) as write, \
+                    patch.object(display, '_uninstall_script') as uninstall:
+                with self.assertRaisesRegex(RuntimeError, 'verify'):
+                    await module_control.withdraw('display', c)
+            write.assert_not_called()
+            uninstall.assert_not_called()
+
+    async def test_unbound_recovery_removes_script_without_changing_session_atoms(self):
+        # Pending cleanup runs before _main and may have no bound compositor.
+        c = self.component(Mock(), lambda: None)
+        with patch.object(display, '_write_atom_int', return_value=True) as write, \
+                patch.object(display, '_uninstall_script', return_value='removed') as uninstall:
+            note = await module_control.withdraw('display', c)
+        write.assert_not_called()
+        c._session_props.assert_not_called()
+        uninstall.assert_called_once()
+        self.assertIn('Restart', note)
+
+    async def test_confirmed_internal_session_releases_both_atoms(self):
+        c = self.component(Mock(return_value={display.ATOM_IS_EXTERNAL: '0'}), lambda: True)
+        with patch.object(display, '_write_atom_int', return_value=True) as write, \
+                patch.object(display, '_uninstall_script', return_value='removed'):
+            await module_control.withdraw('display', c)
+        self.assertEqual([call.args for call in write.call_args_list], [
+            (display.ATOM_FORCE_HDR_SUPPORT, 0), (display.ATOM_HDR_ENABLED, 0)])
+
+
+class UnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unload_withdraws_fan_lease_before_waiting_for_desktop_operations(self):
+        plugin = main.Plugin()
+        client = fan_backend.Client()
+        plugin._fan._client = client
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def close():
+            entered.set()
+            await release.wait()
+        plugin._desktop = SimpleNamespace(close=close)
+        plugin._firmware = Mock()
+        task = asyncio.create_task(plugin._unload())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertTrue(client._stop.is_set(), 'Fan lease must be withdrawn before unrelated drains')
+            self.assertFalse(task.done())
+        finally:
+            release.set()
+            await task

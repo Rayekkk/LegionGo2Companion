@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import test_integration
+import support
 import desktop_bridge
 from desktop_bridge import DesktopBridge
 import fan_backend
@@ -33,7 +33,7 @@ class SharedLifecycleEdges(unittest.IsolatedAsyncioTestCase):
         self.plugin._module_state={};self.plugin._module_health={}
         self.plugin._module_store=SettingsManager('module_settings',str(self.root))
         self.plugin._fan=fan_backend.Plugin();self.plugin._fan._supported=True;self.plugin._fan._load()
-        self.bridge=DesktopBridge(self.plugin,self.root,['get_version','fan_get_state','fan_save_curve','fan_save_unit'])
+        self.bridge=DesktopBridge(self.plugin,['get_version','fan_get_state','fan_save_curve','fan_save_unit'])
         await self.bridge.start()
         self.releases=[]
 

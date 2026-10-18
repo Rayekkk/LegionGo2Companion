@@ -54,6 +54,15 @@ class EventTests(unittest.TestCase):
         self.assertEqual([r['context']['status'] for r in self.records], ['failed','ready'])
         self.assertEqual([r['level'] for r in self.records], ['warning','info'])
 
+    def test_a_healthy_baseline_is_silent_but_failure_and_recovery_are_not(self):
+        for _ in range(3): diag.transition('rgb','reconcile','confirmed',initial=False)
+        self.assertEqual(self.records,[])
+        diag.transition('rgb','reconcile','write_failed',level='warning',initial=False)
+        diag.transition('rgb','reconcile','confirmed',initial=False)
+        diag.transition('remap','managed_profile',False,level='warning',initial=False)
+        self.assertEqual([(r['component'],r['context']['status']) for r in self.records],
+                         [('rgb','write_failed'),('rgb','confirmed'),('remap','False')])
+
     def test_persistent_fault_reappears_after_sink_failure_without_suppressing_a_new_fault_cycle(self):
         with patch.object(diag.time,'monotonic',return_value=100),patch.object(diag,'_sink',side_effect=OSError('full')):
             diag.transition('fan','health','failed',level='warning',error=OSError(errno.EIO,'bad'))
@@ -106,6 +115,23 @@ class EventTests(unittest.TestCase):
         text=record.getMessage()
         for private in ('secret','abc','/home/name','192.168.1.5'):self.assertNotIn(private,text)
         self.assertIn('ValueError',text);self.assertIsNone(record.exc_info)
+
+    def test_cancelled_callback_during_shutdown_is_not_logged_as_an_error(self):
+        try:raise asyncio.CancelledError
+        except asyncio.CancelledError as exc:info=(type(exc),exc,exc.__traceback__)
+        record=logging.LogRecord('asyncio',40,'',0,'Exception in callback',(),info)
+        self.assertFalse(diag._AsyncioFilter().filter(record))
+        self.assertEqual(self.records,[])
+
+    def test_decky_socket_closed_during_stop_is_not_an_error_elsewhere_it_is(self):
+        decky_socket={}
+        exec(compile('def write():\n    raise BrokenPipeError(32, "Broken pipe")\n','/decky_loader/localsocket.py','exec'),decky_socket)
+        for raise_it,expected in ((decky_socket['write'],False),(lambda:(_ for _ in ()).throw(ConnectionResetError(104,'reset')),True)):
+            try:raise_it()
+            except OSError as exc:info=(type(exc),exc,exc.__traceback__)
+            record=logging.LogRecord('asyncio',40,'',0,'Exception in callback',(),info)
+            self.assertEqual(diag._AsyncioFilter().filter(record),expected)
+        self.assertEqual([r['event'] for r in self.records],['asyncio_exception'])
 
     def test_asyncio_error_keeps_metadata_without_formatting_task_or_context(self):
         for with_exception in (True,False):
@@ -175,8 +201,57 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WriterTests(unittest.TestCase):
+    def setUp(self):
+        import collections
+        early=patch.object(diag,'_early',collections.deque(maxlen=64),create=True)  # records other tests left unconfigured
+        early.start();self.addCleanup(early.stop)
+
     def tearDown(self):
         diag.close()
+
+    def test_records_from_import_and_migration_reach_the_file_once_configured(self):
+        import collections
+        with tempfile.TemporaryDirectory() as temporary,patch.object(diag,'_seen',collections.OrderedDict()):
+            directory=Path(temporary)/'logs'
+            for index in range(70):diag.event('settings','primary_corrupt',index=index)
+            diag.transition('plugin','guard','blocked',level='warning')
+            self.assertTrue(diag.configure(directory,Mock()))
+            diag.event('plugin','startup');diag._writer.queue.join();diag.close()
+            events=[json.loads(line) for line in (directory/'events.jsonl').read_text().splitlines()]
+        self.assertEqual([r['event'] for r in events[-2:]],['guard','startup'])
+        self.assertEqual(len(events),65)  # bounded: the oldest early records give way
+
+    def test_rotation_close_enospc_allows_later_records_after_space_returns(self):
+        class FullDisk(io.RawIOBase):
+            def __init__(self, path):
+                self.file=io.FileIO(path, 'a'); self.full=True
+            def writable(self):return True
+            def fileno(self):return self.file.fileno()
+            def write(self, data):
+                if self.full:raise OSError(errno.ENOSPC, 'injected full temporary volume')
+                return self.file.write(data)
+            def close(self):
+                try:self.file.close()
+                finally:super().close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'events.jsonl'
+            handler=diag._PrivateHandler(path, maxBytes=8, backupCount=2, encoding='utf-8')
+            handler.stream.close()
+            raw=FullDisk(path)
+            stream=io.TextIOWrapper(io.BufferedWriter(raw), encoding='utf-8')
+            handler.stream=stream
+            rotate=handler.shouldRollover;handler.shouldRollover=lambda _record:True
+            try:
+                stream.write('pending-buffered-record\n')
+                with self.assertRaises(OSError):stream.flush()
+                record=lambda text:logging.LogRecord('fixture', logging.INFO, '', 0, text, (), None)
+                with self.assertRaises(OSError):handler.emit(record('trigger-rotation'))
+                raw.full=False; handler.shouldRollover=rotate;handler.maxBytes=1024
+                for message in ('later-one','later-two'):handler.emit(record(message))
+                self.assertEqual(path.read_text().splitlines(), ['later-one','later-two'])
+            finally:
+                handler.close()
 
     def test_actual_private_rotation_is_bounded_and_parseable(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -242,8 +317,41 @@ class WriterTests(unittest.TestCase):
             self.assertEqual(json.loads((directory/'events.jsonl').read_text())['event'],'recovered')
             logger.warning.assert_called_once();logger.info.assert_called_once()
 
+    def test_sink_lives_in_its_own_root_directory_outside_the_decky_tree(self):
+        import support
+        self.assertEqual(support.DEFAULT_LOG_DIR,'/var/log/legiongo2companion')
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary)/'legiongo2companion'
+            directory.mkdir(mode=0o755);directory.chmod(0o755)
+            self.assertTrue(diag.configure(directory,Mock()))
+            diag.event('plugin','write');diag.close()
+            self.assertEqual(json.loads((directory/'events.jsonl').read_text())['event'],'write')
+            if os.name=='posix':self.assertEqual(directory.stat().st_mode&0o777,0o700)
+
+    def test_unavailable_file_sink_reports_why_through_the_journal(self):
+        self.addCleanup(diag._source.reset,diag._source.set('decky'))
+        records,logger=[],Mock()
+        journal=lambda _component:setattr(diag,'_sink',lambda text,level:records.append(json.loads(text)))
+        with tempfile.TemporaryDirectory() as temporary,patch.object(diag,'configure_worker',side_effect=journal):
+            self.assertFalse(diag.configure(Path(temporary)/'missing'/'logs',logger))
+        event,=records
+        self.assertEqual((event['component'],event['event'],event['level']),('diagnostics','file_sink_unavailable','warning'))
+        self.assertEqual(event['error']['type'],'FileNotFoundError')
+        message=logger.warning.call_args.args[0]
+        self.assertIn('could not start',message);self.assertNotIn('check Decky logs',message)
+        self.assertNotIn(temporary,message)
+
+    @unittest.skipUnless(os.name=='posix','POSIX owner check')
+    def test_directory_owned_by_the_desktop_user_is_refused(self):
+        self.addCleanup(diag._source.reset,diag._source.set('decky'))
+        with tempfile.TemporaryDirectory() as temporary,patch.object(diag.os,'geteuid',return_value=os.getuid()+100), \
+                patch.object(diag,'configure_worker'):
+            self.assertFalse(diag.configure(Path(temporary),Mock()))
+            self.assertEqual(os.listdir(temporary),[])
+
     @unittest.skipUnless(os.name=='posix','POSIX symlink/regular-file protection')
     def test_symlink_log_directory_and_history_never_touch_target(self):
+        self.addCleanup(diag._source.reset,diag._source.set('decky'))  # a failed configure() falls back to the worker source
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);target=root/'keep';target.write_text('untouched')
             folder=root/'logs';folder.mkdir(mode=0o700);(folder/'events.jsonl').symlink_to(target)
@@ -271,7 +379,7 @@ class WriterTests(unittest.TestCase):
 class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         import collections
-        import test_integration
+        import support
         import main
         from unittest.mock import AsyncMock
         self.main=main
@@ -290,7 +398,7 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         failure=await self.plugin.apply_tdp(15000,18000,20000)
         self.assertFalse(failure['success'])
         self.plugin._tdp.apply_tdp.return_value={'success':True,'private':'not logged'}
-        bridge=DesktopBridge(self.plugin,Path('.'),['apply_tdp'])
+        bridge=DesktopBridge(self.plugin,['apply_tdp'])
         success=await bridge.dispatch('apply_tdp',[15000,18000,20000])
         self.assertTrue(success['success'])
         terminals=[r for r in self.records if r['event'] in ('rpc_failed','rpc_completed')]
@@ -312,6 +420,52 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r['context']['status'] for r in health],['failed','ok'])
         self.assertEqual(health[0]['error']['errno'],errno.ECONNRESET)
         self.assertEqual(self.plugin._fan.get_state.await_count,7)
+
+    async def test_expected_refusal_is_info_but_a_failed_change_stays_a_warning(self):
+        from unittest.mock import AsyncMock
+        refusal={'success':False,'error':'unsupported_backend','message':'High-band preference requires the iwd WiFi backend.'}
+        self.plugin._wifi=Mock(set_band_policy=AsyncMock(return_value=refusal))
+        self.assertIs(await self.plugin.wifi_set_band_policy('high_only'),refusal)
+        self.plugin._wifi.set_band_policy.return_value={'success':False,'error':'band_policy_apply_failed'}
+        await self.plugin.wifi_set_band_policy('high_only')
+        terminals=[r for r in self.records if r['event'] in ('rpc_failed','rpc_completed')]
+        self.assertEqual([(r['event'],r['level'],r['context']['outcome']) for r in terminals],
+                         [('rpc_completed','info','refused'),('rpc_failed','warning','not_confirmed')])
+        self.assertEqual(terminals[0]['context']['reason'],'unsupported_backend')
+
+    async def test_failed_session_restart_does_not_mark_later_display_calls_failed(self):
+        from unittest.mock import AsyncMock
+        state={'setup_done':True,'restart_error':'Gamescope restart failed'}
+        self.plugin._display=Mock(restart_session=AsyncMock(return_value=dict(state)),
+                                  get_state=AsyncMock(return_value=dict(state)),
+                                  set_edid_fix=AsyncMock(return_value=dict(state,edid_fix=True)))
+        await self.plugin.display_restart_session()
+        await self.plugin.display_get_state()
+        await self.plugin.display_set_edid_fix(True)
+        failed=[r['context']['operation'] for r in self.records
+                if r['event']=='rpc_failed' or r['context'].get('status')=='failed']
+        self.assertEqual(failed,['display_restart_session'])
+
+    async def test_calls_refused_by_the_conflict_guard_are_not_reported_again(self):
+        from unittest.mock import AsyncMock
+        from desktop_bridge import DesktopBridge
+        self.plugin._fan=Mock(get_state=AsyncMock(return_value={'success':True}))
+        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'success':True}))
+        self.plugin._guard_blocked=True
+        with self.assertRaisesRegex(RuntimeError,'paused'):await self.plugin.fan_get_state()
+        with self.assertRaisesRegex(RuntimeError,'paused'):await self.plugin.apply_tdp(15000,18000,20000)
+        writer=Mock(drain=AsyncMock())
+        await DesktopBridge(self.plugin,['fan_get_state'])._run_operation({'method':'fan_get_state','args':[]},writer)
+        self.assertIn(b'409',writer.write.call_args.args[0])
+        self.assertEqual([r for r in self.records if r['level']!='info'],[])
+        self.assertEqual(self.plugin._fan.get_state.await_count+self.plugin._tdp.apply_tdp.await_count,0)
+
+    async def test_a_caller_that_goes_away_is_context_not_a_problem(self):
+        from unittest.mock import AsyncMock
+        self.plugin._tdp=Mock(apply_tdp=AsyncMock(side_effect=asyncio.CancelledError))
+        with self.assertRaises(asyncio.CancelledError):await self.plugin.apply_tdp(15000,18000,20000)
+        row,=[r for r in self.records if r['event']=='rpc_waiter_cancelled']
+        self.assertEqual(row['level'],'info')
 
     async def test_failed_logging_cannot_change_success_failure_or_guard_admission(self):
         from unittest.mock import AsyncMock

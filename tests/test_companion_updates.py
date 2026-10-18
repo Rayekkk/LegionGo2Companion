@@ -14,7 +14,6 @@ import time
 import unittest
 from unittest.mock import patch
 import urllib.error
-import urllib.request
 import zipfile
 
 import companion_updates as updates
@@ -226,27 +225,10 @@ class UpdateChecks(_UpdateFixture):
             self.updater._cached = None
             self.assertFalse(self.updater.check()["success"])
 
-    def test_every_redirect_is_validated_before_a_followup_request(self):
-        initial = metadata()["assets"][0]["browser_download_url"]
-        handler = updates._ReleaseRedirect(initial, False)
-        req = urllib.request.Request(initial)
-        for bad in ("http://github.com/file", "https://evil.test/file", "https://github.com/other/file",
-                    "https://release-assets.githubusercontent.com.evil.test/file", "https://127.0.0.1/file",
-                    "https://release-assets.githubusercontent.com:444/file",
-                    "https://user:pass@release-assets.githubusercontent.com/file",
-                    "file:///etc/passwd", "https://release-assets.githubusercontent.com/file#frag"):
-            with self.subTest(url=bad), self.assertRaises(ValueError):
-                handler.redirect_request(req, None, 302, "Found", {}, bad)
-        allowed = "https://release-assets.githubusercontent.com/asset?signature=abc"
-        self.assertEqual(handler.redirect_request(req, None, 302, "Found", {}, allowed).full_url, allowed)
-        with self.assertRaises(ValueError):
-            updates._ReleaseRedirect(updates.API_URL, True).redirect_request(
-                urllib.request.Request(updates.API_URL), None, 302, "Found", {}, allowed)
-
     def test_final_response_url_is_rechecked_and_closed_on_escape(self):
         response = Response(b"bad", url="https://evil.test/file")
         with patch("companion_updates.open_http", return_value=response), \
-                patch.object(self.updater, "_tls"):
+                patch("companion_updates.tls_context"):
             with self.assertRaises(ValueError):
                 self.updater._open(updates.API_URL, metadata=True)
         self.assertTrue(response.closed)

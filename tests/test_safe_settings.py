@@ -267,5 +267,14 @@ class AtomicSettingsTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(manager.backup_path).st_mode), 0o600)
 
 
+class NonblockingMetadataTests(unittest.TestCase):
+    def test_settings_open_cannot_wait_for_a_fifo_replaced_after_lstat(self):
+        with patch.object(safe_settings.os, 'O_NONBLOCK', 0x800, create=True), \
+                patch.object(safe_settings.os, 'open', return_value=42) as opened:
+            self.assertEqual(safe_settings._open_readonly_nofollow('fixture.json'), 42)
+        self.assertTrue(opened.call_args.args[1] & 0x800,
+                        'A later descriptor type check cannot help if open itself blocks on a replaced FIFO.')
+
+
 if __name__ == "__main__":
     unittest.main()

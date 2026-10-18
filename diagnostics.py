@@ -7,6 +7,7 @@ for Decky, a pipe reader, a filesystem or a network service. Import has no I/O.
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 import contextlib
 import contextvars
@@ -21,10 +22,14 @@ import queue
 import re
 import socket
 import stat
+import sys
 import threading
 import time
 import uuid
 
+# Root-owned and outside ~/homebrew: Decky chowns its logs tree to the desktop
+# user on every plugin load, which the owner checks below rightly refuse.
+LOG_DIR = '/var/log/legiongo2companion'
 MAX_BYTES = 1024 * 1024
 BACKUPS = 2
 QUEUE_SIZE = 256
@@ -32,7 +37,9 @@ MAX_RECORD = 4096
 _FIELDS = frozenset(('operation', 'stage', 'outcome', 'reason', 'scope', 'attribute',
     'store', 'phase', 'component', 'job_id', 'worker_id', 'errno', 'returncode',
     'duration_ms', 'pending', 'enabled', 'restored', 'source', 'count', 'retryable',
-    'supported', 'version', 'code', 'status', 'bytes', 'repeated', 'kernel', 'python', 'architecture'))
+    'supported', 'version', 'code', 'status', 'bytes', 'repeated', 'kernel', 'python', 'architecture',
+    'model', 'bios', 'ec', 'steamos', 'steamos_build', 'decky', 'ready', 'failed',
+    'spl', 'sppt', 'fppt', 'mode', 'previous'))
 _IDENTITY = ('store', 'attribute', 'operation', 'stage', 'scope', 'component', 'source')
 _LEVELS = {'debug': 10, 'info': 20, 'warning': 30, 'error': 40, 'critical': 50}
 _operation = contextvars.ContextVar('companion_diagnostic_operation', default=None)
@@ -45,7 +52,9 @@ _legacy = None
 _filter = None
 _asyncio_filter = None
 _seen = collections.OrderedDict()
+_early = collections.deque(maxlen=64)  # Import/__init__/_migration records until configure() has a sink.
 _lock = threading.Lock()
+_HOME = os.path.dirname(os.path.abspath(__file__))
 
 
 def safe_text(value, limit=256):
@@ -65,13 +74,21 @@ def _name(value):
     return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', value) else 'unknown'
 
 
+def _ours(error):
+    module = sys.modules.get(type(error).__module__)
+    return os.path.dirname(os.path.abspath(getattr(module, '__file__', None) or os.sep)) == _HOME
+
+
 def _error(error):
     if isinstance(error, BaseException):
         # Exception strings can include a whole command, credential or packet.
         # Keep type, errno and frame locations; never locals, argv or source lines.
+        # Only this plugin's own exception classes carry product text worth a message.
         result = {'type': type(error).__name__}
         if isinstance(getattr(error, 'errno', None), int):
             result['errno'] = error.errno
+        if _ours(error):
+            result['message'] = safe_text(error, 160)
         frames, tb = [], error.__traceback__
         while tb is not None:
             frames.append({'file': safe_text(Path(tb.tb_frame.f_code.co_filename).name, 80),
@@ -175,15 +192,20 @@ def event(component, action, /, *, level='info', error=None, repeat=0, **fields)
         sink = _sink
         if sink is not None:
             sink(text, level)
-        # With no configured sink, drop rather than synchronously calling an
-        # arbitrary Decky handler from a hardware/asyncio transaction. Configure
-        # reports initialization failure once, outside those transactions.
+        elif _early is not None:
+            # Never synchronously call an arbitrary Decky handler from a
+            # hardware/asyncio transaction; configure() writes these later.
+            _early.append((text, level))
     except Exception:
         pass
 
 
-def transition(component, action, state, /, *, level='info', error=None, **fields):
-    """Record a changed state, including one recovery, without poll-time spam."""
+def transition(component, action, state, /, *, level='info', error=None, initial=True, **fields):
+    """Record a changed state, including one recovery, without poll-time spam.
+
+    initial=False: a first healthy (info) state is only a baseline, not news;
+    a failure is still recorded at once, and so is the recovery after it.
+    """
     try:
         key = ('state', *_key(component, action, _context(fields)))
         value = (safe_text(state, 128), type(error).__name__ if isinstance(error, BaseException) else safe_text(error or '', 128),
@@ -192,6 +214,9 @@ def transition(component, action, state, /, *, level='info', error=None, **field
         repeated = 0
         with _lock:
             previous = _seen.pop(key, None)
+            if previous is None and not initial and level not in ('warning', 'error', 'critical'):
+                _seen[key] = (value, now, 0)
+                return
             if previous and previous[0] == value:
                 if level not in ('warning', 'error', 'critical'):
                     _seen[key] = previous
@@ -237,6 +262,10 @@ def source_context(source):
         _source.reset(token)
 
 
+class UnsafeLogPath(OSError):
+    pass
+
+
 class _PrivateHandler(logging.handlers.RotatingFileHandler):
     def _open(self):
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -245,13 +274,21 @@ class _PrivateHandler(logging.handlers.RotatingFileHandler):
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or hasattr(os, 'geteuid') and info.st_uid != os.geteuid():
-                raise OSError('Unsafe diagnostic log file.')
+                raise UnsafeLogPath('Unsafe diagnostic log file.')
             if hasattr(os, 'fchmod'):
                 os.fchmod(fd, 0o600)
             return os.fdopen(fd, 'a', encoding='utf-8')
         except BaseException:
             os.close(fd)
             raise
+
+    def doRollover(self):
+        # close() can raise (ENOSPC flush) after the stream is already closed.
+        # Detach first so a later emit reopens instead of failing forever.
+        stream, self.stream = self.stream, None
+        if stream is not None:
+            stream.close()
+        super().doRollover()
 
     def handleError(self, record):
         raise OSError('Diagnostic file write unavailable.') from None
@@ -262,14 +299,17 @@ class _Writer:
         directory = Path(directory)
         directory.mkdir(mode=0o700, exist_ok=True)
         info = directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or directory.is_symlink() or hasattr(os, 'geteuid') and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077):
-            raise OSError('Unsafe diagnostic log directory.')
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise UnsafeLogPath('Diagnostic log directory is not a real directory.')
+        if hasattr(os, 'geteuid') and info.st_uid != os.geteuid():
+            raise UnsafeLogPath('Diagnostic log directory has an unexpected owner.')
+        os.chmod(directory, 0o700)
         for name in ('events.jsonl', 'events.jsonl.1', 'events.jsonl.2'):
             path = directory / name
             if path.exists() or path.is_symlink():
                 info = path.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or hasattr(os, 'geteuid') and info.st_uid != os.geteuid():
-                    raise OSError('Unsafe diagnostic log history.')
+                    raise UnsafeLogPath('Diagnostic log history is not a private regular file.')
         self.handler = _PrivateHandler(directory/'events.jsonl', maxBytes=MAX_BYTES, backupCount=BACKUPS, encoding='utf-8')
         self.handler.setFormatter(logging.Formatter('%(message)s'))
         self.queue = queue.Queue(QUEUE_SIZE)
@@ -331,6 +371,15 @@ class _LegacyFilter(logging.Filter):
         return True
 
 
+def _from_decky_socket(error):
+    frame = error.__traceback__
+    while frame is not None:
+        if os.path.basename(frame.tb_frame.f_code.co_filename) == 'localsocket.py':
+            return True
+        frame = frame.tb_next
+    return False
+
+
 class _AsyncioFilter(logging.Filter):
     def filter(self, record):
         if record.levelno < logging.ERROR:
@@ -339,6 +388,10 @@ class _AsyncioFilter(logging.Filter):
         # message, even for a shielded future whose exception was retrieved.
         # Preserve that handler and its delivery, but never format its text.
         error = record.exc_info[1] if record.exc_info else None
+        if isinstance(error, asyncio.CancelledError):
+            return False  # A callback cancelled during shutdown (e.g. Decky's RPC listener at EOF) is not an error.
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)) and _from_decky_socket(error):
+            return False  # Decky closed its RPC socket while stopping the plugin; there is nothing to recover.
         event('runtime', 'asyncio_exception', level='error', error=error, repeat=60)
         record.msg = 'Companion asynchronous task error; see diagnostic events.'
         record.args, record.exc_info, record.exc_text, record.stack_info = (), None, None, None
@@ -361,12 +414,29 @@ def configure(directory, logger=None):
     try:
         _writer = _Writer(directory)
         _sink = _writer.emit
+        _flush_early()
         return True
-    except Exception:
-        _fallback('Companion diagnostic file could not start; check Decky logs.', 'warning')
+    except Exception as exc:
+        # OSError text names the path; our own checks say which one failed.
+        reason = str(exc) if isinstance(exc, UnsafeLogPath) else type(exc).__name__ + (
+            ': ' + exc.strerror if isinstance(getattr(exc, 'strerror', None), str) else '')
+        _fallback('Companion diagnostic file could not start (' + safe_text(reason, 160)
+                  + '); events go to the system journal.', 'warning')
         if directory is not None:
             configure_worker('backend')  # Nonblocking journal fallback, never a synchronous producer handler.
+            _flush_early()
+            event('diagnostics', 'file_sink_unavailable', level='warning', error=exc)
         return False
+
+
+def _flush_early():
+    global _early
+    early, _early = _early, None
+    for text, level in early or ():
+        try:
+            _sink(text, level)
+        except Exception:
+            pass
 
 
 def close():

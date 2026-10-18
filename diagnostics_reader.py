@@ -18,7 +18,7 @@ import stat
 import subprocess
 import time
 
-from diagnostics import MAX_BYTES, MAX_RECORD, safe_text
+from diagnostics import _FIELDS as _CONTEXT, MAX_BYTES, MAX_RECORD, safe_text
 from system_process import system_env
 
 MAX_EVENTS = 1000
@@ -32,10 +32,6 @@ _JOURNAL_ARGV = ('/usr/bin/journalctl', '--since', '7 days ago', '-n', '1000',
                  *(item for name in _IDENTIFIERS for item in ('-t', name)), '_UID=0')
 _NAME = re.compile(r'[A-Za-z0-9_.-]{1,80}\Z')
 _LEVELS = frozenset(('debug', 'info', 'warning', 'error', 'critical'))
-_CONTEXT = frozenset(('operation', 'stage', 'outcome', 'reason', 'scope', 'attribute',
-    'store', 'phase', 'component', 'job_id', 'worker_id', 'errno', 'returncode',
-    'duration_ms', 'pending', 'enabled', 'restored', 'source', 'count', 'retryable',
-    'supported', 'version', 'code', 'status', 'bytes', 'repeated', 'kernel', 'python', 'architecture'))
 
 
 def _integer(value):
@@ -43,7 +39,7 @@ def _integer(value):
 
 
 def _exception(value):
-    """Only exception identity and code locations; never formatted messages."""
+    """Exception identity, code locations and the writer's bounded message."""
     if not isinstance(value, dict):
         return None
     result = {}
@@ -51,6 +47,8 @@ def _exception(value):
         result['type'] = value['type']
     if _integer(value.get('errno')):
         result['errno'] = value['errno']
+    if isinstance(value.get('message'), str):
+        result['message'] = safe_text(value['message'], 160)
     frames = []
     for frame in value.get('frames', [])[-8:] if isinstance(value.get('frames'), list) else ():
         if not isinstance(frame, dict):
@@ -113,22 +111,19 @@ def normalize_event(value, source):
     return result
 
 
-def _owned(info, *, directory=False, private=True, owners=None):
+def _owned(info, *, directory=False):
     if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
         return False
     if not directory and info.st_nlink != 1:
         return False
-    if os.name == 'posix':
-        if info.st_uid not in (owners if owners is not None else {os.geteuid()}):
-            return False
-        if info.st_mode & (0o077 if private else 0o022):
-            return False
+    if os.name == 'posix' and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        return False
     return True
 
 
-def _read_fd(fd, owners=None):
+def _read_fd(fd):
     info = os.fstat(fd)
-    if not _owned(info, owners=owners):
+    if not _owned(info):
         raise PermissionError('unsafe')
     trimmed = info.st_size > MAX_BYTES
     if trimmed:
@@ -150,29 +145,18 @@ def _file_snapshots(log_directory, warnings):
     if not isinstance(log_directory, (str, os.PathLike)):
         warnings.add('backend_missing')
         return [], False
-    base_fd = directory_fd = None
-    owners = None
+    directory_fd = None
     snapshots, accessible = [], False
     try:
-        base = Path(log_directory)
+        # The writer's own private directory under root-owned /var/log.
+        child = Path(log_directory)
         if os.name == 'posix':
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-            base_fd = os.open(base, flags)
-            base_info = os.fstat(base_fd)
-            # Decky creates its SDK-provided log directory as the desktop user
-            # even when the plugin process runs as root. Trust that fixed SDK
-            # base owner, plus our UID for files produced before/after reload;
-            # no UI argument can select this directory or an additional owner.
-            owners = {base_info.st_uid, os.geteuid()}
-            if not _owned(base_info, directory=True, private=False, owners=owners):
+            directory_fd = os.open(child, flags)
+            if not _owned(os.fstat(directory_fd), directory=True):
                 raise PermissionError('unsafe')
-            directory_fd = os.open('diagnostics', flags, dir_fd=base_fd)
-            if not _owned(os.fstat(directory_fd), directory=True, owners=owners):
-                raise PermissionError('unsafe')
-        else:
-            child = base / 'diagnostics'
-            if base.is_symlink() or child.is_symlink() or not _owned(child.lstat(), directory=True):
-                raise PermissionError('unsafe')
+        elif child.is_symlink() or not _owned(child.lstat(), directory=True):
+            raise PermissionError('unsafe')
         for name in ('events.jsonl.2', 'events.jsonl.1', 'events.jsonl'):
             fd = None
             try:
@@ -183,7 +167,7 @@ def _file_snapshots(log_directory, warnings):
                     if path.is_symlink() or not _owned(path.lstat()):
                         raise PermissionError('unsafe')
                     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
-                snapshots.append(_read_fd(fd, owners))
+                snapshots.append(_read_fd(fd))
                 accessible = True
             except FileNotFoundError:
                 pass  # Rotation can move a fixed history file during a snapshot.
@@ -199,9 +183,8 @@ def _file_snapshots(log_directory, warnings):
     except (OSError, ValueError):
         warnings.add('backend_unsafe')
     finally:
-        for fd in (directory_fd, base_fd):
-            if fd is not None:
-                os.close(fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
     return snapshots, accessible
 
 

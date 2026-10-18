@@ -46,6 +46,27 @@ def _manifest_name(entry):
     return PLUGIN_NAMES.get(_identity(manifest.get("name")), "")
 
 
+_manifests = {}
+
+
+def _cached_manifest_name(entry):
+    # The scan runs every 5 s. Opening every sibling's manifest each time floods
+    # the journal when Decky's developer-mode file watcher logs each open; a stat does not.
+    path = os.path.join(entry.path, "plugin.json")
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        _manifests.pop(path, None)
+        return ""
+    key = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = _manifests.get(path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    name = _manifest_name(entry)
+    _manifests[path] = (key, name)
+    return name
+
+
 def installed_conflicts(plugin_dir):
     """Find the three known predecessors; unrelated metadata is not ownership.
 
@@ -68,7 +89,7 @@ def installed_conflicts(plugin_dir):
                     continue
                 if not entry.is_dir():
                     continue
-                name = _manifest_name(entry)
+                name = _cached_manifest_name(entry)
             except (OSError, ValueError, TypeError) as exc:
                 event("plugin", "sibling_manifest_unreadable", level="warning", error=exc,
                       scope=entry.name, outcome="skipped", repeat=60)

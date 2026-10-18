@@ -8,11 +8,15 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+import stat
 
-import test_integration  # Install the Decky/settings stubs before importing main.
+import support  # Install the Decky/settings stubs before importing main.
 import main
 import module_runtime
 from conflict_guard import installed_conflicts
+import test_modules as fixtures
+import fan_backend
+import conflict_guard
 
 
 def decoder_nesting_failure(manifest):
@@ -42,6 +46,19 @@ class DetectionTests(unittest.TestCase):
             (root / "LeGo2 Brightness Fix").mkdir()
             self.assertEqual(installed_conflicts(current),
                              ["LeGo Vibe Control", "LeGo2 Brightness Fix", "LeGoTDP"])
+
+    def test_unchanged_sibling_manifests_are_not_reopened_on_every_scan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); current = root / "LegionGo2Companion"; current.mkdir()
+            other = root / "renamed-plugin"; other.mkdir()
+            manifest = other / "plugin.json"; manifest.write_text(json.dumps({"name": "OtherPlugin"}))
+            with patch("conflict_guard._manifest_name", wraps=conflict_guard._manifest_name) as reads:
+                self.assertEqual(installed_conflicts(current), [])
+                self.assertEqual(installed_conflicts(current), [])
+                self.assertEqual(reads.call_count, 1)
+                manifest.write_text(json.dumps({"name": "LeGo Vibe Control"}))
+                self.assertEqual(installed_conflicts(current), ["LeGo Vibe Control"])
+                self.assertEqual(reads.call_count, 2)
 
     def test_settings_siblings_are_not_installed_plugins(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -154,20 +171,6 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await plugin._unload()
 
-    async def test_unchanged_guard_still_scans_without_reading_display_or_version(self):
-        plugin = self.make_plugin()
-        plugin._module_state = {'display': {'enabled': False, 'session': 1, 'note': 'restart'}}
-        with patch.object(main, '_installed_standalone_plugins', return_value=[]) as scan, \
-             patch.object(main, '_plugin_version') as version, \
-             patch.object(main.display_backend, '_gamescope_start_time') as session, \
-             patch.object(main.decky, 'emit', new=AsyncMock()) as emit:
-            for _ in range(10):
-                await plugin._inspect_guard()
-        self.assertEqual(scan.call_count, 10)
-        version.assert_not_called()
-        session.assert_not_called()
-        emit.assert_not_awaited()
-
     async def test_guard_changes_publish_fresh_status_once_and_keep_restart_latch(self):
         plugin = self.make_plugin()
         with patch.object(main, '_installed_standalone_plugins',
@@ -218,7 +221,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 checked.append(name)
         self.assertGreater(len(checked), 50)
         plugin._firmware.status.assert_called_once()
-        plugin._firmware.check_updates.assert_not_called()
+        plugin._firmware.check.assert_not_called()
 
     async def test_live_conflict_stops_all_modules_and_latches_until_process_restart(self):
         plugin = self.make_plugin(); conflicts = []
@@ -231,13 +234,37 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             await plugin._check_guard()
             for c in self.components: c._unload.assert_awaited_once()
             conflicts.clear()
+            await plugin._check_guard()  # The next periodic scan.
             status = await plugin.get_version()
-            self.assertTrue(status["blocked"]); self.assertTrue(status["restart_required"])
+            self.assertTrue(status["blocked"]); self.assertTrue(status["restart_required"]); self.assertTrue(status["latched"])
             await plugin._main()
             for c in self.components: c._main.assert_awaited_once()
             await plugin._unload(); await plugin._uninstall()
             for c in self.components:
                 c._unload.assert_awaited_once(); c._uninstall.assert_not_awaited()
+
+    async def test_conflict_withdrawal_does_not_wait_for_the_firmware_worker(self):
+        plugin = self.make_plugin(); release = threading.Event(); unloaded = asyncio.Event()
+        plugin._rgb._unload = AsyncMock(side_effect=unloaded.set)
+        plugin._firmware = Mock(close=Mock(side_effect=lambda: release.wait(5)))
+        plugin._modules_started = plugin._guard_checked = True
+        with patch.object(main, "_installed_standalone_plugins", return_value=["LeGoTDP"]),              patch.object(main.decky, "emit", new=AsyncMock()):
+            task = asyncio.create_task(plugin._check_guard())
+            try:
+                await asyncio.wait_for(unloaded.wait(), 1)
+                self.assertFalse(task.done())
+            finally:
+                release.set(); await task
+        plugin._firmware.close.assert_called()
+
+    async def test_rpc_before_main_takes_the_lock_waits_for_module_startup(self):
+        plugin = self.make_plugin(); plugin._module_state = {"rgb": {"enabled": False}}
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]),              patch.object(main, "_migrate_legacy_settings"), patch.object(main, "_reload_component_settings"),              patch.object(main, "restore_intent", AsyncMock()), patch.object(plugin, "_start_desktop", AsyncMock()):
+            startup = asyncio.create_task(plugin._main())
+            await plugin.modules_set_enabled("rgb", True)  # The first frontend RPC.
+            await startup
+        plugin._rgb._main.assert_awaited_once()
+        await plugin._unload()
 
     async def test_normal_lifecycle_still_runs_all_modules(self):
         plugin = self.make_plugin()
@@ -249,13 +276,44 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             for stage in ("_migration", "_main", "_unload", "_uninstall"):
                 getattr(c, stage).assert_awaited_once()
 
-    async def test_failed_scan_blocks_hardware(self):
+    async def test_failing_scan_blocks_rpcs_only_while_it_fails(self):
         plugin = self.make_plugin()
-        with patch.object(main, "_installed_standalone_plugins", side_effect=PermissionError("denied")):
+        plugin._modules_started = True
+        plugin._rgb.set_brightness = AsyncMock(return_value={"success": True})
+        with patch.object(main, "_installed_standalone_plugins", side_effect=PermissionError("denied")) as scan:
             status = await plugin.get_version()
             self.assertTrue(status["blocked"]); self.assertIn("denied", status["guard_error"])
+            self.assertFalse(status["latched"])  # The panel must resume after a clean scan.
             with self.assertRaisesRegex(RuntimeError, "could not be verified"):
                 await plugin.rgb_set_brightness(20)
+            self.assertEqual(scan.call_count, 3)  # One retried scan; RPCs reuse its result.
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]):
+            await plugin._check_guard()
+        self.assertEqual(await plugin.rgb_set_brightness(20), {"success": True})
+        status = await plugin.get_version()
+        self.assertFalse(status["blocked"]); self.assertFalse(status["latched"])
+        self.assertTrue(plugin._modules_started)
+        for c in self.components: c._unload.assert_not_awaited()
+
+    async def test_scan_failure_at_startup_keeps_unstarted_modules_closed(self):
+        plugin = self.make_plugin()
+        with patch.object(main, "_installed_standalone_plugins", side_effect=PermissionError("denied")), patch.object(main, "_migrate_legacy_settings"):
+            await plugin._main()
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]):
+            await plugin._check_guard()
+            status = await plugin.get_version()
+        self.assertTrue(status["blocked"]); self.assertTrue(status["restart_required"]); self.assertTrue(status["latched"])
+        for c in self.components: c._main.assert_not_awaited()
+        await plugin._unload()
+
+    async def test_admission_uses_the_last_scan_instead_of_scanning_each_rpc(self):
+        plugin = self.make_plugin()
+        plugin._rgb.set_brightness = AsyncMock(return_value={"success": True})
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]) as scan:
+            for _ in range(5):
+                await plugin.rgb_set_brightness(20)
+            await plugin.get_version()
+        scan.assert_called_once()
 
     async def test_monitor_catches_installation_without_frontend(self):
         plugin = self.make_plugin(); conflicts = []
@@ -289,36 +347,24 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             finish.set(); await rpc; await checking
             self.assertEqual(order, ["rpc finished", "modules stopped"])
 
-    async def test_finished_rpc_snapshot_drains_without_waiting_for_discard_callbacks(self):
-        plugin = self.make_plugin()
+    async def test_drains_terminate_on_already_finished_jobs(self):
         class BoundedRegistry(set):
             reads = 0
             def __iter__(self):
                 self.reads += 1
                 if self.reads > 3:
-                    raise AssertionError("RPC drain spun on an already completed snapshot")
+                    raise AssertionError("drain spun on an already completed snapshot")
                 return super().__iter__()
         done = asyncio.create_task(asyncio.sleep(0))
         await done
+        # gather completes immediately for finished tasks (Python 3.14), so discard callbacks have not run yet.
+        plugin = self.make_plugin()
         plugin._rpc_jobs = BoundedRegistry({done})
-        # Exercise the immediate-completion path observed on Python 3.14.
         with patch.object(main.asyncio, "gather", new=AsyncMock(return_value=[None])):
             await plugin._drain_rpc_jobs()
         self.assertFalse(plugin._rpc_jobs)
-
-    async def test_finished_worker_snapshot_drains_without_deferred_registry_cleanup(self):
-        class BoundedRegistry(set):
-            reads = 0
-            def __iter__(self):
-                self.reads += 1
-                if self.reads > 3:
-                    raise AssertionError("Hardware drain spun on completed workers")
-                return super().__iter__()
-        done = asyncio.create_task(asyncio.sleep(0))
-        await done
         registry = BoundedRegistry({done})
-        with patch.dict(module_runtime._workers, {"wifi": registry}), \
-             patch.object(module_runtime.asyncio, "gather", new=AsyncMock(return_value=[None])):
+        with patch.dict(module_runtime._workers, {"wifi": registry}),              patch.object(module_runtime.asyncio, "gather", new=AsyncMock(return_value=[None])):
             await module_runtime.drain("wifi")
         self.assertFalse(registry)
 
@@ -350,3 +396,133 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         finally:
             finish.set()
             if checking is not None: await checking
+
+
+class ConflictAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    setUp = fixtures.ModuleGateTests.setUp
+    make_plugin = fixtures.ModuleGateTests.make_plugin
+    asyncTearDown = fixtures.ModuleGateTests.asyncTearDown
+
+    async def test_concurrent_rpc_admission_shares_one_inflight_conflict_scan(self):
+        entered, release = threading.Event(), threading.Event()
+        def scan():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test scan timeout')
+            return []
+        with patch.object(main, '_installed_standalone_plugins', side_effect=scan) as scanning:
+            tasks = [asyncio.create_task(getattr(self.plugin, name)()) for name in
+                     ('rgb_get_status', 'wifi_get_status', 'battery_get_status')]
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                # Give all callers a chance to enter the same held scan.
+                for _ in range(20):
+                    await asyncio.sleep(0)
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+        self.assertEqual(scanning.call_count, 1)
+
+    async def test_cancelled_scan_waiter_does_not_cache_the_completed_scan(self):
+        entered, release = threading.Event(), threading.Event()
+        def scan():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test scan timeout')
+            return []
+        with patch.object(main, '_installed_standalone_plugins', side_effect=scan):
+            caller = asyncio.create_task(self.plugin._inspect_guard())
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            caller.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+            release.set()
+            await self.plugin._guard_scan
+        with patch.object(main, '_installed_standalone_plugins', return_value=['LeGoTDP']) as scanning:
+            await self.plugin._inspect_guard()
+        scanning.assert_called_once()
+        self.assertTrue(self.plugin._guard_blocked)
+
+    async def test_read_only_module_status_still_rejects_conflict_and_shutdown(self):
+        for flag in ('_guard_blocked', '_closing'):
+            with self.subTest(flag=flag):
+                setattr(self.plugin, flag, True)
+                try:
+                    with self.assertRaises(RuntimeError):
+                        await self.plugin.modules_get_status()
+                finally:
+                    setattr(self.plugin, flag, False)
+
+
+class ConflictLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_conflict_withdraws_fan_before_an_admitted_rpc_finishes(self):
+        plugin = main.Plugin()
+        client = fan_backend.Client()
+        plugin._fan._client = client
+        plugin._run_stage = AsyncMock()
+        entered, release = asyncio.Event(), asyncio.Event()
+        request = asyncio.create_task(release.wait())
+        plugin._rpc_jobs.add(request)
+        drain = plugin._drain_rpc_jobs
+        async def observed_drain():
+            entered.set()
+            await drain()
+        with patch.object(plugin, '_drain_rpc_jobs', side_effect=observed_drain):
+            task = asyncio.create_task(plugin._stop_modules())
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                self.assertTrue(client._stop.is_set())
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                await task
+
+    async def test_transient_incomplete_plugin_manifest_does_not_unload_healthy_modules(self):
+        plugin = main.Plugin()
+        plugin._modules_started = True
+        plugin._stop_modules = AsyncMock()
+        with patch.object(main, '_installed_standalone_plugins', side_effect=[ValueError('Incomplete plugin manifest'), []]) as scan:
+            await plugin._check_guard()
+        self.assertEqual(scan.call_count, 2)
+        self.assertFalse(plugin._guard_blocked)
+        self.assertEqual(plugin._guard_error, '')
+        plugin._stop_modules.assert_not_awaited()
+
+    async def test_persistent_scan_failure_still_withdraws_unverifiable_ownership(self):
+        plugin = main.Plugin()
+        plugin._modules_started = True
+        plugin._stop_modules = AsyncMock()
+        with patch.object(main, '_installed_standalone_plugins', side_effect=PermissionError('denied')):
+            for _ in range(main.GUARD_FAILURE_LIMIT - 1):
+                await plugin._check_guard()
+            self.assertFalse(plugin._guard_blocked)
+            plugin._stop_modules.assert_not_awaited()
+            await plugin._check_guard()
+        self.assertTrue(plugin._guard_blocked)
+        plugin._stop_modules.assert_awaited_once()
+
+
+class ManifestMetadataTests(unittest.TestCase):
+    def test_manifest_descriptor_type_is_checked_before_reading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'Companion').mkdir()
+            sibling = root / 'Other'
+            sibling.mkdir()
+            (sibling / 'plugin.json').write_text('{"name":"Other"}', encoding='utf-8')
+            stream = Mock()
+            stream.fileno.return_value = 42
+            handle = Mock()
+            handle.__enter__ = Mock(return_value=stream)
+            handle.__exit__ = Mock(return_value=False)
+            with patch.object(conflict_guard.os, 'O_NONBLOCK', 0x800, create=True), \
+                    patch.object(conflict_guard.os, 'open', return_value=42) as opened, \
+                    patch.object(conflict_guard.os, 'fdopen', return_value=handle), \
+                    patch.object(conflict_guard.os, 'close') as closed, \
+                    patch.object(conflict_guard.os, 'fstat', return_value=types.SimpleNamespace(st_mode=stat.S_IFIFO)):
+                with patch.object(conflict_guard,'event') as warning:
+                    self.assertEqual(conflict_guard.installed_conflicts(str(root / 'Companion')),[])
+                warning.assert_called_once()
+            self.assertTrue(opened.call_args.args[1] & 0x800)
+            closed.assert_called_once_with(42)
+            stream.read.assert_not_called()

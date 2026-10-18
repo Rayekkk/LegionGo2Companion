@@ -1,17 +1,65 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Cheap process-exit hints; D-Bus/device ownership still authorizes every repair."""
+"""InputPlumber D-Bus access (busctl) shared by remap and gyro, plus cheap process-exit hints.
+
+D-Bus/device ownership still authorizes every repair; ProcessWatch only speeds it up.
+"""
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
 import threading
 from pathlib import Path
 from typing import Callable, Any
 
+from system_process import system_env
 
+
+BUSCTL = "/usr/bin/busctl"
 PROC_ROOT = Path("/proc")
 SERVICE = "org.shadowblip.InputPlumber"
+INTERFACE = "org.shadowblip.Input.CompositeDevice"
+DEVICE_PATH_RE = re.compile(r"^/org/shadowblip/InputPlumber/CompositeDevice[0-9]+$")
 _OWNER = re.compile(r"^:[0-9]+\.[0-9]+$")
+
+
+class InputPlumberError(RuntimeError):
+    pass
+
+
+def run_busctl(args: list[str], *, timeout: float = 5.0) -> str:
+    if not os.path.isfile(BUSCTL):
+        raise InputPlumberError("InputPlumber control interface is unavailable.")
+    try:
+        result = subprocess.run(
+            [BUSCTL, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            env=system_env(LC_ALL="C"),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InputPlumberError(f"InputPlumber did not respond: {exc}") from exc
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout).strip()
+        raise InputPlumberError(message[:500] or "InputPlumber rejected the request.")
+    return result.stdout
+
+
+def json_value(args: list[str]) -> Any:
+    raw = run_busctl(["--json=short", *args])
+    try:
+        payload = json.loads(raw)
+        return payload["data"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise InputPlumberError("InputPlumber returned an invalid D-Bus response.") from exc
 
 
 def _read_process(pid: int) -> tuple[str, int] | None:

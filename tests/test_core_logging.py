@@ -13,12 +13,14 @@ import types
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_integration
+import support
 import diagnostics
 import battery_backend as battery
 import controller_backend as controller
 import remap_backend as remap
 import rgb_backend as rgb
+import display_backend as display
+import main
 import safe_settings
 import tdp_backend as tdp
 import vibration_backend as vibe
@@ -157,6 +159,13 @@ class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
         rows = self.events('tdp', 'attribute_write')
         self.assertEqual(len(rows), 4)
         self.assertEqual({row['context']['attribute'] for row in rows}, set(tdp.WMI_ATTRS.values()) | {'platform_profile'})
+        self.assertEqual({row['level'] for row in rows}, {'warning'})
+
+    async def test_tdp_refused_in_place_write_is_not_a_warning(self):
+        with patch.object(tdp, '_wmi_path', return_value='/offline-fixture'), patch('builtins.open', side_effect=PermissionError(errno.EACCES, 'denied')):
+            tdp._write_ppt(15, 18, 25, retried=True)
+        rows = self.events('tdp', 'attribute_write')
+        self.assertEqual({row['level'] for row in rows}, {'info'})
 
     async def test_power_led_access_failure_has_checked_stage_without_hardware_access(self):
         with patch.object(rgb, '_power_capability', return_value=(True, '')), patch.object(rgb, '_with_power_lock', side_effect=TimeoutError('checked lock busy')):
@@ -178,7 +187,7 @@ class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_background_helper_returned_failure_and_retry_have_finite_outcomes(self):
         plugin = tdp.Plugin()
-        with patch.object(tdp, '_offload', side_effect=call_sync), patch.object(tdp, '_wmi_only', return_value=False), patch.object(tdp, '_ensure_ryzenadj', side_effect=[TimeoutError('private helper URL/token'), True]), patch.object(tdp, '_ryzenadj_available', False), patch.object(tdp, '_current_game_id', ''), patch.object(tdp, '_transition_key', None):
+        with patch.object(tdp, '_offload', side_effect=call_sync), patch.object(tdp, '_ensure_ryzenadj', side_effect=[TimeoutError('private helper URL/token'), True]), patch.object(tdp, '_ryzenadj_available', False), patch.object(tdp, '_current_game_id', ''), patch.object(tdp, '_transition_key', None):
             self.assertFalse((await plugin.retry_extras())['success'])
             self.assertTrue((await plugin.retry_extras())['success'])
         rows = self.events('tdp', 'helper_ready')
@@ -245,7 +254,7 @@ class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tdp.decky,'logger',logger),patch.object(tdp,'_load_settings',return_value={'enabled':True}), \
                 patch.object(tdp,'_clamp_for_settings',return_value=(15000,18000,25000)), \
                 patch.object(tdp,'_apply_limits_with_saved_cpu_power',return_value=result) as apply,patch.object(tdp,'_save_active') as save:
-            self.assertIs(tdp._apply_and_record(15000,18000,25000,'fixture'),result)
+            self.assertIs(tdp._apply_and_record(15000,18000,25000,'fixture','global'),result)
         apply.assert_called_once();save.assert_not_called()
         row,=self.events('tdp','limits_apply_failed');self.assertEqual(row['context']['returncode'],4)
         self.assertNotIn(marker,json.dumps(self.records));self.assertNotIn(marker,str(logger.mock_calls))
@@ -263,6 +272,67 @@ class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row['context']['status'] for row in rows],['unavailable','running'])
         self.assertEqual(rows[-1]['context']['outcome'],'cycle_complete')
         self.assertNotIn('ConfidentialValue_Z7',json.dumps(self.records))
+
+    async def test_runtime_event_identifies_device_firmware_and_software_without_ec_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, value in (('product_name', '83N0'), ('bios_version', 'RRCN16WW'), ('ec_firmware_release', '1.16')):
+                (root / name).write_text(value + '\n')
+            (root / 'os-release').write_text('ID=steamos\nVERSION_ID=3.8.28\nBUILD_ID="20260922.1"\n')
+            with patch.object(main.decky, 'DECKY_VERSION', 'v3.2.10', create=True):
+                identity = main._runtime_identity(str(root), str(root / 'os-release'))
+            self.assertEqual(identity, {'model': '83N0', 'bios': 'RRCN16WW', 'ec': '1.16', 'steamos': '3.8.28',
+                                        'steamos_build': '20260922.1', 'decky': 'v3.2.10'})
+            missing = main._runtime_identity(str(root / 'absent'), str(root / 'absent'))
+        self.assertEqual(set(missing.values()), {None})
+        diagnostics.event('plugin', 'runtime', **identity)
+        import diagnostics_reader
+        self.assertEqual(diagnostics_reader.normalize_event(self.records[-1], 'backend')['context'],
+                         {'source': 'decky', 'operation': None, **identity})
+
+    async def test_only_this_plugins_exceptions_add_a_bounded_private_message(self):
+        diagnostics.event('remap', 'restore_failed', level='warning',
+                          error=safe_settings.CorruptSettings('settings at /home/deck/x are unreadable'))
+        diagnostics.event('remap', 'restore_failed', level='warning', error=RuntimeError('SSID=Private Net'))
+        ours, foreign = self.records
+        self.assertEqual(ours['error']['message'], 'settings at [private-path] are unreadable')
+        self.assertNotIn('message', foreign['error'])
+
+    async def test_applied_tdp_limits_record_watts_source_and_reason(self):
+        def apply(spl, sppt, fppt):
+            tdp._applied_mw, tdp._last_source = (spl, sppt, fppt), 'wmi'
+            return {'success': True}
+        with patch.object(tdp, '_apply_limits', side_effect=apply), \
+                patch.object(tdp, '_best_effort_reapply_saved_cpu_power_locked', return_value=[]), \
+                patch.object(tdp, '_applied_mw', ()), patch.object(tdp, '_last_source', ''):
+            tdp._apply_limits_with_saved_cpu_power({}, 25000, 30000, 35000, reason='game')
+            tdp._apply_limits_with_saved_cpu_power({}, 15000, 18000, 20000)
+        game, rpc = self.events('tdp', 'limits_applied')
+        self.assertEqual({key: game['context'][key] for key in ('spl', 'sppt', 'fppt', 'source', 'reason')},
+                         {'spl': 25, 'sppt': 30, 'fppt': 35, 'source': 'wmi', 'reason': 'game'})
+        self.assertIsNone(rpc['context']['reason'])
+        with patch.object(tdp, '_apply_limits', return_value={'success': False}), \
+                patch.object(tdp, '_best_effort_reapply_saved_cpu_power_locked', return_value=[]):
+            tdp._apply_limits_with_saved_cpu_power({}, 25000, 30000, 35000, reason='drift')
+        self.assertEqual(len(self.events('tdp', 'limits_applied')), 2)
+
+    async def test_display_mode_change_records_both_modes_and_pending_restart(self):
+        state = dict(display.Plugin._state, panel_mode='pq', active_mode='pq', restart_pending=False,
+                     reset_in_progress=False, reset_restart_pending=False)
+        def refresh():
+            state['restart_pending'] = True
+        with patch.object(display.Plugin, '_state', state), patch.object(display, '_offload', side_effect=call_sync), \
+                patch.object(display.Plugin, '_refresh_native_support'), \
+                patch.object(display.Plugin, 'native_display_active', return_value=False), \
+                patch.object(display, '_bind_script_dir'), patch.object(display.os.path, 'lexists', return_value=False), \
+                patch.object(display, '_install_script', return_value=(True, 'installed')), \
+                patch.object(display, '_select_mode', side_effect=lambda mode: mode), \
+                patch.object(display, 'settings', Mock()), patch.object(display.Plugin, '_refresh_setup', side_effect=refresh), \
+                patch.object(display.Plugin, '_gamescope_started_at', None):
+            await display.Plugin._apply_mode_locked('gamma22')
+        row, = self.events('display', 'mode_changed')
+        self.assertEqual({key: row['context'][key] for key in ('previous', 'mode', 'pending')},
+                         {'previous': 'pq', 'mode': 'gamma22', 'pending': True})
 
 
 if __name__ == '__main__':

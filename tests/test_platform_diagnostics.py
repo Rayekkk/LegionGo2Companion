@@ -9,7 +9,7 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_integration
+import support
 import diagnostics
 import display_backend as display
 import fan_backend as fan
@@ -51,8 +51,8 @@ class PlatformDiagnosticTests(unittest.TestCase):
     def test_fan_monitor_fault_records_release_and_persist_failure_without_rearming(self):
         plugin = fan.Plugin()
         plugin._client = Mock()
-        plugin._client.check.side_effect = RuntimeError('Fixture sensor failed')
-        plugin._client.snapshot.return_value = {'error': 'Fixture sensor failed', 'automatic': True}
+        plugin._client.pump.side_effect = RuntimeError('Fixture sensor failed')
+        plugin._client.snapshot.return_value = {'kind': 'telemetry', 'error': 'Fixture sensor failed', 'automatic': True}
         plugin._state['enabled'] = True
         async def offload(_component, method, *args): return method(*args)
         async def immediate(_delay): pass
@@ -60,9 +60,9 @@ class PlatformDiagnosticTests(unittest.TestCase):
                 patch.object(fan.module_runtime, 'offload', side_effect=offload), patch.object(fan.asyncio, 'sleep', side_effect=immediate):
             asyncio.run(plugin._monitor())
         event = self.events('fan', 'control_fault')[0]
-        self.assertEqual(event['context']['count'], 1)
-        self.assertTrue(event['context']['restored'])
+        self.assertIn('Fixture settings full', event['context']['reason'])
         self.assertFalse(event['context']['enabled'])
+        self.assertEqual(self.events('fan', 'session_ended')[0]['context']['outcome'], 'fault')
         self.assertFalse(plugin._state['enabled'])
         plugin._client.close.assert_called_once()
 
@@ -85,7 +85,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertEqual(case.edid.read_bytes(), case.original)
         events = self.events('display', 'edid_recovery_store')
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]['context']['stage'], 'intent')
+        self.assertEqual(events[0]['context']['stage'], 'identity')  # nothing is written before the backup's owner is saved
         self.assertEqual(events[0]['error']['type'], 'RuntimeError')
         display.Plugin._edid_pass()
         self.assertTrue(display.Plugin._edid_restore())
@@ -127,7 +127,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
             with self.subTest(exception=exception):
                 self.records.clear(); diagnostics._seen.clear()
                 process = Mock(returncode=7, stderr=marker, stdout='')
-                with patch.object(display, '_gamescope_owner_uid', return_value=None), \
+                with patch.object(display, '_display_owner', return_value=None), \
                         patch.object(display, 'pwd', None), patch.object(display, '_system_env', return_value={}), \
                         patch.object(display.os.path, 'exists', return_value=True), \
                         patch.object(display.subprocess, 'run', return_value=process,
@@ -225,17 +225,15 @@ class PlatformDiagnosticTests(unittest.TestCase):
 
     def test_terminal_wifi_recovery_reports_restored_only_for_recorded_rollback(self):
         case = self.fixture(wpa_fixture.ManualWpaTests); case.configure()
-        for kind in ('band_policy', 'power_save'):
-            for phase in ('committed', 'rolled_back'):
-                with self.subTest(kind=kind, phase=phase):
-                    journal = dict(schema=1, phase=phase, settings_file=str(case.settings))
-                    getattr(case.plugin, '_save_' + kind + '_journal')(journal)
-                    self.records.clear(); diagnostics._seen.clear()
-                    self.assertTrue(getattr(case.plugin, '_recover_' + kind + '_journal')()['success'])
-                    action = 'band_recovery' if kind == 'band_policy' else 'power_recovery'
-                    context = self.events('wifi', action)[0]['context']
-                    self.assertEqual(context['restored'], phase == 'rolled_back')
-                    self.assertEqual(context['outcome'], 'restored' if phase == 'rolled_back' else 'completed')
+        for phase in ('committed', 'rolled_back'):
+            with self.subTest(phase=phase):
+                journal = dict(schema=1, phase=phase, settings_file=str(case.settings))
+                case.plugin._save_band_policy_journal(journal)
+                self.records.clear(); diagnostics._seen.clear()
+                self.assertTrue(case.plugin._recover_band_policy_journal()['success'])
+                context = self.events('wifi', 'band_recovery')[0]['context']
+                self.assertEqual(context['restored'], phase == 'rolled_back')
+                self.assertEqual(context['outcome'], 'restored' if phase == 'rolled_back' else 'completed')
         case.modify.assert_not_called(); case.reconnect.assert_not_called()
 
     def test_independent_wifi_watchdog_failure_records_pending_without_private_journal(self):

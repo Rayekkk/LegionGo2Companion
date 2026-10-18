@@ -1,42 +1,37 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Drain hardware work before withdrawing a module, including cancelled workers."""
 import asyncio
-import math
 import contextlib
 import contextvars
 import functools
+import os
+import time
 from diagnostics import event
-from controller_maintenance import maintenance_present
+
+DMI_ROOT = "/sys/class/dmi/id"
 
 _workers = {}
 CONTROLLER_MODULES = frozenset({'controller', 'remap', 'rgb', 'vibration'})
-_controller_pause = None
+_controller_paused = False
 _controller_generation = 0
 _operation_generation = contextvars.ContextVar('controller_operation_generation', default=None)
-_restoration_owner = contextvars.ContextVar('controller_restoration_owner', default=None)
 
 
-class ControllerPaused(RuntimeError):
+class AdmissionClosed(RuntimeError):
+    """A refused call: the conflict guard, shutdown or maintenance closed admission and already reports why."""
+
+
+class ControllerPaused(AdmissionClosed):
     """Maintenance admission is closed without changing saved module choices."""
 
 
-class _ControllerPause:
-    def __init__(self):
-        self.quiescent = False
-        self.restoring = False
-        self.restoration_token = None
-
-
 def is_paused(module):
-    return module in CONTROLLER_MODULES and (_controller_pause is not None or maintenance_present())
+    return module in CONTROLLER_MODULES and _controller_paused
 
 
 def require_available(module):
     generation = _operation_generation.get()
-    owner = _restoration_owner.get()
-    restoring = (owner is not None and _controller_pause is not None and
-                 owner is _controller_pause.restoration_token and _controller_pause.restoring)
-    if (module in CONTROLLER_MODULES and owner is not None and not restoring) or (is_paused(module) and not restoring) or (module in CONTROLLER_MODULES and generation is not None
+    if is_paused(module) or (module in CONTROLLER_MODULES and generation is not None
                             and generation != _controller_generation):
         raise ControllerPaused('Controller operations are paused for firmware maintenance.')
 
@@ -74,7 +69,6 @@ def background_task(operation):
     """
     context = contextvars.copy_context()
     context.run(_operation_generation.set, None)
-    context.run(_restoration_owner.set, None)
     task = context.run(asyncio.create_task, operation)
     def completed(worker):
         if not worker.cancelled():
@@ -86,91 +80,31 @@ def background_task(operation):
 
 
 def pause_controller():
-    """Close admission synchronously, before waiting for already admitted work.
+    """Close controller admission while fwupd writes the controllers.
 
-    This is only a process-local gate. It does not exclude InputPlumber, another
-    plugin or a restarted Decky process and cannot authorize a USB handoff.
+    Process-local only: it stops Companion's own writes, not other programs.
+    The caller drains already admitted work with drain_controller().
     """
-    global _controller_pause, _controller_generation
-    if _controller_pause is not None or maintenance_present():
+    global _controller_paused, _controller_generation
+    if _controller_paused:
         raise ControllerPaused('Controller maintenance is already in progress.')
-    _controller_pause = _ControllerPause()
+    _controller_paused = True
     _controller_generation += 1
-    return _controller_pause
 
 
-def _require_pause(pause):
-    if pause is None or pause is not _controller_pause:
-        raise ControllerPaused('The controller maintenance owner does not match.')
-
-
-async def drain_controller(pause, *, timeout=5.0):
-    _require_pause(pause)
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 30:
-        raise ValueError('Invalid controller drain deadline.')
+async def drain_controller(*, timeout=5.0):
     work = asyncio.ensure_future(asyncio.gather(*(drain(module) for module in CONTROLLER_MODULES)))
     def finished(task):
         if not task.cancelled():
             task.exception()
     work.add_done_callback(finished)
-    # A timed-out/cancelled caller cannot cancel a still-running hardware thread
-    # or reopen admission. The registry remains available to a later recovery.
+    # A timed-out/cancelled caller cannot cancel a still-running hardware thread.
     await complete(asyncio.wait_for(asyncio.shield(work), timeout))
-    _require_pause(pause)
 
 
-def confirm_controller_quiescent(pause):
-    """Caller must also have joined its separate read-only capture thread."""
-    _require_pause(pause)
-    if pause.restoring or any(_workers.get(module) for module in CONTROLLER_MODULES):
-        raise ControllerPaused('Controller workers are still stopping.')
-    pause.quiescent = True
-
-
-@contextlib.contextmanager
-def controller_restoration(pause, *, usb_restored):
-    """Private coordinator lane while ordinary admission remains closed.
-
-    Only the current quiescent owner may enter after separately proving USB
-    restoration. The boolean is its attestation, not a hardware proof supplied
-    by this function. It permits existing backend transactions to restore their
-    retained intent and read it back, not arbitrary frontend/controller work.
-    No RPC/startup hook calls this lane. Persistent monitors do not inherit it;
-    escaped continuations lose admission as soon as the owner exits the scope.
-    Any failure leaves the ordinary maintenance gate closed.
-    """
-    # An inherited restoration capability is never a coordinator capability.
-    # Check before replacing its generation, including after a previous resume.
-    generation = _operation_generation.get()
-    if (_restoration_owner.get() is not None or
-            generation is not None and generation != _controller_generation):
-        raise ControllerPaused('An expired operation cannot enter controller restoration.')
-    _require_pause(pause)
-    if (usb_restored is not True or not pause.quiescent or pause.restoring or
-            any(_workers.get(module) for module in CONTROLLER_MODULES)):
-        raise ControllerPaused('USB restoration and quiescent ownership are required.')
-    pause.restoring = True
-    pause.restoration_token = object()
-    owner_token = _restoration_owner.set(pause.restoration_token)
-    generation_token = _operation_generation.set(_controller_generation)
-    try:
-        yield
-    finally:
-        pause.restoring = False
-        pause.restoration_token = None
-        _operation_generation.reset(generation_token)
-        _restoration_owner.reset(owner_token)
-
-
-def resume_controller(pause, *, restored):
-    """No timeout/cancellation may implicitly reopen maintenance admission."""
-    global _controller_pause
-    _require_pause(pause)
-    if restored is not True or not pause.quiescent or pause.restoring:
-        raise ControllerPaused('Controller restoration has not been confirmed.')
-    if any(_workers.get(module) for module in CONTROLLER_MODULES):
-        raise ControllerPaused('Controller workers are still stopping.')
-    _controller_pause = None
+def resume_controller():
+    global _controller_paused
+    _controller_paused = False
 
 async def complete(operation):
     """Keep a hardware transaction alive through repeated caller cancellation."""
@@ -214,6 +148,38 @@ async def drain(module):
         workers = tuple(_workers[module])
         await complete(asyncio.gather(*workers, return_exceptions=True))
         _workers[module].difference_update(worker for worker in workers if worker.done())
+
+def is_legion_go_2(dmi_root=DMI_ROOT):
+    """LENOVO 83N0/83N1, the identity the Legion Go 2 modules share.
+
+    Fan, RGB and controller firmware keep their own stricter gates.
+    """
+    def read(name):
+        try:
+            with open(os.path.join(dmi_root, name), encoding="ascii") as handle:
+                return handle.read(128).strip()
+        except (OSError, UnicodeError):
+            return ""
+    return read("sys_vendor") == "LENOVO" and read("product_name") in ("83N0", "83N1")
+
+
+def suspend_offset():
+    """CLOCK_BOOTTIME - CLOCK_MONOTONIC: grows by the time spent suspended."""
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None or not hasattr(time, "clock_gettime"):
+        return None
+    try:
+        return time.clock_gettime(clock) - time.monotonic()
+    except (OSError, ValueError):
+        return None
+
+
+def resumed(previous, current):
+    """(new baseline, whether at least a second of suspend passed since `previous`)."""
+    if current is None:
+        return previous, False
+    return current, previous is not None and current - previous >= 1.0
+
 
 def require_success(result):
     if not isinstance(result, dict) or result.get('success') is not True:

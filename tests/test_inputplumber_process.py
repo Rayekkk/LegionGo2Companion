@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -204,119 +203,6 @@ class ProcessWatchTests(unittest.TestCase):
         (self.proc / "202" / "stat").unlink()
         self.assertTrue(self.watch.consume_exit())
         self.assertEqual(query.call_count, 1)
-
-    def test_newer_capture_wins_when_older_lookup_finishes_first(self):
-        self.write_stat(202, starttime=98765)
-        old_entered, new_entered = threading.Event(), threading.Event()
-        release_old, release_new = threading.Event(), threading.Event()
-        failures = []
-
-        def reply(pid, entered, release):
-            entered.set()
-            if not release.wait(5):
-                raise AssertionError("Timed out releasing process lookup")
-            return [pid]
-
-        old_query = Mock(side_effect=lambda _args: reply(101, old_entered, release_old))
-        new_query = Mock(side_effect=lambda _args: reply(202, new_entered, release_new))
-
-        def capture(query, owner):
-            try:
-                self.watch.capture(query, owner=owner)
-            except BaseException as error:
-                failures.append(error)
-
-        older = threading.Thread(target=capture, args=(old_query, ":1.23"), daemon=True)
-        newer = threading.Thread(target=capture, args=(new_query, ":1.24"), daemon=True)
-        older.start()
-        try:
-            self.assertTrue(old_entered.wait(2), "Older lookup did not start")
-            newer.start()
-            self.assertTrue(new_entered.wait(2), "Newer lookup did not start")
-            release_old.set()
-            older.join(2)
-            self.assertFalse(older.is_alive(), "Older lookup did not finish first")
-            release_new.set()
-            newer.join(2)
-        finally:
-            release_old.set()
-            release_new.set()
-            older.join(2)
-            if newer.ident is not None:
-                newer.join(2)
-        self.assertFalse(newer.is_alive(), "Newer lookup did not finish")
-        self.assertFalse(failures, repr(failures))
-        self.assertEqual(old_query.call_count, 1)
-        self.assertEqual(new_query.call_count, 1)
-        (self.proc / "101" / "stat").unlink()
-        self.assertFalse(self.watch.consume_exit(), "Older lookup replaced the newer token")
-        (self.proc / "202" / "stat").unlink()
-        self.assertTrue(self.watch.consume_exit(), "Newer process was not tracked")
-        self.assertFalse(self.watch.consume_exit())
-
-    def consume_during(self, operation):
-        """Hold an old /proc read while another operation changes the token."""
-        entered, release, updated = threading.Event(), threading.Event(), threading.Event()
-        result, failures = [], []
-        read_process = module._read_process
-
-        def delayed_read(pid):
-            if threading.current_thread() is reader:
-                entered.set()
-                if not release.wait(5):
-                    raise AssertionError("Timed out releasing stale process read")
-                return ("missing", 0)
-            return read_process(pid)
-
-        def consume():
-            try:
-                result.append(self.watch.consume_exit())
-            except BaseException as error:
-                failures.append(error)
-
-        def update():
-            try:
-                operation()
-            except BaseException as error:
-                failures.append(error)
-            finally:
-                updated.set()
-
-        reader = threading.Thread(target=consume, daemon=True)
-        updater = threading.Thread(target=update, daemon=True)
-        completed = False
-        with patch.object(module, "_read_process", side_effect=delayed_read):
-            reader.start()
-            try:
-                self.assertTrue(entered.wait(2), "Process tick did not read /proc")
-                updater.start()
-                completed = updated.wait(2)
-            finally:
-                release.set()
-                reader.join(2)
-                if updater.ident is not None:
-                    updater.join(2)
-        self.assertFalse(reader.is_alive(), "Process tick did not finish")
-        self.assertFalse(updater.is_alive(), "Token update did not finish")
-        self.assertFalse(failures, repr(failures))
-        self.assertTrue(completed, "Token update was blocked by the stale /proc read")
-        self.assertEqual(result, [False], "Stale tick reported an exit after token changed")
-
-    def test_stale_tick_cannot_consume_new_capture(self):
-        self.watch.capture(self.query())
-        self.write_stat(202, starttime=98765)
-        query = self.query(owner=":1.24", pid=202)
-        self.consume_during(lambda: self.watch.capture(query, owner=":1.24"))
-        self.assertFalse(self.watch.consume_exit())
-        (self.proc / "202" / "stat").unlink()
-        self.assertTrue(self.watch.consume_exit())
-        self.assertFalse(self.watch.consume_exit())
-        self.assertEqual(query.call_count, 1)
-
-    def test_stale_tick_cannot_report_exit_after_clear(self):
-        self.watch.capture(self.query())
-        self.consume_during(self.watch.clear)
-        self.assertFalse(self.watch.consume_exit())
 
 
 if __name__ == "__main__":

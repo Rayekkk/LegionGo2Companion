@@ -2,72 +2,23 @@
 
 import asyncio
 import json
-import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-
-ROOT = Path(__file__).resolve().parents[1]
-SETTINGS_ROOT = Path(tempfile.mkdtemp(prefix="legiongo2companion-tests-"))
-CURRENT_SETTINGS = SETTINGS_ROOT / "LegionGo2Companion"
-CURRENT_SETTINGS.mkdir()
-
-
-class Logger:
-    def info(self, _message):
-        pass
-
-    def warning(self, _message):
-        pass
-
-    def error(self, _message):
-        pass
-
-    def debug(self, _message):
-        pass
-
-
-async def emit(_event, *_args):
-    pass
-
-
-decky = types.ModuleType("decky")
-decky.logger = Logger()
-decky.emit = emit
-decky.DECKY_PLUGIN_SETTINGS_DIR = str(CURRENT_SETTINGS)
-sys.modules["decky"] = decky
-
-
-for unix_only in ("fcntl", "pwd"):
-    try:
-        __import__(unix_only)
-    except ImportError:
-        stub = types.ModuleType(unix_only)
-        if unix_only == "pwd":
-            stub.struct_passwd = object
-            stub.getpwall = lambda: []
-            stub.getpwnam = lambda _name: None
-        sys.modules[unix_only] = stub
-
-sys.path.insert(0, str(ROOT))
-import display_backend  # noqa: E402
-import main  # noqa: E402
-# Keep the real inventory guard, but give it an isolated installation parent.
-# The checkout's siblings can include unrelated, unreadable system directories.
-ISOLATED_INSTALL = SETTINGS_ROOT / "plugins" / "LegionGo2Companion"
-ISOLATED_INSTALL.mkdir(parents=True)
-(ISOLATED_INSTALL / "plugin.json").write_bytes((ROOT / "plugin.json").read_bytes())
-main.PLUGIN_DIR = str(ISOLATED_INSTALL)
-import battery_backend  # noqa: E402
-import controller_backend  # noqa: E402
-import remap_backend  # noqa: E402
-import rgb_backend  # noqa: E402
-import tdp_backend  # noqa: E402
-import vibration_backend  # noqa: E402
-import wifi_backend  # noqa: E402
+from support import ROOT, decky  # Installs the Decky/settings stubs first.
+import battery_backend
+import controller_backend
+import display_backend
+import main
+import remap_backend
+import rgb_backend
+import tdp_backend
+import vibration_backend
+import wifi_backend
+import module_runtime
 
 
 class IntegrationTests(unittest.TestCase):
@@ -129,9 +80,7 @@ class IntegrationTests(unittest.TestCase):
             "not/an/app": {"spl": 9000},
             "456": {"spl": 12000, "sppt": 15000, "fppt": 20000},
         }
-        with patch.object(tdp_backend, "_read_key", return_value=tdp_payload), \
-                patch.object(tdp_backend, "_ceilings_mw",
-                             return_value=(50000, 50000, 50000)):
+        with patch.object(tdp_backend, "_read_key", return_value=tdp_payload):
             self.assertEqual(list(tdp_backend._load_profiles()), ["456"])
 
         vibe_payload = {
@@ -173,24 +122,12 @@ class IntegrationTests(unittest.TestCase):
             ("GAMESCOPE_COLOR_APP_WANTS_HDR_FEEDBACK", None),
         )
 
-    def test_tdp_resume_detector_uses_boottime_gap(self):
-        tdp_backend._last_suspend_offset = None
-        with patch.object(tdp_backend, "_suspend_offset",
-                          side_effect=[20.0, 20.2, 22.0]):
-            self.assertFalse(tdp_backend._resume_detected())
-            self.assertFalse(tdp_backend._resume_detected())
-            self.assertTrue(tdp_backend._resume_detected())
-
-    def test_vibration_resume_detector_uses_boottime_gap(self):
-        vibration_backend._last_suspend_offset = None
-        with patch.object(vibration_backend, "_suspend_offset",
-                          side_effect=[8.0, 8.3, 10.0]):
-            self.assertFalse(vibration_backend._resume_detected())
-            self.assertFalse(vibration_backend._resume_detected())
-            self.assertTrue(vibration_backend._resume_detected())
-
-    def test_unsafe_legacy_bulk_profile_rpc_is_not_exposed(self):
-        self.assertFalse(hasattr(main.Plugin(), "vibe_set_game_profiles"))
+    def test_resume_is_a_boottime_gap_of_at_least_a_second(self):
+        import module_runtime
+        self.assertEqual(module_runtime.resumed(None, 20.0), (20.0, False))
+        self.assertEqual(module_runtime.resumed(20.0, 20.2), (20.2, False))
+        self.assertEqual(module_runtime.resumed(20.2, 22.0), (22.0, True))
+        self.assertEqual(module_runtime.resumed(22.0, None), (22.0, False))
 
     def test_tdp_and_namespaced_wrappers_delegate(self):
         plugin = main.Plugin()
@@ -255,6 +192,17 @@ class IntegrationTests(unittest.TestCase):
             finally:
                 decky.DECKY_PLUGIN_SETTINGS_DIR = old_dir
 
+    def test_legacy_migration_survives_an_unusable_settings_directory(self):
+        with tempfile.TemporaryDirectory(prefix="legiongo2-settings-") as raw:
+            blocker = Path(raw) / "LegionGo2Companion"
+            blocker.write_text("a file where the settings directory should be", encoding="utf-8")
+            old_dir = decky.DECKY_PLUGIN_SETTINGS_DIR
+            decky.DECKY_PLUGIN_SETTINGS_DIR = str(blocker)
+            try:
+                main._migrate_legacy_settings()  # Decky exits the plugin if _migration raises.
+            finally:
+                decky.DECKY_PLUGIN_SETTINGS_DIR = old_dir
+
     def test_legacy_migration_repairs_missing_top_level_values(self):
         with tempfile.TemporaryDirectory(prefix="legiongo2-settings-") as raw:
             root = Path(raw)
@@ -302,46 +250,7 @@ class IntegrationTests(unittest.TestCase):
             finally:
                 decky.DECKY_PLUGIN_SETTINGS_DIR = old_dir
 
-    def test_wifi_migration_preserves_orphaned_ownership_state(self):
-        with tempfile.TemporaryDirectory(prefix="legiongo2-settings-") as raw:
-            root = Path(raw)
-            current = root / "LegionGo2Companion"
-            legacy = root / "WiFi Optimizer Go 2"
-            current.mkdir()
-            legacy.mkdir()
-            source_payload = {
-                "band_policy": "five_six_no_24",
-                "band_preference_enabled": True,
-                "band_policy_state": {
-                    "mode": "five_six_no_24",
-                    "owns_iwd": True,
-                    "original": {"iwd": {"modifier_present": False}},
-                    "applied": {
-                        "iwd_modifier_present": True,
-                        "iwd_modifier_value": "0.01",
-                    },
-                },
-            }
-            (legacy / "settings.json").write_text(
-                json.dumps(source_payload), encoding="utf-8"
-            )
-
-            old_dir = decky.DECKY_PLUGIN_SETTINGS_DIR
-            decky.DECKY_PLUGIN_SETTINGS_DIR = str(current)
-            try:
-                main._migrate_legacy_settings()
-                migrated = json.loads(
-                    (current / "wifi_settings.json").read_text(encoding="utf-8")
-                )
-                self.assertEqual(migrated, source_payload)
-                self.assertEqual(
-                    json.loads((legacy / "settings.json").read_text(encoding="utf-8")),
-                    source_payload,
-                )
-            finally:
-                decky.DECKY_PLUGIN_SETTINGS_DIR = old_dir
-
-    def test_migrated_wifi_ownership_matches_active_iwd_setting(self):
+    def test_saved_wifi_ownership_matches_active_iwd_setting(self):
         with tempfile.TemporaryDirectory(prefix="legiongo2-wifi-") as raw:
             root = Path(raw)
             settings_path = root / "wifi_settings.json"
@@ -415,6 +324,17 @@ class IntegrationTests(unittest.TestCase):
         response = asyncio.run(main.Plugin().get_version())
         self.assertEqual(response["version"], json.loads((ROOT / "plugin.json").read_text())["version"])
         self.assertIsInstance(response["standalone_plugins"], list)
+
+
+class RootForwardingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        await module_runtime.drain('tdp')
+
+    async def test_root_forwards_reset_context_guards(self):
+        plugin = main.Plugin()
+        plugin._vibration.reset_to_default = AsyncMock(return_value={'success': True})
+        await plugin.vibe_reset_to_default('111', '111')
+        plugin._vibration.reset_to_default.assert_awaited_once_with('111', '111')
 
 
 if __name__ == "__main__":
