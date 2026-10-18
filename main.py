@@ -38,7 +38,7 @@ import module_runtime
 import diagnostics
 from companion_updates import CompanionUpdates
 from controller_firmware import FirmwarePreparation, INSTALL_ORDER, INSTALL_SECONDS, updater_running
-from safe_settings import atomic_write_json, load_json_object, SettingsManager
+from safe_settings import SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 from desktop_bridge import DesktopBridge
 from desktop_install import DesktopInstall
@@ -117,13 +117,6 @@ def _rpc_module(name):
     return None if name.startswith('modules_') or name in UPDATE_RPCS else 'tdp'
 from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 
-LEGACY_SETTINGS = {
-    "tdp_settings.json": ("LeGoTDP",),
-    "vibration_settings.json": ("LeGo-Vibe-Control", "LeGo Vibe Control"),
-    "display_settings.json": ("LeGo2BrightnessFix", "LeGo2 Brightness Fix"),
-}
-
-
 
 def _plugin_version() -> str:
     try:
@@ -155,61 +148,6 @@ def _runtime_identity(dmi='/sys/class/dmi/id', os_release='/etc/os-release') -> 
 
 def _installed_standalone_plugins() -> list[str]:
     return installed_conflicts(PLUGIN_DIR)
-
-
-def _migrate_legacy_settings() -> None:
-    """Import missing values from each standalone plugin's settings.
-
-    The source remains untouched. Existing combined values always win, while
-    missing top-level values are recovered from the standalone settings. This
-    also repairs an interrupted first migration without rolling newer data back.
-    """
-    # Keep the final directory component unresolved. atomic_write_json()
-    # deliberately rejects a plugin settings directory that was replaced with
-    # a symlink; realpath() here would erase that security boundary before the
-    # checked writer ever saw it.
-    current_dir = os.path.abspath(decky.DECKY_PLUGIN_SETTINGS_DIR)
-    settings_root = os.path.dirname(current_dir)
-    try:
-        os.makedirs(current_dir, exist_ok=True)
-    except OSError as exc:  # Decky exits the plugin on any _migration exception.
-        diagnostics.event('settings', 'legacy_settings_import_failed', level='warning', error=exc)
-        return
-
-    for destination_name, legacy_dirs in LEGACY_SETTINGS.items():
-        destination = os.path.join(current_dir, destination_name)
-        source = next((candidate for candidate in (
-            os.path.join(settings_root, directory, "settings.json")
-            for directory in legacy_dirs
-        ) if os.path.lexists(candidate)), None)
-        if not source:
-            continue
-        try:
-            legacy_payload = load_json_object(source)
-            current_payload = load_json_object(destination, missing_ok=True) or {}
-            payload = dict(legacy_payload)
-            payload.update(current_payload)
-            if payload == current_payload:
-                continue
-            atomic_write_json(destination, payload)
-            diagnostics.event('settings', 'legacy_settings_imported', store=destination_name)
-        except (OSError, ValueError, TypeError, RuntimeError) as exc:
-            diagnostics.event('settings', 'legacy_settings_import_failed', level='warning', store=destination_name, error=exc)
-
-
-def _reload_component_settings() -> None:
-    """Refresh module-level SettingsManager instances after disk migration."""
-    for module in (
-        tdp_backend, fan_backend, vibration_backend, display_backend, wifi_backend, rgb_backend,
-        remap_backend, battery_backend, controller_backend,
-    ):
-        manager = getattr(module, "settings", None)
-        reader = getattr(manager, "read", None)
-        if callable(reader):
-            try:
-                reader()
-            except Exception as exc:
-                diagnostics.event('settings', 'reload_failed', level='error', scope=module.__name__, error=exc)
 
 
 def _rotate_logs(keep: int = 10) -> None:
@@ -589,7 +527,7 @@ class Plugin:
         if self._guard_conflicts:
             return ("All Companion modules are paused. Uninstall "
                     + ", ".join(self._guard_conflicts)
-                    + " in Decky Settings, keep their settings, then restart Decky or the console.")
+                    + " in Decky Settings, then restart Decky or the console.")
         return "Companion is paused. Restart Decky or the console to resume safely."
 
     def _guard_status(self):
@@ -706,11 +644,9 @@ class Plugin:
     async def _migration(self):
         await self._check_guard()
         if self._guard_blocked or self._guard_error:
-            return  # _main retries the migration after its own scan.
+            return  # _main scans again before any module starts.
         async with self._guard_lock:
             await module_runtime.complete(self._drain_rpc_jobs())
-            await asyncio.to_thread(_migrate_legacy_settings)
-            await asyncio.to_thread(_reload_component_settings)
             await self._run_stage("_migration")
 
     async def _main(self):
@@ -741,8 +677,6 @@ class Plugin:
             if self._modules_started or self._guard_blocked or self._closing:
                 return
             await module_runtime.complete(self._drain_rpc_jobs())
-            await asyncio.to_thread(_migrate_legacy_settings)
-            await asyncio.to_thread(_reload_component_settings)
             await self._inspect_guard()
             if self._guard_blocked or self._guard_error:
                 self._guard_blocked = True

@@ -7,6 +7,10 @@
 - Removing old plugin logs never follows a link out of the log folder.
 - Companion logs a warning when a Decky update stops its unload workaround from applying.
 
+### Changed
+
+- Settings from the old standalone plugins (LeGoTDP, LeGo Vibe Control, LeGo2 Brightness Fix) and from versions before 2.1.0 are no longer imported. Companion still pauses while those plugins are installed.
+
 # 2.2.0
 
 Released 2026-10-18.

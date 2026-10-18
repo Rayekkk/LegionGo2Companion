@@ -117,22 +117,15 @@ while allowing a full-range rise within two samples. They are tested policy,
 not user tuning knobs. A rolling twelve-second target history permits physical
 ramp time after a higher target while still detecting a stopped running fan.
 Eight curve points occupy distinct 1°C coordinates. The first seven can move,
-RPM is nondecreasing between points, and point eight is fixed at 100°C/full speed.
-Schema 1 migration retains the complete ten-point global/preset originals while
-choosing an eight-point approximation that minimizes below-100°C interpolation
-error. It preserves assignment intent and increments revision, with custom off.
-Schema 3 retains schema 2's eight-point originals in `curve_archive_v2`, including
-all five preset assignments and the existing ten-point archive. A cumulative
-maximum removes falling segments without reducing interpolated cooling; old
-temperatures and RPM/percent display remain intact. Migration increments the
-revision once, forces custom off and is idempotent. Both metadata and curves use
-the same revision check. Validation also rejects decreasing RPM at the RPC and
-controller boundary. New defaults begin at 0°C; migrated curves retain their
-original first temperature, which remains editable.
+RPM is nondecreasing between points, and point eight stays at 100°C with a speed
+of at least 1500 RPM; at 100°C and above the controller runs at full speed
+whatever the curve says. Both metadata and curves use the same revision check.
+Validation also rejects decreasing RPM at the RPC and controller boundary. New
+defaults begin at 0°C.
 
-Schema 4 adds `assign_tdp_presets`, default false. Migration preserves existing
-global points, all mappings, units and archives; assignments remain dormant
-until explicitly enabled. With the option off the backend never queries the
+Settings use schema 4, the format Fan Control first shipped with (2.1.0); any
+other schema is refused for review. `assign_tdp_presets` defaults to false, so
+assignments remain dormant until explicitly enabled. With the option off the backend never queries the
 Companion TDP preset and applies only the global curve. Changing this option
 uses the same revision check as curve/unit writes, never starts an idle worker,
 and applies the new selection to an already active controller. A failed active

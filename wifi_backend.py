@@ -2855,9 +2855,6 @@ class Plugin:
         except Exception as e:
             diagnostic_event('wifi', 'uninstall_failed', level='error', error=e, repeat=60)
 
-    async def _migration(self):
-        pass
-
     # ---- Hardware detection ----
 
     def _detect_device_family(self) -> tuple[str, str, str]:

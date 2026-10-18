@@ -506,8 +506,7 @@ class TdpCoreTests(unittest.TestCase):
         boost, epp = self.cpu_controls()
         self.profile.write_text('performance')
         self.store.replace({})
-        with patch.object(tdp, 'LEGACY_SETTINGS_FILE', str(self.root / 'none.json')):
-            tdp._migrate()
+        tdp._migrate()
         self.assertEqual(self.store.getSetting('baseline'), {'pending': True})
         self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
         self.assertTrue(self.rpc('set_cpu_boost', True)['success'])

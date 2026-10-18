@@ -48,7 +48,6 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._start_desktop = AsyncMock()
         with patch.object(diagnostics, '_sink', lambda text, level: records.append(json.loads(text))), \
                 patch.object(diagnostics, '_seen', collections.OrderedDict()), \
-                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'), \
                 patch.object(main, '_runtime_identity', return_value={'model': '83N0'}):
             await self.plugin._main()
             await self.plugin._unload()
@@ -105,8 +104,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_persisted_pending_cleanup_retries_without_starting_module(self):
         self.plugin._module_state['wifi'] = {'enabled': False, 'pending': True}
         self.plugin._save_modules()
-        with patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as stop, \
-                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+        with patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as stop:
             await self.plugin._main()
         stop.assert_awaited_once_with('wifi', self.plugin._wifi)
         self.plugin._wifi._main.assert_not_awaited()
@@ -312,8 +310,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         finished = threading.Event()
         controllers = [getattr(self.plugin, '_' + name) for name in sorted(module_runtime.CONTROLLER_MODULES)]
         with patch.object(main, 'updater_running', side_effect=lambda: not finished.is_set()), \
-                patch.object(main, 'UPDATER_POLL_S', 0.01), \
-                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+                patch.object(main, 'UPDATER_POLL_S', 0.01):
             await self.plugin._main()
             await asyncio.sleep(0.05)
             for component in controllers:
@@ -333,8 +330,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_updater_that_never_ends_keeps_controllers_paused(self):
         self.addCleanup(module_runtime.resume_controller)
-        with patch.object(main, 'updater_running', return_value=True), patch.object(main, 'UPDATER_WAIT_S', 0), \
-                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+        with patch.object(main, 'updater_running', return_value=True), patch.object(main, 'UPDATER_WAIT_S', 0):
             await self.plugin._main()
             await asyncio.wait_for(self.plugin._updater_wait, 5)
         self.assertTrue(module_runtime.is_paused('vibration'))
@@ -343,8 +339,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_interrupted_reenable_finishes_saved_intent_on_startup(self):
         self.plugin._module_state['controller'] = {'enabled': True, 'resume': {'source': 'right'}}
         self.plugin._controller.set_gyro_source = AsyncMock()
-        with patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
-            await self.plugin._main()
+        await self.plugin._main()
         self.plugin._controller.set_gyro_source.assert_awaited_once_with('right')
         self.assertEqual(self.plugin._module_state['controller'], {'enabled': True})
 
@@ -361,8 +356,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         for suffix in ('', '.bak'):
             Path(self.folder.name, 'module_settings.json' + suffix).write_text('{broken')
         fresh = self.make_plugin()
-        with patch.object(main, 'withdraw', new=AsyncMock()) as stop, \
-                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+        with patch.object(main, 'withdraw', new=AsyncMock()) as stop:
             await fresh._main()
         for name in main.MODULE_NAMES:
             self.assertFalse(fresh._module_enabled(name))
@@ -381,7 +375,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                 path = Path(logs, f'{age:02}.log')
                 path.write_text('x')
                 os.utime(path, (1_000_000 - age, 1_000_000 - age))
-            with patch.object(main.decky, 'DECKY_PLUGIN_LOG_DIR', logs, create=True),                     patch.object(main.diagnostics, 'configure'),                     patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+            with patch.object(main.decky, 'DECKY_PLUGIN_LOG_DIR', logs, create=True),                     patch.object(main.diagnostics, 'configure'):
                 await self.plugin._main()
             self.assertEqual(sorted(p.name for p in Path(logs).glob('*.log')), [f'{i:02}.log' for i in range(10)])
         self.plugin._wifi._main.assert_not_awaited()
@@ -390,8 +384,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._module_state['wifi'] = {'enabled': False, 'pending': True}
         self.plugin._save_modules()
         with patch.object(main, 'withdraw', new=AsyncMock(return_value='')), \
-                patch.object(self.plugin, '_save_modules', side_effect=OSError('disk full')), \
-                patch.object(main, '_migrate_legacy_settings'), patch.object(main, '_reload_component_settings'):
+                patch.object(self.plugin, '_save_modules', side_effect=OSError('disk full')):
             await self.plugin._main()
         self.plugin._tdp._main.assert_awaited_once()
         self.plugin._wifi._main.assert_not_awaited()

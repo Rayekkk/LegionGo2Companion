@@ -84,14 +84,6 @@ _PROFILE_ATTRS = ('rumble_intensity', 'left_handle/rumble_mode', 'right_handle/r
                   'touchpad/vibration_intensity', 'touchpad/vibration_enabled')
 CURRENT_SCHEMA             = 2
 
-# Pre-schema-2 keys. Read once during migration, never written again.
-_LEGACY_KEYS = {
-    PKEY_LEVEL:  "intensity_level",
-    PKEY_MODE:   "rumble_mode",
-    PKEY_TP_INT: "touchpad_intensity",
-    PKEY_TP_EN:  "touchpad_enabled",
-}
-
 settings = SettingsManager(
     name="vibration_settings",
     settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR,
@@ -500,12 +492,12 @@ def _active_values(profiles: dict | None = None, app_id: str | None = None) -> d
 
 
 def _migrate() -> None:
-    """Fold the old flat settings keys into profile '0' exactly once."""
+    """Create the default profile '0' and stamp the store schema, once."""
     with _settings_lock:
         _read_valid_settings()
         # A hand-edited or truncated store can hold anything here, and this runs
         # from _migration() - where a raise kills the plugin before its RPC
-        # socket exists. Same guard as LeGoTDP's copy.
+        # socket exists.
         try:
             schema = int(settings.getSetting(SETTINGS_KEY_SCHEMA, 1))
         except (TypeError, ValueError):
@@ -521,12 +513,8 @@ def _migrate() -> None:
         if not isinstance(profiles, dict):
             profiles = {}
         if DEFAULT_APP not in profiles:
-            legacy = {
-                field: settings.getSetting(old_key, DEFAULT_PROFILE[field])
-                for field, old_key in _LEGACY_KEYS.items()
-            }
             profiles[DEFAULT_APP] = {"overwrite": False,
-                                     "settings": _coerce_profile(legacy)}
+                                     "settings": _coerce_profile(None)}
             event("vibration", "settings_migrated", scope="global", version=str(CURRENT_SCHEMA))
         settings.setSetting(SETTINGS_KEY_GAME_PROFILES, profiles)
         settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
@@ -852,22 +840,13 @@ class Plugin:
                       outcome="failed", repeat=60)
 
     async def _migration(self):
-        """Fold the pre-1.5.0 flat keys into profile '0', before anything reads
-        the store.
-
-        This is the loader's own hook for the job: it runs to completion before
-        _main() is even scheduled, so no profile read can race the migration.
-
-        decky.migrate_settings() does not fit here - it relocates files as they
-        are, whereas this rewrites keys inside a file that is already in the
-        right place.
+        """Prepare the store before anything reads it; _main() is not yet scheduled.
 
         Nothing may escape. The loader runs this with run_until_complete inside
         a bare except that logs and sys.exit(0)s, and it never gets as far as
         creating the RPC socket - so a raise here would leave the panel retrying
         an is_ready() that has nobody to answer it, spinning on "Initializing"
-        forever. Recording the failure instead tells the user their old settings
-        did not come across, before they start rebuilding them on top.
+        forever. Recording the failure instead surfaces it in the panel.
         """
         self._migration_error = None
         try:

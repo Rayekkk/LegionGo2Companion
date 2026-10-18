@@ -78,7 +78,7 @@ non-cooperating EC writer.
 
 1. Install [Decky Loader](https://decky.xyz) if you do not already have it.
 2. Download `LegionGo2Companion-<version>.zip` from [Releases](https://github.com/Rayekkk/LegionGo2Companion/releases).
-3. Uninstall **LeGoTDP**, **LeGo Vibe Control** and **LeGo2 Brightness Fix** if you have them (keep their settings, see below).
+3. Uninstall **LeGoTDP**, **LeGo Vibe Control** and **LeGo2 Brightness Fix** if you have them.
 4. In Gaming Mode, open **Quick Access Menu → Decky → Settings → Developer**.
 5. Choose **Install Plugin from ZIP**, select the archive, then open **Legion Go 2 Companion** in Decky.
 
@@ -87,14 +87,13 @@ No terminal commands are needed.
 > [!IMPORTANT]
 > Companion pauses **all modules** while **LeGoTDP**, **LeGo Vibe Control** or
 > **LeGo2 Brightness Fix** is installed; disabling them is not enough. Uninstall them in
-> Decky Settings, keep their settings, then restart Decky or the console.
+> Decky Settings, then restart Decky or the console.
 
 <details>
 <summary><b>Moving from the standalone plugins</b></summary>
 
-Keep the old plugins' Decky settings folders when uninstalling them. Companion imports
-missing TDP, vibration and display settings; values already saved in Companion take
-precedence. It leaves the original files intact. Deleted settings cannot be imported.
+Companion does not import settings from these plugins; set TDP, vibration and display
+again in Companion.
 
 **Check again** confirms that a conflict is gone; a restart is still required. Renamed
 copies of those plugins still count. An unreadable manifest of an unrelated plugin is
@@ -575,7 +574,7 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 
 | What you see | What to do |
 |---|---|
-| All modules paused | Uninstall LeGoTDP, LeGo Vibe Control and LeGo2 Brightness Fix (keep their settings), then restart Decky or the console. |
+| All modules paused | Uninstall LeGoTDP, LeGo Vibe Control and LeGo2 Brightness Fix, then restart Decky or the console. |
 | A module is missing | Check **Manage Modules**: a disabled module is hidden; a failed start or cleanup has a retry button there. |
 | A control is unavailable | Read the reason on the page; some controls need system drivers or a specific model. |
 | Fan Control is not available | Check your model in [Requirements](#requirements). |
@@ -735,9 +734,8 @@ With custom control off, there are no fan workers or sleep inhibitors and no bac
 polling. Visible fan views request bounded passive readings; hiding them stops new requests.
 Active control uses its own telemetry independently of the menu.
 
-Settings migrations preserve the original ten-point and earlier eight-point curves, preset
-mappings and units in the saved data. Falling segments are raised to remove speed decreases
-while retaining the originals in archives. Migration keeps custom control off; optional TDP
+Saved fan settings use the format Fan Control shipped with in 2.1.0; any other format is
+refused and custom control stays off until the curve is reviewed. Optional TDP
 assignments remain dormant until explicitly enabled. Saving uses a revision check so an old
 editor cannot overwrite newer settings.
 

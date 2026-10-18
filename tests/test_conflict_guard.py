@@ -146,9 +146,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             manifest.write_text(json.dumps({"name": "OtherPlugin"}))
             plugin = self.make_plugin()
             with patch.object(main, "_installed_standalone_plugins",
-                              side_effect=lambda: installed_conflicts(current)), \
-                    patch.object(main, "_migrate_legacy_settings"), \
-                    patch.object(main, "_reload_component_settings"):
+                              side_effect=lambda: installed_conflicts(current)):
                 try:
                     await plugin._main()
                     text = '{"name":"OtherPlugin","metadata":' + '[' * 2000 + '0' + ']' * 2000 + '}'
@@ -193,13 +191,11 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_blocked_start_migration_unload_and_uninstall_never_enter_modules(self):
         plugin = self.make_plugin()
-        with patch.object(main, "_installed_standalone_plugins", return_value=["LeGoTDP"]), \
-             patch.object(main, "_migrate_legacy_settings") as migrate:
+        with patch.object(main, "_installed_standalone_plugins", return_value=["LeGoTDP"]):
             await plugin._migration(); await plugin._main()
             status = await plugin.get_version()
             self.assertTrue(status["blocked"])
             await plugin._unload(); await plugin._uninstall()
-            migrate.assert_not_called()
         for c in self.components:
             for stage in ("_main", "_migration", "_unload", "_uninstall"):
                 getattr(c, stage).assert_not_awaited()
@@ -225,9 +221,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_live_conflict_stops_all_modules_and_latches_until_process_restart(self):
         plugin = self.make_plugin(); conflicts = []
-        with patch.object(main, "_installed_standalone_plugins", side_effect=lambda: list(conflicts)), \
-             patch.object(main, "_migrate_legacy_settings"), \
-             patch.object(main, "_reload_component_settings"):
+        with patch.object(main, "_installed_standalone_plugins", side_effect=lambda: list(conflicts)):
             await plugin._main()
             for c in self.components: c._main.assert_awaited_once()
             conflicts.append("LeGo2 Brightness Fix")
@@ -259,7 +253,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rpc_before_main_takes_the_lock_waits_for_module_startup(self):
         plugin = self.make_plugin(); plugin._module_state = {"rgb": {"enabled": False}}
-        with patch.object(main, "_installed_standalone_plugins", return_value=[]),              patch.object(main, "_migrate_legacy_settings"), patch.object(main, "_reload_component_settings"),              patch.object(main, "restore_intent", AsyncMock()), patch.object(plugin, "_start_desktop", AsyncMock()):
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]),              patch.object(main, "restore_intent", AsyncMock()), patch.object(plugin, "_start_desktop", AsyncMock()):
             startup = asyncio.create_task(plugin._main())
             await plugin.modules_set_enabled("rgb", True)  # The first frontend RPC.
             await startup
@@ -268,9 +262,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_lifecycle_still_runs_all_modules(self):
         plugin = self.make_plugin()
-        with patch.object(main, "_installed_standalone_plugins", return_value=[]), \
-             patch.object(main, "_migrate_legacy_settings"), \
-             patch.object(main, "_reload_component_settings"):
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]):
             await plugin._migration(); await plugin._main(); await plugin._unload(); await plugin._uninstall()
         for c in self.components:
             for stage in ("_migration", "_main", "_unload", "_uninstall"):
@@ -297,7 +289,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scan_failure_at_startup_keeps_unstarted_modules_closed(self):
         plugin = self.make_plugin()
-        with patch.object(main, "_installed_standalone_plugins", side_effect=PermissionError("denied")), patch.object(main, "_migrate_legacy_settings"):
+        with patch.object(main, "_installed_standalone_plugins", side_effect=PermissionError("denied")):
             await plugin._main()
         with patch.object(main, "_installed_standalone_plugins", return_value=[]):
             await plugin._check_guard()
@@ -318,9 +310,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_catches_installation_without_frontend(self):
         plugin = self.make_plugin(); conflicts = []
         with patch.object(main, "_installed_standalone_plugins", side_effect=lambda: list(conflicts)), \
-             patch.object(main, "CHECK_INTERVAL_S", 0.01), \
-             patch.object(main, "_migrate_legacy_settings"), \
-             patch.object(main, "_reload_component_settings"):
+             patch.object(main, "CHECK_INTERVAL_S", 0.01):
             await plugin._main(); conflicts.append("LeGoTDP")
             for _ in range(100):
                 if not plugin._modules_started: break

@@ -284,11 +284,6 @@ SETTINGS_FIELD_EPP = "epp"
 SETTINGS_KEY_BASELINE = "baseline"
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
-# Pre-schema-2 locations, inside the plugin directory. Read once by _migrate()
-# and never written again.
-LEGACY_SETTINGS_FILE = os.path.join(PLUGIN_DIR, "settings.json")
-LEGACY_PROFILES_FILE = os.path.join(PLUGIN_DIR, "profiles.json")
-
 # The enforce loop reads settings from an executor thread while RPC handlers
 # write them from the event loop. Re-entrant because the write paths load first.
 _settings_lock = threading.RLock()
@@ -568,22 +563,8 @@ def _save_active(s: dict, spl: int, sppt: int, fppt: int) -> None:
         _save_settings(s)
 
 
-def _read_legacy(path: str) -> dict:
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
 def _migrate() -> None:
-    """Fold the pre-1.5.0 files in the plugin directory into Decky's store.
-
-    Runs exactly once. The old files are left on disk untouched: they disappear
-    with the next reinstall anyway, and leaving them means a downgrade still
-    finds its settings.
-    """
+    """Mark the baseline as pending and stamp the store schema, once."""
     with _settings_lock:
         _read_valid_settings()
         try:
@@ -594,24 +575,12 @@ def _migrate() -> None:
             # A fresh store means nothing was written yet. Otherwise the hardware
             # may hold our own values until the next boot resets the CPU controls.
             fresh = (all(settings.getSetting(key, None) is None
-                         for key in (SETTINGS_KEY_SETTINGS, SETTINGS_KEY_GAME_PROFILES))
-                     and not _read_legacy(LEGACY_SETTINGS_FILE))
+                         for key in (SETTINGS_KEY_SETTINGS, SETTINGS_KEY_GAME_PROFILES)))
             settings.setSetting(SETTINGS_KEY_BASELINE, {"pending": True} if fresh else
                                 {"pending": True, "after_boot": _read_sysfs(BOOT_ID_PATH)})
             settings.commit()
         if schema >= CURRENT_SCHEMA:
             return
-
-        legacy_settings = _read_legacy(LEGACY_SETTINGS_FILE)
-        legacy_profiles = _read_legacy(LEGACY_PROFILES_FILE)
-
-        if legacy_settings and settings.getSetting(SETTINGS_KEY_SETTINGS, None) is None:
-            settings.setSetting(SETTINGS_KEY_SETTINGS, legacy_settings)
-            event('tdp','legacy_settings_imported',store='settings')
-        if legacy_profiles and settings.getSetting(SETTINGS_KEY_GAME_PROFILES, None) is None:
-            settings.setSetting(SETTINGS_KEY_GAME_PROFILES, legacy_profiles)
-            event('tdp','legacy_settings_imported',store='profiles',count=len(legacy_profiles))
-
         settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
         settings.commit()
 
@@ -2986,24 +2955,13 @@ class Plugin:
             await self._enforce_pass()
 
     async def _migration(self):
-        """Fold the pre-1.5.0 files into Decky's store, before anything reads it.
-
-        This is the loader's own hook for the job: it runs to completion before
-        _main() is even scheduled, so no settings read can race the migration.
-
-        decky.migrate_settings() deliberately goes unused. It relocates a file
-        under its own basename and rm -rf's the source, so the legacy
-        PLUGIN_DIR/settings.json would land straight on top of the
-        SettingsManager store - identical filename - and replace the whole
-        keyed object with a flat pre-1.5.0 dict. That helper moves files; this
-        migration has to reshape them.
+        """Prepare the store before anything reads it; _main() is not yet scheduled.
 
         Nothing may escape. The loader runs this with run_until_complete inside
         a bare except that logs and sys.exit(0)s, and it never gets as far as
         creating the RPC socket - so a raise here would leave the panel retrying
         an is_ready() that has nobody to answer it, spinning on "Initializing"
-        forever. Recording the failure instead tells the user their old settings
-        did not come across, before they start rebuilding them on top.
+        forever. Recording the failure instead surfaces it in the panel.
         """
         try:
             await _offload(_migrate)
