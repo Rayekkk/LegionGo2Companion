@@ -3,7 +3,7 @@
 import contextlib
 import unittest
 from unittest.mock import patch
-import test_integration
+import support
 import tdp_backend as tdp
 
 
@@ -62,3 +62,35 @@ class DriftBudgetTests(unittest.TestCase):
         self.passes();self.assertEqual(self.apply.call_count,tdp.DRIFT_MAX_ATTEMPTS)
         self.observed.update(spl_limit=10.,sppt_limit=10.,fppt_limit=10.)
         self.passes();self.assertEqual(self.apply.call_count,2*tdp.DRIFT_MAX_ATTEMPTS)
+
+    def test_one_failed_correction_is_context_and_a_repeated_one_is_a_warning(self):
+        import collections, json, diagnostics
+        records=[]
+        self.stack.enter_context(patch.object(diagnostics,'_sink',lambda text,level:records.append(json.loads(text))))
+        self.stack.enter_context(patch.object(diagnostics,'_seen',collections.OrderedDict()))
+        self.apply.return_value={'success':False,'returncode':1}
+        self.passes(1)
+        self.assertEqual([r['level'] for r in records],['info'])
+        self.passes(1)
+        self.assertEqual([r['level'] for r in records],['info','warning'])
+        self.assertEqual(records[-1]['context']['count'],2)
+
+
+class TransitionBackoffTests(unittest.TestCase):
+    def test_tdp_transition_backoff_and_new_context(self):
+        with patch.object(tdp, "_transition_key", None), \
+             patch.object(tdp.time, "monotonic", return_value=100), \
+             patch.object(tdp, "_apply_and_record", return_value={"success": False}) as apply:
+            key = ("123", False, (15,18,25))
+            tdp._transition_apply(key[2], "test", key, "game")
+            first_retry = tdp._transition_retry_at
+            self.assertTrue(100 < first_retry <= 115)
+            tdp._transition_apply(key[2], "test", key, "game")
+            self.assertEqual(apply.call_count, 1)
+            for _ in range(2):
+                tdp._transition_retry_at = 0
+                tdp._transition_apply(key[2], "test", key, "game")
+            self.assertTrue(145 <= tdp._transition_retry_at <= 175,
+                            'Repeated failure must settle into a bounded low retry rate')
+            tdp._transition_apply(key[2], "new game", ("456", False, key[2]), "game")
+            self.assertEqual(apply.call_count, 4)

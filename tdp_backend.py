@@ -9,6 +9,7 @@ import module_runtime
 from active_app import resolve_running_app, scan_proc_for_appid
 import asyncio
 import copy
+import functools
 import glob
 import hashlib
 import json
@@ -28,8 +29,7 @@ if PLUGIN_DIR not in sys.path:
     sys.path.insert(0, PLUGIN_DIR)
 
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
-# name before we are imported, and sys.modules wins over sys.path. Keep this
-# backend-specific helper name for version/TLS compatibility.
+# name before we are imported, and sys.modules wins over sys.path.
 from tdp_updater import Updater  # noqa: E402 - needs the sys.path line above
 
 BIN_DIR       = os.path.join(PLUGIN_DIR, "bin")
@@ -42,13 +42,7 @@ RYZENADJ_SHA256 = "d04547f111c6af3e40d3f210468adb884561618ddade0b640d90e50c88d03
 RYZENADJ_BINARY_SHA256 = "18a61170efec95d2366355b9dd5c75a961a9e8008d42e3471f4f414a6faec471"
 
 # The pinned RyzenAdj download uses TLS verification and a host allowlist.
-# Standalone plugin update paths are intentionally not part of Companion.
-updater = Updater(
-    user_agent="LeGoTDP",
-    log_prefix="[legotdp]",
-    plugin_dir=PLUGIN_DIR,
-    logger=decky.logger,
-)
+updater = Updater(user_agent="LeGoTDP")
 
 # Reported by get_caps() when the firmware does not answer. The frontend carries
 # the same numbers as FALLBACK_STD for the moments before get_caps() returns.
@@ -59,26 +53,13 @@ FALLBACK_STD_W = {"spl": 35, "sppt": 37, "fppt": 45}
 HARD_MIN_MW = 5000
 HARD_MAX_MW = 50000
 
-# Devices driven through the firmware alone. The plugin downloads ryzenadj
-# itself, and on these it simply does not: the firmware range is the whole
-# range that is wanted here, so there is nothing for a second tool to add. The
-# sliders stop at what the firmware reports rather than at the Extras ceiling.
-#
-# Matched on DMI product_family, which names the family rather than the SKU -
-# a Legion Go S reports "Legion Go S 8APU1" whatever the model number on the
-# box. Anything that does not match is left on the path it has always taken,
-# so a device that is not listed here behaves exactly as it did before.
-WMI_ONLY_FAMILIES = ("legion go s",)
-
-# Preset ladder in watts, shared by both supported devices.
+# Preset ladder in watts.
 PRESETS_DEFAULT = {
     "silent":      {"spl": 8,  "sppt": 15, "fppt": 20},
     "balanced":    {"spl": 16, "sppt": 25, "fppt": 30},
     "performance": {"spl": 20, "sppt": 32, "fppt": 35},
     "max":         {"spl": 35, "sppt": 37, "fppt": 45},
 }
-
-PRESETS_LEGION_GO_S = PRESETS_DEFAULT
 
 # Lenovo firmware attributes. Writing these goes through the EC instead of poking the
 # SMU directly, so the firmware stops fighting us and the values survive suspend.
@@ -114,9 +95,9 @@ _mutation_lock = threading.RLock()
 # the enforce loop and a user action could interleave and corrupt each other.
 _apply_lock = threading.Lock()
 
-# Runtime capability, not merely device capability. A Go 2 still has a working
-# WMI range when the download fails, but it must not advertise the Extras range
-# until the executable actually exists and passed its integrity check.
+# Runtime capability, not merely device capability. RyzenAdj is downloaded only
+# when the user asks for Extras, and the Extras range is not advertised until
+# the executable actually exists and passed its integrity check.
 _ryzenadj_available: bool = False
 
 # Cache of last successful --info parse - keeps UI responsive when lock is held
@@ -156,69 +137,21 @@ _FRONTEND_APPID_TTL = 12.0
 
 # ── Device identity ────────────────────────────────────────────────────────────
 
-_wmi_only_cache: bool | None = None
-
-
-def _dmi(field: str) -> str:
-    try:
-        with open(f"/sys/class/dmi/id/{field}") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _wmi_only() -> bool:
-    """True on hardware this plugin drives through the firmware alone.
-
-    Read once: DMI does not change while the machine is running.
-    """
-    global _wmi_only_cache
-    if _wmi_only_cache is None:
-        # Each field is matched on its own. Joining them first would let a name
-        # straddle the seam - "Legion Go" followed by a version starting with
-        # "S" would read as "legion go s" and take a Go 2 down the wrong path.
-        fields = [_dmi(f).lower()
-                  for f in ("product_family", "product_version", "product_name")]
-        _wmi_only_cache = any(
-            name in field for field in fields for name in WMI_ONLY_FAMILIES)
-        if _wmi_only_cache:
-            event('tdp','firmware_interface_only',supported=True)
-    return _wmi_only_cache
-
-
-def _presets() -> dict:
-    """The preset ladder for the hardware in front of us."""
-    return PRESETS_LEGION_GO_S if _wmi_only() else PRESETS_DEFAULT
+# Read once: DMI does not change while the machine is running. Nothing is
+# written to power controls on any other model.
+_legion_go_2 = functools.cache(module_runtime.is_legion_go_2)
+UNSUPPORTED_MODEL = "TDP control is available only on the Lenovo Legion Go 2."
 
 
 def _defaults() -> dict:
     """Where a fresh install starts, in milliwatts."""
-    balanced = _presets()["balanced"]
+    balanced = PRESETS_DEFAULT["balanced"]
     return {"spl":  balanced["spl"]  * 1000,
             "sppt": balanced["sppt"] * 1000,
             "fppt": balanced["fppt"] * 1000,
             "enabled": True,
             "cpu_boost_enabled": None,
             "epp": None}
-
-
-def _ceilings_mw() -> tuple[int, int, int]:
-    """(spl, sppt, fppt) ceilings in milliwatts.
-
-    One per parameter, because the firmware does not use the same limit for all
-    three - a Legion Go S reports 40 / 43 / 53 W. Everywhere else this stays the
-    Extras ceiling, which ryzenadj reaches.
-
-    A firmware that will not answer keeps the old bound rather than collapsing
-    the sliders: better to leave them where they were than to silently cap
-    somebody at the minimum.
-    """
-    if not _wmi_only():
-        return HARD_MAX_MW, HARD_MAX_MW, HARD_MAX_MW
-    caps = _wmi_caps()
-    if not caps:
-        return HARD_MAX_MW, HARD_MAX_MW, HARD_MAX_MW
-    return tuple(caps[k]["max"] * 1000 for k in ("spl", "sppt", "fppt"))
 
 
 def _standard_ceilings_mw() -> tuple[int, int, int]:
@@ -231,17 +164,14 @@ def _standard_ceilings_mw() -> tuple[int, int, int]:
 
 def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     """Ceilings the current persisted mode is allowed to apply."""
-    if _wmi_only():
-        return _ceilings_mw()
     if state.get("extras_unlocked", False) and _ryzenadj_available:
         return HARD_MAX_MW, HARD_MAX_MW, HARD_MAX_MW
     return _standard_ceilings_mw()
 
 
 # Plugging the charger in makes the firmware apply a profile of its own, and it
-# lands after ours: measured on a Legion Go S, an apply at the moment of the
-# transition wrote 40/43/53 and the attributes read back 10/15/20 - the
-# low-power defaults - a fraction of a second later. One write at the instant
+# lands after ours: an apply at the moment of the transition read back the
+# low-power defaults a fraction of a second later. One write at the instant
 # the state changes is simply too early, so the values go back several times
 # over the seconds that follow, until one of them is the last word.
 #
@@ -259,6 +189,8 @@ _ac_target: tuple = ()
 # user action, game change or charger transition increments this and makes the
 # old ladder a no-op before it reaches hardware.
 _ac_generation: int = 0
+# When the charger last changed; a game switch inside the ladder's span restarts it.
+_ac_changed_at: float = float("-inf")
 
 
 # ── AC power detection ─────────────────────────────────────────────────────────
@@ -341,10 +273,16 @@ settings = SettingsManager(
 
 SETTINGS_KEY_SETTINGS      = "settings"
 SETTINGS_KEY_GAME_PROFILES = "game_profiles"
+# Profiles the user turned off. A separate key, so no game_profiles lookup can apply them.
+SETTINGS_KEY_INACTIVE_GAME_PROFILES = "inactive_game_profiles"
 SETTINGS_KEY_SCHEMA        = "schema_version"
 CURRENT_SCHEMA             = 2
 SETTINGS_FIELD_CPU_BOOST_ENABLED = "cpu_boost_enabled"
 SETTINGS_FIELD_EPP = "epp"
+# What release puts back: {"pending": True[, "after_boot": id]} until captured,
+# then the system's own platform profile / CPU Boost / EPP (None = unknown).
+SETTINGS_KEY_BASELINE = "baseline"
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 # Pre-schema-2 locations, inside the plugin directory. Read once by _migrate()
 # and never written again.
@@ -356,17 +294,8 @@ LEGACY_PROFILES_FILE = os.path.join(PLUGIN_DIR, "profiles.json")
 _settings_lock = threading.RLock()
 
 
-async def _offload(fn, *args):
-    """Run blocking work off the event loop.
-
-    Settings I/O, sysfs reads and waiting on _settings_lock or _apply_lock all
-    block. Decky gives each plugin its own process and loop, so blocking here
-    does not stall other plugins - it stalls this one: every RPC the panel sends
-    queues behind it, and neither the enforce loop nor the info loop ticks until
-    it returns. _apply_lock alone can be held for a profile bounce plus three
-    firmware writes.
-    """
-    return await module_runtime.offload('tdp', fn, *args)
+# Settings I/O, sysfs and the apply locks block; keep them off the plugin's loop.
+_offload = functools.partial(module_runtime.offload, 'tdp')
 
 
 def _read_valid_settings() -> None:
@@ -411,7 +340,7 @@ def _clamp_triplet(spl, sppt, fppt,
         spl, sppt, fppt = int(spl), int(sppt), int(fppt)
     except (TypeError, ValueError):
         return _defaults()["spl"], _defaults()["sppt"], _defaults()["fppt"]
-    spl_max, sppt_max, fppt_max = ceilings or _ceilings_mw()
+    spl_max, sppt_max, fppt_max = ceilings or (HARD_MAX_MW, HARD_MAX_MW, HARD_MAX_MW)
     spl  = max(HARD_MIN_MW, min(spl,  spl_max))
     fppt = max(spl,         min(fppt, fppt_max))
     sppt = max(spl,         min(sppt, min(sppt_max, fppt)))
@@ -505,7 +434,14 @@ def _save_settings(s: dict) -> None:
 # ── Per-game profiles ──────────────────────────────────────────────────────────
 
 def _load_profiles() -> dict:
-    raw_profiles = _read_key(SETTINGS_KEY_GAME_PROFILES, {})
+    return _normalised_profiles(_read_key(SETTINGS_KEY_GAME_PROFILES, {}))
+
+
+def _load_inactive_profiles() -> dict:
+    return _normalised_profiles(_read_key(SETTINGS_KEY_INACTIVE_GAME_PROFILES, {}))
+
+
+def _normalised_profiles(raw_profiles: dict) -> dict:
     profiles: dict[str, dict] = {}
     for raw_app_id, raw_profile in raw_profiles.items():
         app_id = _normalise_app_id(raw_app_id, allow_empty=False)
@@ -530,13 +466,8 @@ def _load_profiles() -> dict:
             p["ac_spl"], p["ac_sppt"], p["ac_fppt"] = _clamp_triplet(
                 p["ac_spl"], p.get("ac_sppt", p["ac_spl"]), p.get("ac_fppt", p["ac_spl"]))
         profiles[app_id] = p
-        if len(profiles) >= MAX_GAME_PROFILES:
-            break
+    # MAX_GAME_PROFILES limits only new profiles: a store already above it keeps every valid one.
     return profiles
-
-
-def _save_profiles(profiles: dict) -> None:
-    _write_key(SETTINGS_KEY_GAME_PROFILES, profiles)
 
 
 def _effective_cpu_values(
@@ -592,7 +523,7 @@ def _prepare_cpu_profile(
     """
     existing = profiles.get(app_id)
     creating = existing is None
-    if creating and len(profiles) >= MAX_GAME_PROFILES:
+    if creating and len(profiles) + len(_load_inactive_profiles()) >= MAX_GAME_PROFILES:
         raise ValueError("maximum number of game profiles reached")
     for field in (SETTINGS_FIELD_CPU_BOOST_ENABLED, SETTINGS_FIELD_EPP):
         if state.get(field) is not None or (
@@ -659,6 +590,15 @@ def _migrate() -> None:
             schema = int(settings.getSetting(SETTINGS_KEY_SCHEMA, 1))
         except (TypeError, ValueError):
             schema = 1
+        if settings.getSetting(SETTINGS_KEY_BASELINE, None) is None:
+            # A fresh store means nothing was written yet. Otherwise the hardware
+            # may hold our own values until the next boot resets the CPU controls.
+            fresh = (all(settings.getSetting(key, None) is None
+                         for key in (SETTINGS_KEY_SETTINGS, SETTINGS_KEY_GAME_PROFILES))
+                     and not _read_legacy(LEGACY_SETTINGS_FILE))
+            settings.setSetting(SETTINGS_KEY_BASELINE, {"pending": True} if fresh else
+                                {"pending": True, "after_boot": _read_sysfs(BOOT_ID_PATH)})
+            settings.commit()
         if schema >= CURRENT_SCHEMA:
             return
 
@@ -674,6 +614,33 @@ def _migrate() -> None:
 
         settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
         settings.commit()
+
+
+def _capture_baseline() -> None:
+    """Persist the system's power controls once, before the first write to any."""
+    with _settings_lock:
+        _read_valid_settings()
+        marker = settings.getSetting(SETTINGS_KEY_BASELINE, None)
+        if not isinstance(marker, dict) or marker.get("pending") is not True:
+            return
+        if "after_boot" in marker and (
+                not marker["after_boot"] or _read_sysfs(BOOT_ID_PATH) in ("", marker["after_boot"])):
+            return
+        path = _profile_path()
+        profile = _read_profile(path) if path else ""
+        settings.setSetting(SETTINGS_KEY_BASELINE, {
+            # 'custom' is the plugin's own mode, never a baseline.
+            "platform_profile": profile if profile and profile != "custom" else None,
+            SETTINGS_FIELD_CPU_BOOST_ENABLED: _read_cpu_baseline(SETTINGS_FIELD_CPU_BOOST_ENABLED),
+            SETTINGS_FIELD_EPP: _read_cpu_baseline(SETTINGS_FIELD_EPP),
+        })
+        settings.commit()
+
+
+def _baseline() -> dict:
+    """The captured values, or {} when none were captured (today's defaults apply)."""
+    value = _read_key(SETTINGS_KEY_BASELINE, {})
+    return {} if value.get("pending") else value
 
 
 # ── ryzenadj binary ────────────────────────────────────────────────────────────
@@ -845,16 +812,18 @@ def _wmi_caps() -> dict:
     return caps
 
 
+def _profile_choices(path: str) -> list[str]:
+    try:
+        with open(os.path.join(os.path.dirname(path), "choices")) as f:
+            return f.read().split()
+    except OSError:
+        return []
+
+
 def _profile_path() -> str | None:
     """The platform-profile node whose choices include 'custom' (the tunable one)."""
-    for path in glob.glob(PLATFORM_PROFILE_GLOB):
-        try:
-            with open(os.path.join(os.path.dirname(path), "choices")) as f:
-                if "custom" in f.read().split():
-                    return path
-        except OSError:
-            continue
-    return None
+    return next((path for path in glob.glob(PLATFORM_PROFILE_GLOB)
+                 if "custom" in _profile_choices(path)), None)
 
 
 def _read_profile(path: str) -> str:
@@ -876,14 +845,15 @@ def _write_profile(path: str, value: str) -> bool:
         return False
 
 
-def _write_ppt(spl_w: int, sppt_w: int, fppt_w: int) -> None:
+def _write_ppt(spl_w: int, sppt_w: int, fppt_w: int, retried: bool = False) -> None:
     for key, val in (("spl", spl_w), ("sppt", sppt_w), ("fppt", fppt_w)):
         try:
             with open(_wmi_path(key, "current_value"), "w") as f:
                 f.write(str(val))
         except OSError as exc:
-            event("tdp", "attribute_write", level="warning", error=exc,
-                  attribute=WMI_ATTRS[key], outcome="failed", repeat=60)
+            # A refused in-place write is normal: the profile bounce below writes again.
+            event("tdp", "attribute_write", level="info" if retried else "warning", error=exc,
+                  attribute=WMI_ATTRS[key], outcome="retried" if retried else "failed", repeat=60)
 
 
 def _ppt_matches(spl_w: int, sppt_w: int, fppt_w: int) -> bool:
@@ -903,21 +873,17 @@ def _apply_wmi(spl_w: int, sppt_w: int, fppt_w: int) -> dict:
 
     # Fast path: if we can latch a write in place, skip the visible profile bounce.
     if _read_profile(path) == "custom":
-        _write_ppt(spl_w, sppt_w, fppt_w)
+        _write_ppt(spl_w, sppt_w, fppt_w, retried=True)
         if _ppt_matches(spl_w, sppt_w, fppt_w):
             decky.logger.info(f"[legotdp] wmi apply {spl_w}W/{sppt_w}W/{fppt_w}W")
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
 
     # Force a real transition into custom, then write. Bounce via a low profile so the
     # momentary blip is downward, never a spike.
-    bounce = "low-power"
-    try:
-        with open(os.path.join(os.path.dirname(path), "choices")) as f:
-            choices = f.read().split()
-        bounce = next((c for c in ("low-power", "balanced", "performance") if c in choices),
-                      next((c for c in choices if c != "custom"), "custom"))
-    except OSError:
-        pass
+    choices = _profile_choices(path)
+    bounce = (next((c for c in ("low-power", "balanced", "performance") if c in choices),
+                   next((c for c in choices if c != "custom"), "custom"))
+              if choices else "low-power")
     _write_profile(path, bounce)
     if not _write_profile(path, "custom"):
         return {"success": False, "stdout": "", "stderr": "cannot select custom profile",
@@ -1008,9 +974,12 @@ _applied_at: float = 0.0
 
 
 def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
-    """Prefer the firmware path; fall back to ryzenadj only when the request exceeds
-    what the firmware accepts (the Extras range)."""
+    """The firmware path inside the range it accepts; verified ryzenadj only
+    beyond it (the Extras range) or when the firmware interface is absent."""
     global _last_source, _applied_mw, _applied_at
+    if not _legion_go_2():
+        return {"success": False, "stdout": "", "stderr": UNSUPPORTED_MODEL, "returncode": -1}
+    _capture_baseline()
     spl_mw, sppt_mw, fppt_mw = _clamp_triplet(spl_mw, sppt_mw, fppt_mw)
     triple_w = (("spl", spl_mw // 1000), ("sppt", sppt_mw // 1000), ("fppt", fppt_mw // 1000))
     if not _apply_lock.acquire(timeout=8.0):
@@ -1023,17 +992,8 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
                 _last_source = "wmi"
                 _applied_mw, _applied_at = (spl_mw, sppt_mw, fppt_mw), time.monotonic()
                 _invalidate_limits_cache()
-                return result
-            if _wmi_only():
-                # Say what actually happened. ryzenadj is deliberately not
-                # installed here, so falling through to it would only turn a
-                # firmware refusal into a confusing "ryzenadj not found".
-                return result
-            event('tdp','firmware_fallback',level='warning',source='wmi',reason='hardware_unconfirmed',returncode=result.get('returncode'),repeat=60)
-        if _wmi_only():
-            return {"success": False, "stdout": "",
-                    "stderr": "requested limits are outside what the firmware accepts",
-                    "returncode": -1}
+            # No SMU fallback inside the firmware range: a refusal is reported as is.
+            return result
         result = _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
         if result["success"]:
             _last_source = "ryzenadj"
@@ -1217,24 +1177,13 @@ def _get_running_appid() -> str:
                                time.monotonic(), _scan_proc_for_appid, _FRONTEND_APPID_TTL)
 
 
-def _suspend_offset() -> float | None:
-    clock = getattr(time, "CLOCK_BOOTTIME", None)
-    if clock is None or not hasattr(time, "clock_gettime"):
-        return None
-    try:
-        return time.clock_gettime(clock) - time.monotonic()
-    except (OSError, ValueError):
-        return None
+_suspend_offset = module_runtime.suspend_offset
 
 
 def _resume_detected() -> bool:
     global _last_suspend_offset
-    current = _suspend_offset()
-    if current is None:
-        return False
-    previous = _last_suspend_offset
-    _last_suspend_offset = current
-    return previous is not None and current - previous >= 1.0
+    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
+    return resumed
 
 
 def _scan_proc_for_appid() -> str:
@@ -1281,7 +1230,7 @@ def _arm_ac_settle(target: tuple) -> int:
     return _ac_generation
 
 
-def _apply_and_record(spl: int, sppt: int, fppt: int, why: str) -> dict:
+def _apply_and_record(spl: int, sppt: int, fppt: int, why: str, reason: str) -> dict:
     """Apply a triplet and remember it as the target the enforce pass defends."""
     with _mutation_lock:
         state = _load_settings()
@@ -1289,7 +1238,7 @@ def _apply_and_record(spl: int, sppt: int, fppt: int, why: str) -> dict:
             return {"success": False, "stdout": "", "stderr": "plugin disabled",
                     "returncode": -1}
         target = _clamp_for_settings(state, spl, sppt, fppt)
-        result = _apply_limits_with_saved_cpu_power(state, *target)
+        result = _apply_limits_with_saved_cpu_power(state, *target, reason=reason)
         if result["success"]:
             _save_active(state, *target)
             decky.logger.info(
@@ -1338,7 +1287,7 @@ def _reapply_current_target(expected_generation: int | None = None) -> bool:
                 s, "after charger transition settled")
             _ac_target = ()
             return True
-        _apply_and_record(*target, "TDP after a charger transition")
+        _apply_and_record(*target, "TDP after a charger transition", "ac")
         if _target_matches(target):
             _best_effort_reapply_saved_cpu_power_locked(
                 s, "after charger transition re-apply")
@@ -1352,14 +1301,14 @@ _transition_failures = 0
 _transition_retry_at = 0.0
 
 
-def _transition_apply(target, why, key):
+def _transition_apply(target, why, key, reason):
     global _transition_key, _transition_failures, _transition_retry_at
     if key != _transition_key:
         _transition_key, _transition_failures, _transition_retry_at = key, 0, 0.0
     if time.monotonic() < _transition_retry_at:
         return {"success": False}
     try:
-        result = _apply_and_record(*target, why)
+        result = _apply_and_record(*target, why, reason)
     except Exception:
         _transition_failures += 1
         _transition_retry_at = time.monotonic() + (60 if _transition_failures >= 3 else 5)
@@ -1380,7 +1329,7 @@ def _check_and_enforce_locked() -> dict:
     which cannot await decky.emit itself, so the async loop above does the
     emitting - that is what lets the panel stop polling for the charger state.
     """
-    global _current_game_id, _current_ac_online, _last_cpu_power_check, _transition_key
+    global _current_game_id, _current_ac_online, _last_cpu_power_check, _transition_key, _ac_changed_at
 
     s = _load_settings()
     now = time.monotonic()
@@ -1397,6 +1346,10 @@ def _check_and_enforce_locked() -> dict:
             s, "CPU control drift check")
         _last_cpu_power_check = now
     if not s.get("enabled", True):
+        # Track the fresh frontend report (no /proc scan) so an unchanged
+        # set_active_app heartbeat does not run another pass.
+        _current_game_id = resolve_running_app(_frontend_appid, _frontend_appid_ts, now,
+                                               lambda: _current_game_id, _FRONTEND_APPID_TTL)
         return {}
 
     appid    = _get_running_appid()
@@ -1404,6 +1357,9 @@ def _check_and_enforce_locked() -> dict:
     ac_changed = ac_now != _current_ac_online
     _current_ac_online = ac_now
     events = {"power_source": {"ac": ac_now}} if ac_changed else {}
+    if ac_changed:
+        _ac_changed_at = now
+    resettle = now - _ac_changed_at < sum(AC_SETTLE_DELAYS_S)
 
     game_changed = appid != _current_game_id
 
@@ -1413,13 +1369,13 @@ def _check_and_enforce_locked() -> dict:
         if profile is not None:
             trigger = "AC state change" if ac_changed else "game launch"
             target = _profile_target(s, profile, ac_now)
-            if ac_changed:
+            if resettle:
                 events["_resettle_generation"] = _arm_ac_settle(target)
             else:
                 _cancel_ac_settle()
             result = _transition_apply(
                 target, f"game profile on {trigger} (ac={ac_now})",
-                (appid, ac_now, target))
+                (appid, ac_now, target), "ac" if ac_changed and not game_changed else "game")
             _current_game_id = appid if result.get("success") else "\x00"
             return events
 
@@ -1433,11 +1389,12 @@ def _check_and_enforce_locked() -> dict:
         else:
             why = f"global TDP on AC change (ac={ac_now})"
         target = _global_triplet(s)
-        if ac_changed:
+        if resettle:
             events["_resettle_generation"] = _arm_ac_settle(target)
         else:
             _cancel_ac_settle()
-        result = _transition_apply(target, why, (appid, ac_now, target))
+        result = _transition_apply(target, why, (appid, ac_now, target),
+                                   "ac" if ac_changed and not game_changed else "global")
         _current_game_id = appid if result.get("success") else "\x00"
         return events
 
@@ -1451,8 +1408,16 @@ def _check_and_enforce_locked() -> dict:
 
 
 def _check_and_enforce() -> dict:
+    global _current_ac_online
     with _mutation_lock:
-        return _check_and_enforce_locked()
+        ac_before = _current_ac_online
+        try:
+            return _check_and_enforce_locked()
+        except Exception:
+            # A transition that raised is not applied: keep the charger edge (and
+            # its panel event) so the next pass retries it.
+            _current_ac_online = ac_before
+            raise
 
 
 # WMI reads back the exact value we wrote, so a tight tolerance is right there. The
@@ -1507,12 +1472,13 @@ def _enforce_target(want: tuple) -> None:
     # cross-check; both make `cur` unreliable rather than merely stale.
     profile_lost = _wmi_profile_lost()
     overridden = _wmi_limits_overridden(want_w) if _last_source == "wmi" else False
-    context = (profile_lost, _wmi_live_limits if overridden is True else ())
+    # No fresh live read (None) keeps the last confirmed one, or the next identical read looks like a new cause.
+    live = _wmi_live_limits if overridden is True else _drift_context[1] if overridden is None else ()
+    context = (profile_lost, live)
     if _drift_settled:
         same_limits = all(abs(c - r) <= tolerance for c, r in zip(cur, _drift_settled))
-        same_live = (overridden is None or
-                     (len(context[1]) == len(_drift_context[1]) and
-                      all(abs(a-b) <= tolerance for a, b in zip(context[1], _drift_context[1]))))
+        same_live = (len(live) == len(_drift_context[1]) and
+                     all(abs(a-b) <= tolerance for a, b in zip(live, _drift_context[1])))
         same_cause = profile_lost == _drift_context[0] and same_live
         if same_limits and same_cause:
             return
@@ -1548,15 +1514,21 @@ def _enforce_target(want: tuple) -> None:
     _drift_attempts += 1
     decky.logger.info(
         f"[legotdp] TDP drift {cur} -> {want_w}, re-applying (attempt {_drift_attempts})")
-    result = _apply_limits_with_saved_cpu_power(_load_settings(), *want)
+    result = _apply_limits_with_saved_cpu_power(_load_settings(), *want, reason="drift")
     if not result["success"]:
-        event('tdp','drift_apply_failed',level='warning',returncode=result.get('returncode'),reason='hardware_unconfirmed',repeat=60)
+        # A single miss is expected while Steam resets TDP during a session restart; the next pass retries.
+        event('tdp','drift_apply_failed',level='warning' if _drift_attempts > 1 else 'info',
+              returncode=result.get('returncode'),reason='hardware_unconfirmed',count=_drift_attempts,repeat=60)
 
 
 def _restore_defaults_locked() -> dict:
     """Hand control back to firmware. Caller must hold _mutation_lock."""
     global _last_source, _applied_mw, _applied_at
     global _drift_target, _drift_settled, _drift_attempts, _drift_context
+    if not _legion_go_2():
+        return {"success": True, "stdout": "", "stderr": "", "returncode": 0}  # never written
+    _capture_baseline()
+    saved = _baseline().get("platform_profile")
     if not _apply_lock.acquire(timeout=8.0):
         return {"success": False, "stdout": "", "stderr": "apply busy", "returncode": -1}
     try:
@@ -1564,11 +1536,14 @@ def _restore_defaults_locked() -> dict:
         _drift_context = (False, ())
         path = _profile_path()
         if path:
-            if not _write_profile(path, "balanced") or _read_profile(path) != "balanced":
-                return {"success": False, "stdout": "", "stderr": "Balanced firmware profile was not confirmed", "returncode": -1}
+            target = (saved if isinstance(saved, str) and saved != "custom"
+                      and saved in _profile_choices(path) else "balanced")
+            if not _write_profile(path, target) or _read_profile(path) != target:
+                return {"success": False, "stdout": "", "returncode": -1,
+                        "stderr": f"{target.capitalize()} firmware profile was not confirmed"}
             _last_source, _applied_mw, _applied_at = "", (), 0.0
             _invalidate_limits_cache()
-            decky.logger.info("[legotdp] restore_defaults: platform profile -> balanced")
+            decky.logger.info(f"[legotdp] restore_defaults: platform profile -> {target}")
             return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
         if not _ryzenadj_lock.acquire(timeout=4.0):
             return {"success": False, "stdout": "", "stderr": "ryzenadj busy", "returncode": -1}
@@ -1587,8 +1562,14 @@ def _restore_defaults_locked() -> dict:
 
 def _release_controls_locked() -> dict:
     """Return every managed power control to standard policy without erasing intent."""
+    if not _legion_go_2():
+        return {"success": True, "error": ""}  # nothing was ever written here
     state = _load_settings()
     profiles = _load_profiles()
+    _capture_baseline()  # a pending baseline reads as {} and would be overwritten by the hard defaults
+    baseline = _baseline()
+    boost = baseline.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
+    epp = _canonical_epp_syntax(baseline.get(SETTINGS_FIELD_EPP))
     errors = []
     operations = []
     if state.get("enabled", True):
@@ -1597,9 +1578,10 @@ def _release_controls_locked() -> dict:
     choices = [state, *profiles.values()]
     if any(choice.get(key) is not None for choice in choices
            for key in ("cpu_boost_enabled", "ac_cpu_boost_enabled")):
-        operations.append(("CPU Boost", _apply_cpu_boost_hardware, (True,)))
+        operations.append(("CPU Boost", _apply_cpu_boost_hardware,
+                           (boost if type(boost) is bool else True,)))
     if any(choice.get(key) is not None for choice in choices for key in ("epp", "ac_epp")):
-        operations.append(("EPP", _apply_epp_hardware, ("balance_performance",)))
+        operations.append(("EPP", _apply_epp_hardware, (epp or "balance_performance",)))
     for name, operation, args in operations:
         try:
             result = operation(*args)
@@ -1711,6 +1693,8 @@ def _cpufreq_control_dirs() -> list[str]:
 
 def _boost_targets() -> tuple[list[str], bool, str]:
     """Select one Boost ABI in kernel-preferred fallback order."""
+    if not _legion_go_2():
+        return [], False, UNSUPPORTED_MODEL
     generic = os.path.join(CPU_SYS_ROOT, "cpufreq", "boost")
     if os.path.exists(generic):
         return [generic], True, ""
@@ -1776,6 +1760,8 @@ def _capture_cpu_boost() -> dict:
 
 
 def _epp_targets() -> tuple[list[str], bool, str]:
+    if not _legion_go_2():
+        return [], False, UNSUPPORTED_MODEL
     dirs = _cpufreq_control_dirs()
     if not dirs:
         return [], False, ""
@@ -1914,6 +1900,12 @@ def _rollback_cpu_power_write(
     return failures
 
 
+def _rollback_detail(originals, requested, changed, equivalent) -> str:
+    rollback = _rollback_cpu_power_write(originals, requested, changed, equivalent)
+    return (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
+            else "; previous state restored")
+
+
 def _transactional_cpu_power_write(
     originals: dict[str, str],
     requested: dict[str, str],
@@ -1946,10 +1938,7 @@ def _transactional_cpu_power_write(
                 raise OSError(
                     f"{_sysfs_short_name(path)} final readback mismatch")
     except (OSError, ValueError, KeyError) as exc:
-        rollback = _rollback_cpu_power_write(
-            originals, requested, changed, equivalent)
-        suffix = (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
-                  else "; previous state restored")
+        suffix = _rollback_detail(originals, requested, changed, equivalent)
         return {
             "success": False,
             "error": f"{label} write failed: {exc}{suffix}",
@@ -1983,6 +1972,7 @@ def _epp_equivalent(left: str, right: str) -> bool:
 
 
 def _apply_cpu_boost_hardware(enabled: bool) -> dict:
+    _capture_baseline()
     capture = _capture_cpu_boost()
     if not capture["can_set"]:
         return {
@@ -2020,6 +2010,7 @@ def _compatible_saved_epp(capture: dict, value) -> str | None:
 
 
 def _apply_epp_hardware(value: str) -> dict:
+    _capture_baseline()
     capture = _capture_epp()
     if not capture["can_set"]:
         return {
@@ -2101,6 +2092,17 @@ def _cpu_power_controls_error_status(
     }
 
 
+def _stored_edit_refusal(app_id: str, current_app_id: str) -> str | None:
+    """A saved profile is edited without hardware writes, so never the running game's."""
+    if not app_id:
+        return "invalid profile request"
+    if current_app_id == app_id:
+        return "game is running; change its settings as the running game"
+    if app_id not in _load_profiles():
+        return "this game has no profile in use"
+    return None
+
+
 def _cpu_editor_profile(state: dict, profiles: dict, app_id: str,
                         ac_profile: bool) -> dict:
     selected = profiles.get(app_id) if app_id else None
@@ -2164,7 +2166,7 @@ def _best_effort_reapply_saved_cpu_power_locked(
 
 
 def _apply_limits_with_saved_cpu_power(
-    state: dict, spl: int, sppt: int, fppt: int
+    state: dict, spl: int, sppt: int, fppt: int, reason: str | None = None
 ) -> dict:
     """Apply Layer 1 first, then restore persistent CPU controls.
 
@@ -2174,6 +2176,10 @@ def _apply_limits_with_saved_cpu_power(
     Caller holds _mutation_lock.
     """
     result = _apply_limits(spl, sppt, fppt)
+    if result["success"]:
+        # Without a reason, the RPC that applied it is the event's operation.
+        event('tdp', 'limits_applied', reason=reason, source=_last_source,
+              **dict(zip(("spl", "sppt", "fppt"), (value // 1000 for value in _applied_mw))))
     # A failed Layer 1 call may already have selected platform_profile before a
     # later firmware/RyzenAdj error. CPU controls are independent, so restore
     # them even on that partial failure.
@@ -2207,7 +2213,7 @@ def _tdp_user_transaction():
                     old = _clamp_for_settings(before, *(
                         before.get("active_" + key, before.get(key, _defaults()[key]))
                         for key in ("spl", "sppt", "fppt")))
-                    rollback = _apply_limits_with_saved_cpu_power(before_cpu, *old)
+                    rollback = _apply_limits_with_saved_cpu_power(before_cpu, *old, reason="rollback")
                 else:
                     rollback = _restore_defaults_locked()
                     rollback["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(
@@ -2240,7 +2246,8 @@ class Plugin:
     def __init__(self):
         self._tasks = []
         self._helper_cancel = threading.Event()
-        self._extras_retry_busy = False
+        # Extras taps and helper retries run in tap order, so the last choice wins.
+        self._extras_lock = asyncio.Lock()
         self._helper_error = ""
 
     _ready: bool = False
@@ -2254,20 +2261,6 @@ class Plugin:
 
     async def get_settings(self) -> dict:
         return await _offload(_load_settings)
-
-    @staticmethod
-    def _cpu_power_persistence_failure(
-        exc: Exception, transaction: dict, equivalent
-    ) -> str:
-        rollback = _rollback_cpu_power_write(
-            transaction["originals"],
-            transaction["requested"],
-            transaction["changed"],
-            equivalent,
-        )
-        suffix = (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
-                  else "; previous state restored")
-        return f"settings persist failed: {exc}{suffix}"
 
     async def get_cpu_power_controls(self, app_id: str = "", ac_profile: bool = False) -> dict:
         def _do() -> dict:
@@ -2286,7 +2279,7 @@ class Plugin:
         return await _offload(_do)
 
     async def _set_cpu_control(self, field: str, value, app_id: str,
-                               ac_profile: bool, expected_app_id: str | None) -> dict:
+                               ac_profile: bool, expected_app_id: str | None, stored: bool = False) -> dict:
         def _do() -> dict:
             with _mutation_lock:
                 selected = _normalise_app_id(app_id)
@@ -2296,14 +2289,17 @@ class Plugin:
                         selected or "", ac_profile if type(ac_profile) is bool else False,
                         operation_success=success, operation_error=error)
                 try:
-                    if (selected is None or type(ac_profile) is not bool
-                            or (ac_profile and not selected)
+                    if (selected is None or type(ac_profile) is not bool or type(stored) is not bool
+                            or (ac_profile and not selected) or (stored and not selected)
                             or (expected_app_id is not None and expected is None)):
                         return status(False, "invalid CPU profile context")
                     current = _get_running_appid()
                     if expected is not None and current != expected:
                         return status(False, "foreground game changed")
-                    if selected and current != selected:
+                    refusal = _stored_edit_refusal(selected, current) if stored else None
+                    if refusal:
+                        return status(False, refusal)
+                    if selected and not stored and current != selected:
                         return status(False, "game is no longer active")
                     state, profiles = _load_settings(), _load_profiles()
                     if selected and not state.get("enabled", True):
@@ -2335,7 +2331,7 @@ class Plugin:
                         profile[("ac_" if ac_profile else "") + field] = canonical
                     else:
                         state[field] = canonical
-                    active = _cpu_editor_profile(state, profiles, selected, ac_profile)["active"]
+                    active = not stored and _cpu_editor_profile(state, profiles, selected, ac_profile)["active"]
                     transaction = None
                     if active:
                         transaction = apply(canonical)
@@ -2347,8 +2343,9 @@ class Plugin:
                             values[SETTINGS_KEY_GAME_PROFILES] = profiles
                         _write_keys(values)
                     except Exception as exc:
-                        error = (self._cpu_power_persistence_failure(exc, transaction, equivalent)
-                                 if transaction is not None else f"settings persist failed: {exc}")
+                        error = f"settings persist failed: {exc}" + (_rollback_detail(
+                            transaction["originals"], transaction["requested"],
+                            transaction["changed"], equivalent) if transaction is not None else "")
                         return status(False, error)
                     event("tdp", "cpu_profile_saved", attribute=field,
                           scope=("game_ac" if ac_profile else "game") if selected else "global",
@@ -2365,24 +2362,28 @@ class Plugin:
         return await _offload(_do)
 
     async def set_cpu_boost(self, enabled: bool, app_id: str = "", ac_profile: bool = False,
-                            expected_app_id: str | None = None) -> dict:
+                            expected_app_id: str | None = None, stored: bool = False) -> dict:
         return await self._set_cpu_control(
-            SETTINGS_FIELD_CPU_BOOST_ENABLED, enabled, app_id, ac_profile, expected_app_id)
+            SETTINGS_FIELD_CPU_BOOST_ENABLED, enabled, app_id, ac_profile, expected_app_id, stored)
 
     async def set_epp(self, value: str, app_id: str = "", ac_profile: bool = False,
-                      expected_app_id: str | None = None) -> dict:
+                      expected_app_id: str | None = None, stored: bool = False) -> dict:
         return await self._set_cpu_control(
-            SETTINGS_FIELD_EPP, value, app_id, ac_profile, expected_app_id)
+            SETTINGS_FIELD_EPP, value, app_id, ac_profile, expected_app_id, stored)
 
     async def get_power_source(self) -> dict:
         return {"ac": await _offload(_get_ac_online)}
 
     async def retry_extras(self) -> dict:
-        if _wmi_only():
-            return {"success": False, "error": "Extras is unavailable on this device"}
-        if getattr(self, "_extras_retry_busy", False):
-            return {"success": False, "error": "A retry is already running"}
-        self._extras_retry_busy = True
+        """Download and verify RyzenAdj. Only ever started by the user (Extras)."""
+        async with self._extras_lock:
+            return await self._retry_extras()
+
+    async def _retry_extras(self) -> dict:
+        if not _legion_go_2():
+            return {"success": False, "error": UNSUPPORTED_MODEL}
+        if _ryzenadj_available:
+            return {"success": True}  # queued behind the retry that verified it
         cancellation = self._helper_cancel
         def retry():
             global _ryzenadj_available, _current_game_id, _transition_key
@@ -2406,8 +2407,6 @@ class Plugin:
                 else:
                     event("tdp", "helper_job", outcome="cancelled", reason="module_shutdown")
                 return {"success": False, "error": str(exc)}
-            finally:
-                self._extras_retry_busy = False
         return await _offload(retry)
 
     async def get_extras_unlocked(self) -> bool:
@@ -2447,12 +2446,21 @@ class Plugin:
         return await _offload(_do)
 
     async def set_extras_unlocked(self, enabled: bool) -> dict:
+        async with self._extras_lock:
+            return await self._set_extras_unlocked(enabled)
+
+    async def _set_extras_unlocked(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
             return {"success": False, "stdout": "",
                     "stderr": "enabled must be a boolean", "returncode": -1}
+        if enabled and not _ryzenadj_available:
+            helper = await self._retry_extras()
+            if not helper["success"]:
+                return {"success": False, "stdout": "", "returncode": -1,
+                        "stderr": f"Extras needs the verified RyzenAdj helper: {helper['error']}"}
         def _do():
             with _tdp_user_transaction() as restore_failed:
-                if enabled and (_wmi_only() or not _ryzenadj_available):
+                if enabled and not _ryzenadj_available:
                     return {"success": False, "stdout": "",
                             "stderr": "Extras is unavailable because ryzenadj is not ready",
                             "returncode": -1}
@@ -2490,14 +2498,18 @@ class Plugin:
                     "ac_profile": {}, "error": "invalid app id"}
         def _do() -> dict:
             p = _load_profiles().get(app_id)
+            active = p is not None
             if p is None:
-                return {"exists": False, "profile": {}, "ac_separate": False, "ac_profile": {}}
+                p = _load_inactive_profiles().get(app_id)
+            if p is None:
+                return {"exists": False, "active": False, "profile": {}, "ac_separate": False, "ac_profile": {}}
             spl  = p.get("spl",  _defaults()["spl"])
             sppt = p.get("sppt", _defaults()["sppt"])
             fppt = p.get("fppt", _defaults()["fppt"])
             state = _load_settings()
             return {
                 "exists":      True,
+                "active":      active,
                 "profile":     {"spl": spl, "sppt": sppt, "fppt": fppt,
                                 "preset": p.get("preset", ""),
                                 **_effective_cpu_values(state, p)},
@@ -2509,18 +2521,35 @@ class Plugin:
             }
         return await _offload(_do)
 
-    async def set_game_ac_profile(self, app_id: str, spl: int, sppt: int, fppt: int, ac_separate: bool, preset_name: str = "") -> dict:
+    async def list_game_profiles(self) -> dict:
+        """Every saved game profile, for browsing; a profile kept under Global is inactive."""
+        def _do() -> dict:
+            rows = {}
+            for active, profiles in ((False, _load_inactive_profiles()), (True, _load_profiles())):
+                for app_id, p in profiles.items():
+                    spl = p.get("spl", _defaults()["spl"])
+                    rows[app_id] = {"app_id": app_id, "active": active,
+                                    "ac_separate": p.get("ac_separate", False),
+                                    "preset": p.get("preset", ""), "spl": spl,
+                                    "ac_preset": p.get("ac_preset", ""), "ac_spl": p.get("ac_spl", spl)}
+            return {"profiles": list(rows.values())}
+        return await _offload(_do)
+
+    async def set_game_ac_profile(self, app_id: str, spl: int, sppt: int, fppt: int, ac_separate: bool, preset_name: str = "",
+                                  stored: bool = False) -> dict:
         app_id = _normalise_app_id(app_id, allow_empty=False)
-        if (app_id is None or type(ac_separate) is not bool
+        if (app_id is None or type(ac_separate) is not bool or type(stored) is not bool
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
             return {"success": False, "stderr": "invalid profile request",
                     "stdout": "", "returncode": -1}
         preset_name = _safe_label(preset_name)
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
-                if not app_id or _get_running_appid() != app_id:
-                    return {"success": False, "stderr": "game is no longer active",
-                            "stdout": "", "returncode": -1}
+                current = _get_running_appid()
+                refusal = (_stored_edit_refusal(app_id, current) if stored
+                           else "game is no longer active" if current != app_id else None)
+                if refusal:
+                    return {"success": False, "stderr": refusal, "stdout": "", "returncode": -1}
                 state = _load_settings()
                 if not state.get("enabled", True):
                     return {"success": False, "stderr": "plugin disabled",
@@ -2543,7 +2572,7 @@ class Plugin:
                 profiles[app_id] = p
 
                 want = None
-                if _get_ac_online():
+                if not stored and _get_ac_online():
                     if ac_separate:
                         want = ac
                     elif all(p.get(k) is not None for k in ("spl", "sppt", "fppt")):
@@ -2570,8 +2599,9 @@ class Plugin:
                     "stdout": "", "returncode": -1}
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
-                profiles = _load_profiles()
+                profiles, inactive = _load_profiles(), _load_inactive_profiles()
                 profiles.pop(app_id, None)
+                inactive.pop(app_id, None)
                 state = _load_settings()
                 if state.get("enabled", True) and _get_running_appid() == app_id:
                     target = _global_triplet(state)
@@ -2582,10 +2612,57 @@ class Plugin:
                     state["active_spl"], state["active_sppt"], state["active_fppt"] = target
                     _cancel_ac_settle()
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
-                             SETTINGS_KEY_GAME_PROFILES: profiles})
+                             SETTINGS_KEY_GAME_PROFILES: profiles,
+                             SETTINGS_KEY_INACTIVE_GAME_PROFILES: inactive})
                 return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
         result = await _offload(_do)
         event("tdp", "profile_deleted", scope="game",
+              level="info" if result["success"] else "warning",
+              outcome="confirmed" if result["success"] else "failed")
+        return result
+
+    async def set_game_profile_active(self, app_id: str, active: bool) -> dict:
+        """Use a game's own profile, or keep it unused so the game follows Global.
+
+        Turning a profile off moves it, unchanged, to the inactive key; turning it
+        on moves it back, or starts one from the global settings.
+        """
+        app_id = _normalise_app_id(app_id, allow_empty=False)
+        if app_id is None or type(active) is not bool:
+            return {"success": False, "stderr": "invalid profile request",
+                    "stdout": "", "returncode": -1}
+        def _do() -> dict:
+            with _tdp_user_transaction() as restore_failed:
+                state = _load_settings()
+                profiles, inactive = _load_profiles(), _load_inactive_profiles()
+                if not active:
+                    if app_id in profiles:
+                        inactive[app_id] = profiles.pop(app_id)
+                elif app_id in inactive:
+                    profile = inactive.pop(app_id)
+                    if app_id not in profiles:
+                        # 50 W may have been turned off while this profile was unused.
+                        if not state.get("extras_unlocked", False):
+                            _clamp_profile(profile, _standard_ceilings_mw())
+                        profiles[app_id] = profile
+                else:
+                    _prepare_cpu_profile(state, profiles, app_id)
+                if state.get("enabled", True) and _get_running_appid() == app_id:
+                    profile = profiles.get(app_id)
+                    target = (_profile_target(state, profile, _get_ac_online())
+                              if profile is not None else _global_triplet(state))
+                    result = _apply_limits_with_saved_cpu_power(
+                        _effective_cpu_state(state, profiles, app_id), *target)
+                    if not result["success"]:
+                        return restore_failed(result)
+                    state["active_spl"], state["active_sppt"], state["active_fppt"] = target
+                    _cancel_ac_settle()
+                _write_keys({SETTINGS_KEY_SETTINGS: state,
+                             SETTINGS_KEY_GAME_PROFILES: profiles,
+                             SETTINGS_KEY_INACTIVE_GAME_PROFILES: inactive})
+                return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+        result = await _offload(_do)
+        event("tdp", "profile_active" if active else "profile_inactive", scope="game",
               level="info" if result["success"] else "warning",
               outcome="confirmed" if result["success"] else "failed")
         return result
@@ -2602,13 +2679,8 @@ class Plugin:
                     if not result["success"]:
                         return restore_failed(result)
                     state["enabled"] = False
-                    try:
-                        result["cpu_power_errors"] = (
-                            _reapply_saved_cpu_power_controls_locked(state))
-                    except Exception as exc:
-                        result["cpu_power_errors"] = [
-                            f"CPU power restore failed: {exc}"]
-                    state["enabled"] = False
+                    result["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(
+                        state, "TDP disabled")
                     _save_settings(state)
                     _cancel_ac_settle()
                     return restore_failed(result)
@@ -2618,7 +2690,6 @@ class Plugin:
                 result = _apply_limits_with_saved_cpu_power(state, *target)
                 if not result["success"]:
                     return restore_failed(result)
-                state["enabled"] = True
                 state["active_spl"], state["active_sppt"], state["active_fppt"] = target
                 _save_settings(state)
                 _cancel_ac_settle()
@@ -2631,51 +2702,34 @@ class Plugin:
         """Slider ceilings in watts. `std` is what the firmware accepts over WMI;
         `max` is the Extras range, which falls through to ryzenadj."""
         def _do() -> dict:
-            caps = _wmi_caps()
+            supported = _legion_go_2()
+            caps = _wmi_caps() if supported else {}
             std = {k: caps[k]["max"] for k in WMI_ATTRS} if caps else dict(FALLBACK_STD_W)
-            firmware_only = _wmi_only()
             firmware_available = bool(caps) and _profile_path() is not None
-            helper_available = (not firmware_only and _ryzenadj_available
+            helper_available = (supported and _ryzenadj_available
                                 and os.path.isfile(BIN_PATH))
             available = firmware_available or helper_available
             error = ""
-            if not available:
-                error = "Firmware TDP controls are unavailable"
-                if not firmware_only:
-                    error += " and verified RyzenAdj is unavailable"
-                    if self._helper_error:
-                        error += f": {self._helper_error}"
+            if not supported:
+                error = UNSUPPORTED_MODEL
+            elif not available:
+                error = "Firmware TDP controls are unavailable and verified RyzenAdj is unavailable"
+                if self._helper_error:
+                    error += f": {self._helper_error}"
             return {
                 "min": min(caps[k]["min"] for k in WMI_ATTRS) if caps else HARD_MIN_MW // 1000,
                 "std": std,
-                # ryzenadj is not installed on these, so the two ranges are
-                # the same and the frontend hides the Extras switch rather than
-                # offering a range nothing here would apply.
+                # Until the helper is verified the two ranges are the same.
                 "max": dict(std) if not helper_available
                        else {k: HARD_MAX_MW // 1000 for k in WMI_ATTRS},
                 "wmi": bool(caps),
                 "extras": helper_available,
                 "tdp_available": available,
                 "tdp_error": error,
-                "helper_retry_available": not firmware_only and not helper_available,
-                "presets": _presets(),
+                # Enabling Extras (or this retry) downloads the verified helper.
+                "helper_retry_available": supported and not helper_available,
+                "presets": PRESETS_DEFAULT,
             }
-        return await _offload(_do)
-
-    async def restore_defaults(self) -> dict:
-        def _do() -> dict:
-            with _tdp_user_transaction() as restore_failed:
-                result = _restore_defaults_locked()
-                if result["success"]:
-                    state = _load_settings()
-                    try:
-                        result["cpu_power_errors"] = (
-                            _reapply_saved_cpu_power_controls_locked(state))
-                    except Exception as exc:
-                        result["cpu_power_errors"] = [
-                            f"CPU power restore failed: {exc}"]
-                    _cancel_ac_settle()
-                return restore_failed(result)
         return await _offload(_do)
 
     async def set_panel_active(self, active: bool) -> None:
@@ -2699,14 +2753,9 @@ class Plugin:
             with _mutation_lock:
                 s = _load_settings()
                 if not s.get("enabled", True):
-                    try:
-                        cpu_power_errors = (
-                            _reapply_saved_cpu_power_controls_locked(s))
-                    except Exception as exc:
-                        cpu_power_errors = [
-                            f"CPU power restore failed: {exc}"]
                     return {"success": True, "skipped": True,
-                            "cpu_power_errors": cpu_power_errors}
+                            "cpu_power_errors": _best_effort_reapply_saved_cpu_power_locked(
+                                s, "resume")}
                 # Whatever was cached describes the pre-suspend hardware.
                 _invalidate_limits_cache()
                 _, target, _ = _startup_context_target(s)
@@ -2730,6 +2779,10 @@ class Plugin:
             raise ValueError("invalid app id")
         _frontend_appid = normalised
         _frontend_appid_ts = time.monotonic()
+        # A switch is applied now rather than on the next five-second tick. The
+        # pass re-checks the game under _mutation_lock, so a racing tick is a no-op.
+        if self._ready and _get_running_appid() != _current_game_id:
+            await self._enforce_pass()
 
     async def get_tdp_info(self) -> dict:
         if not self._ready:
@@ -2742,7 +2795,7 @@ class Plugin:
 
     async def apply_tdp(self, spl: int, sppt: int, fppt: int, app_id: str = "",
                         preset_name: str = "",
-                        expected_app_id: str | None = None) -> dict:
+                        expected_app_id: str | None = None, stored: bool = False) -> dict:
         if not self._ready:
             return {"success": False, "stderr": "not ready", "stdout": "", "returncode": -1}
         app_id = _normalise_app_id(app_id)
@@ -2750,6 +2803,7 @@ class Plugin:
         expected_app_id = (
             _normalise_app_id(expected_app_id) if expected_was_supplied else None)
         if (app_id is None or (expected_was_supplied and expected_app_id is None)
+                or type(stored) is not bool or (stored and not app_id)
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
             return {"success": False, "stderr": "invalid TDP request",
                     "stdout": "", "returncode": -1}
@@ -2765,6 +2819,8 @@ class Plugin:
                 if expected_app_id is not None and current_app_id != expected_app_id:
                     return {"success": False, "stderr": "foreground game changed",
                             "stdout": "", "returncode": -1}
+                if stored:
+                    return _save_stored(s, current_app_id)
                 if app_id and current_app_id != app_id:
                     return {"success": False, "stderr": "game is no longer active",
                             "stdout": "", "returncode": -1}
@@ -2792,6 +2848,21 @@ class Plugin:
                             "message": "Global TDP settings saved. They will apply when no game profile is active."}
 
                 return _apply_current(s)
+
+        def _save_stored(s: dict, current_app_id: str) -> dict:
+            refusal = _stored_edit_refusal(app_id, current_app_id)
+            if refusal:
+                return {"success": False, "stderr": refusal, "stdout": "", "returncode": -1}
+            profiles = _load_profiles()
+            profile = profiles[app_id]
+            requested = _target_for_preset(s, spl, sppt, fppt, preset_name or profile.get("preset", ""))
+            profile.update({"spl": requested[0], "sppt": requested[1], "fppt": requested[2]})
+            if preset_name:
+                profile["preset"] = preset_name
+            _write_keys({SETTINGS_KEY_GAME_PROFILES: profiles})
+            event("tdp", "profile_saved", scope="game", outcome="saved")
+            return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
+                    "applied": False, "saved_only": True, "stored": True}
 
         def _apply_current(s: dict) -> dict:
             # _do retains the mutation lock across validation, hardware and
@@ -2870,7 +2941,7 @@ class Plugin:
             await asyncio.sleep(2)
             try:
                 published = await self._push_info()
-                if published:transition('tdp','info_stream','available',outcome='published')
+                if published:transition('tdp','info_stream','available',outcome='published',initial=False)
             except Exception as e:
                 transition('tdp','info_stream','unavailable',level='warning',error=e,outcome='unavailable')
 
@@ -2892,24 +2963,27 @@ class Plugin:
             if settled:
                 return
 
+    async def _enforce_pass(self):
+        try:
+            events = await _offload(_check_and_enforce)
+            generation = events.pop("_resettle_generation", None)
+            if generation is not None:
+                # Deliberately not awaited: the ladder runs for several
+                # seconds and the enforce loop has its own schedule to keep.
+                task = asyncio.create_task(self._resettle_after_ac(generation))
+                self._tasks.append(task)
+                task.add_done_callback(
+                    lambda done: self._tasks.remove(done) if done in self._tasks else None)
+            for event, payload in events.items():
+                await decky.emit(event, payload)
+            transition('tdp','enforcement_loop','running',outcome='cycle_complete',initial=False)
+        except Exception as e:
+            transition('tdp','enforcement_loop','unavailable',level='warning',error=e,outcome='unavailable')
+
     async def _enforce_loop(self):
         while True:
             await asyncio.sleep(5)
-            try:
-                events = await _offload(_check_and_enforce)
-                generation = events.pop("_resettle_generation", None)
-                if generation is not None:
-                    # Deliberately not awaited: the ladder runs for several
-                    # seconds and the enforce loop has its own schedule to keep.
-                    task = asyncio.create_task(self._resettle_after_ac(generation))
-                    self._tasks.append(task)
-                    task.add_done_callback(
-                        lambda done: self._tasks.remove(done) if done in self._tasks else None)
-                for event, payload in events.items():
-                    await decky.emit(event, payload)
-                transition('tdp','enforcement_loop','running',outcome='cycle_complete')
-            except Exception as e:
-                transition('tdp','enforcement_loop','unavailable',level='warning',error=e,outcome='unavailable')
+            await self._enforce_pass()
 
     async def _migration(self):
         """Fold the pre-1.5.0 files into Decky's store, before anything reads it.
@@ -2940,11 +3014,15 @@ class Plugin:
     async def _main(self):
         self._helper_cancel = threading.Event()
         self._helper_error = ""
-        decky.logger.info(f"[legotdp] startup  v{updater.plugin_version()}")
         try:
             global _current_ac_online, _ryzenadj_available, _last_suspend_offset
             Plugin._ready = False
             Plugin._setup_error = None
+            if not await _offload(_legion_go_2):
+                # Reported through is_ready(); no loop starts, nothing is written.
+                Plugin._setup_error = UNSUPPORTED_MODEL
+                event('tdp', 'unsupported_model', level='warning')
+                return
             # Resolve the trust store now so the log states up front whether downloads
             # and update checks will be able to verify certificates.
             await _offload(updater.ssl_context)
@@ -2955,12 +3033,8 @@ class Plugin:
             _last_suspend_offset = _suspend_offset()
             wmi = await _offload(_wmi_caps)
             try:
-                if _wmi_only():
-                    _ryzenadj_available = False
-                    decky.logger.info(
-                        "[legotdp] firmware-only device, skipping the ryzenadj download")
-                else:
-                    _ryzenadj_available = bool(await _offload(lambda: _ensure_ryzenadj(download=False)))
+                # Verify a helper left by an earlier Extras opt-in; never download here.
+                _ryzenadj_available = bool(await _offload(lambda: _ensure_ryzenadj(download=False)))
             except Exception as e:
                 _ryzenadj_available = False
                 self._helper_error = str(e)
@@ -2984,7 +3058,7 @@ class Plugin:
                             event('tdp','cpu_power_restore_failed',level='warning',error=exc,stage='startup',repeat=60)
                         return {"success": True, "skipped": True,
                                 "cpu_power_errors": cpu_power_errors}
-                    result = _apply_limits_with_saved_cpu_power(s, *target)
+                    result = _apply_limits_with_saved_cpu_power(s, *target, reason="startup")
                     _last_cpu_power_check = time.monotonic()
                     if result["success"]:
                         _save_active(s, *target)
@@ -3006,10 +3080,6 @@ class Plugin:
                 asyncio.create_task(self._enforce_loop()),
                 asyncio.create_task(self._info_loop()),
             ]
-            if not _wmi_only() and not _ryzenadj_available:
-                # Optional network work never delays the firmware path or the
-                # admission gate shared with other modules.
-                self._tasks.append(asyncio.create_task(self.retry_extras()))
             decky.logger.info(
                 f"[legotdp] ready (wmi={'yes' if wmi else 'no'}, "
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")

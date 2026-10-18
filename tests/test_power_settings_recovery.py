@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import test_integration  # Isolated Decky stubs.
+import support  # Isolated Decky stubs.
 import tdp_backend as tdp
 import vibration_backend as vibe
 from safe_settings import AtomicSettingsManager, CorruptSettings
@@ -24,7 +24,6 @@ class PowerSettingsRecoveryTests(unittest.TestCase):
                  patch.object(tdp, "_restore_defaults_locked") as restore:
                 for operation in (tdp._migrate, tdp._load_settings, tdp._load_profiles,
                                   lambda: tdp._write_keys({"settings": {"enabled": False}}),
-                                  lambda: asyncio.run(tdp.Plugin().restore_defaults()),
                                   lambda: asyncio.run(tdp.Plugin().set_plugin_enabled(True))):
                     with self.subTest(operation=operation):
                         with self.assertRaisesRegex(CorruptSettings, "TDP settings recovery failed"):

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import test_integration
+import support
 import main
 import module_control
 import tdp_backend as tdp
@@ -53,13 +53,13 @@ class CpuProfileTests(unittest.TestCase):
             'settings': self.store, 'CPU_SYS_ROOT': str(self.cpu), '_current_game_id': '',
             '_current_ac_online': False, '_last_cpu_power_check': 0.0,
             '_transition_key': None, '_transition_failures': 0, '_transition_retry_at': 0.0,
-            '_ac_target': (), '_ac_generation': 0, '_last_source': 'wmi',
+            '_ac_target': (), '_ac_generation': 0, '_ac_changed_at': float('-inf'), '_last_source': 'wmi',
             '_drift_target': (), '_drift_settled': (), '_drift_attempts': 0,
         }.items():
             self.stack.enter_context(patch.object(tdp, name, value))
         for name, callback in {
             '_get_running_appid': lambda: self.app, '_get_ac_online': lambda: self.ac,
-            '_resume_detected': lambda: self.resumed, '_wmi_only': lambda: False,
+            '_resume_detected': lambda: self.resumed,
             '_allowed_ceilings_mw': lambda _state: (35000, 37000, 45000),
             '_apply_limits': apply,
             '_restore_defaults_locked': lambda: tdp._apply_limits(25000, 28000, 35000),
@@ -84,7 +84,8 @@ class CpuProfileTests(unittest.TestCase):
     def payload(self):
         fresh = AtomicSettingsManager('tdp_settings', str(self.root / 'settings'))
         return {'settings': fresh.getSetting('settings'),
-                'game_profiles': fresh.getSetting('game_profiles')}
+                'game_profiles': fresh.getSetting('game_profiles'),
+                'inactive_game_profiles': fresh.getSetting('inactive_game_profiles')}
 
     def seed(self, profiles, **global_values):
         self.store.replace({'settings': {**self.base, **global_values},
@@ -106,7 +107,6 @@ class CpuProfileTests(unittest.TestCase):
             'performance': {'spl': 20, 'sppt': 32, 'fppt': 35},
             'max': {'spl': 35, 'sppt': 37, 'fppt': 45},
         })
-        self.assertEqual(tdp.PRESETS_LEGION_GO_S, tdp.PRESETS_DEFAULT)
         self.seed({'123': self.game(preset='minimum')})
         self.assertEqual(tdp._load_profiles()['123']['spl'], 15000)
         simplified = {**self.base, 'advanced_tdp_control': False}
@@ -518,9 +518,143 @@ class CpuProfileTests(unittest.TestCase):
         tdp._check_and_enforce()
         self.assert_hardware(True, '204')
 
+    def test_turning_a_game_profile_off_keeps_it_unused_until_turned_on(self):
+        saved = self.game(ac_separate=True, ac_spl=20000, ac_sppt=23000, ac_fppt=30000, ac_epp='26')
+        self.seed({'111': saved})
+        self.app = '111'
+        tdp._check_and_enforce()
+        self.assert_hardware(True, '204')
+        self.rpc('set_game_profile_active', '111', False)
+        payload = self.payload()
+        self.assertEqual(payload['game_profiles'], {})
+        self.assertEqual({k: payload['inactive_game_profiles']['111'][k] for k in saved}, saved, 'nothing is lost')
+        self.assertEqual(self.limits, [25000, 28000, 35000], 'the running game falls back to Global now')
+        self.assert_hardware(False, '77')
+        profile = self.rpc_profile('111')
+        self.assertEqual((profile['exists'], profile['active'], profile['profile']['spl']), (True, False, 15000))
+        # Every existing lookup ignores the unused profile: enforce pass, game switch, AC change.
+        for change in ('enforce', 'switch', 'ac'):
+            with self.subTest(change=change):
+                tdp._current_game_id = ''; tdp._transition_key = None
+                if change == 'switch':
+                    self.app = ''; asyncio.run(self.plugin.set_active_app('')); self.app = '111'
+                    asyncio.run(self.plugin.set_active_app('111'))
+                self.ac = change == 'ac'
+                tdp._check_and_enforce()
+                self.assertEqual(self.limits, [25000, 28000, 35000])
+                self.assert_hardware(False, '77')
+        self.ac = False
+        self.rpc('set_game_profile_active', '111', True)
+        payload = self.payload()
+        self.assertEqual(payload['inactive_game_profiles'], {})
+        self.assertEqual({k: payload['game_profiles']['111'][k] for k in saved}, saved)
+        self.assertEqual(self.limits, [15000, 18000, 25000], 'turning it on applies it to the running game')
+        self.assert_hardware(True, '204')
+        self.assertTrue(self.rpc_profile('111')['active'])
+
+    def rpc_profile(self, app_id):
+        return asyncio.run(self.plugin.get_game_profile(app_id))
+
+    def test_turning_on_a_game_without_a_profile_starts_from_global(self):
+        self.app = '111'
+        self.rpc('set_game_profile_active', '111', True)
+        saved = self.payload()['game_profiles']['111']
+        self.assertEqual((saved['spl'], saved['sppt'], saved['fppt']), (25000, 28000, 35000))
+        self.assertEqual((saved['cpu_boost_enabled'], saved['epp']), (False, '77'))
+        self.rpc('set_game_profile_active', '222', False)  # nothing to turn off
+        self.assertNotIn('222', self.payload()['inactive_game_profiles'])
+
+    def test_profile_cap_counts_unused_profiles_and_delete_clears_both_keys(self):
+        self.store.replace({'settings': self.base, 'game_profiles': {'111': self.game()},
+                            'inactive_game_profiles': {'222': self.game(), '333': self.game()}, 'schema_version': 2})
+        self.app = '444'
+        with patch.object(tdp, 'MAX_GAME_PROFILES', 3):
+            for method, args in (('apply_tdp', (15000, 18000, 25000, '444', 'custom', '444')),
+                                 ('set_game_profile_active', ('444', True))):
+                with self.subTest(method=method), self.assertRaisesRegex(RuntimeError, 'maximum number of game profiles'):
+                    asyncio.run(getattr(self.plugin, method)(*args))
+            self.app = '222'
+            self.rpc('set_game_profile_active', '222', True)  # moving one back does not add a profile
+        self.rpc('delete_game_profile', '222')
+        self.rpc('delete_game_profile', '333')
+        payload = self.payload()
+        self.assertEqual((list(payload['game_profiles']), payload['inactive_game_profiles']), (['111'], {}))
+        self.assertFalse(self.rpc_profile('333')['exists'])
+
+    def test_profile_list_shows_active_charger_and_kept_profiles(self):
+        self.store.replace({'settings': self.base, 'schema_version': 2,
+                            'game_profiles': {'111': self.game(preset='balanced'),
+                                              '222': self.game(ac_separate=True, ac_spl=25000, ac_preset='performance')},
+                            'inactive_game_profiles': {'333': self.game(preset='custom'), '111': self.game()}})
+        rows = {row['app_id']: row for row in asyncio.run(self.plugin.list_game_profiles())['profiles']}
+        self.assertEqual(sorted(rows), ['111', '222', '333'])
+        self.assertEqual((rows['111']['active'], rows['111']['preset'], rows['111']['spl']), (True, 'balanced', 15000))
+        self.assertEqual((rows['222']['ac_separate'], rows['222']['ac_spl'], rows['222']['ac_preset']), (True, 25000, 'performance'))
+        self.assertEqual((rows['333']['active'], rows['333']['ac_spl']), (False, 15000))
+
+    def test_saved_profile_edits_write_no_hardware_and_never_the_running_game(self):
+        self.seed({'111': self.game(preset='balanced'), '222': self.game()})
+        self.store.replace({**self.payload(), 'schema_version': 2, 'inactive_game_profiles': {'333': self.game()}})
+        self.app = '222'
+        self.hardware(False, '77')
+        before = list(self.limits)
+        result = self.rpc('apply_tdp', 20000, 25000, 30000, '111', 'custom', '222', True)
+        self.assertEqual((result['applied'], result['stored']), (False, True))
+        self.rpc('set_game_ac_profile', '111', 30000, 35000, 40000, True, 'performance', True)
+        self.rpc('set_cpu_boost', False, '111', True, '222', True)
+        self.rpc('set_epp', 'power', '111', False, '222', True)
+        saved = self.payload()['game_profiles']['111']
+        self.assertEqual((saved['spl'], saved['sppt'], saved['fppt'], saved['preset']), (20000, 25000, 30000, 'custom'))
+        self.assertEqual((saved['ac_separate'], saved['ac_spl'], saved['ac_preset'], saved['ac_cpu_boost_enabled'], saved['epp']),
+                         (True, 30000, 'performance', False, 'power'))
+        self.assertEqual(self.limits, before)
+        self.assert_hardware(False, '77')
+        # The running game, a kept (Global) profile and a game without a profile are refused unchanged.
+        snapshot = self.payload()
+        for app_id in ('222', '333', '444'):
+            with self.subTest(app_id=app_id):
+                self.assertFalse(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, app_id, 'custom', '222', True))['success'])
+                self.assertFalse(asyncio.run(self.plugin.set_game_ac_profile(app_id, 9000, 9000, 9000, True, '', True))['success'])
+                self.assertFalse(asyncio.run(self.plugin.set_cpu_boost(True, app_id, False, '222', True))['success'])
+        self.assertFalse(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, '', 'custom', '222', True))['success'])
+        self.assertEqual(self.payload(), snapshot)
+
+    def test_a_store_above_the_cap_keeps_every_profile_when_one_is_edited(self):
+        many = {str(i): self.game() for i in range(1, 515)}
+        self.store.replace({'settings': self.base, 'game_profiles': many,
+                            'inactive_game_profiles': {'900': self.game()}, 'schema_version': 2})
+        self.assertEqual(len(asyncio.run(self.plugin.list_game_profiles())['profiles']), 515)
+        self.rpc('apply_tdp', 20000, 22000, 25000, '1', 'custom', '', True)
+        payload = self.payload()
+        self.assertEqual((len(payload['game_profiles']), len(payload['inactive_game_profiles'])), (514, 1))
+        self.assertEqual(payload['game_profiles']['1']['spl'], 20000)
+        self.app = '2000'
+        with self.assertRaisesRegex(RuntimeError, 'maximum number of game profiles'):
+            asyncio.run(self.plugin.set_game_profile_active('2000', True))
+
+    def test_profile_activation_refuses_bad_input_without_writing(self):
+        before = self.payload()
+        for args in (('', True), ('../x', False), ('111', 'yes'), ('111', 1)):
+            with self.subTest(args=args):
+                result = asyncio.run(self.plugin.set_game_profile_active(*args))
+                self.assertFalse(result['success'])
+        self.assertEqual(self.payload(), before)
+
+    def test_unused_profile_above_standard_limits_is_clamped_when_turned_on(self):
+        self.store.replace({'settings': self.base, 'game_profiles': {},
+                            'inactive_game_profiles': {'111': self.game(spl=45000, sppt=48000, fppt=50000, preset='custom')},
+                            'schema_version': 2})
+        self.app = '111'
+        with patch.object(tdp, '_standard_ceilings_mw', return_value=(35000, 37000, 45000)):
+            self.rpc('set_game_profile_active', '111', True)
+        saved = self.payload()['game_profiles']['111']
+        self.assertEqual((saved['spl'], saved['sppt'], saved['fppt']), (35000, 37000, 45000))
+        self.assertEqual(self.limits, [35000, 37000, 45000])
+
     def test_failed_tdp_result_preserves_saved_and_running_game_cpu(self):
         for operation, args in (
             ('delete_game_profile', ('111',)),
+            ('set_game_profile_active', ('111', False)),
             ('set_game_ac_profile', ('111', 25000, 28000, 35000, False)),
             ('set_plugin_enabled', (False,)),
         ):
@@ -650,11 +784,11 @@ class CpuProfileTests(unittest.TestCase):
         async def scenario():
             await plugin.get_cpu_power_controls('111', True)
             await plugin.set_cpu_boost(False, '111', True, '111')
-            await plugin.set_epp('26', '111', True, '111')
+            await plugin.set_epp('26', '111', True, '111', True)
         asyncio.run(scenario())
         plugin._tdp.get_cpu_power_controls.assert_awaited_once_with('111', True)
-        plugin._tdp.set_cpu_boost.assert_awaited_once_with(False, '111', True, '111')
-        plugin._tdp.set_epp.assert_awaited_once_with('26', '111', True, '111')
+        plugin._tdp.set_cpu_boost.assert_awaited_once_with(False, '111', True, '111', False)
+        plugin._tdp.set_epp.assert_awaited_once_with('26', '111', True, '111', True)
 
     def test_failed_new_profile_commit_restores_unmanaged_cpu_before_firmware_bounce(self):
         self.seed({}, cpu_boost_enabled=None, epp=None)
