@@ -684,9 +684,7 @@ class Plugin:
                       "remaining_s": round(max(0.0, capture["deadline"] - now), 3) if capture["active"] else 0.0}
             for kind in ("physical", "virtual"):
                 stream = capture[kind]
-                recent = stream.get("times")
-                if recent is None:
-                    recent = stream["times"] = deque(maxlen=4096)
+                recent = stream["times"]
                 while recent and recent[0] < now - 1:
                     recent.popleft()
                 duration = max(0.001, min(1.0, now - capture["started"]))
@@ -744,10 +742,7 @@ class Plugin:
                             stream["sample"] = sample
                             stream["reports"] += 1
                             stream["last"] = _capture_time()
-                            recent = stream.get("times")
-                            if recent is None:
-                                recent = stream["times"] = deque(maxlen=4096)
-                            recent.append(stream["last"])
+                            stream["times"].append(stream["last"])
             if not readers and not capture["reason"]:
                 capture["reason"] = "unavailable"
         except Exception as exc:
@@ -769,16 +764,13 @@ class Plugin:
 
     def _stop_capture(self) -> None:
         with self._operation:
-            self._stop_capture_locked()
-
-    def _stop_capture_locked(self) -> None:
-        self._stop.set()
-        thread = self._thread
-        if thread and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
-            if thread.is_alive():
-                raise ControllerError("The previous controller test is still stopping.")
-        self._thread = None
+            self._stop.set()
+            thread = self._thread
+            if thread and thread is not threading.current_thread():
+                thread.join(timeout=1.0)
+                if thread.is_alive():
+                    raise ControllerError("The previous controller test is still stopping.")
+            self._thread = None
 
     def _start_capture(self) -> dict:
         with self._operation:
@@ -789,7 +781,8 @@ class Plugin:
             if records[0] is None:
                 raise ControllerError("The supported Legion Go 2 controller is unavailable.")
             now = _capture_time()
-            stream = {"reports": 0, "invalid_reports": 0, "sample": None, "last": None, "error": ""}
+            stream = {"reports": 0, "invalid_reports": 0, "sample": None, "last": None, "error": "",
+                      "times": deque(maxlen=4096)}
             capture = {"token": secrets.token_urlsafe(24), "active": True, "reason": "",
                        "started": now, "deadline": now + CAPTURE_SECONDS, "lease": now + LEASE_SECONDS,
                        "physical": copy.deepcopy(stream), "virtual": copy.deepcopy(stream)}
@@ -811,7 +804,7 @@ class Plugin:
         def stop_token() -> dict:
             with self._operation:
                 self._snapshot(token)
-                self._stop_capture_locked()
+                self._stop_capture()
                 return self._snapshot(token)
         return await _offload(stop_token)
 

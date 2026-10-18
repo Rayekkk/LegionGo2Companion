@@ -51,7 +51,6 @@ class Release:
         return 'https://s3.service.lenovo.com/legion/cms/package/' + self.filename
 
 
-CATALOG_DATE = '2026-10-12'
 RELEASES = MappingProxyType({
     'left': Release('left', 'Left controller', '260310A', 424320,
         '0822e989fc9df6cb4e3ec38d5a6b468403998f56dd37abbcecbe3d9c0e12879b',

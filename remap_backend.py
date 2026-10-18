@@ -393,17 +393,20 @@ def _join_profile(header: str, blocks: list[str]) -> str:
     return result
 
 
-def _build_profile(base_profile: str, state: dict[str, Any]) -> str:
-    header, blocks = _mapping_blocks(base_profile)
-    by_source: dict[str, int] = {}
+def _by_source(blocks: list[str]) -> dict[str, str]:
+    found: dict[str, str] = {}
     for block in blocks:
         source = _source_for_block(block)
         if source:
-            by_source[source] = by_source.get(source, 0) + 1
-    duplicates = [source for source, count in by_source.items() if count > 1]
-    if duplicates:
-        raise RemapError("The active profile contains ambiguous dedicated-button mappings.")
+            if source in found:
+                raise RemapError("The active profile contains ambiguous dedicated-button mappings.")
+            found[source] = block
+    return found
 
+
+def _build_profile(base_profile: str, state: dict[str, Any]) -> str:
+    header, blocks = _mapping_blocks(base_profile)
+    _by_source(blocks)
     replacements = {
         BUTTON_SOURCES[button]: _expected_mapping(state, button)
         for button in BUTTON_SOURCES
@@ -430,16 +433,9 @@ def _profile_matches(profile: str, state: dict[str, Any]) -> bool:
     if _profile_name(profile) != PROFILE_NAME:
         return False
     try:
-        _, blocks = _mapping_blocks(profile)
+        found = _by_source(_mapping_blocks(profile)[1])
     except RemapError:
         return False
-    found: dict[str, str] = {}
-    for block in blocks:
-        source = _source_for_block(block)
-        if source:
-            if source in found:
-                return False
-            found[source] = block
     for button, source in BUTTON_SOURCES.items():
         if not _mapping_matches(found.get(source), _expected_mapping(state, button)):
             return False
@@ -464,14 +460,7 @@ def _previous_actions(current: str, state: dict[str, Any]) -> dict[str, str | No
     result: dict[str, str | None] = dict.fromkeys(BUTTON_SOURCES)
     if not state["enabled"] or _profile_name(current) != PROFILE_NAME:
         return result
-    _, blocks = _mapping_blocks(current)
-    by_source: dict[str, str] = {}
-    for block in blocks:
-        source = _source_for_block(block)
-        if source:
-            if source in by_source:
-                raise RemapError("The active profile contains ambiguous dedicated-button mappings.")
-            by_source[source] = block
+    by_source = _by_source(_mapping_blocks(current)[1])
     for button, source in BUTTON_SOURCES.items():
         result[button] = next((action for action in _owned_actions(state, button)
                                if _mapping_matches(by_source.get(source),
@@ -492,14 +481,10 @@ def _apply_state(state: dict[str, Any], *, adopt_external: bool) -> tuple[dict[s
     path, _ = _find_device()
     current = _get_profile(path)
     working = copy.deepcopy(state)
-    if _profile_name(current) != PROFILE_NAME:
-        if adopt_external:
-            working["baseline_profile"] = current
-            _save_state(working)
-        elif not _valid_profile(working.get("baseline_profile")):
-            raise RemapError("The original InputPlumber profile is unavailable.")
-    base = working.get("baseline_profile")
-    if not _valid_profile(base):
+    if adopt_external and _profile_name(current) != PROFILE_NAME:
+        working["baseline_profile"] = current
+        _save_state(working)
+    if not _valid_profile(working.get("baseline_profile")):
         raise RemapError("The original InputPlumber profile is unavailable.")
     if _profile_matches(current, working):
         if working.get("previous_actions") is not None:
@@ -832,30 +817,21 @@ class Plugin:
     async def get_status(self):
         return await module_runtime.offload('remap', _status_sync)
 
-    async def set_enabled(self, enabled):
+    async def _mutate(self, changes):
         try:
-            status = await module_runtime.offload('remap', _mutate_sync, {"enabled": enabled})
+            status = await module_runtime.offload('remap', _mutate_sync, changes)
             return {"success": True, "status": status}
         except Exception as exc:
             return {"success": False, "error": str(exc), "status": await self.get_status()}
+
+    async def set_enabled(self, enabled):
+        return await self._mutate({"enabled": enabled})
 
     async def set_action(self, button, action):
         if (not isinstance(button, str) or not isinstance(action, str)
                 or button not in BUTTON_SOURCES or action not in ACTION_LABELS):
             return {"success": False, "error": "Unsupported button or action.", "status": await self.get_status()}
-        key = f"{button}_action"
-        try:
-            status = await module_runtime.offload('remap', _mutate_sync, {key: action})
-            return {"success": True, "status": status}
-        except Exception as exc:
-            return {"success": False, "error": str(exc), "status": await self.get_status()}
+        return await self._mutate({f"{button}_action": action})
 
     async def restore_defaults(self):
-        try:
-            status = await module_runtime.offload('remap', _mutate_sync, {
-                "desktop_action": "default",
-                "page_action": "default",
-            })
-            return {"success": True, "status": status}
-        except Exception as exc:
-            return {"success": False, "error": str(exc), "status": await self.get_status()}
+        return await self._mutate({"desktop_action": "default", "page_action": "default"})

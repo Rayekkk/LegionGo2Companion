@@ -31,13 +31,8 @@ try:
     import pyudev as _pyudev
     _udev_ctx = _pyudev.Context()
     _PYUDEV = True
-except ImportError as _e:
-    decky.logger.warning("[lego-vibe] pyudev import failed")
-    _pyudev = None
-    _udev_ctx = None
-    _PYUDEV = False
 except Exception as _e:
-    decky.logger.warning("[lego-vibe] pyudev initialization failed")
+    decky.logger.warning(f"[lego-vibe] pyudev {'import' if isinstance(_e, ImportError) else 'initialization'} failed")
     _pyudev = None
     _udev_ctx = None
     _PYUDEV = False
@@ -144,12 +139,8 @@ def _discover() -> tuple[str | None, str | None]:
             candidate = os.path.join(dev.sys_path, _SIGNATURE_ATTR)
             if os.path.exists(candidate):
                 return dev.sys_path, "pyudev"
-        if not found_any:
-            event("vibration", "device_discovery", level="warning", source="pyudev",
-                  reason="no_hid_devices", repeat=60)
-        else:
-            event("vibration", "device_discovery", level="warning", source="pyudev",
-                  reason="compatible_device_missing", repeat=60)
+        event("vibration", "device_discovery", level="warning", source="pyudev",
+              reason="compatible_device_missing" if found_any else "no_hid_devices", repeat=60)
 
     # Glob fallback - driver-name-agnostic, searches all HID drivers.
     # Path structure: /sys/bus/hid/drivers/<driver>/<device_id>/rumble_intensity
@@ -327,15 +318,7 @@ def _restore_baseline() -> bool:
 
 
 async def _offload(fn, *args):
-    """Run blocking work off the event loop.
-
-    Sysfs writes, settings I/O and waiting on _apply_lock all block. Decky gives
-    each plugin its own process and loop, so blocking here does not stall other
-    plugins - it stalls this one: every RPC the panel sends queues behind it, and
-    the hotplug monitor stops draining its netlink queue until it returns.
-    _apply_lock alone can be held by that worker for as long as five sysfs
-    writes take.
-    """
+    """Run blocking sysfs/settings work off the loop so RPCs and hotplug keep draining."""
     def run():
         with _settings_lock:
             return fn(*args)
@@ -435,10 +418,7 @@ def _read_valid_settings() -> None:
 
 
 def _load_profiles() -> dict:
-    """A private copy of the profile store. Callers coerce and mutate what they
-    get back, and getSetting hands out a live reference into the manager's own
-    dict - so without the copy those edits would land in the store uncommitted,
-    and a later read() would silently drop them again."""
+    """A private copy of the profile store: getSetting returns a live reference callers would mutate."""
     with _settings_lock:
         _read_valid_settings()
         raw_profiles = settings.getSetting(SETTINGS_KEY_GAME_PROFILES, {}) or {}
@@ -551,19 +531,7 @@ def _device_status() -> dict:
 
 
 async def _emit_device_status() -> None:
-    """Push the driver status to the panel.
-
-    A controller is plugged, unplugged or re-bound with the Quick Access Menu
-    shut far more often than with it open. Before this the panel kept showing
-    whatever it happened to see the last time it was opened, so the status dot
-    could sit on red with the device working perfectly.
-
-    Only the status goes out. Hotplug re-applies the stored profile without
-    changing it, so a settings payload would be telling the panel what it
-    already knows - and adopting one bumps the panel's edit counter, which can
-    make it discard the reply to an edit the user made in the meantime and
-    leave a slider showing a value the hardware no longer has.
-    """
+    """Push only the driver status: a settings payload would race the panel's pending edits."""
     try:
         await decky.emit("device", await _offload(_device_status))
     except Exception as exc:
@@ -701,7 +669,6 @@ async def _monitor_hotplug() -> None:
     if not _PYUDEV:
         decky.logger.info("[lego-vibe] pyudev unavailable, hotplug monitor disabled")
         return
-    global _device_path, _discovery_method
 
     monitor = _pyudev.Monitor.from_netlink(_udev_ctx)
     monitor.filter_by(subsystem='hid')
@@ -840,13 +807,10 @@ class Plugin:
                       outcome="failed", repeat=60)
 
     async def _migration(self):
-        """Prepare the store before anything reads it; _main() is not yet scheduled.
+        """Prepare the store before _main() reads it.
 
-        Nothing may escape. The loader runs this with run_until_complete inside
-        a bare except that logs and sys.exit(0)s, and it never gets as far as
-        creating the RPC socket - so a raise here would leave the panel retrying
-        an is_ready() that has nobody to answer it, spinning on "Initializing"
-        forever. Recording the failure instead surfaces it in the panel.
+        Nothing may escape: a raise here exits the plugin before its RPC socket
+        exists, so the failure is reported through is_ready() instead.
         """
         self._migration_error = None
         try:
@@ -886,11 +850,7 @@ class Plugin:
         for task in tasks:
             task.cancel()
         if tasks:
-            # Bounded on purpose. A hotplug apply runs in a worker thread, and
-            # cancelling the task does not stop it - awaiting unbounded can
-            # outlast the five seconds the loader waits before sending SIGKILL,
-            # and a SIGKILL means _uninstall() never runs. That is how LeGoTDP
-            # left the platform profile pinned after an uninstall.
+            # Bounded: a worker-thread apply ignores cancel, and the loader's 5 s SIGKILL would skip _uninstall().
             await asyncio.wait(tasks, timeout=1.0)
         _monitor_task = None
         _drift_task = None
@@ -899,14 +859,7 @@ class Plugin:
     async def _uninstall(self):
         """Put the controller back on the values found before the first write.
 
-        The sysfs values live in the driver, not in the plugin, so uninstalling
-        while intensity is 'off' would otherwise leave a silent controller and
-        nothing installed to turn it back on.
-
-        Runs after _unload(), which cancels the hotplug monitor - though not any
-        apply already running in a worker thread. _apply_settings serialises on
-        _apply_lock, so the two cannot interleave and leave the hardware holding
-        half of each profile.
+        _apply_lock serialises this with any hotplug apply still running in a worker.
         """
         restored = await _offload(_restore_baseline)
         event("vibration", "restore", level="info" if restored else "warning",
@@ -971,12 +924,7 @@ class Plugin:
         return await self._set_field(PKEY_LEVEL, max(0, min(3, int(level))), expected_app_id, expected_profile_id)
 
     async def set_rumble_mode(self, mode_idx: int, expected_app_id=None, expected_profile_id=None) -> dict:
-        """
-        Set the vibration pattern. The controller firmware demonstrates the
-        new mode by itself, so the plugin deliberately does not play one -
-        doing so put a second, unsynchronised rumble on top of the firmware's
-        and made the same mode feel different every time.
-        """
+        """Set the vibration pattern; the firmware plays its own demo, so none is added here."""
         if type(mode_idx) is not int:
             return {"success": False, "error": "mode must be an integer"}
         return await self._set_field(PKEY_MODE, max(0, min(63, mode_idx)), expected_app_id, expected_profile_id)
@@ -1008,21 +956,9 @@ class Plugin:
 
     @module_runtime.controller_operation('vibration')
     async def reapply(self) -> dict:
-        """
-        Force every attribute back onto the hardware. Used after resume from
-        suspend, where the controller comes back at its firmware defaults but
-        the write cache still believes our values are in place.
+        """Force every attribute back after resume, when the controller returns at firmware defaults.
 
-        Driven from the frontend, off Steam's own resume notification: Decky has
-        no backend resume hook, the loader only ever invokes _migration, _main,
-        _unload and _uninstall.
-
-        Retried, because that notification arrives before USB has finished
-        coming back. Measured on the device: resume at 20:04:19, the controller
-        re-appeared at 20:04:23 under a new sysfs path. A single attempt at t+0
-        found no device and reported a failure that was really "not back yet" -
-        and if the controller had not re-enumerated at all, the hotplug monitor
-        would have had nothing to catch either.
+        Retried: the resume notification arrives seconds before USB re-enumerates.
         """
         deadline = time.monotonic() + _REAPPLY_WAIT_S
 

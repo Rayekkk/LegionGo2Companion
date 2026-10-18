@@ -509,7 +509,8 @@ class CaptureTests(unittest.TestCase):
         self.backend = module.Plugin()
 
     def capture(self, now=100):
-        stream = {"reports": 0, "invalid_reports": 0, "sample": None, "last": None, "error": ""}
+        stream = {"reports": 0, "invalid_reports": 0, "sample": None, "last": None, "error": "",
+                  "times": module.deque(maxlen=4096)}
         self.backend._capture = {"token": "test-token", "active": True, "reason": "",
                                  "started": now, "deadline": now + 30, "lease": now + 3,
                                  "physical": copy.deepcopy(stream), "virtual": copy.deepcopy(stream)}

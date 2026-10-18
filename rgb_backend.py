@@ -283,11 +283,7 @@ def _rgb_channel_maxima(path: str) -> tuple[int, int, int]:
     return maxima
 
 
-def _read_rgb_snapshot(path: str | None = None) -> dict[str, Any] | None:
-    if path is None:
-        path, _ = _rgb_capability()
-    if path is None:
-        return None
+def _read_rgb_snapshot(path: str) -> dict[str, Any] | None:
     # A controller reply may be temporarily incomplete during a profile/effect
     # transition. Retry the whole read, never merge partial snapshots or issue
     # writes. A persistent failure remains unavailable to the transaction.
@@ -1218,17 +1214,13 @@ class Plugin:
                     candidate["power_led_enabled"] = original_power
                 if not operations:
                     return True, ""
-
-                def _apply_all() -> bool:
-                    outcomes = [operation() for operation in operations]
-                    return all(outcomes)
-
+                # A list, not a generator: every restore runs even after one fails.
                 return _transaction(
                     state,
                     candidate,
                     before_rgb=before_rgb,
                     before_power=before_power,
-                    apply=_apply_all,
+                    apply=lambda: all([operation() for operation in operations]),
                 )
 
         success, error = await _offload(_restore)
