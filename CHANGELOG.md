@@ -6,6 +6,7 @@
 - Wi-Fi never writes a line break into `/etc/iwd/main.conf` from saved settings.
 - Removing old plugin logs never follows a link out of the log folder.
 - Companion logs a warning when a Decky update stops its unload workaround from applying.
+- **Desktop app:** a change that gets no answer in time now says to check the current value before trying again, since it may already have been applied.
 
 ### Changed
 

@@ -280,7 +280,8 @@ private slots:
         client.call("fan_set_enabled",{false},true); WAIT_COMPARE(requests,2);
         client.cancelReads(true); QTest::qWait(200); QCOMPARE(replies.size(),1); QCOMPARE(client.pending(),1);
         for(auto *socket:server.findChildren<QTcpSocket *>())socket->abort();
-        WAIT_COMPARE(replies.size(),2); QVERIFY(!replies[1][3].toString().isEmpty());
+        WAIT_COMPARE(replies.size(),2); // An unanswered change may have applied: never invite a blind retry.
+        QCOMPARE(replies[1][3].toString(),QString("Companion didn't confirm the change in time. Check the current value before trying again."));
     }
 };
 QTEST_GUILESS_MAIN(TransportTests)

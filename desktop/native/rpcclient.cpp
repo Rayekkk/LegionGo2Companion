@@ -137,7 +137,9 @@ void RpcClient::startNext() {
         else if (status == 200 && reply_->error() != QNetworkReply::NoError)
             message = "Connection lost. Check the value, then try again.";
         else if (parse.error != QJsonParseError::NoError || !document.isObject())
-            message = "Companion isn't responding. Try again in a moment.";
+            // A change that timed out may still have been applied: retrying blindly could repeat it.
+            message = active_.mutation ? "Companion didn't confirm the change in time. Check the current value before trying again."
+                                       : "Companion isn't responding. Try again in a moment.";
         else if (document.object().contains("error")) {
             message = document.object().value("error").toString().trimmed().left(1000);
             if (message.isEmpty()) message = "Companion couldn't complete this. Try again.";
