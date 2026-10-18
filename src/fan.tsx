@@ -276,8 +276,8 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
       const epoch = mutationEpoch.current;
       try { const next = await getFanState(() => !cancelled && rootVisible() && (fullscreen || isViewVisible())); if (!cancelled && epoch === mutationEpoch.current) accept(next); }
       catch (e) { if (!cancelled && epoch === mutationEpoch.current) {
-        setReadError(String(e));
-        setStatus(previous => previous && { ...previous, readings: { valid: false, error: String(e) } });
+        setReadError(errorText(e));
+        setStatus(previous => previous && { ...previous, readings: { valid: false, error: errorText(e) } });
       } }
       finally { if (!cancelled) timer = setTimeout(() => void poll(), 1000); }
     };
