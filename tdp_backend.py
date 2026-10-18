@@ -116,12 +116,8 @@ APP_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_GAME_PROFILES = 512
 MAX_LABEL_LENGTH = 96
 
-# The panel says when it is on screen, and re-says it every 30 s while it stays
-# there. The timestamp is what makes that a lease rather than a latch: a
-# frontend that goes away without running its cleanup - a Steam UI restart, say
-# - used to leave the info loop reading RAPL every two seconds, and spawning
-# `ryzenadj --info` every fifteen with Extras on, for the rest of the session.
-# _frontend_appid below is leased the same way for the same reason.
+# The panel re-announces itself every 30 s; the TTL makes that a lease, so a frontend
+# gone without cleanup (Steam UI restart) stops the info polling. _frontend_appid likewise.
 _panel_active: bool = False
 _panel_active_ts: float = 0.0
 _PANEL_ACTIVE_TTL_S = 90.0
@@ -141,6 +137,14 @@ _FRONTEND_APPID_TTL = 12.0
 # written to power controls on any other model.
 _legion_go_2 = functools.cache(module_runtime.is_legion_go_2)
 UNSUPPORTED_MODEL = "TDP control is available only on the Lenovo Legion Go 2."
+
+
+def _ok(**extra) -> dict:
+    return {"success": True, "stdout": "", "stderr": "", "returncode": 0, **extra}
+
+
+def _fail(stderr: str, **extra) -> dict:
+    return {"success": False, "stdout": "", "stderr": stderr, "returncode": -1, **extra}
 
 
 def _defaults() -> dict:
@@ -169,25 +173,14 @@ def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     return _standard_ceilings_mw()
 
 
-# Plugging the charger in makes the firmware apply a profile of its own, and it
-# lands after ours: an apply at the moment of the transition read back the
-# low-power defaults a fraction of a second later. One write at the instant
-# the state changes is simply too early, so the values go back several times
-# over the seconds that follow, until one of them is the last word.
-#
-# Unplugging does not need this; it is included anyway because it costs one
-# comparison and the firmware is free to grow the same behaviour there.
+# Plugging the charger in makes the firmware apply its own profile after ours, so the
+# values are re-asserted over the following seconds (on unplug too; it costs nothing).
 AC_SETTLE_DELAYS_S = (0.5, 1.5, 3.0, 6.0)
 
-# What the last charger transition asked for. The ladder re-asserts this rather
-# than the recorded active_* triplet, because a failed apply records nothing -
-# and a failure is precisely when the ladder is needed. Reading active_* there
-# would put back whatever ran before the transition, which with a per-game AC
-# profile is the wrong half of it.
+# What the last charger transition asked for; the ladder re-asserts this, not active_*,
+# because a failed apply records nothing and failure is when the ladder is needed.
 _ac_target: tuple = ()
-# Every delayed charger ladder carries the generation that armed it. Any newer
-# user action, game change or charger transition increments this and makes the
-# old ladder a no-op before it reaches hardware.
+# Generation that armed the pending ladder; any newer action bumps it, voiding the old one.
 _ac_generation: int = 0
 # When the charger last changed; a game switch inside the ladder's span restarts it.
 _ac_changed_at: float = float("-inf")
@@ -262,10 +255,7 @@ def _safe_label(value) -> str:
 
 # ── Persistence ────────────────────────────────────────────────────────────────
 
-# Settings live in Decky's settings directory, not in the plugin directory. The
-# plugin directory is wiped by every reinstall, and this plugin's own updater
-# tells the user to uninstall before installing the new zip - which used to take
-# the global settings and every per-game profile with it.
+# Decky's settings directory, not the plugin directory, which every reinstall wipes.
 settings = SettingsManager(
     name="tdp_settings",
     settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR,
@@ -743,7 +733,7 @@ def _parse_ryzenadj_output(text: str) -> dict:
 
 def _apply_ryzenadj(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
     if not _ryzenadj_lock.acquire(timeout=4.0):
-        return {"success": False, "stdout": "", "stderr": "ryzenadj busy", "returncode": -1}
+        return _fail("ryzenadj busy")
     try:
         rc, out, err = _run_ryzenadj([
             f"--stapm-limit={spl_mw}",
@@ -837,15 +827,14 @@ def _ppt_matches(spl_w: int, sppt_w: int, fppt_w: int) -> bool:
 def _apply_wmi(spl_w: int, sppt_w: int, fppt_w: int) -> dict:
     path = _profile_path()
     if path is None:
-        return {"success": False, "stdout": "", "stderr": "no custom platform profile",
-                "returncode": -1}
+        return _fail("no custom platform profile")
 
     # Fast path: if we can latch a write in place, skip the visible profile bounce.
     if _read_profile(path) == "custom":
         _write_ppt(spl_w, sppt_w, fppt_w, retried=True)
         if _ppt_matches(spl_w, sppt_w, fppt_w):
             decky.logger.info(f"[legotdp] wmi apply {spl_w}W/{sppt_w}W/{fppt_w}W")
-            return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+            return _ok()
 
     # Force a real transition into custom, then write. Bounce via a low profile so the
     # momentary blip is downward, never a spike.
@@ -855,8 +844,7 @@ def _apply_wmi(spl_w: int, sppt_w: int, fppt_w: int) -> dict:
               if choices else "low-power")
     _write_profile(path, bounce)
     if not _write_profile(path, "custom"):
-        return {"success": False, "stdout": "", "stderr": "cannot select custom profile",
-                "returncode": -1}
+        return _fail("cannot select custom profile")
     _write_ppt(spl_w, sppt_w, fppt_w)
 
     if not _ppt_matches(spl_w, sppt_w, fppt_w):
@@ -864,16 +852,14 @@ def _apply_wmi(spl_w: int, sppt_w: int, fppt_w: int) -> dict:
             f"{WMI_ATTRS[k]}={_wmi_read(k, 'current_value')} want {v}"
             for k, v in (("spl", spl_w), ("sppt", sppt_w), ("fppt", fppt_w))
             if _wmi_read(k, "current_value") != v)
-        return {"success": False, "stdout": "", "stderr": mismatch, "returncode": -1}
+        return _fail(mismatch)
     decky.logger.info(f"[legotdp] wmi apply {spl_w}W/{sppt_w}W/{fppt_w}W (via bounce)")
-    return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+    return _ok()
 
 
 # ── RAPL package power ─────────────────────────────────────────────────────────
 
-# None = never probed, "" = probed and not found. A miss is retried: powercap can
-# register after the plugin starts, and remembering the failure forever left the
-# package draw reading blank until the plugin was reloaded.
+# None = never probed, "" = not found; a miss is retried because powercap can register late.
 _rapl_dir: str | None = None
 _rapl_probed_at: float = 0.0
 _RAPL_RESCAN_S = 60.0
@@ -947,12 +933,12 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
     beyond it (the Extras range) or when the firmware interface is absent."""
     global _last_source, _applied_mw, _applied_at
     if not _legion_go_2():
-        return {"success": False, "stdout": "", "stderr": UNSUPPORTED_MODEL, "returncode": -1}
+        return _fail(UNSUPPORTED_MODEL)
     _capture_baseline()
     spl_mw, sppt_mw, fppt_mw = _clamp_triplet(spl_mw, sppt_mw, fppt_mw)
     triple_w = (("spl", spl_mw // 1000), ("sppt", sppt_mw // 1000), ("fppt", fppt_mw // 1000))
     if not _apply_lock.acquire(timeout=8.0):
-        return {"success": False, "stdout": "", "stderr": "apply busy", "returncode": -1}
+        return _fail("apply busy")
     try:
         caps = _wmi_caps()
         if caps and all(caps[k]["min"] <= v <= caps[k]["max"] for k, v in triple_w):
@@ -973,22 +959,11 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
         _apply_lock.release()
 
 
-# The WMI attributes are the driver's record of its own writes, not a reading of
-# the hardware, so anything that moves the limits without going through that
-# interface leaves them reporting stale values and the enforce pass idle.
-# Measured on the device: with the plugin holding 25/30/35 through WMI, an
-# external drop to 15 W left the attributes still reporting 25/30/35, the panel
-# showing 25/30/35, and zero re-apply attempts.
-#
-# `ryzenadj --info` is a live read and does see WMI-applied slow and fast
-# correctly, so it can serve as a cross-check. Sparingly: it spawns a process,
-# which is the cost the limits cache exists to avoid in the first place.
+# The WMI attributes record the driver's own writes, not the hardware, so an external
+# change leaves them stale (measured: 25/30/35 still shown after a drop to 15 W).
+# `ryzenadj --info` reads live values, so it cross-checks - sparingly, as it spawns a process.
 _WMI_VERIFY_EVERY_S = 30.0
-# None, not 0.0. time.monotonic() counts from boot, so on a machine that has
-# only just started 0.0 is a timestamp a few seconds in the past rather than
-# "never" - which skipped the first cross-check for the first half minute of
-# uptime. Invisible on a dev box or a console that has been on for hours; CI
-# runs on a freshly booted runner and caught it immediately.
+# None = never: time.monotonic() starts near 0 at boot, so 0.0 would skip the first check.
 _wmi_verified_at: float | None = None
 _wmi_live_limits: tuple = ()
 
@@ -1036,13 +1011,8 @@ def _wmi_profile_lost() -> bool:
     return path is not None and _read_profile(path) != "custom"
 
 
-# Reading limits over WMI is three sysfs reads. On the ryzenadj path it spawns a
-# process, and the enforce loop asks every five seconds whether or not anyone has
-# the panel open - so with Extras enabled that was a `ryzenadj --info` every five
-# seconds forever, including mid-game. Serve a recent answer instead. The window
-# is well inside the ryzenadj drift tolerance (6 W), which only exists to catch a
-# post-resume reset, and _apply_limits drops the cache so a change we made is
-# never hidden behind it.
+# On the ryzenadj path a limits read spawns a process and the enforce loop asks every
+# 5 s, so a recent answer is served; _apply_limits drops it so our own change shows.
 _LIMITS_CACHE_TTL_S = 15.0
 _limits_cache: dict = {}
 _limits_cache_ts: float = 0.0
@@ -1056,30 +1026,10 @@ def _invalidate_limits_cache() -> None:
 
 
 def _adopt_unreadable_spl(parsed: dict) -> dict:
-    """Replace the STAPM read-back, which does not report what we asked for.
+    """Report the applied SPL: ryzenadj's STAPM LIMIT follows the fast limit, not SPL.
 
-    Measured on a Legion Go 2 (Strix Point, ryzenadj 0.19.0) by sampling for a
-    minute after each change with the plugin stopped:
-
-        set stapm=15 slow=18 fast=25  ->  STAPM settles on 25.0, held for 60 s
-        set stapm=40 slow=45 fast=47  ->  STAPM settles on ~46.6, wobbling
-        set stapm=50 slow=50 fast=50  ->  STAPM settles on 50.0
-
-    STAPM LIMIT follows the fast limit, never the value handed to
-    --stapm-limit, and the SMU moves it by a few hundred milliwatts while it
-    manages the budget. Sampled a second after a change it is somewhere in
-    transit between the old value and the new one - which is where readings
-    like 34.880 and 49.746 come from, and why matching it against fppt exactly
-    does not work.
-
-    Taking the row at face value put the FPPT number in the panel's SPL row,
-    and handed the enforce loop a target it could never reach: three wasted
-    ryzenadj re-applies on every change before it gave up and stood down.
-
-    SPL is therefore not observable on this layer, so report what was applied.
-    Slow and fast are honoured exactly, so drift is still caught through them -
-    including a post-resume reset, which moves all three. The WMI path does not
-    come through here; there all three are real registers and read back exact.
+    Measured (Strix Point, ryzenadj 0.19.0): stapm=15 slow=18 fast=25 reads STAPM 25.0.
+    Slow and fast read back exactly, so drift (incl. a post-resume reset) is still caught.
     """
     if _applied_mw and "spl_limit" in parsed:
         parsed["spl_limit"] = _applied_mw[0] / 1000
@@ -1204,8 +1154,7 @@ def _apply_and_record(spl: int, sppt: int, fppt: int, why: str, reason: str) -> 
     with _mutation_lock:
         state = _load_settings()
         if not state.get("enabled", True):
-            return {"success": False, "stdout": "", "stderr": "plugin disabled",
-                    "returncode": -1}
+            return _fail("plugin disabled")
         target = _clamp_for_settings(state, spl, sppt, fppt)
         result = _apply_limits_with_saved_cpu_power(state, *target, reason=reason)
         if result["success"]:
@@ -1252,14 +1201,12 @@ def _reapply_current_target(expected_generation: int | None = None) -> bool:
             s.get("active_fppt", s.get("fppt", _defaults()["fppt"])),
         )
         if _target_matches(target):
-            _best_effort_reapply_saved_cpu_power_locked(
-                s, "after charger transition settled")
+            _best_effort_reapply_saved_cpu_power_locked(s)
             _ac_target = ()
             return True
         _apply_and_record(*target, "TDP after a charger transition", "ac")
         if _target_matches(target):
-            _best_effort_reapply_saved_cpu_power_locked(
-                s, "after charger transition re-apply")
+            _best_effort_reapply_saved_cpu_power_locked(s)
             _ac_target = ()
             return True
         return False
@@ -1311,8 +1258,7 @@ def _check_and_enforce_locked() -> dict:
         _current_game_id = "\x00"
         decky.logger.info("[legotdp] backend detected resume from suspend")
     if resumed or now - _last_cpu_power_check >= CPU_POWER_DRIFT_CHECK_S:
-        _best_effort_reapply_saved_cpu_power_locked(
-            s, "CPU control drift check")
+        _best_effort_reapply_saved_cpu_power_locked(s)
         _last_cpu_power_check = now
     if not s.get("enabled", True):
         # Track the fresh frontend report (no /proc scan) so an unchanged
@@ -1389,11 +1335,8 @@ def _check_and_enforce() -> dict:
             raise
 
 
-# WMI reads back the exact value we wrote, so a tight tolerance is right there. The
-# ryzenadj path reports STAPM LIMIT for SPL, which the firmware manages dynamically
-# (it drifts several watts below the set point under load), so comparing it tightly
-# made the loop re-apply forever. A wide band there still catches a real reset - after
-# resume the SMU drops to firmware defaults, which is a double-digit gap.
+# WMI reads back exactly what we wrote. ryzenadj reports STAPM LIMIT for SPL, which drifts
+# watts below the set point under load; the wide band still catches a post-resume reset.
 DRIFT_TOLERANCE_WMI_W      = 1.0
 DRIFT_TOLERANCE_RYZENADJ_W = 6.0
 DRIFT_MAX_ATTEMPTS = 3
@@ -1407,10 +1350,8 @@ _drift_context: tuple = (False, ())
 def _enforce_target(want: tuple) -> None:
     """Re-apply `want` when the hardware has drifted off it.
 
-    Some targets are simply unreachable - the SMU silently caps slow-limit around
-    50 W, for instance - and chasing those forever re-ran ryzenadj every 5 s and
-    flooded the log. After a few failed attempts we accept whatever the hardware
-    settled on, and only act again if it moves away from that.
+    Some targets are unreachable (the SMU caps slow-limit near 50 W), so after a few
+    failed attempts the settled value is accepted until the hardware moves off it.
     """
     global _drift_target, _drift_settled, _drift_attempts, _drift_context
 
@@ -1418,12 +1359,7 @@ def _enforce_target(want: tuple) -> None:
         _drift_target, _drift_settled, _drift_attempts = want, (), 0
         _drift_context = (False, ())
 
-    # Only reuse the panel's cache if it was filled after the last apply. It is
-    # refreshed on its own two-second cadence, so a pass running right after a
-    # change would otherwise compare the new target against a snapshot taken
-    # before it - which reported a drift that had not happened and spent a
-    # redundant apply correcting it. Visible in the journal as a "TDP drift"
-    # line one second after every slider move.
+    # Reuse the panel's cache only if filled after the last apply, else it shows a false drift.
     with _info_cache_lock:
         parsed = dict(_info_cache) if _panel_is_active() and _info_cache_ts > _applied_at else {}
     if not parsed:
@@ -1434,11 +1370,8 @@ def _enforce_target(want: tuple) -> None:
 
     want_w    = tuple(v / 1000 for v in want)
     tolerance = DRIFT_TOLERANCE_WMI_W if _last_source == "wmi" else DRIFT_TOLERANCE_RYZENADJ_W
-    # The WMI attributes keep reporting the last value even after the profile leaves
-    # 'custom', so a matching read is not proof the limit is actually enforced - force
-    # a re-apply (which re-selects custom) when we detect that. For the same reason
-    # a matching read is no proof nobody else moved the limits, hence the live
-    # cross-check; both make `cur` unreliable rather than merely stale.
+    # WMI attributes keep the last value after leaving 'custom' or an external change,
+    # so a matching `cur` proves nothing then: re-apply on either signal.
     profile_lost = _wmi_profile_lost()
     overridden = _wmi_limits_overridden(want_w) if _last_source == "wmi" else False
     # No fresh live read (None) keeps the last confirmed one, or the next identical read looks like a new cause.
@@ -1455,10 +1388,8 @@ def _enforce_target(want: tuple) -> None:
         _drift_settled, _drift_attempts = (), 0
     if not profile_lost and overridden is not True \
             and all(abs(c - r) <= tolerance for c, r in zip(cur, want_w)):
-        # The retry budget is for consecutive failures to reach a target, not
-        # the lifetime count of unrelated drifts. A confirmed real target starts
-        # the next recovery from a full budget.
-        # Unchecked WMI facade values cannot erase a known SMU disagreement.
+        # A confirmed target refills the budget (it counts consecutive failures), but
+        # unchecked WMI facade values cannot erase a known SMU disagreement.
         if _last_source != "wmi" or overridden is False or not _drift_context[1]:
             _drift_attempts = 0
             _drift_context = (False, ())
@@ -1495,11 +1426,11 @@ def _restore_defaults_locked() -> dict:
     global _last_source, _applied_mw, _applied_at
     global _drift_target, _drift_settled, _drift_attempts, _drift_context
     if not _legion_go_2():
-        return {"success": True, "stdout": "", "stderr": "", "returncode": 0}  # never written
+        return _ok()  # never written
     _capture_baseline()
     saved = _baseline().get("platform_profile")
     if not _apply_lock.acquire(timeout=8.0):
-        return {"success": False, "stdout": "", "stderr": "apply busy", "returncode": -1}
+        return _fail("apply busy")
     try:
         _drift_target, _drift_settled, _drift_attempts = (), (), 0
         _drift_context = (False, ())
@@ -1508,14 +1439,13 @@ def _restore_defaults_locked() -> dict:
             target = (saved if isinstance(saved, str) and saved != "custom"
                       and saved in _profile_choices(path) else "balanced")
             if not _write_profile(path, target) or _read_profile(path) != target:
-                return {"success": False, "stdout": "", "returncode": -1,
-                        "stderr": f"{target.capitalize()} firmware profile was not confirmed"}
+                return _fail(f"{target.capitalize()} firmware profile was not confirmed")
             _last_source, _applied_mw, _applied_at = "", (), 0.0
             _invalidate_limits_cache()
             decky.logger.info(f"[legotdp] restore_defaults: platform profile -> {target}")
-            return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+            return _ok()
         if not _ryzenadj_lock.acquire(timeout=4.0):
-            return {"success": False, "stdout": "", "stderr": "ryzenadj busy", "returncode": -1}
+            return _fail("ryzenadj busy")
         try:
             rc, out, err = _run_ryzenadj(["--max-performance"], timeout=5.0)
             if rc == 0:
@@ -2120,9 +2050,7 @@ def _reapply_saved_cpu_power_controls_locked(state: dict) -> list[str]:
     return errors
 
 
-def _best_effort_reapply_saved_cpu_power_locked(
-    state: dict, context: str
-) -> list[str]:
+def _best_effort_reapply_saved_cpu_power_locked(state: dict) -> list[str]:
     try:
         errors = _reapply_saved_cpu_power_controls_locked(state)
     except Exception as exc:
@@ -2152,8 +2080,7 @@ def _apply_limits_with_saved_cpu_power(
     # A failed Layer 1 call may already have selected platform_profile before a
     # later firmware/RyzenAdj error. CPU controls are independent, so restore
     # them even on that partial failure.
-    errors = _best_effort_reapply_saved_cpu_power_locked(
-        state, "saved CPU control did not apply after Layer 1")
+    errors = _best_effort_reapply_saved_cpu_power_locked(state)
     result["cpu_power_errors"] = errors
     return result
 
@@ -2185,8 +2112,7 @@ def _tdp_user_transaction():
                     rollback = _apply_limits_with_saved_cpu_power(before_cpu, *old, reason="rollback")
                 else:
                     rollback = _restore_defaults_locked()
-                    rollback["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(
-                        before_cpu, "after failed TDP operation")
+                    rollback["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(before_cpu)
                 return (rollback.get("success", False)
                         and not rollback.get("cpu_power_errors"))
             except Exception as exc:
@@ -2420,25 +2346,21 @@ class Plugin:
 
     async def _set_extras_unlocked(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
-            return {"success": False, "stdout": "",
-                    "stderr": "enabled must be a boolean", "returncode": -1}
+            return _fail("enabled must be a boolean")
         if enabled and not _ryzenadj_available:
             helper = await self._retry_extras()
             if not helper["success"]:
-                return {"success": False, "stdout": "", "returncode": -1,
-                        "stderr": f"Extras needs the verified RyzenAdj helper: {helper['error']}"}
+                return _fail(f"Extras needs the verified RyzenAdj helper: {helper['error']}")
         def _do():
             with _tdp_user_transaction() as restore_failed:
                 if enabled and not _ryzenadj_available:
-                    return {"success": False, "stdout": "",
-                            "stderr": "Extras is unavailable because ryzenadj is not ready",
-                            "returncode": -1}
+                    return _fail("Extras is unavailable because ryzenadj is not ready")
                 s = _load_settings()
                 profiles = _load_profiles()
                 if enabled:
                     s["extras_unlocked"] = True
                     _save_settings(s)
-                    return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+                    return _ok()
 
                 _lock_extras_state(s, profiles)
                 s["extras_unlocked"] = False
@@ -2455,7 +2377,7 @@ class Plugin:
                 _write_keys({SETTINGS_KEY_SETTINGS: s,
                              SETTINGS_KEY_GAME_PROFILES: profiles})
                 _cancel_ac_settle()
-                return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+                return _ok()
         result = await _offload(_do)
         decky.logger.info(f"[legotdp] extras_unlocked={enabled} success={result['success']}")
         return result
@@ -2509,8 +2431,7 @@ class Plugin:
         app_id = _normalise_app_id(app_id, allow_empty=False)
         if (app_id is None or type(ac_separate) is not bool or type(stored) is not bool
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
-            return {"success": False, "stderr": "invalid profile request",
-                    "stdout": "", "returncode": -1}
+            return _fail("invalid profile request")
         preset_name = _safe_label(preset_name)
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
@@ -2518,11 +2439,10 @@ class Plugin:
                 refusal = (_stored_edit_refusal(app_id, current) if stored
                            else "game is no longer active" if current != app_id else None)
                 if refusal:
-                    return {"success": False, "stderr": refusal, "stdout": "", "returncode": -1}
+                    return _fail(refusal)
                 state = _load_settings()
                 if not state.get("enabled", True):
-                    return {"success": False, "stderr": "plugin disabled",
-                            "stdout": "", "returncode": -1}
+                    return _fail("plugin disabled")
                 profiles = _load_profiles()
                 p = _prepare_cpu_profile(
                     state, profiles, app_id,
@@ -2558,14 +2478,13 @@ class Plugin:
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles})
                 event("tdp", "ac_profile_saved", scope="game_ac", enabled=ac_separate)
-                return {"success": True, "stderr": "", "stdout": "", "returncode": 0}
+                return _ok()
         return await _offload(_do)
 
     async def delete_game_profile(self, app_id: str) -> dict:
         app_id = _normalise_app_id(app_id, allow_empty=False)
         if app_id is None:
-            return {"success": False, "stderr": "invalid app id",
-                    "stdout": "", "returncode": -1}
+            return _fail("invalid app id")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 profiles, inactive = _load_profiles(), _load_inactive_profiles()
@@ -2583,7 +2502,7 @@ class Plugin:
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles,
                              SETTINGS_KEY_INACTIVE_GAME_PROFILES: inactive})
-                return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+                return _ok()
         result = await _offload(_do)
         event("tdp", "profile_deleted", scope="game",
               level="info" if result["success"] else "warning",
@@ -2598,8 +2517,7 @@ class Plugin:
         """
         app_id = _normalise_app_id(app_id, allow_empty=False)
         if app_id is None or type(active) is not bool:
-            return {"success": False, "stderr": "invalid profile request",
-                    "stdout": "", "returncode": -1}
+            return _fail("invalid profile request")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
@@ -2629,7 +2547,7 @@ class Plugin:
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles,
                              SETTINGS_KEY_INACTIVE_GAME_PROFILES: inactive})
-                return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
+                return _ok()
         result = await _offload(_do)
         event("tdp", "profile_active" if active else "profile_inactive", scope="game",
               level="info" if result["success"] else "warning",
@@ -2638,8 +2556,7 @@ class Plugin:
 
     async def set_plugin_enabled(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
-            return {"success": False, "stderr": "enabled must be a boolean",
-                    "stdout": "", "returncode": -1}
+            return _fail("enabled must be a boolean")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
@@ -2648,8 +2565,7 @@ class Plugin:
                     if not result["success"]:
                         return restore_failed(result)
                     state["enabled"] = False
-                    result["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(
-                        state, "TDP disabled")
+                    result["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(state)
                     _save_settings(state)
                     _cancel_ac_settle()
                     return restore_failed(result)
@@ -2710,21 +2626,13 @@ class Plugin:
         _panel_active_ts = time.monotonic() if active else 0.0
 
     async def reapply(self) -> dict:
-        """Force the saved limits back onto the hardware.
-
-        Called by the frontend on resume from suspend, where the SMU comes back
-        at firmware defaults. Decky has no backend resume hook - the loader only
-        ever invokes _migration, _main, _unload and _uninstall - so Steam's own
-        notification is the only signal there is, and without it the enforce
-        loop takes up to five seconds to notice.
-        """
+        """Force the saved limits back; the frontend calls it on resume (no backend hook)."""
         def _do() -> dict:
             with _mutation_lock:
                 s = _load_settings()
                 if not s.get("enabled", True):
                     return {"success": True, "skipped": True,
-                            "cpu_power_errors": _best_effort_reapply_saved_cpu_power_locked(
-                                s, "resume")}
+                            "cpu_power_errors": _best_effort_reapply_saved_cpu_power_locked(s)}
                 # Whatever was cached describes the pre-suspend hardware.
                 _invalidate_limits_cache()
                 _, target, _ = _startup_context_target(s)
@@ -2766,7 +2674,7 @@ class Plugin:
                         preset_name: str = "",
                         expected_app_id: str | None = None, stored: bool = False) -> dict:
         if not self._ready:
-            return {"success": False, "stderr": "not ready", "stdout": "", "returncode": -1}
+            return _fail("not ready")
         app_id = _normalise_app_id(app_id)
         expected_was_supplied = expected_app_id is not None
         expected_app_id = (
@@ -2774,25 +2682,21 @@ class Plugin:
         if (app_id is None or (expected_was_supplied and expected_app_id is None)
                 or type(stored) is not bool or (stored and not app_id)
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
-            return {"success": False, "stderr": "invalid TDP request",
-                    "stdout": "", "returncode": -1}
+            return _fail("invalid TDP request")
         preset_name = _safe_label(preset_name)
 
         def _do() -> dict:
             with _mutation_lock:
                 s = _load_settings()
                 if not s.get("enabled", True):
-                    return {"success": False, "stderr": "plugin disabled",
-                            "stdout": "", "returncode": -1}
+                    return _fail("plugin disabled")
                 current_app_id = _get_running_appid()
                 if expected_app_id is not None and current_app_id != expected_app_id:
-                    return {"success": False, "stderr": "foreground game changed",
-                            "stdout": "", "returncode": -1}
+                    return _fail("foreground game changed")
                 if stored:
                     return _save_stored(s, current_app_id)
                 if app_id and current_app_id != app_id:
-                    return {"success": False, "stderr": "game is no longer active",
-                            "stdout": "", "returncode": -1}
+                    return _fail("game is no longer active")
 
                 if (not app_id and current_app_id
                         and current_app_id in _load_profiles()):
@@ -2809,19 +2713,17 @@ class Plugin:
                     try:
                         _save_settings(s)
                     except Exception as exc:
-                        return {"success": False, "stdout": "", "returncode": -1,
-                                "stderr": f"Could not save global TDP settings: {exc}",
-                                "applied": False, "saved_only": False}
-                    return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
-                            "applied": False, "saved_only": True,
-                            "message": "Global TDP settings saved. They will apply when no game profile is active."}
+                        return _fail(f"Could not save global TDP settings: {exc}",
+                                     applied=False, saved_only=False)
+                    return _ok(applied=False, saved_only=True, message=(
+                        "Global TDP settings saved. They will apply when no game profile is active."))
 
                 return _apply_current(s)
 
         def _save_stored(s: dict, current_app_id: str) -> dict:
             refusal = _stored_edit_refusal(app_id, current_app_id)
             if refusal:
-                return {"success": False, "stderr": refusal, "stdout": "", "returncode": -1}
+                return _fail(refusal)
             profiles = _load_profiles()
             profile = profiles[app_id]
             requested = _target_for_preset(s, spl, sppt, fppt, preset_name or profile.get("preset", ""))
@@ -2830,8 +2732,7 @@ class Plugin:
                 profile["preset"] = preset_name
             _write_keys({SETTINGS_KEY_GAME_PROFILES: profiles})
             event("tdp", "profile_saved", scope="game", outcome="saved")
-            return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
-                    "applied": False, "saved_only": True, "stored": True}
+            return _ok(applied=False, saved_only=True, stored=True)
 
         def _apply_current(s: dict) -> dict:
             # _do retains the mutation lock across validation, hardware and
@@ -2889,19 +2790,12 @@ class Plugin:
         return await _offload(_do)
 
     async def _push_info(self) -> bool:
-        """One refresh, pushed to the panel. True when something went out.
-
-        Split out of _info_loop so the emit itself can be tested - the loop
-        around it never terminates, so there is no way to await one iteration.
-        """
+        """One refresh, pushed to the panel. True when something went out."""
         if not _panel_is_active():
             return False
         await _offload(_refresh_info_cache)
         with _info_cache_lock:
             values = dict(_info_cache)
-        # Pushed, not polled. The panel used to ask for this over RPC every two
-        # seconds - a round trip per tick to fetch numbers the backend had just
-        # refreshed on this very schedule.
         await decky.emit("tdp_info", {"success": True, "values": values})
         return True
 
@@ -2915,13 +2809,7 @@ class Plugin:
                 transition('tdp','info_stream','unavailable',level='warning',error=e,outcome='unavailable')
 
     async def _resettle_after_ac(self, generation: int):
-        """Put the limits back over the seconds after a charger transition.
-
-        The firmware writes its own profile on plug-in and wins the race against
-        a single apply, so the target is re-asserted until it stops being
-        overwritten. Each pass is skipped once the hardware already agrees, so
-        this costs nothing when the first write did stick.
-        """
+        """Re-assert the target after a charger transition (see AC_SETTLE_DELAYS_S)."""
         for delay in AC_SETTLE_DELAYS_S:
             await asyncio.sleep(delay)
             try:
@@ -2955,13 +2843,10 @@ class Plugin:
             await self._enforce_pass()
 
     async def _migration(self):
-        """Prepare the store before anything reads it; _main() is not yet scheduled.
+        """Prepare the store before anything reads it; runs before _main().
 
-        Nothing may escape. The loader runs this with run_until_complete inside
-        a bare except that logs and sys.exit(0)s, and it never gets as far as
-        creating the RPC socket - so a raise here would leave the panel retrying
-        an is_ready() that has nobody to answer it, spinning on "Initializing"
-        forever. Recording the failure instead surfaces it in the panel.
+        Nothing may escape: a raise here stops the loader before the RPC socket
+        exists, leaving the panel on "Initializing"; is_ready() reports it instead.
         """
         try:
             await _offload(_migrate)
@@ -3055,35 +2940,20 @@ class Plugin:
         await _offload(_invalidate_ac_ladder)
         for t in self._tasks:
             t.cancel()
-        # Bounded on purpose. Cancelling a task parked in run_in_executor does
-        # not stop the worker thread, so awaiting it takes as long as whatever
-        # blocking call it sits inside - a `ryzenadj --info` plus its lock wait
-        # is five seconds on its own. The loader gives a plugin exactly five
-        # seconds to stop before it sends SIGKILL, and a SIGKILL means
-        # _uninstall() never runs at all. Observed on the device: the platform
-        # profile was left pinned to 'custom' with the plugin already gone.
+        # Bounded: a cancelled executor task keeps its thread, and the loader SIGKILLs
+        # after 5 s, which would skip _uninstall() and leave the profile on 'custom'.
         if self._tasks:
             await asyncio.wait(self._tasks, timeout=1.0)
         self._tasks = []
         decky.logger.info("[legotdp] unloaded")
 
     async def _uninstall(self):
-        """Hand the hardware back before the plugin directory disappears.
+        """Hand the hardware back, else the firmware stays on the last 'custom' triplet.
 
-        The firmware keeps whatever ppt_* triplet was last latched into the
-        'custom' profile, so without this an uninstall leaves the machine pinned
-        to the plugin's final TDP with nothing left installed to change it.
-
-        Nothing is cleaned off disk here: the loader removes the whole plugin
-        directory straight afterwards, and DECKY_PLUGIN_SETTINGS_DIR - where the
-        settings and per-game profiles live - is deliberately left alone, so a
-        reinstall still finds them.
+        Settings are left on disk on purpose so a reinstall still finds them.
         """
         def _do() -> None:
-            # _unload() cancelled the enforce loop, but cancelling a task parked
-            # in run_in_executor does not stop the worker thread, so a pass may
-            # still be in flight holding this lock. Take it, or that pass could
-            # re-assert the limits after we have handed the profile back.
+            # An in-flight enforce pass may still hold this lock; wait so it cannot re-assert.
             with _mutation_lock:
                 module_runtime.require_success(_release_controls_locked())
         await _offload(_do)
