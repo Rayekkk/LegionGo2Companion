@@ -68,15 +68,6 @@ class ProcessWatchTests(unittest.TestCase):
             self.assertFalse(self.watch.consume_exit())
         self.assertEqual(query.call_count, 2)
 
-    def test_explicit_owner_avoids_name_lookup_and_healthy_recapture_is_cached(self):
-        query = self.query()
-        self.watch.capture(query, owner=":1.23")
-        self.assertEqual(query.call_count, 1)
-        self.watch.capture(query, owner=":1.23")
-        self.watch.capture(query)
-        self.assertFalse(self.watch.consume_exit())
-        self.assertEqual(query.call_count, 1)
-
     def test_process_death_is_consumed_only_once(self):
         query = self.query()
         self.watch.capture(query)

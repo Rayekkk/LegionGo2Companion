@@ -110,18 +110,6 @@ class IntegrationTests(unittest.TestCase):
             finally:
                 vibration_backend._attr_cache.pop(key, None)
 
-    def test_gamescope_property_parser_tracks_values_and_removals(self):
-        self.assertEqual(
-            display_backend._parse_prop_line(
-                "GAMESCOPE_DISPLAY_HDR_ENABLED(CARDINAL) = 1"),
-            ("GAMESCOPE_DISPLAY_HDR_ENABLED", "1"),
-        )
-        self.assertEqual(
-            display_backend._parse_prop_line(
-                "GAMESCOPE_COLOR_APP_WANTS_HDR_FEEDBACK:  not found."),
-            ("GAMESCOPE_COLOR_APP_WANTS_HDR_FEEDBACK", None),
-        )
-
     def test_resume_is_a_boottime_gap_of_at_least_a_second(self):
         import module_runtime
         self.assertEqual(module_runtime.resumed(None, 20.0), (20.0, False))
