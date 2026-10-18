@@ -8,9 +8,11 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import test_integration
+import support
 import display_backend as display
 from safe_settings import AtomicSettingsManager
+
+REAL_SESSION_PROPS = display.Plugin._session_props
 
 
 class DisplayResetTests(unittest.TestCase):
@@ -154,6 +156,21 @@ class DisplayResetTests(unittest.TestCase):
         self.assertFalse(self.state['reset_restart_pending'])
         self.assertEqual(self.persisted(), display.DEFAULT_SETTINGS)
 
+    def test_pending_reset_saved_by_2_1_survives_the_first_refresh_after_update(self):
+        # 2.1 stamped the session with the epoch mtime of /proc/<pid>; this one began 500 s ago.
+        now = display.time.time()
+        self.session = display._IDENTITY_BASE + 6.05
+        self.state['panel_mode'] = None
+        self.stack.enter_context(patch.object(display, '_session_wall_clock', return_value=now - 500))
+        self.store.replace({**display.DEFAULT_SETTINGS, 'reset_session': now - 100})
+        display.Plugin._refresh_setup()
+        self.assertTrue(self.state['reset_restart_pending'])
+        self.assertEqual(self.persisted()['reset_session'], now - 100)
+        self.store.replace({**display.DEFAULT_SETTINGS, 'reset_session': now - 1000})
+        display.Plugin._refresh_setup()
+        self.assertFalse(self.state['reset_restart_pending'], 'Gaming Mode restarted after that reset')
+        self.assertIsNone(self.persisted()['reset_session'])
+
     def test_reset_restores_preexisting_script_and_preserves_external_display(self):
         self.backup.write_bytes(b'previous-third-party-script')
         self.external = 1
@@ -262,6 +279,81 @@ class DisplayResetTests(unittest.TestCase):
         self.assert_paused()
         self.assertEqual(self.atoms, [])
         self.assertEqual(self.nits, [])
+
+
+class DisplayDockCleanupTests(unittest.TestCase):
+    setUp = DisplayResetTests.setUp
+    reset = DisplayResetTests.reset
+
+    def prepare_cache(self, external=1):
+        cached = {display.ATOM_IS_EXTERNAL: 0,
+                  display.ATOM_SDR_NITS: display._float_raw(120),
+                  display.ATOM_EDID_PATH: f'"{self.edid}"'}
+        for name, value in (('_prop_cache', cached), ('_prop_cache_display', display.DISPLAY),
+                            ('_prop_cache_ready', True)):
+            self.stack.enter_context(patch.object(display, name, value))
+        self.stack.enter_context(patch.object(display.Plugin, '_session_props',
+                                             new=staticmethod(REAL_SESSION_PROPS)))
+        self.stack.enter_context(patch.object(display, '_read_props_uncached',
+            return_value={**cached, display.ATOM_IS_EXTERNAL: external,
+                          display.ATOM_SDR_NITS: display._float_raw(700)}))
+
+    def test_reset_does_not_restore_internal_baselines_using_a_predock_cache(self):
+        self.prepare_cache()
+        self.edid.write_bytes(b'new-display-edid')
+        result = self.reset()
+        self.assertEqual(result['reset_error'], '')
+        self.assertEqual(self.nits, [])
+        self.assertEqual(self.atoms, [(display.ATOM_FORCE_HDR_SUPPORT, 0)])
+
+    def test_reset_session_change_during_live_read_defers_all_atom_writes(self):
+        self.prepare_cache(external=0)
+        def moved(names):
+            self.session = 200.0
+            return {display.ATOM_IS_EXTERNAL: 0}
+        with patch.object(display, '_read_props_uncached', side_effect=moved):
+            result = self.reset()
+        self.assertTrue(result['reset_error'])
+        self.assertEqual(self.nits, [])
+        self.assertEqual(self.atoms, [])
+        self.assertTrue(self.script.exists())
+
+    def test_uninstall_does_not_restore_internal_hdr_using_a_predock_cache(self):
+        self.prepare_cache()
+        self.state['active_mode'] = display.MODE_PQ
+        with patch.object(display.Plugin, '_task', None), patch.object(display.Plugin, '_prop_task', None), \
+                patch.object(display.Plugin, '_refresh_native_support'), \
+                patch.object(display.Plugin, '_edid_restore'):
+            asyncio.run(self.plugin._unload(uninstalling=True))
+        self.assertEqual(self.nits, [])
+        self.assertEqual(self.atoms, [(display.ATOM_FORCE_HDR_SUPPORT, 0)])
+
+    def uninstall_on_internal_panel(self, **modes):
+        self.prepare_cache(external=0)
+        self.state.update(modes)
+        with patch.object(display.Plugin, '_task', None), patch.object(display.Plugin, '_prop_task', None),                 patch.object(display.Plugin, '_refresh_native_support'),                 patch.object(display.Plugin, '_edid_restore'):
+            asyncio.run(self.plugin._unload(uninstalling=True))
+
+    def test_uninstall_leaves_steams_hdr_alone_when_no_hdr_mode_was_chosen(self):
+        for mode in (None, display.MODE_G22):
+            with self.subTest(mode=mode):
+                self.atoms.clear()
+                self.uninstall_on_internal_panel(panel_mode=mode, active_mode=mode)
+                self.assertEqual(self.atoms, [(display.ATOM_FORCE_HDR_SUPPORT, 0)])
+
+    def test_uninstall_still_takes_the_panel_out_of_pq_it_was_put_in(self):
+        self.uninstall_on_internal_panel(panel_mode=display.MODE_PQ, active_mode=display.MODE_PQ)
+        self.assertEqual(self.atoms, [(display.ATOM_FORCE_HDR_SUPPORT, 0), (display.ATOM_HDR_ENABLED, 0)])
+
+    def test_disabling_hybrid_goes_straight_to_gamma_without_restoring_pq_first(self):
+        import module_control
+        display.Plugin._hdr_baseline = True  # Steam HDR was on when Hybrid took over
+        self.plugin.cleanup_native_display = AsyncMock(return_value={})
+        with patch.object(display.Plugin, '_task', None), patch.object(display.Plugin, '_prop_task', None),                 patch.object(display.Plugin, '_release', return_value=True),                 patch.object(display.Plugin, '_edid_restore', return_value=True):
+            asyncio.run(module_control.withdraw('display', self.plugin))
+        modes = [value for name, value in self.atoms if name == display.ATOM_HDR_ENABLED]
+        self.assertNotIn(1, modes, 'a PQ round trip is two needless modesets')
+        self.assertEqual(modes[-1], 0)
 
 
 if __name__ == '__main__':

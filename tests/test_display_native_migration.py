@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import test_integration
+import support
 import display_backend as display
 from safe_settings import AtomicSettingsManager
 

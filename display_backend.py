@@ -50,10 +50,12 @@ The proper fix belongs in DXVK. This is a stopgap for as long as that is stale.
 import asyncio
 import copy
 from diagnostics import event as diagnostic_event, transition as diagnostic_transition
+import errno
 import glob
 import hashlib
 import math
 import os
+import posixpath
 from system_process import system_env as _system_env
 import select
 import signal
@@ -144,15 +146,21 @@ NOTIFY_ATTR = "actual_brightness"
 # 20 wakeups/s battery tax.
 POLL_FALLBACK_S = 0.25
 
-# Reading the gate atoms costs an xprop process, measured at 2.1 ms - the single
-# largest thing this plugin does. The gate only moves when a game starts or
-# stops, and being a second or two late there costs nothing: Steam does not take
-# over its own gain atoms instantly either. The EDID check rides along on it.
+# A fresh gate read costs an xprop process (the single largest thing this plugin
+# does) and, as root, a setuid spawn into the display owner. The gate only moves
+# when a game starts or stops, and being a second or two late there costs
+# nothing: Steam does not take over its own gain atoms instantly either. The EDID
+# check rides along on it.
 GATE_INTERVAL_S = 2.0
+WATCHER_RECOVERY_S = 30.0  # Longer than a Gamescope restart.
+# Desktop Mode has no gamescope atoms: while no gamescope-wl runs, X probes back
+# off (doubling) to this; a returning gamescope-wl is probed at once.
+ABSENT_PROBE_MAX_S = 32.0
 
 # Hybrid mode polls faster, because this interval is exactly how long HDR
-# content stays on a gamma 2.2 output before the panel follows it into PQ. One
-# xprop costs about 2 ms, so twice a second is not worth economising on.
+# content stays on a gamma 2.2 output before the panel follows it into PQ. The
+# tick is served from the watcher's cache, so it spawns nothing while that is
+# healthy; only a change that needs a live admission read goes to xprop.
 HYBRID_INTERVAL_S = 0.5
 HARDWARE_RETRY_S = 10.0
 
@@ -190,12 +198,22 @@ FALLBACK_BASELINE_NITS = 203.0
 # thing every mode below turns on. So the script is a precondition rather than an
 # extra, and the plugin stays gated behind installing the variant the chosen mode
 # needs.
+#
+# That is gamescope's config dir, not ours: Decky starts this process as root
+# with HOME=/root, where 2.1.0 and earlier installed the script and gamescope
+# (running as the session user) never looked. As root, _bind_script_dir()
+# rebinds the paths below to the running gamescope's user and every write goes
+# through display_script_io.py as that user; LEGACY_SCRIPT_DIR is only cleaned.
 SCRIPT_NAME = "lenovo.legiongo2.oled.lua"
-SCRIPT_DIR = os.path.join(
+LEGACY_SCRIPT_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
     "gamescope", "scripts",
 )
+SCRIPT_DIR = LEGACY_SCRIPT_DIR
 INSTALLED_SCRIPT = os.path.join(SCRIPT_DIR, SCRIPT_NAME)
+SCRIPT_USER = None  # (config dir, uid, gid) that script writes run as
+SCRIPT_IO = os.path.join(PLUGIN_DIR, "display_script_io.py")
+_script_binding = None  # what SCRIPT_DIR was resolved from
 
 # Three ways to run this panel, none of them free:
 #
@@ -275,6 +293,7 @@ DEFAULT_SETTINGS = {
     "native_restart_session": None,
     "native_cleanup_note": "",
     "edid_write_pending": None,
+    "edid_patched_identity": None,
 }
 
 settings = SettingsManager(
@@ -295,8 +314,8 @@ def _read_internal_edid() -> bytes:
     """Raw EDID of the internal panel, or b'' when there is none to read."""
     for path in sorted(glob.glob("/sys/class/drm/card*-eDP-*/edid")):
         try:
-            with open(path, "rb") as f:
-                data = f.read()
+            with _open_regular(path) as f:
+                data = _read_capped(f)
             if len(data) >= EDID_BLOCK:
                 return data
         except OSError:
@@ -349,8 +368,8 @@ def _cta_max_luminance(edid: bytes):
         while j < dtd_start:
             header = block[j]
             tag, size = header >> 5, header & 0x1F
-            if size == 0:
-                break
+            if size == 0 or j + size >= EDID_BLOCK:
+                break  # malformed block: never read past the 128-byte extension
             # tag 7 is "extended"; extended tag 6 is HDR static metadata.
             if tag == 7 and size >= 4 and block[j + 1] == 6:
                 code = block[j + 4]
@@ -491,17 +510,19 @@ def _xprop_env(display=None) -> dict:
 
 def _xprop_command(arguments, display=None):
     binary = "/usr/bin/xprop" if os.path.exists("/usr/bin/xprop") else "xprop"
-    command = [binary] + list(arguments)
+    return [binary] + list(arguments)
+
+
+def _xprop_user(display=None) -> dict:
+    """Spawn kwargs that drop root to the display owner (no PAM session, unlike runuser)."""
     get_euid = getattr(os, "geteuid", None)
     owner = _display_owner(display)
-    if (get_euid is not None and get_euid() == 0 and owner not in (None, 0)
-            and pwd is not None and os.path.exists("/usr/bin/runuser")):
-        try:
-            username = pwd.getpwuid(owner).pw_name
-        except KeyError:
-            return command
-        return ["/usr/bin/runuser", "-u", username, "--"] + command
-    return command
+    if (get_euid is None or get_euid() != 0 or owner in (None, 0) or pwd is None):
+        return {}
+    try:
+        return {"user": owner, "group": pwd.getpwuid(owner).pw_gid, "extra_groups": []}
+    except KeyError:
+        return {}
 
 
 def _parse_prop_line(line: str) -> tuple[str, str | None] | None:
@@ -523,15 +544,14 @@ def _set_prop_cache(values: dict, display: str, *, ready: bool = True) -> None:
 
 
 def _update_prop_cache(line: str, display: str) -> None:
-    global _prop_cache_display, _prop_cache_ready
+    global _prop_cache_ready
     parsed = _parse_prop_line(line)
     if parsed is None:
         return
     name, value = parsed
     with _prop_cache_lock:
         if _prop_cache_display != display:
-            _prop_cache.clear()
-            _prop_cache_display = display
+            return  # Cleared under a live spy: only a fresh seed may mark it complete.
         if value is None:
             _prop_cache.pop(name, None)
         else:
@@ -553,7 +573,13 @@ def _cached_props(names) -> dict | None:
     with _prop_cache_lock:
         if not _prop_cache_ready or _prop_cache_display != DISPLAY:
             return None
-        return {name: _prop_cache[name] for name in names if name in _prop_cache}
+        props = {name: _prop_cache[name] for name in names if name in _prop_cache}
+        # Same rule as _read_props_uncached: the watcher replays HDR_APP as
+        # "not found" until the first HDR content, which on the internal panel is SDR.
+        if (ATOM_HDR_APP in names and ATOM_HDR_APP not in props
+                and _as_int(_prop_cache.get(ATOM_IS_EXTERNAL)) == 0):
+            props[ATOM_HDR_APP] = "0"
+        return props
 
 
 def _read_props_uncached(names, display=None) -> dict:
@@ -563,17 +589,28 @@ def _read_props_uncached(names, display=None) -> dict:
     rides along with the numeric ones rather than costing a second process.
     """
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             _xprop_command(["-root"] + list(names), display),
             capture_output=True, text=True, timeout=3, env=_xprop_env(display),
-        ).stdout
+            **_xprop_user(display),
+        )
     except (OSError, subprocess.SubprocessError):
         return {}
+    if result.returncode != 0:  # partial output proves neither ownership nor absence
+        return {}
     values = {}
-    for line in out.splitlines():
+    hdr_app_absent = False
+    for line in result.stdout.splitlines():
+        if line.partition(":")[0] == ATOM_HDR_APP and line.endswith(("not found.", "no such atom on any window.")):
+            hdr_app_absent = True
         for name in names:
             if line.startswith(name + "(") and "= " in line:
                 values[name] = line.split("= ", 1)[1].strip()
+    # Gamescope publishes HDR_APP only on change, so before the first HDR
+    # transition it is missing: on the internal panel that means SDR content.
+    if (hdr_app_absent and ATOM_HDR_APP not in values
+            and _as_int(values.get(ATOM_IS_EXTERNAL)) == 0):
+        values[ATOM_HDR_APP] = "0"
     return values
 
 
@@ -612,14 +649,22 @@ async def _terminate_prop_process(process) -> None:
 
 async def _watch_properties() -> None:
     """Keep one xprop process alive and cache Gamescope property changes."""
+    lost_at = None  # Gamescope restarts drop the watcher; only an outage that outlasts one is a problem.
+    probe_after, delay = 0.0, GATE_INTERVAL_S
     while True:
         process = None
         display = None
         try:
-            if not await _offload(_pick_display):
-                _invalidate_prop_cache()
+            if time.monotonic() < probe_after and await _offload(_gamescope_start_time) is None:
                 await asyncio.sleep(GATE_INTERVAL_S)
                 continue
+            if not await _offload(_pick_display):
+                lost_at = None  # No Gamescope (Desktop mode) - nothing to watch.
+                _invalidate_prop_cache()
+                probe_after, delay = time.monotonic() + delay, min(delay * 2, ABSENT_PROBE_MAX_S)
+                await asyncio.sleep(GATE_INTERVAL_S)
+                continue
+            delay = GATE_INTERVAL_S
             display = DISPLAY
             initial = await _offload(_read_props_uncached, WATCHED_ATOMS, display)
             _set_prop_cache(initial, display, ready=bool(initial))
@@ -630,20 +675,25 @@ async def _watch_properties() -> None:
                 stderr=asyncio.subprocess.DEVNULL,
                 env=_xprop_env(display),
                 start_new_session=os.name == "posix",
+                **_xprop_user(display),
             )
-            diagnostic_event('display', 'property_watcher_started', repeat=60)
             if process.stdout is None:
                 raise RuntimeError("xprop watcher has no stdout")
             while True:
                 raw = await process.stdout.readline()
                 if not raw:
                     break
+                lost_at = None
                 _update_prop_cache(raw.decode("utf-8", errors="replace").strip(), display)
-            diagnostic_event('display', 'property_watcher_disconnected', level='warning', repeat=60)
+            lost_at = time.monotonic() if lost_at is None else lost_at
+            if time.monotonic() - lost_at >= WATCHER_RECOVERY_S:
+                diagnostic_event('display', 'property_watcher_disconnected', level='warning', repeat=60)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            diagnostic_event('display', 'property_watcher_failed', level='warning', error=exc, repeat=60)
+            lost_at = time.monotonic() if lost_at is None else lost_at
+            if time.monotonic() - lost_at >= WATCHER_RECOVERY_S:
+                diagnostic_event('display', 'property_watcher_failed', level='warning', error=exc, repeat=60)
         finally:
             await _terminate_prop_process(process)
             if display is not None:
@@ -671,6 +721,7 @@ def _probe_gamescope(display: str) -> tuple:
             _xprop_command(["-root"], display),
             capture_output=True, text=True, timeout=5,
             env=_xprop_env(display),
+            **_xprop_user(display),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return 0, False
@@ -736,6 +787,7 @@ def _write_atom_int(name: str, value: int) -> bool:
                 ["-root", "-f", name, "32c", "-set", name, str(int(value))]
             ),
             capture_output=True, timeout=3, env=_xprop_env(), check=True,
+            **_xprop_user(),
         )
         return True
     except (OSError, subprocess.SubprocessError):
@@ -756,8 +808,9 @@ _script_bytes_cache = {}
 
 def _read_script_bytes(path: str):
     try:
-        info = os.stat(path)
-        signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        info = os.stat(path, follow_symlinks=False)
+        signature = (info.st_dev, info.st_ino, info.st_uid, info.st_size,
+                     info.st_mtime_ns, info.st_ctime_ns)
     except OSError:
         _script_bytes_cache.pop(path, None)
         return None
@@ -769,10 +822,51 @@ def _read_script_bytes(path: str):
     return data
 
 
+# An EDID is at most 256 blocks of 128 bytes; the Lua scripts are a few KiB.
+MAX_FILE_BYTES = 32 * 1024
+
+
+def _open_regular(path: str, writable: bool = False):
+    """Unbuffered handle on a bounded regular file, never via a final symlink.
+
+    These paths come from X properties, sysfs and user-owned directories, and
+    this process is root. O_NONBLOCK stops a FIFO swapped in after a check from
+    hanging the open; the type is checked on the descriptor before any read.
+    """
+    flags = os.O_RDWR if writable else os.O_RDONLY
+    for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_NOCTTY", "O_CLOEXEC", "O_BINARY"):
+        flags |= getattr(os, name, 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+            raise OSError(errno.EINVAL, "not a bounded regular file", path)
+        return os.fdopen(fd, "r+b" if writable else "rb", buffering=0)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_capped(handle) -> bytes:
+    """Read to EOF, refusing anything that grows past MAX_FILE_BYTES."""
+    chunks, size = [], 0
+    while chunk := handle.read(MAX_FILE_BYTES + 1 - size):
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_FILE_BYTES:
+            raise OSError(errno.EFBIG, "file exceeds the read limit")
+    return b"".join(chunks)
+
+
 def _read_bytes(path: str):
     try:
-        with open(path, "rb") as f:
-            return f.read()
+        with _open_regular(path) as f:
+            # Anything in the user's script dir that they do not own got there
+            # through a link or from someone else; it is not theirs, nor ours.
+            if (SCRIPT_USER is not None and os.path.dirname(path) == SCRIPT_DIR
+                    and os.fstat(f.fileno()).st_uid != SCRIPT_USER[1]):
+                return None
+            return _read_capped(f)
     except OSError:
         return None
 
@@ -825,6 +919,7 @@ def _loaded_script_variant(started=None):
     so switching pq -> gamma22 -> pq does not ask for a meaningless restart.
     """
     started = _gamescope_start_time() if started is None else started
+    started = None if started is None else _session_wall_clock(started)
     if started is None:
         return None
     try:
@@ -853,11 +948,15 @@ def _install_script() -> tuple:
     ours = _read_script_bytes(BUNDLED_SCRIPT)
     if ours is None:
         return False, "the bundled display script is missing from the plugin"
-    try:
-        os.makedirs(SCRIPT_DIR, exist_ok=True)
-    except OSError as e:
-        diagnostic_event('display', 'script_install_failed', level='error', error=e, stage='directory', repeat=60)
-        return False, f"could not create {SCRIPT_DIR}: {e}"
+    if not _bind_script_dir():
+        return False, "could not find the Gaming Mode user; open Gaming Mode and try again"
+    _remove_legacy_scripts()
+    if SCRIPT_USER is None:
+        try:
+            os.makedirs(SCRIPT_DIR, exist_ok=True)
+        except OSError as e:
+            diagnostic_event('display', 'script_install_failed', level='error', error=e, stage='directory', repeat=60)
+            return False, f"could not create {SCRIPT_DIR}: {e}"
 
     existing = _read_script_bytes(INSTALLED_SCRIPT)
     if existing == ours:
@@ -873,16 +972,42 @@ def _install_script() -> tuple:
         # explicitly not worth keeping: backing that up on every mode change
         # would bury the script the user actually wants back.
         backup = INSTALLED_SCRIPT + ".backup"
-        if not _write_file_atomically(backup, existing):
+        if not _script_write(backup, existing):
             return False, "could not back up the existing display script"
 
-    if not _write_file_atomically(INSTALLED_SCRIPT, ours):
+    if not _script_write(INSTALLED_SCRIPT, ours):
         return False, f"could not write {INSTALLED_SCRIPT}"
     return True, "installed"
 
 
 _gamescope_pid = None
 _gamescope_scan_after = 0.0
+_CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+
+
+# Session identities start above any epoch time, so stamps saved by 2.1
+# (the epoch mtime of /proc/<pid>) stay recognisable; see Plugin._same_session.
+_IDENTITY_BASE = 1e11
+
+
+def _boot_offset():
+    """A per-boot constant, so process start ticks differ between boots."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as handle:
+            return _IDENTITY_BASE + int(handle.read().strip().replace("-", "")[:6], 16) * 1000.0
+    except (OSError, ValueError):
+        return _IDENTITY_BASE
+
+
+def _session_wall_clock(started):
+    """Epoch time at which the session identified by `started` began, or None."""
+    # starttime and /proc/uptime both count from boot, suspend included.
+    try:
+        with open("/proc/uptime") as handle:
+            uptime = float(handle.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    return time.time() - uptime + (started - _boot_offset())
 
 
 def _gamescope_start_time():
@@ -892,7 +1017,14 @@ def _gamescope_start_time():
         with open(f"/proc/{pid}/comm") as handle:
             if handle.read().strip() != "gamescope-wl":
                 return None
-        return os.stat(f"/proc/{pid}").st_mtime
+        # starttime (field 22) is fixed at fork; the /proc/<pid> inode mtime is
+        # only the moment something first looked and can change with the dcache.
+        with open(f"/proc/{pid}/stat") as handle:
+            try:
+                ticks = int(handle.read().rpartition(")")[2].split()[19])
+            except (ValueError, IndexError):
+                return None
+        return _boot_offset() + ticks / _CLK_TCK
     if _gamescope_pid is not None:
         try:
             value = started(_gamescope_pid)
@@ -923,6 +1055,110 @@ def _gamescope_start_time():
     return None
 
 
+def _gamescope_config_dir(pid):
+    """(config dir, uid, gid) that gamescope `pid` reads its scripts under."""
+    uid = os.stat(f"/proc/{pid}").st_uid
+    account = pwd.getpwuid(uid)
+    # gamescope's environment is always POSIX; posixpath keeps that true on any test host.
+    base = posixpath.join(account.pw_dir, ".config")
+    with open(f"/proc/{pid}/environ", "rb") as handle:
+        environ = handle.read(256 * 1024)
+    for entry in environ.split(b"\0"):
+        if entry.startswith(b"XDG_CONFIG_HOME="):
+            value = os.fsdecode(entry[len(b"XDG_CONFIG_HOME="):])
+            # The XDG spec ignores a relative value, and so does gamescope.
+            base = posixpath.normpath(value) if posixpath.isabs(value) else base
+    return base, uid, account.pw_gid
+
+
+def _bind_script_dir() -> bool:
+    """Point the script paths at gamescope's user. False while root cannot tell.
+
+    An unprivileged plugin already is that user, so only root rebinds.
+    """
+    global SCRIPT_DIR, INSTALLED_SCRIPT, SCRIPT_USER, _script_binding
+    get_euid = getattr(os, "geteuid", None)
+    if get_euid is None or get_euid() != 0:
+        return True
+    _gamescope_start_time()
+    pid = _gamescope_pid
+    try:
+        if pid is not None:
+            key = ("gamescope", pid)
+            if key == _script_binding:
+                return True
+            base, uid, gid = _gamescope_config_dir(pid)
+        else:
+            # Desktop Mode has no gamescope, but its X display names the user.
+            uid = _display_owner()
+            if uid is None:
+                return _script_binding is not None
+            key = ("display", uid)
+            if key == _script_binding:
+                return True
+            account = pwd.getpwuid(uid)
+            base, gid = os.path.join(account.pw_dir, ".config"), account.pw_gid
+    except (OSError, KeyError):
+        return _script_binding is not None
+    SCRIPT_DIR = os.path.join(base, "gamescope", "scripts")
+    INSTALLED_SCRIPT = os.path.join(SCRIPT_DIR, SCRIPT_NAME)
+    SCRIPT_USER = (base, uid, gid) if uid != 0 else None
+    _script_binding = key
+    return True
+
+
+def _run_script_io(operation: str, path: str, data: bytes = b"") -> int:
+    """Run display_script_io.py as SCRIPT_USER; its exit code, 1 on failure."""
+    base, uid, gid = SCRIPT_USER
+    if os.path.dirname(path) != SCRIPT_DIR:
+        return 1
+    try:
+        result = subprocess.run(
+            ["/usr/bin/python3", "-I", SCRIPT_IO, operation, base, os.path.basename(path)],
+            input=data, capture_output=True, timeout=10, env=_system_env(), cwd="/",
+            user=uid, group=gid, extra_groups=[])
+    except (OSError, subprocess.SubprocessError) as exc:
+        diagnostic_event('display', 'script_io_failed', level='error', error=exc,
+                         operation=operation, repeat=60)
+        return 1
+    if result.returncode not in (0, 2):
+        diagnostic_event('display', 'script_io_failed', level='error', operation=operation,
+                         returncode=result.returncode, repeat=60)
+    return result.returncode
+
+
+def _script_write(path: str, data: bytes) -> bool:
+    """Atomically write a file in SCRIPT_DIR, as the user who owns that dir."""
+    if SCRIPT_USER is None:
+        return _write_file_atomically(path, data)
+    return _run_script_io("write", path, data) == 0
+
+
+def _script_unlink(path: str) -> None:
+    """os.unlink() for a file in SCRIPT_DIR, as the user who owns that dir."""
+    if SCRIPT_USER is None:
+        os.unlink(path)
+        return
+    code = _run_script_io("unlink", path)
+    if code == 2:
+        raise FileNotFoundError(errno.ENOENT, "no such file", path)
+    if code:
+        raise OSError(errno.EIO, "could not remove the file", path)
+
+
+def _remove_legacy_scripts() -> None:
+    """Drop our own copies from the /root dir older releases installed to."""
+    if SCRIPT_DIR == LEGACY_SCRIPT_DIR:
+        return
+    for leaf in (SCRIPT_NAME, SCRIPT_NAME + ".backup"):
+        path = os.path.join(LEGACY_SCRIPT_DIR, leaf)
+        if _is_our_script(_read_bytes(path)):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 _UNKNOWN_VARIANT = object()
 
 
@@ -945,8 +1181,9 @@ def _restart_needed(loaded_variant=_UNKNOWN_VARIANT) -> bool:
     # Test seams and development builds may point BUNDLED_SCRIPT at a file that
     # is not in the production variant table. Fall back to the original mtime
     # rule rather than silently declaring it loaded.
+    started = _session_wall_clock(started)
     try:
-        return started < os.path.getmtime(INSTALLED_SCRIPT)
+        return started is not None and started < os.path.getmtime(INSTALLED_SCRIPT)
     except OSError:
         return False
 
@@ -958,6 +1195,9 @@ def _uninstall_script() -> str:
     restore brightness control - worse than before the plugin was installed. If
     setup displaced someone else's script, that one goes back.
     """
+    if not _bind_script_dir():
+        return "could not find the Gaming Mode user's display script folder"
+    _remove_legacy_scripts()
     backup = INSTALLED_SCRIPT + ".backup"
     current = _read_script_bytes(INSTALLED_SCRIPT)
 
@@ -969,9 +1209,9 @@ def _uninstall_script() -> str:
 
     saved = _read_bytes(backup)
     if saved is not None:
-        if _write_file_atomically(INSTALLED_SCRIPT, saved):
+        if _script_write(INSTALLED_SCRIPT, saved):
             try:
-                os.unlink(backup)
+                _script_unlink(backup)
             except OSError:
                 pass
             return "restored the display script that was there before"
@@ -979,7 +1219,7 @@ def _uninstall_script() -> str:
 
     if current is not None:
         try:
-            os.unlink(INSTALLED_SCRIPT)
+            _script_unlink(INSTALLED_SCRIPT)
             return "removed the display script"
         except OSError:
             return "could not remove the display script"
@@ -994,7 +1234,7 @@ def _restart_session() -> tuple:
     here once already looked to the user like a dead button.
     """
     env = _system_env()
-    owner = _gamescope_owner_uid()
+    owner = _display_owner()
     account = None
     if pwd is not None and owner is not None:
         try:
@@ -1079,27 +1319,16 @@ def _write_file_atomically(path: str, data: bytes) -> bool:
 
 
 def _restore_file_snapshot(path: str, existed: bool, data) -> bool:
-    """Best-effort rollback of one file captured before a transaction."""
+    """Best-effort rollback of one display-script file captured before a transaction."""
     if existed:
-        return data is not None and _write_file_atomically(path, data)
+        return data is not None and _script_write(path, data)
     try:
-        os.unlink(path)
+        _script_unlink(path)
     except FileNotFoundError:
         pass
     except OSError:
         return False
     return True
-
-
-def _gamescope_owner_uid():
-    """Owner of the X socket for the gamescope display, when POSIX exposes it."""
-    try:
-        number = DISPLAY.rsplit(":", 1)[1].split(".", 1)[0]
-        if not number.isdigit():
-            return None
-        return os.stat(os.path.join(X11_SOCKET_DIR, "X" + number)).st_uid
-    except (AttributeError, IndexError, OSError):
-        return None
 
 
 def _published_edid_is_safe(path: str, opened_stat=None) -> bool:
@@ -1123,11 +1352,41 @@ def _published_edid_is_safe(path: str, opened_stat=None) -> bool:
     owner = getattr(info, "st_uid", None)
     if get_euid is None or owner is None:
         return True
-    gamescope_owner = _gamescope_owner_uid()
+    gamescope_owner = _display_owner()
     if gamescope_owner is not None:
         return owner == gamescope_owner
     euid = get_euid()
     return owner != 0 if euid == 0 else owner == euid
+
+
+def _edid_owned_identity():
+    """(device, inode) of the file our last patch wrote, or None when unknown (e.g. patched by 2.1.0)."""
+    owned = settings.getSetting("edid_patched_identity", None)
+    if isinstance(owned, dict) and type(owned.get("device")) is int and type(owned.get("inode")) is int:
+        return owned["device"], owned["inode"]
+    return None
+
+
+def _forget_edid_baseline() -> bool:
+    """Drop the backup, the remembered original and its file identity; False keeps them for a retry."""
+    try:
+        os.unlink(EDID_BACKUP)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    Plugin._edid_original = None
+    Plugin._store_settings({"edid_patched_identity": None})
+    return True
+
+
+def _forget_gone_edid_target() -> bool:
+    """gamescope moved its EDID and the interrupted write's own file is gone: drop that baseline too.
+
+    Equal bytes do not prove a new file is ours. If the backup cannot be removed,
+    the recovery record stays, so a restart cannot reload the stale baseline.
+    """
+    return _forget_edid_baseline() and _clear_edid_write_pending()
 
 
 def _clear_edid_write_pending() -> bool:
@@ -1153,15 +1412,14 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
     Returns ``written``, ``changed`` or ``failed``.
     """
     try:
-        with open(path, "r+b", buffering=0) as f:
-            if f.read() != expected:
-                return "changed"
-
+        with _open_regular(path, writable=True) as f:
             opened = os.fstat(f.fileno())
-            if expected_identity is not None and (opened.st_dev, opened.st_ino) != expected_identity:
-                return "changed"
             if not _published_edid_is_safe(path, opened):
                 return "failed"
+            if _read_capped(f) != expected:
+                return "changed"
+            if expected_identity is not None and (opened.st_dev, opened.st_ino) != expected_identity:
+                return "changed"
             published = os.stat(path)
             if ((opened.st_dev, opened.st_ino)
                     != (published.st_dev, published.st_ino)):
@@ -1206,7 +1464,7 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                     f.flush()
                     os.fsync(f.fileno())
                     f.seek(0)
-                    if f.read() == expected:
+                    if _read_capped(f) == expected:
                         # Rollback returns to the entry state, which can itself
                         # be an owned partial write under recovery. Preserve its
                         # proof instead of declaring that original bytes won.
@@ -1227,7 +1485,7 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                 # intent without a digest remains, requiring deferred recovery.
                 try:
                     f.seek(0)
-                    pending["partial_sha256"] = hashlib.sha256(f.read()).hexdigest()
+                    pending["partial_sha256"] = hashlib.sha256(_read_capped(f)).hexdigest()
                     Plugin._store_settings({"edid_write_pending": pending}, required=True)
                     diagnostic_transition('display', 'edid_recovery', 'partial_recorded', level='warning', pending=True)
                 except Exception as proof_error:
@@ -1245,7 +1503,6 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                 _clear_edid_write_pending()
                 return "changed"
             _clear_edid_write_pending()
-            diagnostic_event('display', 'edid_rewrite', outcome='written', bytes=len(replacement))
             return "written"
     except OSError as exc:
         diagnostic_transition('display', 'edid_recovery', 'io_failed', level='warning', error=exc, stage='rewrite', pending=True)
@@ -1305,6 +1562,7 @@ class Plugin:
     _loaded_script_variant = None
     _gamescope_started_at = None
     _session_retry_after = 0.0
+    _session_retry_delay = GATE_INTERVAL_S  # grows only while gamescope-wl is gone
     _hybrid_suspended_external = False
     _hybrid_pq_hold_until = 0.0
     _hybrid_sdr_since = None
@@ -1338,6 +1596,9 @@ class Plugin:
 
     @staticmethod
     def _native_remove_scripts() -> list[str]:
+        if not _bind_script_dir():
+            raise RuntimeError("Could not find the Gaming Mode user's display script folder.")
+        _remove_legacy_scripts()
         notes = []
         for path, label in ((INSTALLED_SCRIPT, "display script"),
                             (INSTALLED_SCRIPT + ".backup", "display-script backup")):
@@ -1358,7 +1619,7 @@ class Plugin:
             # Do not delete a file replaced after its ownership was checked.
             if _read_bytes(path) != data:
                 raise RuntimeError(f"The {label} changed during native display cleanup.")
-            os.unlink(path)
+            _script_unlink(path)
         return notes
 
     @staticmethod
@@ -1470,7 +1731,7 @@ class Plugin:
                     decky.logger.debug(f"{LOG} native display probe: {Plugin._native_detection.get('reason', '')}")
                 detection = Plugin._native_detection
                 diagnostic_transition('display', 'native_support', detection.get('status', 'unknown'),
-                                      supported=detection.get('supported') is True,
+                                      supported=detection.get('supported') is True, initial=False,
                                       reason=detection.get('reason', 'unknown'))
                 journal = settings.getSetting("native_cleanup", None)
                 retired = settings.getSetting("native_retired", False) is True
@@ -1619,13 +1880,19 @@ class Plugin:
     @staticmethod
     def _same_session(saved, current) -> bool:
         try:
-            return abs(float(saved) - float(current)) < 0.01
+            saved, current = float(saved), float(current)
         except (TypeError, ValueError):
             return False
+        if saved < _IDENTITY_BASE <= current:
+            # A 2.1 stamp: /proc/<pid> was first looked up while that process ran.
+            start = _session_wall_clock(current)
+            return start is not None and start - 1.0 <= saved <= time.time() + 1.0
+        return abs(saved - current) < 0.01
 
     @staticmethod
     def _sync_loaded_script() -> None:
         """Notice a new gamescope and bind runtime state to what it loaded."""
+        _bind_script_dir()
         started = _gamescope_start_time()
         if started is None or Plugin._same_session(
                 Plugin._gamescope_started_at, started):
@@ -1864,9 +2131,11 @@ class Plugin:
         def _install_then_save_locked():
             if Plugin.native_display_active():
                 return False, "Native gamescope display support is active."
+            _bind_script_dir()
             backup = INSTALLED_SCRIPT + ".backup"
-            installed_existed = os.path.exists(INSTALLED_SCRIPT)
-            backup_existed = os.path.exists(backup)
+            # lexists: a link there is unreadable by design and must not be lost.
+            installed_existed = os.path.lexists(INSTALLED_SCRIPT)
+            backup_existed = os.path.lexists(backup)
             installed_before = _read_script_bytes(INSTALLED_SCRIPT)
             backup_before = _read_bytes(backup)
             if ((installed_existed and installed_before is None)
@@ -1947,6 +2216,8 @@ class Plugin:
             f"{LOG} selected mode {previous or 'unset'} -> {mode}, "
             f"active {Plugin._state.get('active_mode') or 'unknown'}, "
             f"script {os.path.basename(BUNDLED_SCRIPT)}")
+        diagnostic_event('display', 'mode_changed', previous=previous or 'unset', mode=mode,
+                         pending=Plugin._state.get('restart_pending') is True)
 
         if Plugin._state.get("active_mode") == MODE_HYBRID:
             await _offload(Plugin._hybrid_pass)
@@ -2130,6 +2401,35 @@ class Plugin:
             return ok
 
     @staticmethod
+    def _migrate_legacy_script() -> None:
+        """Move a 2.1.0 install out of /root, where gamescope never loaded it.
+
+        Reinstalls through the same path as Setup, so foreign-script handling
+        and legacy cleanup are Setup's. Any failure leaves the user at Setup.
+        """
+        try:
+            mode = Plugin._state.get("panel_mode")
+            if mode not in MODES or Plugin._state.get("reset_in_progress"):
+                return
+            Plugin._refresh_native_support()
+            if Plugin.native_display_active() or not _bind_script_dir():
+                return
+            if os.path.lexists(INSTALLED_SCRIPT):
+                return
+            legacy = _read_bytes(os.path.join(LEGACY_SCRIPT_DIR, SCRIPT_NAME))
+            if _script_variant(legacy) != MODE_SCRIPT[mode]:
+                return
+            with Plugin._runtime_lock:
+                _select_mode(mode)
+                ok, note = _install_script()
+            if ok:
+                decky.logger.info(f"{LOG} moved the {mode} display script to the Gaming Mode user")
+            else:
+                diagnostic_event('display', 'script_migration_failed', level='warning', error=note)
+        except Exception as error:
+            diagnostic_event('display', 'script_migration_failed', level='warning', error=error)
+
+    @staticmethod
     def _refresh_setup() -> None:
         """Re-check the display script; someone may have replaced it behind us."""
         with Plugin._runtime_lock:
@@ -2182,6 +2482,11 @@ class Plugin:
         work to do no matter which mode the panel runs in.
         """
         wanted = list(dict.fromkeys(list(names) + [ATOM_EDID_PATH]))
+        if (not fresh and time.monotonic() < Plugin._session_retry_after and _cached_props(wanted) is None
+                and _gamescope_start_time() is None):
+            Plugin._state["gamescope_reachable"] = False  # Desktop Mode: no xprop until the back-off runs out.
+            Plugin._session_note = "gamescope not reachable"
+            return {}
         # Safety-critical writes bypass the watcher without destroying its
         # complete snapshot. Incremental notifications still need that cache.
         props = _read_props(wanted, fresh=True) if fresh else _read_props(wanted)
@@ -2203,13 +2508,13 @@ class Plugin:
             Plugin._session_retry_after = now + GATE_INTERVAL_S
             if not _pick_display():
                 Plugin._session_note = "gamescope not reachable"
+                if _gamescope_start_time() is None:
+                    Plugin._session_retry_after = now + Plugin._session_retry_delay
+                    Plugin._session_retry_delay = min(Plugin._session_retry_delay * 2, ABSENT_PROBE_MAX_S)
                 return {}
-            # Drop a potentially stale/incomplete watcher snapshot and use the
-            # normal read path.  Keeping the retry behind _read_props() also
-            # preserves the single interception point used by diagnostics and
-            # tests.
-            _invalidate_prop_cache()
-            props = _read_props(wanted, fresh=True) if fresh else _read_props(wanted)
+            # Retry live, but keep the watcher's snapshot: a running xprop -spy
+            # only reports later changes, so clearing it leaves a partial cache.
+            props = _read_props(wanted, fresh=True)
             complete = props and (
                 not needs_control_root or ATOM_IS_EXTERNAL in props)
             if not complete:
@@ -2217,6 +2522,7 @@ class Plugin:
                     "gamescope is up but its control root is not ready"
                 return {}
         Plugin._session_note = ""
+        Plugin._session_retry_delay = GATE_INTERVAL_S
         Plugin._state["gamescope_reachable"] = True
         Plugin._edid_path = (_as_path(props.get(ATOM_EDID_PATH))
                              or Plugin._edid_path)
@@ -2610,7 +2916,7 @@ class Plugin:
                 Plugin._hybrid_pq_hold_until,
             )
             if now < ready_at:
-                Plugin._hdr_mode_settled()
+                # Still in PQ, so not settled: keep counting undone switches.
                 Plugin._state["hybrid_reason"] = (
                     "no HDR content, waiting for a stable switch to gamma 2.2")
                 return
@@ -2747,6 +3053,19 @@ class Plugin:
         original = Plugin._edid_original
         path = Plugin._edid_path
         pending = settings.getSetting("edid_write_pending", None)
+        if (isinstance(pending, dict) and pending.get("schema") == 1 and isinstance(pending.get("path"), str)
+                and os.path.isabs(pending["path"]) and pending["path"] != os.path.abspath(path or "")):
+            # gamescope published a new path. Only proof that the interrupted write's own
+            # file is gone ends that recovery; an existing or unreadable old file keeps it.
+            try:
+                os.lstat(pending["path"])
+            except FileNotFoundError:
+                diagnostic_transition('display', 'edid_recovery', 'target_gone', pending=False)
+                if not _forget_gone_edid_target():
+                    return False
+                pending, original = None, None
+            except OSError:
+                pass
         if pending is not None:
             if (not isinstance(pending, dict) or pending.get("schema") != 1
                     or pending.get("path") != os.path.abspath(path or "")
@@ -2776,11 +3095,11 @@ class Plugin:
             return False
 
         try:
-            with open(path, "rb") as handle:
+            with _open_regular(path) as handle:
                 current_info = os.fstat(handle.fileno())
                 if not _published_edid_is_safe(path, current_info):
                     return False
-                current = handle.read()
+                current = _read_capped(handle)
         except FileNotFoundError:
             decky.logger.info(f"{LOG} EDID path disappeared, not recreating it")
             Plugin._state["edid_patched"] = False
@@ -2798,8 +3117,16 @@ class Plugin:
             result = "changed"
         elif current == original:
             result = "written"
+        elif current == patched and _edid_owned_identity() not in (None, identity):
+            # Our trimmed bytes in a file we never wrote: a new file is not ours to restore.
+            if not _forget_edid_baseline():
+                return False
+            diagnostic_transition('display', 'edid_recovery', 'foreign', pending=False)
+            Plugin._state["edid_patched"] = False
+            Plugin._state["edid_reason"] = "turned off, display EDID changed"
+            return True
         elif current == patched:
-            result = _rewrite_file_if_unchanged(path, current, original)
+            result = _rewrite_file_if_unchanged(path, current, original, expected_identity=identity)
         elif pending:
             if pending.get("partial_sha256") != hashlib.sha256(current).hexdigest():
                 Plugin._state["edid_reason"] = "Partial EDID ownership is unverified; original bytes were preserved"
@@ -2822,6 +3149,7 @@ class Plugin:
             except OSError:
                 pass
             Plugin._edid_original = None
+            Plugin._store_settings({"edid_patched_identity": None})
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "turned off"
             diagnostic_transition('display', 'edid_recovery', 'restored', restored=True, pending=False)
@@ -2869,15 +3197,19 @@ class Plugin:
         if not path:
             Plugin._state["edid_reason"] = "gamescope publishes no EDID path"
             return
-        Plugin._edid_path = path
         if not _published_edid_is_safe(path):
             Plugin._state["edid_reason"] = "refusing an unsafe EDID path"
             diagnostic_transition('display', 'edid_recovery', 'unsafe_path', level='warning', pending=True)
             return
 
         try:
-            with open(path, "rb") as f:
-                data = f.read()
+            with _open_regular(path) as f:
+                info = os.fstat(f.fileno())
+                if not _published_edid_is_safe(path, info):
+                    Plugin._state["edid_reason"] = "refusing an unsafe EDID path"
+                    return
+                data = _read_capped(f)
+            identity = (info.st_dev, info.st_ino)
         except OSError as exc:
             Plugin._state["edid_reason"] = "EDID file unreadable"
             diagnostic_transition('display', 'edid_recovery', 'read_failed', level='warning', error=exc, pending=True)
@@ -2888,6 +3220,9 @@ class Plugin:
             # the original is kept on disk - or this display never had the block.
             ours = (_strip_displayid(Plugin._edid_original)
                     if Plugin._edid_original else None)
+            if data == ours and _edid_owned_identity() not in (None, identity):
+                # Equal bytes in a file we never wrote: that baseline belongs to a file that is gone.
+                ours = None if _forget_edid_baseline() else ours
             Plugin._state["edid_patched"] = data == ours
             nits = _cta_max_luminance(data)
             Plugin._state["edid_game_nits"] = round(nits, 1) if nits else 0.0
@@ -2928,8 +3263,17 @@ class Plugin:
             diagnostic_transition('display', 'edid_recovery', 'backup_failed', level='warning', stage='backup', pending=True)
             Plugin._edid_original = None
             return
+        # The backup belongs to this inode from now on, also if the write below is interrupted.
+        # The rewrite is in place and pinned to it, so a replaced file never inherits the backup.
+        try:
+            Plugin._store_settings({"edid_patched_identity": {"device": identity[0], "inode": identity[1]}}, required=True)
+        except RuntimeError as exc:
+            Plugin._state["edid_reason"] = "could not save the original EDID"
+            diagnostic_transition('display', 'edid_recovery_store', 'deferred', level='warning', error=exc,
+                                  store='display_settings', stage='identity', pending=True)
+            return
 
-        result = _rewrite_file_if_unchanged(path, data, patched)
+        result = _rewrite_file_if_unchanged(path, data, patched, expected_identity=identity)
         if result == "written":
             Plugin._state["edid_patched"] = True
             Plugin._state["edid_game_nits"] = round(nits, 1)
@@ -2992,9 +3336,10 @@ class Plugin:
                                 maximum = _read_int(os.path.join(bl_dir, "max_brightness")) if bl_dir else None
                                 Plugin._state["max_nits"] = round(_millinits_to_nits(maximum), 2) if maximum else 0.0
                                 Plugin._last_written = None
+                        # Stamped first: a failing pass must not re-run the gate every tick.
+                        gate_ts = now
                         gate_ok = await _offload(Plugin._refresh_gate)
                         await _offload(Plugin._edid_pass)
-                        gate_ts = now
 
                     # Hybrid runs on its own, faster clock: this one decides how
                     # long HDR content is shown on a gamma 2.2 output before the
@@ -3050,7 +3395,10 @@ class Plugin:
                     await asyncio.sleep(0.5)
         finally:
             if notify is not None:
-                os.close(notify)
+                # A cancelled wait's thread may still poll this fd: closing it under
+                # that thread fails it with EBADF or polls a reused descriptor.
+                module_runtime.background_task(module_runtime.drain('display')).add_done_callback(
+                    lambda _done, fd=notify: os.close(fd))
 
     async def _main(self):
         decky.logger.info(f"{LOG} startup")
@@ -3102,6 +3450,7 @@ class Plugin:
             decky.logger.info(
                 f"{LOG} recovered the original EDID from a previous run")
 
+        await _offload(Plugin._migrate_legacy_script)
         await _offload(Plugin._refresh_setup)
 
         if Plugin._state["reset_in_progress"]:
@@ -3175,9 +3524,10 @@ class Plugin:
             diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='brightness', pending=True)
         # Hybrid holds the panel in gamma 2.2 between HDR games. Leaving it there
         # with nothing left to switch it back would cost the user their HDR.
+        # Uninstalling ends in gamma 2.2 (below), so do not detour through PQ.
         if Plugin._state.get("active_mode") == MODE_HYBRID:
             try:
-                await _offload(Plugin._hybrid_release)
+                await _offload(Plugin._hybrid_release, MODE_G22 if uninstalling else None)
             except Exception as exc:
                 diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='hybrid', pending=True)
         if uninstalling:
@@ -3195,7 +3545,11 @@ class Plugin:
                         if Plugin._ownership_session_current() is not True:
                             return
                         _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
-                        if _as_int(props.get(ATOM_IS_EXTERNAL)) == 0:
+                        # Only an HDR mode we chose can have left the panel in PQ;
+                        # otherwise Steam's own HDR setting is not ours to clear.
+                        chose_hdr = any(Plugin._state.get(key) in (MODE_PQ, MODE_HYBRID)
+                                        for key in ("panel_mode", "active_mode"))
+                        if chose_hdr and _as_int(props.get(ATOM_IS_EXTERNAL)) == 0:
                             _write_atom_int(ATOM_HDR_ENABLED, 0)
                 await _offload(release_legacy_atoms)
             except Exception as exc:

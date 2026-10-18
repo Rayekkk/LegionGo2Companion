@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """EDID remains independent of legacy/native display setup, using real files."""
 import asyncio
-import builtins
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
-import test_integration  # Decky/Linux doubles before importing the backend.
+import support  # Decky/Linux doubles before importing the backend.
 import display_backend as display
 from safe_settings import AtomicSettingsManager
 
@@ -87,7 +88,7 @@ class NativeDisplayEdidTests(unittest.TestCase):
             display, '_read_props', side_effect=lambda names: {
                 display.ATOM_EDID_PATH: f'"{self.published}"'}))
         self.stack.enter_context(patch.object(
-            display, '_gamescope_owner_uid', return_value=self.edid.stat().st_uid))
+            display, '_display_owner', return_value=self.edid.stat().st_uid))
         self.plugin = display.Plugin()
         self.configure({})
 
@@ -107,6 +108,10 @@ class NativeDisplayEdidTests(unittest.TestCase):
 
     def persisted(self):
         return json.loads(Path(self.store.path).read_text(encoding='utf-8'))
+
+    def owned(self, path=None):
+        info = (path or self.edid).stat()  # A patch records the inode it wrote in place.
+        return {'device': info.st_dev, 'inode': info.st_ino}
 
     def assert_patched(self, path=None, original=None, expected=None, luminance_code=100):
         path = path or self.edid
@@ -130,7 +135,7 @@ class NativeDisplayEdidTests(unittest.TestCase):
                 self.configure(fields)
                 display.Plugin._edid_pass()
                 self.assert_patched()
-                self.assertEqual(self.persisted(), self.saved)
+                self.assertEqual(self.persisted(), {**self.saved, 'edid_patched_identity': self.owned()})
                 for key, value in fields.items():
                     self.assertEqual(self.state[key], value)
                 self.read_props.assert_called_once_with([display.ATOM_EDID_PATH])
@@ -144,7 +149,7 @@ class NativeDisplayEdidTests(unittest.TestCase):
                 result = asyncio.run(self.plugin.set_edid_fix(True))
                 self.assertTrue(result['edid_fix'])
                 self.assert_patched()
-                self.assertEqual(self.persisted(), {**self.saved, 'edid_fix': True})
+                self.assertEqual(self.persisted(), {**self.saved, 'edid_fix': True, 'edid_patched_identity': self.owned()})
                 result = asyncio.run(self.plugin.set_edid_fix(False))
                 self.assertFalse(result['edid_fix'])
                 self.assertFalse(result['edid_patched'])
@@ -202,7 +207,7 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.assertEqual(self.backup.read_bytes(), self.original)
 
     def test_open_and_read_errors_retain_patched_bytes_and_recovery_until_retry(self):
-        real_open = builtins.open
+        real_open = display._open_regular
         for failure in (PermissionError('read access denied'), OSError('read I/O failed')):
             for phase in ('open', 'read'):
                 with self.subTest(failure=type(failure).__name__, phase=phase):
@@ -214,13 +219,13 @@ class NativeDisplayEdidTests(unittest.TestCase):
                         def __enter__(self): return self
                         def __exit__(self, *_args): self.handle.close()
                         def fileno(self): return self.handle.fileno()
-                        def read(self): raise failure
-                    def opened(path, mode='r', *args, **kwargs):
-                        if Path(path) == self.edid and mode == 'rb':
+                        def read(self, *_args): raise failure
+                    def opened(path, writable=False):
+                        if Path(path) == self.edid and not writable:
                             if phase == 'open': raise failure
-                            return FailedRead(real_open(path, mode, *args, **kwargs))
-                        return real_open(path, mode, *args, **kwargs)
-                    with patch('builtins.open', side_effect=opened):
+                            return FailedRead(real_open(path, writable))
+                        return real_open(path, writable)
+                    with patch.object(display, '_open_regular', side_effect=opened):
                         self.assertFalse(display.Plugin._edid_restore())
                     self.assertEqual(self.edid.read_bytes(), self.expected)
                     self.assertEqual(self.backup.read_bytes(), self.original)
@@ -234,13 +239,13 @@ class NativeDisplayEdidTests(unittest.TestCase):
     def test_path_removed_between_validation_and_read_is_released_without_recreation(self):
         display.Plugin._edid_pass()
         self.assert_patched()
-        real_open = builtins.open
-        def opened(path, mode='r', *args, **kwargs):
-            if Path(path) == self.edid and mode == 'rb':
+        real_open = display._open_regular
+        def opened(path, writable=False):
+            if Path(path) == self.edid and not writable:
                 self.edid.unlink()
                 raise FileNotFoundError('compositor removed old copy')
-            return real_open(path, mode, *args, **kwargs)
-        with patch('builtins.open', side_effect=opened):
+            return real_open(path, writable)
+        with patch.object(display, '_open_regular', side_effect=opened):
             self.assertTrue(display.Plugin._edid_restore())
         self.assertFalse(self.edid.exists())
         self.assertFalse(self.state['edid_patched'])
@@ -274,6 +279,67 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.assertEqual(self.edid.read_bytes(), self.original)
         self.assertFalse(self.backup.exists())
         self.read_props.assert_not_called()
+
+
+class PublishedEdidOpenTests(unittest.TestCase):
+    """Root opens of the X-published path never follow links, block or over-read."""
+    setUp = NativeDisplayEdidTests.setUp
+    configure = NativeDisplayEdidTests.configure
+
+    def run_bounded(self, fn, *args):
+        result = []
+        worker = threading.Thread(target=lambda: result.append(fn(*args)), daemon=True)
+        worker.start()
+        worker.join(3)
+        self.assertFalse(worker.is_alive(), 'A FIFO must not block the root display worker.')
+        return result[0]
+
+    def test_oversize_published_file_is_neither_read_nor_backed_up(self):
+        huge = self.original + bytes(display.MAX_FILE_BYTES)
+        self.edid.write_bytes(huge)
+        self.assertIsNone(display._read_bytes(str(self.edid)))
+        display.Plugin._edid_pass()
+        self.assertEqual(self.edid.read_bytes(), huge)
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(self.state['edid_reason'], 'EDID file unreadable')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlink and FIFO semantics')
+    def test_symlink_is_refused_for_reads_and_in_place_writes(self):
+        victim = self.root / 'victim'
+        victim.write_bytes(self.original)
+        link = self.root / 'link'
+        link.symlink_to(victim)
+        self.assertIsNone(display._read_bytes(str(link)))
+        self.assertEqual(display._rewrite_file_if_unchanged(str(link), self.original, b'x'), 'failed')
+        self.assertEqual(victim.read_bytes(), self.original)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlink and FIFO semantics')
+    def test_fifo_is_refused_without_waiting_for_a_writer(self):
+        fifo = self.root / 'fifo'
+        os.mkfifo(fifo)
+        self.assertIsNone(self.run_bounded(display._read_bytes, str(fifo)))
+        self.assertEqual(self.run_bounded(display._rewrite_file_if_unchanged, str(fifo), b'', b'x'), 'failed')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlink and FIFO semantics')
+    def test_published_file_swapped_after_the_path_check_is_refused(self):
+        victim = self.root / 'victim'
+        victim.write_bytes(self.original)
+        checked = display._published_edid_is_safe
+        for swap in ('fifo', 'symlink'):
+            with self.subTest(swap=swap):
+                self.configure({})
+                def safe_then_swap(path, opened_stat=None):
+                    verdict = checked(path, opened_stat)
+                    if opened_stat is None and not os.path.islink(path) and os.path.isfile(path):
+                        self.edid.unlink()
+                        os.mkfifo(self.edid) if swap == 'fifo' else self.edid.symlink_to(victim)
+                    return verdict
+                with patch.object(display, '_published_edid_is_safe', side_effect=safe_then_swap):
+                    self.run_bounded(display.Plugin._edid_pass)
+                self.assertEqual(self.state['edid_reason'], 'EDID file unreadable')
+                self.assertEqual(victim.read_bytes(), self.original)
+                self.assertFalse(self.backup.exists())
+                self.edid.unlink()
 
 
 if __name__ == '__main__':
