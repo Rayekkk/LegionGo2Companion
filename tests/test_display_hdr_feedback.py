@@ -561,7 +561,7 @@ class XpropIdentityTests(unittest.TestCase):
         with patches[0], patches[1], patches[2]:
             self.assertEqual(display._xprop_user(':0'),
                              {'user': 1000, 'group': 1001, 'extra_groups': []})
-        self.assertNotIn('runuser', ' '.join(display._xprop_command(['-root'], ':0')))
+        self.assertNotIn('runuser', ' '.join(display._xprop_command(['-root'])))
 
     def test_no_identity_change_for_root_owned_or_unknown_display(self):
         for owner in (0, None):

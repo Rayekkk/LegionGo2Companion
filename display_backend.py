@@ -4,47 +4,19 @@
 
 """Legacy display support and independent EDID correction under gamescope.
 
-Recognised native Legion Go 2 support retires only the Lua/brightness/Hybrid
-workaround. The description below documents that workaround on older systems;
-EDID correction remains independent on both older and native configurations.
+Native Legion Go 2 support in gamescope retires only the Lua/brightness/Hybrid
+workaround; the EDID correction stays independent of it.
 
-Both come from the same afternoon of measuring a Legion Go 2 (Samsung
-AMS881KB01-0), and both are gaps rather than misbehaviour: something upstream
-simply does not write where the display is listening.
+1. Brightness (Plugin._refresh_gate): in PQ the Samsung AMS881KB01-0 ignores
+   the eDP AUX backlight (millinits, max 471000) that Steam's slider writes.
+   With no HDR content nothing else listens, so the level is forwarded to
+   GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS, which uses the same unit.
 
-1. The brightness slider (see Plugin._refresh_gate)
-
-The panel is driven over eDP AUX luminance control, so /sys/class/backlight/
-amdgpu_bl0 is expressed in millinits and tops out at 471000, i.e. 471 nits of
-full-field white. While gamescope drives the panel in PQ, the panel ignores that
-control completely. Steam still writes the slider there, so the slider moves and
-nothing happens.
-
-Steam does have a working path, but only for HDR content: with an HDR app on
-screen it drives GAMESCOPE_HDR_INPUT_GAIN and GAMESCOPE_SDR_INPUT_GAIN instead
-of the backlight (that is the two-tone slider the Quick Access Menu shows in
-HDR). With no HDR content it falls back to the backlight alone and there is
-nothing downstream that listens. So the gap is PQ output with no HDR content,
-and this plugin forwards the requested level to
-GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS, which is expressed in the same unit.
-
-2. The EDID games are given (see Plugin._edid_pass)
-
-gamescope writes a copy of the panel EDID and publishes its path in
-GAMESCOPE_DISPLAY_EDID_PATH; Proton loads that into the Wine registry, and DXVK
-parses it to fill DXGI_OUTPUT_DESC1. DXVK vendors libdisplay-info pinned at a
-2023 commit whose parse_ext() ignores errno, so when _di_displayid_parse()
-refuses a DisplayID 2.0 block with ENOTSUP the whole EDID is discarded rather
-than that one block. DXVK then substitutes NormalizeDisplayMetadata()'s
-placeholders: 1499 nits peak, 799 full-frame, and generic P3 primaries.
-
-Measured on the device: this panel reports 1107.128 / 475.683 nits and its own
-primaries, and games were seeing 1499 / 799 / P3. Removing the DisplayID
-extension from gamescope's copy makes the rest parse and games read the real
-values. DXVK never reads DisplayID at all - only base-block chromaticity and the
-CTA HDR static metadata - so dropping it cannot cost those games anything.
-
-The proper fix belongs in DXVK. This is a stopgap for as long as that is stale.
+2. EDID (Plugin._edid_pass): DXVK's vendored libdisplay-info discards the whole
+   EDID when it refuses a DisplayID 2.0 block, so games see placeholder metadata
+   (1499/799 nits, P3) instead of the panel's 1107/476 nits. Dropping the
+   DisplayID extension from gamescope's published copy fixes that; DXVK never
+   reads DisplayID. A stopgap until DXVK is fixed.
 """
 
 import asyncio
@@ -90,15 +62,10 @@ ATOM_HDR_APP = "GAMESCOPE_COLOR_APP_WANTS_HDR_FEEDBACK"
 ATOM_EDID_PATH = "GAMESCOPE_DISPLAY_EDID_PATH"
 ATOM_IS_EXTERNAL = "GAMESCOPE_DISPLAY_IS_EXTERNAL"
 
-# Hybrid mode drives these two. The first is the only input that decides whether
-# the output runs PQ or gamma 2.2, and gamescope acts on it live. The second is
-# what makes the whole thing possible: the Vulkan layer reads
-# GAMESCOPE_HDR_OUTPUT_FEEDBACK exactly once, when the game creates its surface,
-# and hides every HDR format if it reads zero - so a game started while the panel
-# sits in gamma 2.2 would never ask for HDR and the switch would never fire.
-# gamescope publishes that feedback as (output HDR on OR this debug flag), and
-# the flag does not touch the output itself, so holding it at 1 lets games see
-# HDR while the panel stays in gamma 2.2 until one of them actually uses it.
+# Hybrid drives these two. HDR_ENABLED switches the output between PQ and gamma
+# 2.2 live. The Vulkan layer reads HDR_OUTPUT_FEEDBACK once per surface and hides
+# HDR formats when it is 0; gamescope publishes it as (output HDR OR this debug
+# flag), so holding the flag at 1 lets games ask for HDR while still in gamma 2.2.
 ATOM_HDR_ENABLED = "GAMESCOPE_DISPLAY_HDR_ENABLED"
 ATOM_FORCE_HDR_SUPPORT = "GAMESCOPE_DEBUG_FORCE_HDR_SUPPORT"
 
@@ -120,63 +87,40 @@ _prop_cache_lock = threading.Lock()
 def _strict_bool(value, default: bool) -> bool:
     return value if type(value) is bool else default
 
-# gamescope listens on the root window of every Xwayland server it runs, so a
-# write to any of them takes effect. What cannot be assumed is the numbering:
-# how many servers there are is a command line option and which numbers they get
-# depends on what was already taken, so a desktop session holding :0 pushes them
-# along. The server is found by looking for gamescope's own atoms - xprop exits 0
-# whether or not the atom it was asked for exists, so its status says nothing.
+# Xwayland numbering is not fixed (a desktop session may hold :0), so the server
+# is found by gamescope's own atoms; xprop exits 0 even for a missing atom.
 DISPLAY = ":0"          # replaced at startup by _pick_display()
 X11_SOCKET_DIR = "/tmp/.X11-unix"
 DISPLAY_FALLBACK = (":0", ":1")
 
-# The backlight class calls sysfs_notify() on `actual_brightness` every time the
-# level is set, including from a sysfs write, so the kernel can wake us exactly
-# when the slider moves and we never have to poll. Measured on the device: the
-# wake-ups track the drag at ~50 ms, which is simply the rate Steam writes at.
-#
-# `actual_brightness` is only the doorbell. It lags the requested value and was
-# observed reporting the minimum mid-transition, so the value itself always comes
-# from `brightness`.
+# sysfs_notify() on `actual_brightness` wakes us whenever the level is set, so
+# nothing polls. It is only the doorbell: it lags (and can read the minimum
+# mid-transition), so the value always comes from `brightness`.
 NOTIFY_ATTR = "actual_brightness"
 
-# Used only where the notification is unavailable, so the plugin still works.
-# Kernel notifications are the normal path.  On an unusual system without
-# inotify support, 4 reads/s still feels immediate while avoiding a permanent
-# 20 wakeups/s battery tax.
+# Poll rate only where the kernel notification is unavailable.
 POLL_FALLBACK_S = 0.25
 
-# A fresh gate read costs an xprop process (the single largest thing this plugin
-# does) and, as root, a setuid spawn into the display owner. The gate only moves
-# when a game starts or stops, and being a second or two late there costs
-# nothing: Steam does not take over its own gain atoms instantly either. The EDID
-# check rides along on it.
+# A fresh gate read costs an xprop spawn; the gate only moves when a game starts
+# or stops, so a second or two late is fine. The EDID check rides along.
 GATE_INTERVAL_S = 2.0
 WATCHER_RECOVERY_S = 30.0  # Longer than a Gamescope restart.
 # Desktop Mode has no gamescope atoms: while no gamescope-wl runs, X probes back
 # off (doubling) to this; a returning gamescope-wl is probed at once.
 ABSENT_PROBE_MAX_S = 32.0
 
-# Hybrid mode polls faster, because this interval is exactly how long HDR
-# content stays on a gamma 2.2 output before the panel follows it into PQ. The
-# tick is served from the watcher's cache, so it spawns nothing while that is
-# healthy; only a change that needs a live admission read goes to xprop.
+# How long HDR content can sit on a gamma 2.2 output before Hybrid switches to
+# PQ. Served from the watcher's cache; only live admission reads spawn xprop.
 HYBRID_INTERVAL_S = 0.5
 HARDWARE_RETRY_S = 10.0
 
-# Enter PQ as soon as HDR appears, but do not chase brief SDR frames emitted
-# while a game is rebuilding its swapchain or moving between loading screens.
-# Both timers ride on the existing Hybrid poll; they add no wake-ups or xprop
-# calls of their own. The minimum hold protects the physical PQ modeset from an
-# immediate reversal, while the SDR debounce requires a continuously observed
-# absence of HDR before the panel goes back to gamma 2.2.
+# Enter PQ at once, but leave it only after continuous SDR (swapchain rebuilds and
+# loading screens flash SDR) and a minimum PQ residency. Both ride the Hybrid poll.
 HYBRID_PQ_MIN_HOLD_S = 3.0
 HYBRID_SDR_DEBOUNCE_S = 2.0
 
-# Every write to GAMESCOPE_DISPLAY_HDR_ENABLED is a modeset that blanks the
-# panel for a moment. If something else ever held the opposite value, correcting
-# it on every pass would turn the screen into a strobe rather than fix anything,
-# so after a few corrections that did not stick we stand off and say so.
+# Each HDR_ENABLED write is a blanking modeset: after a few corrections that did
+# not stick, stand off rather than strobe the panel against another writer.
 HDR_FIGHT_LIMIT = 4
 HDR_BACKOFF_S = 60.0
 
@@ -192,18 +136,11 @@ KNOWN_PANELS = {
 # that was there before we touched it.
 FALLBACK_BASELINE_NITS = 203.0
 
-# gamescope reads display scripts from $XDG_CONFIG_HOME/gamescope/scripts at
-# startup, and only at startup. Without one of ours the panel runs stock: usable,
-# but with no known refresh timings and no say over the EOTF, which is the single
-# thing every mode below turns on. So the script is a precondition rather than an
-# extra, and the plugin stays gated behind installing the variant the chosen mode
-# needs.
-#
-# That is gamescope's config dir, not ours: Decky starts this process as root
-# with HOME=/root, where 2.1.0 and earlier installed the script and gamescope
-# (running as the session user) never looked. As root, _bind_script_dir()
-# rebinds the paths below to the running gamescope's user and every write goes
-# through display_script_io.py as that user; LEGACY_SCRIPT_DIR is only cleaned.
+# gamescope reads $XDG_CONFIG_HOME/gamescope/scripts only at startup, and every
+# mode depends on the script's EOTF, so installing it gates the plugin. As root,
+# _bind_script_dir() rebinds these paths to gamescope's user and writes go through
+# display_script_io.py as that user. LEGACY_SCRIPT_DIR (/root, where 2.1.0 and
+# earlier installed it unseen) is only cleaned.
 SCRIPT_NAME = "lenovo.legiongo2.oled.lua"
 LEGACY_SCRIPT_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
@@ -248,8 +185,7 @@ LEGACY_SCRIPT_SHA256 = {
     "eea882283c9d3b13456aba526750393ad80b4cba96593741dbd3c393e982a13a": MODE_PQ,
 }
 
-# Rebound by _select_mode(). The script helpers read this rather than taking a
-# mode, so that the choice is made in exactly one place.
+# Rebound by _select_mode() only, so the mode choice lives in one place.
 BUNDLED_SCRIPT = BUNDLED_SCRIPTS[MODE_PQ]
 
 
@@ -265,18 +201,14 @@ def _select_mode(mode) -> str:
     return mode
 
 
-# The published EDID and our patch both outlive a plugin reload, but the bytes
-# we would put back do not. Kept on disk so uninstalling still restores the file
-# rather than leaving it trimmed with nothing maintaining it.
+# The original bytes must outlive a reload, so uninstall can still restore them.
 EDID_BACKUP = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "edid-original.bin")
 
 EDID_BLOCK = 128
 EXT_TAG_CTA = 0x02
 EXT_TAG_DISPLAYID = 0x70
 
-# panel_mode stays None until the user picks one, which is what puts the setup
-# screen up. There is no safe default here: each mode trades something the user
-# may care about, so guessing on their behalf would be the wrong call.
+# panel_mode stays None (setup screen) until the user picks: no mode is a safe default.
 DEFAULT_SETTINGS = {
     "enabled": True,
     "edid_fix": True,
@@ -308,7 +240,7 @@ def _offload(fn, *args):
     return module_runtime.offload('display', fn, *args)
 
 
-# â”€â”€ EDID parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- EDID parsing --
 
 def _read_internal_edid() -> bytes:
     """Raw EDID of the internal panel, or b'' when there is none to read."""
@@ -412,7 +344,7 @@ def _strip_displayid(edid: bytes):
     return bytes(out)
 
 
-# â”€â”€ Backlight â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Backlight --
 
 def _find_backlight() -> str:
     """Directory of the internal panel's backlight, preferring the amdgpu one."""
@@ -473,14 +405,7 @@ def _wait_for_change(fd, timeout_s: float) -> None:
         poller.unregister(fd)
 
 
-# â”€â”€ gamescope atoms â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-# Steam exports LD_LIBRARY_PATH pointing at its own bundled libraries and the
-# plugin inherits it, so a system binary spawned from here loads Steam's copies
-# of libreadline/libc and dies. Observed exactly once, as
-# `bash: undefined symbol: rl_trim_arg_from_keyseq` from the restart button.
-# Everything this plugin spawns is a system tool, so the loader variables go.
-
+# -- gamescope atoms --
 
 def _display_owner(display=None):
     try:
@@ -508,7 +433,7 @@ def _xprop_env(display=None) -> dict:
     return env
 
 
-def _xprop_command(arguments, display=None):
+def _xprop_command(arguments):
     binary = "/usr/bin/xprop" if os.path.exists("/usr/bin/xprop") else "xprop"
     return [binary] + list(arguments)
 
@@ -590,7 +515,7 @@ def _read_props_uncached(names, display=None) -> dict:
     """
     try:
         result = subprocess.run(
-            _xprop_command(["-root"] + list(names), display),
+            _xprop_command(["-root"] + list(names)),
             capture_output=True, text=True, timeout=3, env=_xprop_env(display),
             **_xprop_user(display),
         )
@@ -668,7 +593,7 @@ async def _watch_properties() -> None:
             display = DISPLAY
             initial = await _offload(_read_props_uncached, WATCHED_ATOMS, display)
             _set_prop_cache(initial, display, ready=bool(initial))
-            command = _xprop_command(["-spy", "-root"] + list(WATCHED_ATOMS), display)
+            command = _xprop_command(["-spy", "-root"] + list(WATCHED_ATOMS))
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
@@ -718,7 +643,7 @@ def _as_path(raw):
 def _probe_gamescope(display: str) -> tuple:
     try:
         out = subprocess.run(
-            _xprop_command(["-root"], display),
+            _xprop_command(["-root"]),
             capture_output=True, text=True, timeout=5,
             env=_xprop_env(display),
             **_xprop_user(display),
@@ -757,7 +682,6 @@ def _pick_display() -> bool:
         decky.logger.info(f"{LOG} talking to gamescope on {best} "
                           f"({best_score[1]} atoms"
                           f"{', control root' if best_score[0] else ''})")
-    if best != DISPLAY:
         _invalidate_prop_cache()
     DISPLAY = best
     return True
@@ -895,17 +819,9 @@ def _script_variant(data):
 
 
 def _is_our_script(data) -> bool:
-    """True when these bytes are one of the variants we ship.
-
-    Asked of whatever is already installed, so that swapping modes is not
-    mistaken for displacing somebody else's script. Getting this wrong once
-    meant the backup of a hand-written script was overwritten with our own
-    previous variant, and there was then nothing left to restore.
-    """
+    """True for any variant we ship, so a mode swap never backs up our own script."""
     if data is None:
         return False
-    # BUNDLED_SCRIPT first: it is whichever variant the current mode selected,
-    # and the one place that is rebound rather than read from the table.
     if data == _read_script_bytes(BUNDLED_SCRIPT):
         return True
     return _script_variant(data) is not None
@@ -960,17 +876,11 @@ def _install_script() -> tuple:
 
     existing = _read_script_bytes(INSTALLED_SCRIPT)
     if existing == ours:
-        # Nothing to write. Rewriting identical bytes would still move the file's
-        # mtime, and _restart_needed() reads exactly that - which is how switching
-        # between pq and hybrid, two modes that share a script, used to demand a
-        # Game Mode restart that changed nothing.
+        # Rewriting would move the mtime that _restart_needed() reads.
         return True, "installed"
 
     if existing is not None and not _is_our_script(existing):
-        # Keep whatever was there. Someone who had hand-tuned a script should be
-        # able to get it back without hunting for it. Our own previous variant is
-        # explicitly not worth keeping: backing that up on every mode change
-        # would bury the script the user actually wants back.
+        # Back up a foreign script; never our own variant, which would bury it.
         backup = INSTALLED_SCRIPT + ".backup"
         if not _script_write(backup, existing):
             return False, "could not back up the existing display script"
@@ -1163,12 +1073,7 @@ _UNKNOWN_VARIANT = object()
 
 
 def _restart_needed(loaded_variant=_UNKNOWN_VARIANT) -> bool:
-    """True when the running gamescope did not load the selected script.
-
-    File mtime is enough on a cold read. During this plugin process we can do
-    better: remembering the loaded variant means pq -> gamma22 -> pq does not
-    request a restart when the session has been running pq the whole time.
-    """
+    """True when the running gamescope did not load the selected script."""
     started = _gamescope_start_time()
     if started is None:
         # Cannot tell, so do not nag.
@@ -1178,9 +1083,7 @@ def _restart_needed(loaded_variant=_UNKNOWN_VARIANT) -> bool:
     wanted = _script_variant(_read_script_bytes(BUNDLED_SCRIPT))
     if wanted is not None:
         return loaded_variant != wanted
-    # Test seams and development builds may point BUNDLED_SCRIPT at a file that
-    # is not in the production variant table. Fall back to the original mtime
-    # rule rather than silently declaring it loaded.
+    # A script outside the variant table (development builds): fall back to mtime.
     started = _session_wall_clock(started)
     try:
         return started is not None and started < os.path.getmtime(INSTALLED_SCRIPT)
@@ -1189,12 +1092,7 @@ def _restart_needed(loaded_variant=_UNKNOWN_VARIANT) -> bool:
 
 
 def _uninstall_script() -> str:
-    """Undo what setup did, so removing the plugin is not a downgrade.
-
-    Leaving our script behind would strand the panel in PQ with nothing left to
-    restore brightness control - worse than before the plugin was installed. If
-    setup displaced someone else's script, that one goes back.
-    """
+    """Remove our script (restoring a displaced one) so uninstall cannot strand PQ."""
     if not _bind_script_dir():
         return "could not find the Gaming Mode user's display script folder"
     _remove_legacy_scripts()
@@ -1203,8 +1101,6 @@ def _uninstall_script() -> str:
 
     if current is not None and not _is_our_script(current):
         # Someone replaced it after we installed; leave their choice alone.
-        # Any of our variants counts as ours, not just the current mode's, or
-        # uninstalling after a mode change would refuse to clean up.
         return "left a third-party display script in place"
 
     saved = _read_bytes(backup)
@@ -1229,9 +1125,7 @@ def _uninstall_script() -> str:
 def _restart_session() -> tuple:
     """Restart Game Mode so gamescope picks the script up. (ok, note).
 
-    Absolute paths on purpose: the plugin is spawned by the loader, not by a
-    login shell, and cannot be assumed to have a useful PATH. Failing silently
-    here once already looked to the user like a dead button.
+    Absolute paths: the loader gives no useful PATH.
     """
     env = _system_env()
     owner = _display_owner()
@@ -1402,6 +1296,20 @@ def _clear_edid_write_pending() -> bool:
         return False  # Keep the durable recovery intent until a later retry.
 
 
+def _overwrite_in_place(handle, data: bytes) -> None:
+    """Replace the whole content of an open file on the same inode, durably."""
+    handle.seek(0)
+    view = memoryview(data)
+    while view:
+        written = handle.write(view)
+        if not written:
+            raise OSError("short write")
+        view = view[written:]
+    handle.truncate()
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 def _rewrite_file_if_unchanged(path: str, expected: bytes,
                                replacement: bytes, expected_identity=None) -> str:
     """Rewrite the verified inode without ever replacing a newer connector.
@@ -1439,30 +1347,12 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                                       error=exc, stage='intent', store='display_settings', pending=True)
                 return "failed"
             try:
-                f.seek(0)
-                view = memoryview(replacement)
-                while view:
-                    written = f.write(view)
-                    if not written:
-                        raise OSError("short write")
-                    view = view[written:]
-                f.truncate()
-                f.flush()
-                os.fsync(f.fileno())
+                _overwrite_in_place(f, replacement)
             except OSError as exc:
                 # A failed in-place update may have written a prefix. Restore the
                 # verified bytes on the same inode before admitting failure.
                 try:
-                    f.seek(0)
-                    view = memoryview(expected)
-                    while view:
-                        written = f.write(view)
-                        if not written:
-                            raise OSError("short rollback write")
-                        view = view[written:]
-                    f.truncate()
-                    f.flush()
-                    os.fsync(f.fileno())
+                    _overwrite_in_place(f, expected)
                     f.seek(0)
                     if _read_capped(f) == expected:
                         # Rollback returns to the entry state, which can itself
@@ -1473,7 +1363,6 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                         except Exception as proof_error:
                             diagnostic_transition('display', 'edid_recovery_store', 'deferred', level='warning',
                                                   error=proof_error, stage='rollback_proof', store='display_settings', pending=True)
-                            pass  # The newer intent without proof stays deferred.
                         diagnostic_event('display', 'edid_write_rolled_back', level='warning', error=exc, repeat=60,
                                          restored=expected == Plugin._edid_original,
                                          pending=settings.getSetting('edid_write_pending', None) is not None)
@@ -1491,7 +1380,6 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                 except Exception as proof_error:
                     diagnostic_transition('display', 'edid_recovery', 'unverified_partial', level='error',
                                           error=proof_error, stage='partial_proof', pending=True)
-                    pass
                 return "failed"
 
             # A connector can change while the old descriptor is being written.
@@ -1744,9 +1632,8 @@ class Plugin:
                     if retired and not legacy_session:
                         # Replacing the installed package does not replace the
                         # executable already running in this Gaming Mode session.
-                        if marker is None:
-                            Plugin._native_store({"native_restart_session": {"session": session}})
-                        elif isinstance(marker, dict) and marker.get("session") is None and session is not None:
+                        if marker is None or (isinstance(marker, dict) and marker.get("session") is None
+                                              and session is not None):
                             Plugin._native_store({"native_restart_session": {"session": session}})
                         Plugin._state.update(native_support_detected=True, native_cleanup_pending=False,
                                              native_cleanup_error="", native_restart_pending=True,
@@ -1911,28 +1798,17 @@ class Plugin:
 
         # Both baselines belong to one X/gamescope session. Recover them across a
         # Decky reload, but never carry them into a new session whose atoms reset.
-        brightness_session = settings.getSetting(
-            "brightness_baseline_session",
-            DEFAULT_SETTINGS["brightness_baseline_session"])
-        if Plugin._same_session(brightness_session, started):
-            saved = settings.getSetting(
-                "brightness_baseline", DEFAULT_SETTINGS["brightness_baseline"])
+        Plugin._baseline = None
+        if Plugin._same_session(settings.getSetting("brightness_baseline_session", None), started):
+            saved = settings.getSetting("brightness_baseline", None)
             try:
                 Plugin._baseline = float(saved) if saved is not None else None
             except (TypeError, ValueError):
-                Plugin._baseline = None
-        else:
-            Plugin._baseline = None
-
-        hdr_session = settings.getSetting(
-            "hdr_baseline_session", DEFAULT_SETTINGS["hdr_baseline_session"])
-        if Plugin._same_session(hdr_session, started):
-            saved = settings.getSetting(
-                "hdr_baseline", DEFAULT_SETTINGS["hdr_baseline"])
-            Plugin._hdr_baseline = (
-                saved if type(saved) is bool else None)
-        else:
-            Plugin._hdr_baseline = None
+                pass
+        Plugin._hdr_baseline = None
+        if Plugin._same_session(settings.getSetting("hdr_baseline_session", None), started):
+            saved = settings.getSetting("hdr_baseline", None)
+            Plugin._hdr_baseline = saved if type(saved) is bool else None
 
         wanted = Plugin._state.get("panel_mode")
         stored_active = Plugin._state.get("active_mode")
@@ -1969,15 +1845,11 @@ class Plugin:
             if mode == MODE_HYBRID:
                 # This is a new ownership period. Capture what is there now and
                 # keep it across Decky reloads, not across separate entries.
-                Plugin._hdr_baseline = None
-                Plugin._store_settings({
-                    "hdr_baseline": None,
-                    "hdr_baseline_session": None,
-                })
+                Plugin._forget_hdr_baseline()
                 Plugin._hybrid_suspended_external = False
             Plugin._set_active_mode(mode)
 
-    # â”€â”€ exported to the frontend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- exported to the frontend --
 
     async def get_state(self) -> dict:
         try:
@@ -2278,7 +2150,7 @@ class Plugin:
             await _offload(Plugin._edid_pass)
         return dict(Plugin._state)
 
-    # â”€â”€ brightness half â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- brightness half --
 
     @staticmethod
     def _release() -> bool:
@@ -2472,15 +2344,7 @@ class Plugin:
 
     @staticmethod
     def _session_props(names, *, fresh=False) -> dict:
-        """Read atoms, re-find a session that moved, and learn the EDID path.
-
-        Every caller needs the same two things before anything else: a session
-        that answers, and wherever gamescope is currently publishing the EDID.
-        Both live here rather than inside the brightness gate because that gate
-        returns early in two of the three modes - which used to leave the EDID
-        half with no path at all, and it is the one part of this plugin that has
-        work to do no matter which mode the panel runs in.
-        """
+        """Read atoms, re-find a session that moved, and learn the EDID path (all modes)."""
         wanted = list(dict.fromkeys(list(names) + [ATOM_EDID_PATH]))
         if (not fresh and time.monotonic() < Plugin._session_retry_after and _cached_props(wanted) is None
                 and _gamescope_start_time() is None):
@@ -2550,9 +2414,9 @@ class Plugin:
 
         # Ahead of the mode gates on purpose: this is what teaches the EDID half
         # where to look, and that half runs in all three modes.
-        props = Plugin._session_props(
-            [ATOM_HDR_OUT, ATOM_HDR_APP, ATOM_SDR_NITS, ATOM_IS_EXTERNAL,
-             ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT])
+        names = [ATOM_HDR_OUT, ATOM_HDR_APP, ATOM_SDR_NITS, ATOM_IS_EXTERNAL,
+                 ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT]
+        props = Plugin._session_props(names)
 
         mode = Plugin._state.get("active_mode")
         if mode not in MODES:
@@ -2596,10 +2460,7 @@ class Plugin:
             Plugin._state["reason"] = Plugin._session_note or "gamescope not reachable"
             return False
 
-        atoms = {name: _as_int(props.get(name))
-                  for name in (ATOM_HDR_OUT, ATOM_HDR_APP, ATOM_SDR_NITS,
-                               ATOM_IS_EXTERNAL, ATOM_HDR_ENABLED,
-                               ATOM_FORCE_HDR_SUPPORT)}
+        atoms = {name: _as_int(props.get(name)) for name in names}
 
         if atoms.get(ATOM_IS_EXTERNAL):
             # The backlight we read belongs to the built-in panel; the atom
@@ -2630,10 +2491,8 @@ class Plugin:
             if current and current > 0:
                 Plugin._remember_brightness_baseline(current)
 
-        # gamescope drops what we wrote when it re-initialises, which it does
-        # across a suspend and a session restart. The loop only writes when the
-        # backlight moves, so without this the level stays wrong until the user
-        # touches the slider - and the value needed to notice it is already here.
+        # gamescope drops our value on re-init (suspend, restart); rewrite it now
+        # rather than waiting for the slider to move.
         live = _as_float(atoms.get(ATOM_SDR_NITS))
         if (Plugin._last_written is not None and live is not None
                 and abs(live - Plugin._last_written) > 0.01):
@@ -2653,10 +2512,7 @@ class Plugin:
                 Plugin._state["reason"] = "could not clear stale hybrid HDR support"
             return False
 
-        # The request atom is only our own last write; actual output feedback is
-        # the closed loop. Retry even when HDR_ENABLED already reads one, because
-        # that exact mismatch used to become a permanent "slider already works"
-        # blind spot.
+        # Output feedback, not our own request atom, closes the loop.
         if not atoms.get(ATOM_HDR_OUT, 0):
             Plugin._release_locked()
             if Plugin._standing_off():
@@ -2679,7 +2535,7 @@ class Plugin:
         Plugin._state["reason"] = "forwarding slider to gamescope"
         return True
 
-    # â”€â”€ display mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- display mode --
 
     @staticmethod
     def _correct_hdr_mode(target: bool) -> bool:
@@ -2727,7 +2583,7 @@ class Plugin:
     def _standing_off() -> bool:
         return time.monotonic() < Plugin._hdr_backoff_until
 
-    # â”€â”€ hybrid half â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- hybrid half --
 
     @staticmethod
     def _reset_hybrid_timing() -> None:
@@ -2761,6 +2617,11 @@ class Plugin:
         Plugin._hdr_baseline = bool(value)
 
     @staticmethod
+    def _forget_hdr_baseline() -> None:
+        Plugin._hdr_baseline = None
+        Plugin._store_settings({"hdr_baseline": None, "hdr_baseline_session": None})
+
+    @staticmethod
     def _hybrid_pass_locked() -> None:
         """Move the panel between gamma 2.2 and PQ from what the game asks for."""
         if Plugin.native_display_active():
@@ -2775,9 +2636,9 @@ class Plugin:
             Plugin._state["hybrid_reason"] = "waiting for the display script"
             return
 
-        props = Plugin._session_props(
-            [ATOM_HDR_APP, ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT,
-             ATOM_IS_EXTERNAL, ATOM_HDR_OUT])
+        names = [ATOM_HDR_APP, ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT,
+                 ATOM_IS_EXTERNAL, ATOM_HDR_OUT]
+        props = Plugin._session_props(names)
         if not props:
             # Time without feedback cannot count as continuously observed SDR.
             # Keep the PQ hold deadline, but make the debounce start over once
@@ -2796,9 +2657,7 @@ class Plugin:
                 or _as_int(props.get(ATOM_HDR_ENABLED)) not in (0, 1)
                 or _as_int(props.get(ATOM_HDR_APP)) not in (0, 1)
                 or _as_int(props.get(ATOM_HDR_ENABLED)) != _as_int(props.get(ATOM_HDR_APP))):
-            props = Plugin._session_props(
-                [ATOM_HDR_APP, ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT,
-                 ATOM_IS_EXTERNAL, ATOM_HDR_OUT], fresh=True)
+            props = Plugin._session_props(names, fresh=True)
             if Plugin._ownership_session_current() is not True:
                 Plugin._state["hybrid_reason"] = "waiting to verify the current gamescope session"
                 return
@@ -2811,11 +2670,8 @@ class Plugin:
         if external == 1:
             if not Plugin._hybrid_suspended_external:
                 Plugin._reset_hybrid_timing()
-                dropped = _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
-                if dropped:
-                    Plugin._edid_recheck_until = \
-                        time.monotonic() + GATE_INTERVAL_S
-                if dropped:
+                if _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
+                    Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
                     Plugin._hybrid_suspended_external = True
                     output = _as_int(props.get(ATOM_HDR_OUT))
                     if output is not None:
@@ -2853,10 +2709,8 @@ class Plugin:
                 found = 0 if forced else (_as_int(props.get(ATOM_HDR_OUT)) or 0)
             Plugin._remember_hdr_baseline(bool(found))
 
-        # Re-asserted rather than set once: gamescope drops it on restart, and
-        # without it the Vulkan layer hides every HDR format from a game started
-        # while the panel is in gamma 2.2 - so nothing would ever ask for HDR and
-        # the switch below could never fire.
+        # Re-asserted every pass: gamescope drops it on restart, and without it no
+        # game started in gamma 2.2 could ever ask for HDR.
         if not _as_int(props.get(ATOM_FORCE_HDR_SUPPORT)):
             if _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 1):
                 Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
@@ -2970,11 +2824,7 @@ class Plugin:
             # external display is equally hands-off: Steam or that monitor's own
             # policy decides whether it should run HDR.
             if external == 1 and dropped:
-                Plugin._hdr_baseline = None
-                Plugin._store_settings({
-                    "hdr_baseline": None,
-                    "hdr_baseline_session": None,
-                })
+                Plugin._forget_hdr_baseline()
                 Plugin._hybrid_suspended_external = False
                 Plugin._state["hybrid_reason"] = ""
                 Plugin._hdr_mode_settled()
@@ -3015,11 +2865,7 @@ class Plugin:
             # Only forget the hand-back target after both writes succeeded. If
             # Xwayland disappeared halfway through unload, a Decky reload in
             # the same gamescope session still has enough information to retry.
-            Plugin._hdr_baseline = None
-            Plugin._store_settings({
-                "hdr_baseline": None,
-                "hdr_baseline_session": None,
-            })
+            Plugin._forget_hdr_baseline()
             Plugin._hdr_mode_settled()
             Plugin._hybrid_suspended_external = False
             Plugin._state["hybrid_reason"] = ""
@@ -3035,7 +2881,7 @@ class Plugin:
             Plugin._state["hybrid_reason"] = "could not hand HDR control back"
             return False
 
-    # â”€â”€ EDID half â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- EDID half --
 
     @staticmethod
     def _edid_restore() -> bool:
@@ -3290,7 +3136,7 @@ class Plugin:
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "could not write the EDID file"
 
-    # â”€â”€ loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- loop --
 
     async def _loop(self, bl_dir: str):
         bl_path = os.path.join(bl_dir, "brightness") if bl_dir else ""
@@ -3341,9 +3187,7 @@ class Plugin:
                         gate_ok = await _offload(Plugin._refresh_gate)
                         await _offload(Plugin._edid_pass)
 
-                    # Hybrid runs on its own, faster clock: this one decides how
-                    # long HDR content is shown on a gamma 2.2 output before the
-                    # panel catches up, and the gate cadence would be visible.
+                    # Hybrid runs on its own, faster clock (see HYBRID_INTERVAL_S).
                     if (Plugin._state.get("active_mode") == MODE_HYBRID
                             and now - hybrid_ts >= HYBRID_INTERVAL_S):
                         await _offload(Plugin._hybrid_pass)
@@ -3456,12 +3300,8 @@ class Plugin:
         if Plugin._state["reset_in_progress"]:
             await self.reset_settings()
 
-        # As early as the gate allows, and before the slower startup work. The
-        # Vulkan layer reads GAMESCOPE_HDR_OUTPUT_FEEDBACK once, when a game
-        # creates its surface, so a game that starts before the forced-support
-        # flag is back loses HDR for its whole run. This cannot close the window
-        # completely - the plugin can start before gamescope does - but it takes
-        # everything below out of it.
+        # Before the slower startup work: a game that creates its surface before
+        # the forced-support flag is back loses HDR for its whole run.
         if Plugin._state.get("active_mode") == MODE_HYBRID:
             await _offload(Plugin._hybrid_pass)
 
