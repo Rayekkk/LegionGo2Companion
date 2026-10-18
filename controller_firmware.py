@@ -384,15 +384,18 @@ def console_power():
     return ac, percent
 
 
-def pad_power(read, components):
-    """fwupd writes each pad over the receiver link: a detached or low pad could drop mid-write."""
+def pad_power(read, components, partial=False):
+    """fwupd writes each pad over the receiver link: a detached or low pad could drop mid-write.
+
+    partial: an earlier component of this install is already written."""
     pads = [c for c in ('left', 'right') if c in components]
     levels = read() if pads and read else None
     for side in pads:
         level = levels.get(side) if isinstance(levels, dict) else None
         if levels is None or levels.get('connection_' + side) != 'attached' or type(level) is not int or level < 30:
             raise FirmwareError(f'{RELEASES[side].label}: attach it to the console and charge it to at least 30%. '
-                                'Nothing was installed.')
+                                + ('Components updated before it keep their new firmware; check again to finish.'
+                                   if partial else 'Nothing was installed.'))
 
 
 def build_container(images):
@@ -551,7 +554,7 @@ class FirmwarePreparation:
             return self._status()
 
     def admit_install(self, token):
-        """Refuse before the caller pauses controller modules; no device access."""
+        """Refuse before the caller pauses controller modules; only reads the pads' input report."""
         with self._lock:
             return self._admit(token)
 
@@ -672,7 +675,7 @@ class FirmwarePreparation:
                         raise FirmwareError('fwupd and the controller driver report different versions. Check again.')
                     if updater_running():
                         raise FirmwareError('Another firmware update is running. Try again when it finishes.')
-                    pad_power(self._pads, (component,))
+                    pad_power(self._pads, (component,), partial=installed != check['installed'])
                     self._step('installing', component)
                     event('firmware', 'install_started', scope=component, version=images[component].release.version)
                     returncode, seconds, tail = install_blob(container, devices[component]['id'],

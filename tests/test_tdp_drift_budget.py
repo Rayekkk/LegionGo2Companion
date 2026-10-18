@@ -25,6 +25,10 @@ class DriftBudgetTests(unittest.TestCase):
     def passes(self,n=12):
         for _ in range(n):tdp._enforce_target(self.want)
 
+    def test_persistent_live_limit_disagreement_does_not_reset_retry_budget(self):
+        self.passes()
+        self.assertEqual(self.apply.call_count,tdp.DRIFT_MAX_ATTEMPTS)
+
     def test_not_due_crosschecks_do_not_turn_unverified_wmi_facade_into_recovery(self):
         for _ in range(8):
             self.override=True;self.passes(1)

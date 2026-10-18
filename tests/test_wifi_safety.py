@@ -257,6 +257,16 @@ class IwdMainConfEditorTests(unittest.TestCase):
             self.assertEqual(self.iwd.read_bytes().decode(), original)
         self.assertEqual(self.edit(original, "0.5 # mine"), original)  # A user's one-line value still restores.
 
+    def test_restore_recreates_only_a_whitespace_only_original(self):
+        original = {"file_exists": True, "rank_section_present": False, "modifier_present": False}
+        self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.0\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "saved content"):
+            self.plugin._restore_iwd_rank_modifier(dict(original, empty_file_content="[General]\nEnableNetworkConfiguration=true\n"))
+        self.assertEqual(self.iwd.read_text(encoding="utf-8"), "[Rank]\nBandModifier2_4GHz=0.0\n")  # Refused before any change.
+        self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.0\n", encoding="utf-8")
+        self.plugin._restore_iwd_rank_modifier(dict(original, empty_file_content="\n"))
+        self.assertEqual(self.iwd.read_text(encoding="utf-8"), "\n")
+
     @unittest.skipUnless(os.name == "posix", "symlink semantics")
     def test_symlinked_main_conf_is_refused_without_touching_the_target(self):
         target = self.iwd.with_name("target.conf")

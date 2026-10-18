@@ -287,6 +287,32 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(status['phase'], 'failed')
         self.assertIn('attach it to the console', status['error'])
 
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_pad_detached_after_the_first_pad_says_what_was_installed(self):
+        state = Service()
+        both = feed(); both['candidates']['right'].update(feed_version='v26.04.01.01', version=catalog.raw_version('v26.04.01.01'))
+        with patch.object(catalog, 'check_catalog', return_value=both):
+            state.run('check')
+        with patch.object(fw, 'download_image', side_effect=lambda r, c: r.component.encode() * 200), \
+                patch.object(fw, 'validate_image', side_effect=validated):
+            state.run('download')
+        token = state.service.status()['token']
+        new_left = dict(INSTALLED, left='260401A')
+        state.readings = [INSTALLED, new_left, new_left]
+        attached = {'left': 100, 'right': 100, 'connection_left': 'attached', 'connection_right': 'attached'}
+        reads = iter([attached, attached, dict(attached, connection_right='detached')])
+        state.service._pads = lambda: next(reads)
+        with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                patch.object(fw, 'fwupd_devices', side_effect=[devices()[0], devices(left='260401A')[0]]), \
+                patch.object(fw, 'updater_running', return_value=False), \
+                patch.object(fw, 'install_blob', return_value=(0, 1.0, 'Done')) as install:
+            _, status = state.run('install', token, Mock())
+        install.assert_called_once()  # Left only; the detached right pad is never written.
+        self.assertEqual(status['phase'], 'failed')
+        self.assertIn('Right controller: attach it', status['error'])
+        self.assertIn('keep their new firmware', status['error'])
+        self.assertNotIn('Nothing was installed', status['error'])
+
     def test_receiver_only_install_does_not_read_the_pads(self):
         fw.pad_power(None, ('receiver',))
         fw.pad_power(Mock(side_effect=AssertionError('read')), ('receiver',))

@@ -970,6 +970,9 @@ class Plugin:
         self._atomic_write_text(IWD_MAIN_CONF, updated)
 
     def _restore_iwd_rank_modifier(self, snapshot: dict):
+        # Only a whitespace-only original is ever recreated; the snapshot comes from deck-owned settings.
+        if str(snapshot.get("empty_file_content") or "").strip():
+            raise ValueError("Refusing to recreate iwd main.conf with saved content")
         before_present = bool(snapshot.get("modifier_present"))
         before_value = str(snapshot.get("modifier_value") or "")
         self._set_iwd_rank_modifier(
