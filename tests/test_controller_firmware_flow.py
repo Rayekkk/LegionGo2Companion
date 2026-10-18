@@ -1,0 +1,478 @@
+# SPDX-License-Identifier: BSD-3-Clause
+"""Check / Download / Install state machine, sysfs reader and fwupd engine.
+
+Every subprocess is mocked: nothing here runs fwupd or touches a controller.
+"""
+import asyncio
+from dataclasses import replace
+import hashlib
+import json
+import os
+from pathlib import Path
+import struct
+import tempfile
+import threading
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+import support  # noqa: F401  (Decky stub for main)
+import controller_firmware as fw
+import controller_firmware_catalog as catalog
+import main
+import module_runtime
+from test_controller_firmware_catalog import result
+
+INSTALLED = {'left': '260310A', 'right': '260310A', 'receiver': '260422A'}
+
+
+def feed(left='v26.04.01.01'):
+    value = result()
+    value['candidates']['left'].update(feed_version=left, version=catalog.raw_version(left))
+    return value
+
+
+def image(component, version):
+    release = replace(fw.release_for(component), version=version)
+    return fw.ValidatedImage(release, component.encode() * 200)
+
+
+def validated(component, data, release=None):
+    return fw.ValidatedImage(replace(release, size=len(data), sha256=hashlib.sha256(data).hexdigest()), data)
+
+
+def devices(**versions):
+    rows = []
+    for component, instance in fw.FWUPD_INSTANCES.items():
+        rows.append({'Name': component, 'DeviceId': hashlib.sha1(component.encode()).hexdigest(),
+            'InstanceIds': [instance], 'Plugin': 'legion_hid', 'Flags': ['internal', 'updatable'],
+            'Version': versions.get(component, INSTALLED[component])})
+    return {component: {'id': row['DeviceId'], 'version': row['Version']}
+        for component, row in zip(fw.FWUPD_INSTANCES, rows)}, rows
+
+
+class Service:
+    """A FirmwarePreparation with a scripted reader and synchronous waits."""
+    def __init__(self, readings=None):
+        self.readings = readings or []
+        self.service = fw.FirmwarePreparation(reader=self.read, sleep=lambda _seconds: None)
+
+    def read(self):
+        if self.readings:
+            value = self.readings.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return dict(value)
+        return dict(INSTALLED)
+
+    def run(self, method, *args):
+        status = getattr(self.service, method)(*args)
+        if self.service._thread is not None:
+            self.service._thread.join(5)
+        return status, self.service.status()
+
+
+class FlowTests(unittest.TestCase):
+    def downloaded(self, left='v26.04.01.01'):
+        state = Service()
+        with patch.object(catalog, 'check_catalog', return_value=feed(left)):
+            state.run('check')
+        with patch.object(fw, 'download_image', side_effect=lambda r, c: r.component.encode() * 200), \
+                patch.object(fw, 'validate_image', side_effect=validated):
+            state.run('download')
+        return state
+
+    def test_check_reports_versions_and_only_newer_components(self):
+        state = Service()
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            _, status = state.run('check')
+        self.assertEqual(status['phase'], 'available')
+        rows = {row['id']: row for row in status['components']}
+        self.assertEqual((rows['left']['installed'], rows['left']['available'], rows['left']['newer']), ('260310A', '260401A', True))
+        self.assertFalse(rows['right']['newer'] or rows['receiver']['newer'])
+        self.assertEqual(status['token'], '')
+        with patch.object(catalog, 'check_catalog', return_value=result()):
+            _, status = state.run('check')
+        self.assertEqual(status['phase'], 'up_to_date')
+        status['components'][0]['installed'] = 'fake'
+        self.assertEqual(state.service.status()['components'][0]['installed'], '260310A')
+
+    def test_check_fails_closed_on_partial_feed_or_changed_versions(self):
+        partial = result(); partial['candidates']['receiver'] = None
+        for readings, value in (([], partial), ([INSTALLED, dict(INSTALLED, left='260311A')], result()),
+                                ([fw.FirmwareError('The supported controllers are not connected.')], result())):
+            state = Service(list(readings))
+            with patch.object(catalog, 'check_catalog', return_value=value):
+                _, status = state.run('check')
+            self.assertEqual(status['phase'], 'failed')
+            self.assertTrue(status['error'])
+            self.assertEqual(status['checked_at'], '')
+
+    def test_download_needs_a_fresh_available_check_and_fetches_all_three_once(self):
+        state = Service()
+        with self.assertRaises(fw.FirmwareError):
+            state.service.download()
+        with patch.object(catalog, 'check_catalog', return_value=result()):
+            state.run('check')
+        with self.assertRaises(fw.FirmwareError):
+            state.service.download()  # Up to date: nothing to download.
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            state.run('check')
+        with patch.object(fw.time, 'monotonic', return_value=state.service._check['at'] + fw.CHECK_MAX_AGE + 1):
+            with self.assertRaises(fw.FirmwareError):
+                state.service.download()
+        # A stale check ends in `failed`, from which both UIs offer Check, instead of looping on Download.
+        self.assertEqual(state.service.status()['phase'], 'failed')
+        self.assertIn('out of date', state.service.status()['error'])
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            state.run('check')
+        calls = []
+        with patch.object(fw, 'download_image', side_effect=lambda r, c: calls.append(r.component) or b'x' * 700), \
+                patch.object(fw, 'validate_image', side_effect=validated) as validate:
+            _, status = state.run('download')
+        self.assertEqual(sorted(calls), sorted(fw.RELEASES))
+        self.assertEqual(validate.call_count, 3)
+        self.assertEqual(status['phase'], 'downloaded')
+        self.assertRegex(status['token'], '^[0-9a-f]{64}$')
+        self.assertEqual([row['downloaded'] for row in status['components']], [True, False, False])
+
+    def test_failed_download_discards_images_and_allows_a_new_check(self):
+        state = Service()
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            state.run('check')
+        with patch.object(fw, 'download_image', return_value=b'x' * 700), \
+                patch.object(fw, 'validate_image', side_effect=fw.FirmwareError('The Lenovo firmware signature is not valid.')):
+            _, status = state.run('download')
+        self.assertEqual((status['phase'], status['error']), ('failed', 'The Lenovo firmware signature is not valid.'))
+        self.assertIsNone(state.service._images)
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            _, status = state.run('check')
+        self.assertEqual(status['phase'], 'available')
+
+    def test_install_is_enabled(self):
+        self.assertTrue(fw.INSTALL_ENABLED)
+        self.assertTrue(self.downloaded().service.status()['install_enabled'])
+
+    @patch.object(fw, 'INSTALL_ENABLED', False)
+    def test_kill_switch_never_runs_fwupd(self):
+        state = self.downloaded()
+        status = state.service.status()
+        self.assertFalse(status['install_enabled']); self.assertTrue(status['install_reason'])
+        done = Mock()
+        with patch.object(fw, '_run_tool') as tool:
+            with self.assertRaises(fw.FirmwareError):
+                state.service.admit_install(status['token'])
+            with self.assertRaises(fw.FirmwareError):
+                state.service.install(status['token'], done)
+        tool.assert_not_called(); done.assert_called_once()
+        self.assertEqual(state.service.status()['phase'], 'downloaded')
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_install_needs_the_confirmed_token_of_the_current_download(self):
+        state = self.downloaded()
+        token = state.service.status()['token']
+        for wrong in ('', None, 'x' * 64, token.upper()):
+            with self.assertRaises(fw.FirmwareError):
+                state.service.admit_install(wrong)
+        # A new check replaces the download; the old confirmation is stale.
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            state.run('check')
+        with self.assertRaises(fw.FirmwareError):
+            state.service.admit_install(token)
+        state = self.downloaded()
+        token = state.service.status()['token']
+        with patch.object(fw.time, 'monotonic', return_value=state.service._check['at'] + fw.CHECK_MAX_AGE + 1):
+            with self.assertRaises(fw.FirmwareError):
+                state.service.admit_install(token)
+        status = state.service.status()
+        self.assertEqual(status['phase'], 'failed')
+        self.assertEqual((status['token'], [row['downloaded'] for row in status['components']]), ('', [False] * 3))
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_install_writes_only_newer_devices_then_verifies_with_retries(self):
+        state = self.downloaded()
+        token = state.service.status()['token']
+        found, _ = devices()
+        new = dict(INSTALLED, left='260401A')
+        # Preflight read, then the controller is still restarting twice before it reports the new version.
+        state.readings = [INSTALLED, fw.FirmwareError('restarting'), INSTALLED, new]
+        done = Mock()
+        containers = []
+        def blob(container, device_id, log):
+            containers.append(container.read_bytes())
+            return 0, 42.0, 'Done'
+        with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
+                patch.object(fw, 'install_blob', side_effect=blob) as install:
+            _, status = state.run('install', token, done)
+        self.assertEqual(status['phase'], 'installed', status['error'])
+        install.assert_called_once()
+        self.assertEqual(install.call_args.args[1], found['left']['id'])
+        done.assert_called_once()
+        self.assertEqual({row['id']: row['installed'] for row in status['components']}, new)
+        self.assertEqual(status['token'], '')
+        sizes = struct.unpack_from('<6I', containers[0])
+        self.assertEqual(sizes[2:4], (len(b'left' * 200), 0x0260401A))
+
+    def test_one_install_updates_every_newer_component_in_order(self):
+        state = Service()
+        newer = result()
+        for component, version in (('left', 'v26.04.01.01'), ('right', 'v26.04.01.02'), ('receiver', 'v26.05.01.01')):
+            newer['candidates'][component].update(feed_version=version, version=catalog.raw_version(version))
+        with patch.object(catalog, 'check_catalog', return_value=newer):
+            state.run('check')
+        with patch.object(fw, 'download_image', side_effect=lambda r, c: r.component.encode() * 200), \
+                patch.object(fw, 'validate_image', side_effect=validated):
+            state.run('download')
+        target = {row['id']: row['available'] for row in state.service.status()['components']}
+        current = dict(INSTALLED)
+        state.service._reader = lambda: dict(current)
+        written = []
+        def blob(container, device_id, log):
+            component = next(c for c, d in devices()[0].items() if d['id'] == device_id)
+            written.append(component); current[component] = target[component]
+            return 0, 40.0, 'Done'
+        with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                patch.object(fw, 'fwupd_devices', side_effect=lambda: devices(**current)[0]), \
+                patch.object(fw, 'updater_running', return_value=False), patch.object(fw, 'install_blob', side_effect=blob):
+            _, status = state.run('install', state.service.status()['token'], Mock())
+        self.assertEqual(status['phase'], 'installed', status['error'])
+        self.assertEqual(written, ['left', 'right', 'receiver'])
+        self.assertEqual({row['id']: row['installed'] for row in status['components']}, target)
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_install_refuses_foreign_updater_mismatch_and_changed_versions_before_writing(self):
+        found, _ = devices()
+        mismatch, _ = devices(receiver='251208A')
+        for running, listed, readings in ((True, found, []), (False, mismatch, []),
+                                          (False, found, [dict(INSTALLED, right='260311A')])):
+            state = self.downloaded()
+            token = state.service.status()['token']
+            state.readings = list(readings)
+            with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                    patch.object(fw, 'fwupd_devices', return_value=listed), \
+                    patch.object(fw, 'updater_running', return_value=running), \
+                    patch.object(fw, 'install_blob') as install:
+                _, status = state.run('install', token, Mock())
+            install.assert_not_called()
+            self.assertEqual(status['phase'], 'failed')
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_failed_or_unverified_install_reports_error_and_allows_retry(self):
+        found, _ = devices()
+        for returncode, readings in ((1, []), (None, []), (0, [INSTALLED] + [INSTALLED] * fw.VERIFY_ATTEMPTS)):
+            state = self.downloaded()
+            token = state.service.status()['token']
+            state.readings = list(readings)
+            done = Mock()
+            with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                    patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
+                    patch.object(fw, 'install_blob', return_value=(returncode, 1.0, 'error tail')):
+                _, status = state.run('install', token, done)
+            self.assertEqual(status['phase'], 'failed')
+            self.assertIn('Left controller', status['error'])
+            done.assert_called_once()
+            with patch.object(catalog, 'check_catalog', return_value=feed()):
+                _, status = state.run('check')
+            self.assertEqual(status['phase'], 'available', 'no permanent lock after a failed install')
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_concurrent_install_is_rejected_while_one_runs(self):
+        state = self.downloaded()
+        token = state.service.status()['token']
+        release, entered = threading.Event(), threading.Event()
+        def blob(*_args):
+            entered.set(); self.assertTrue(release.wait(5)); return 1, 1.0, ''
+        found, _ = devices()
+        with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
+                patch.object(fw, 'install_blob', side_effect=blob):
+            state.service.install(token, Mock())
+            self.assertTrue(entered.wait(5))
+            self.assertEqual(state.service.status()['phase'], 'installing')
+            second = Mock()
+            with self.assertRaises(fw.FirmwareError):
+                state.service.install(token, second)
+            second.assert_called_once()
+            self.assertEqual(state.service.check()['phase'], 'installing', 'a check cannot interrupt an install')
+            release.set(); state.service._thread.join(5)
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_power_refusal_comes_before_the_install_and_keeps_the_download(self):
+        state = self.downloaded()
+        token = state.service.status()['token']
+        for error in (fw.FirmwareError('Connect power or charge the console to at least 30%.'), OSError('no sysfs')):
+            with patch.object(fw, 'console_power', side_effect=error), patch.object(fw, '_run_tool') as tool:
+                with self.assertRaises(fw.FirmwareError):
+                    state.service.admit_install(token)
+            tool.assert_not_called()
+            status = state.service.status()
+            self.assertEqual((status['phase'], status['token']), ('downloaded', token))
+        with patch.object(fw, 'console_power'):
+            self.assertEqual(state.service.admit_install(token)[0], state.service._check)
+
+    @patch.object(fw, 'INSTALL_ENABLED', True)
+    def test_install_that_succeeds_after_close_still_reports_installed(self):
+        state = self.downloaded()
+        token = state.service.status()['token']
+        new = dict(INSTALLED, left='260401A')
+        current = dict(INSTALLED)
+        state.service._reader = lambda: dict(current)
+        release, entered = threading.Event(), threading.Event()
+        def blob(*_args):
+            entered.set(); self.assertTrue(release.wait(5)); current.update(new); return 0, 40.0, 'Done'
+        found, _ = devices()
+        with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+                patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
+                patch.object(fw, 'install_blob', side_effect=blob):
+            state.service.install(token, Mock())
+            self.assertTrue(entered.wait(5))
+            state.service.close()  # The conflict guard closes the updater while fwupd writes.
+            release.set(); state.service._thread.join(5)
+        status = state.service.status()
+        self.assertEqual(status['phase'], 'installed', status['message'])
+        self.assertEqual({row['id']: row['installed'] for row in status['components']}, new)
+        self.assertEqual(status['token'], '')
+
+
+class EngineTests(unittest.TestCase):
+    def test_container_is_the_fwupd_legion_hid_layout(self):
+        images = {'receiver': image('receiver', '260422A'), 'left': image('left', '260310A'), 'right': image('right', '260310A')}
+        data = fw.build_container(images)
+        header = struct.unpack_from('<6I', data)
+        self.assertEqual(header, (len(images['receiver'].original), 0x0260422A, len(images['left'].original), 0x0260310A,
+                                  len(images['right'].original), 0x0260310A))
+        self.assertEqual(data[24:], images['receiver'].original + images['left'].original + images['right'].original)
+        for broken in ({'left': images['left'], 'right': images['right']}, dict(images, left=images['right']),
+                       dict(images, receiver=b'raw')):
+            with self.assertRaises(fw.FirmwareError):
+                fw.build_container(broken)
+
+    def test_fwupd_devices_match_unique_updatable_legion_hid_instances(self):
+        found, rows = devices()
+        def listing(payload, returncode=0):
+            return Mock(returncode=returncode, stdout=json.dumps({'Devices': payload}).encode())
+        with patch.object(fw, '_run_tool', return_value=listing(rows)) as tool:
+            self.assertEqual(fw.fwupd_devices(), found)
+        self.assertEqual(tool.call_args.args[0], [fw.FWUPDMGR, 'get-devices', '--json'])
+        for payload, code in ((rows + [dict(rows[1], DeviceId='f' * 40)], 0), ([dict(rows[0], Flags=['internal'])] + rows[1:], 0),
+                              ([dict(rows[0], Plugin='other')] + rows[1:], 0), ([dict(rows[0], DeviceId='../x')] + rows[1:], 0),
+                              (rows, 1)):
+            with patch.object(fw, '_run_tool', return_value=listing(payload, code)), self.assertRaises(fw.FirmwareError):
+                fw.fwupd_devices()
+        with patch.object(fw, '_run_tool', return_value=Mock(returncode=0, stdout=b'not json')), self.assertRaises(fw.FirmwareError):
+            fw.fwupd_devices()
+
+    def test_install_blob_is_bounded_and_keeps_the_output_tail(self):
+        with tempfile.TemporaryDirectory() as raw:
+            log = Path(raw) / 'fwupdtool.log'
+            def run(argv, timeout, stdout, stderr):
+                stdout.write(b'x' * 5000 + b'Done')
+                return Mock(returncode=0)
+            with patch.object(fw, '_run_tool', side_effect=run) as tool:
+                returncode, _, tail = fw.install_blob(Path(raw) / 'c.bin', 'a' * 40, log)
+            self.assertEqual(returncode, 0); self.assertTrue(tail.endswith('Done')); self.assertLessEqual(len(tail), 4096)
+            self.assertEqual(tool.call_args.args[0][:4], [fw.FWUPDTOOL, 'install-blob', str(Path(raw) / 'c.bin'), 'a' * 40])
+            self.assertEqual(tool.call_args.args[1], fw.INSTALL_SECONDS)
+            with patch.object(fw, '_run_tool', side_effect=fw.subprocess.TimeoutExpired('fwupdtool', 1)):
+                self.assertIsNone(fw.install_blob(Path(raw) / 'c.bin', 'a' * 40, log)[0])
+
+    def test_updater_running_detects_fwupd_clients_and_steam_updater(self):
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            for pid, name in ((1, 'systemd'), (2, 'fwupd')):
+                (proc / str(pid)).mkdir(); (proc / str(pid) / 'comm').write_text(name + '\n')
+            self.assertFalse(fw.updater_running(proc))
+            for name in ('fwupdtool', 'fwupdmgr', 'steamos-firmwar'):
+                (proc / '9').mkdir(exist_ok=True); (proc / '9' / 'comm').write_text(name + '\n')
+                self.assertTrue(fw.updater_running(proc), name)
+
+    def test_two_different_reads_are_not_trusted(self):
+        with patch.object(fw, '_read_versions_once', side_effect=[INSTALLED, dict(INSTALLED, left='0000000')]), \
+                patch.object(fw, '_text', side_effect=lambda p: {'sys_vendor': 'LENOVO', 'product_name': '83N0',
+                    'product_version': 'Legion Go 8ASP2', 'idVendor': '17ef', 'idProduct': '61eb'}.get(p.name)), \
+                patch.object(fw.Path, 'glob', side_effect=[[Path('usb')], [Path('hid')]]), \
+                patch.object(fw.Path, 'is_file', return_value=True), \
+                patch.object(fw.os.path, 'realpath', side_effect=lambda p: '/d/usb/hid-lenovo-go' if str(p).endswith('driver') else '/d/usb/hid'), \
+                self.assertRaises(fw.FirmwareError):
+            fw.read_installed_versions()
+
+
+@unittest.skipUnless(os.name == 'posix', 'sysfs symlink tree')
+class SysfsReaderTests(unittest.TestCase):
+    def tree(self, *, product='83N0', driver='hid-lenovo-go', generation='2', version='260310a', extra_root=False):
+        raw = tempfile.TemporaryDirectory(); self.addCleanup(raw.cleanup)
+        sysfs = Path(raw.name)
+        dmi = sysfs / 'class/dmi/id'; dmi.mkdir(parents=True)
+        for name, value in (('sys_vendor', 'LENOVO'), ('product_name', product), ('product_version', 'Legion Go 8ASP2')):
+            (dmi / name).write_text(value + '\n')
+        usb = sysfs / 'devices/pci/usb3/3-1'; usb.mkdir(parents=True)
+        (usb / 'idVendor').write_text('17ef\n'); (usb / 'idProduct').write_text('61eb\n')
+        (sysfs / 'bus/usb/devices').mkdir(parents=True); (sysfs / 'bus/usb/devices/3-1').symlink_to(usb)
+        drivers = sysfs / 'bus/hid/drivers'; (drivers / driver).mkdir(parents=True); (drivers / 'hid-multitouch').mkdir()
+        (sysfs / 'bus/hid/devices').mkdir(parents=True)
+        for index, owner in ((1, 'hid-multitouch'), (2, driver), (3, driver)):
+            node = usb / f'3-1:1.{index}' / f'0003:17EF:61EB.000{index}'; node.mkdir(parents=True)
+            (node / 'driver').symlink_to(drivers / owner)
+            (sysfs / 'bus/hid/devices' / node.name).symlink_to(node)
+            if index == 2 or (index == 3 and extra_root):
+                for sub, value in (('', '260422a'), ('left_handle', version), ('right_handle', '260310a'), ('tx_dongle', '260422a')):
+                    (node / sub).mkdir(exist_ok=True)
+                    (node / sub / 'firmware_version').write_text(value + '\n')
+                    (node / sub / 'hardware_generation').write_text(generation + '\n')
+        return sysfs
+
+    def test_reads_driver_versions_on_the_supported_console(self):
+        self.assertEqual(fw.read_installed_versions(self.tree()), INSTALLED)
+
+    def test_unsupported_model_driver_generation_format_or_duplicate_fail_closed(self):
+        for options in ({'product': '83N1'}, {'driver': 'hid-generic'}, {'generation': '1'},
+                        {'version': '0'}, {'version': '261399a'}, {'extra_root': True}):
+            with self.subTest(**options), self.assertRaises(fw.FirmwareError):
+                fw.read_installed_versions(self.tree(**options))
+
+
+class PluginInstallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_controller_writes_are_paused_only_while_an_admitted_install_runs(self):
+        plugin = main.Plugin()
+        plugin._check_guard = AsyncMock()
+        plugin._controller = Mock(_status_cache=('cached', {}))
+        finished = asyncio.Event()
+        observed = []
+        class Firmware:
+            def admit_install(self, token):
+                if token != 'good':
+                    raise fw.FirmwareError('The confirmed update no longer matches the download.')
+            def install(self, token, on_done):
+                observed.append(module_runtime.is_paused('rgb'))
+                threading.Thread(target=lambda: (on_done(), loop.call_soon_threadsafe(finished.set))).start()
+                return {'phase': 'installing'}
+        loop = asyncio.get_running_loop()
+        plugin._firmware = Firmware()
+        with self.assertRaises(fw.FirmwareError):
+            await plugin.firmware_install('bad')
+        self.assertFalse(module_runtime.is_paused('rgb'), 'a refused install never pauses controllers')
+        with patch.object(main.vibration_backend, '_forget_device') as forget:
+            self.assertEqual((await plugin.firmware_install('good'))['phase'], 'installing')
+            await asyncio.wait_for(finished.wait(), 5)
+            await asyncio.sleep(0)
+        self.assertEqual(observed, [True])
+        self.assertFalse(module_runtime.is_paused('rgb'))
+        self.assertFalse(module_runtime.is_paused('vibration'))
+        self.assertIsNone(plugin._controller._status_cache)
+        forget.assert_called_once()
+
+    async def test_paused_controller_rejects_module_writes(self):
+        module_runtime.pause_controller()
+        try:
+            with self.assertRaises(module_runtime.ControllerPaused):
+                module_runtime.require_available('rgb')
+            module_runtime.require_available('fan')
+            with self.assertRaises(module_runtime.ControllerPaused):
+                module_runtime.pause_controller()
+        finally:
+            module_runtime.resume_controller()
+        module_runtime.require_available('rgb')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
-import copy
 import io
 import os
 from pathlib import Path
 import threading
 import unittest
 from unittest.mock import patch, Mock
+import support
 import controller_firmware as fw
 import subprocess
-import sys
+import urllib.request
+import controller_firmware
+import controller_firmware_catalog
 
 
 class PolicyTests(unittest.TestCase):
@@ -34,20 +36,6 @@ class PolicyTests(unittest.TestCase):
                     with self.assertRaises(fw.FirmwareError):
                         fw.validate_image(component, data)
             verify.assert_not_called()
-
-    def test_snapshot_has_no_installed_claim_or_flash_capability(self):
-        service = fw.FirmwarePreparation()
-        status = service.status()
-        self.assertFalse(status['flash_available'])
-        self.assertFalse(status['catalog_live'])
-        self.assertIsNone(status['installed_versions'])
-        status['job']['phase'] = 'fake'
-        status['components'][0]['version'] = 'fake'
-        self.assertEqual(service.status()['job']['phase'], 'idle')
-        self.assertEqual(service.status()['components'][0]['version'], '260310A')
-        service.close()
-        with self.assertRaises(fw.FirmwareError):
-            service.prepare('left')
 
     def test_redirect_is_never_followed(self):
         with self.assertRaises(fw.FirmwareError):
@@ -103,10 +91,8 @@ class PolicyTests(unittest.TestCase):
 
     def test_cancel_reaps_real_stalled_download_process(self):
         cancelled = threading.Event()
-        # Replace only helper contents with a harmless stalled child, keeping
-        # the parent's actual pipe timeout, kill and reaping behavior.
-        with subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as child:
+        # Only the helper's contents are replaced; the parent's pipe timeout, kill and reaping stay real.
+        with support.stalled_child() as child:
             timer = threading.Timer(.3, cancelled.set)
             timer.start()
             try:
@@ -117,53 +103,6 @@ class PolicyTests(unittest.TestCase):
             finally:
                 timer.cancel()
                 timer.join(2)
-                if child.poll() is None:
-                    child.kill(); child.wait(timeout=3)
-
-    def test_backend_job_survives_frontend_snapshot_and_excludes_double_start(self):
-        ready, finish = threading.Event(), threading.Event()
-        def download(release, cancelled):
-            ready.set()
-            self.assertTrue(finish.wait(2))
-            return b'fixture-original'
-        with patch.object(fw, 'download_image', side_effect=download), patch.object(fw, 'validate_image',
-                side_effect=lambda component, data: fw.ValidatedImage(fw.release_for(component), data)):
-            service = fw.FirmwarePreparation()
-            first = service.prepare('left')
-            self.assertTrue(ready.wait(2))
-            self.assertEqual(service.status()['job']['id'], first['job']['id'])
-            with self.assertRaises(fw.FirmwareError):
-                service.prepare('right')
-            finish.set(); service._thread.join(2)
-            self.assertEqual(service.status()['job']['phase'], 'validated')
-            self.assertEqual(service._image.original, b'fixture-original')
-            service.close()
-            self.assertIsNone(service._image)
-
-    def test_close_during_validation_never_publishes_image(self):
-        ready, finish = threading.Event(), threading.Event()
-        def validate(component, data):
-            ready.set(); self.assertTrue(finish.wait(2))
-            return fw.ValidatedImage(fw.release_for(component), data)
-        with patch.object(fw, 'download_image', return_value=b'fixture'), patch.object(fw, 'validate_image', side_effect=validate):
-            service = fw.FirmwarePreparation(); service.prepare('receiver')
-            self.assertTrue(ready.wait(2))
-            closer = threading.Thread(target=service.close); closer.start()
-            self.assertTrue(service._cancelled.wait(2)); finish.set(); closer.join(2)
-            self.assertFalse(closer.is_alive())
-            self.assertIsNone(service._image)
-            self.assertEqual(service.status()['job']['phase'], 'stopped')
-
-    def test_failed_validation_discards_prior_success(self):
-        with patch.object(fw, 'download_image', return_value=b'fixture'), patch.object(fw, 'validate_image',
-                side_effect=[fw.ValidatedImage(fw.release_for('left'), b'fixture'), fw.FirmwareError('bad')]):
-            service = fw.FirmwarePreparation(); service.prepare('left'); service._thread.join(2)
-            self.assertIsNotNone(service._image)
-            service.prepare('right'); service._thread.join(2)
-            self.assertIsNone(service._image)
-            self.assertEqual(service.status()['job']['phase'], 'failed')
-            service.close()
-
 
 @unittest.skipUnless(os.environ.get('COMPANION_OFFICIAL_FW_FIXTURES'), 'Original Lenovo images required for offline crypto tests')
 class OfficialImageTests(unittest.TestCase):
@@ -195,6 +134,22 @@ class OfficialImageTests(unittest.TestCase):
             for modified in (data[:-1], data+b'x'):
                 with self.assertRaises(fw.FirmwareError):
                     fw.validate_image(component, modified)
+
+
+class RedirectResourceTests(unittest.TestCase):
+    def test_rejected_redirect_closes_the_original_response(self):
+        url = 'https://github.com/test/asset'
+        handlers = (
+            (controller_firmware._NoRedirect(), controller_firmware.FirmwareError),
+            (controller_firmware_catalog._NoRedirect(), controller_firmware_catalog.CatalogError),
+        )
+        for handler, exception in handlers:
+            with self.subTest(handler=type(handler).__module__):
+                response = io.BytesIO(b'redirect body')
+                with self.assertRaises(exception):
+                    handler.redirect_request(urllib.request.Request(url), response, 302,
+                                             'Found', {}, 'https://foreign.example/asset')
+                self.assertTrue(response.closed)
 
 
 if __name__ == '__main__':

@@ -14,6 +14,7 @@ import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -25,7 +26,12 @@ TARGETS = (
     ('receiver', 58, 'com.lenovo.legionspace.rx'),
 )
 MAX_BODY = 128 * 1024
-WALL_SECONDS = 45
+# The feed answers in ~0.2 s, but on 2026-10-17 a third to a half of its replies were
+# HTTP 500 after 10 s, sometimes several in a row; short attempts are retried until the
+# shared budget runs out, so one bad reply does not fail the check.
+REQUEST_SECONDS = 3
+HELPER_SECONDS = 85
+WALL_SECONDS = 90
 
 
 class CatalogError(RuntimeError):
@@ -76,7 +82,7 @@ def _fetch(path, parameters):
         urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     request = urllib.request.Request(url, headers={
         'Accept-Encoding': 'identity', 'User-Agent': 'LegionGo2Companion'})
-    with opener.open(request, timeout=8) as response:
+    with opener.open(request, timeout=REQUEST_SECONDS) as response:
         if response.status != 200 or response.geturl() != url:
             raise CatalogError('The Lenovo catalog request did not complete.')
         if response.headers.get('Content-Encoding', 'identity') != 'identity':
@@ -85,6 +91,25 @@ def _fetch(path, parameters):
         if len(data) > MAX_BODY:
             raise CatalogError('Lenovo catalog exceeds the size limit.')
     return _json(data)
+
+
+def _transient(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    if isinstance(exc, urllib.error.URLError):
+        exc = exc.reason
+    return isinstance(exc, (TimeoutError, ConnectionError))
+
+
+def _fetch_retrying(path, parameters, deadline):
+    """Only server errors and timeouts are retried; any other answer is final."""
+    while True:
+        try:
+            return _fetch(path, parameters)
+        except Exception as exc:
+            if not _transient(exc) or time.monotonic() + REQUEST_SECONDS >= deadline:
+                raise
+            time.sleep(.5)
 
 
 def _candidate(body, terminal, package):
@@ -117,7 +142,8 @@ def valid_image_url(url):
 
 
 def _check_http():
-    bootstrap = _fetch('/api/getBaseUrls', {'source': '1', 'language': 'en', 'modelName': 'Legion Go 2'})
+    deadline = time.monotonic() + HELPER_SECONDS  # Inside the parent's WALL_SECONDS.
+    bootstrap = _fetch_retrying('/api/getBaseUrls', {'source': '1', 'language': 'en', 'modelName': 'Legion Go 2'}, deadline)
     if (not isinstance(bootstrap, dict) or type(bootstrap.get('code')) is not int or
             bootstrap['code'] != 200 or not isinstance(bootstrap.get('data'), dict)):
         raise CatalogError('Lenovo catalog configuration is unavailable.')
@@ -134,9 +160,9 @@ def _check_http():
         raise CatalogError('The reviewed Legion Go 2 model is absent from the catalog.')
     candidates = {}
     for component, terminal, package in TARGETS:
-        body = _fetch('/api/queryPackageInfo', {'modelName': MODEL, 'sn': '',
+        body = _fetch_retrying('/api/queryPackageInfo', {'modelName': MODEL, 'sn': '',
             'countryCode': area, 'packageCode': package, 'terminalId': str(terminal),
-            'packageVer': 'v00.00.00.00'})
+            'packageVer': 'v00.00.00.00'}, deadline)
         candidates[component] = _candidate(body, terminal, package)
     return {'checked_at': datetime.now(timezone.utc).isoformat(), 'model': MODEL,
         'region': area, 'candidates': candidates}
@@ -165,7 +191,7 @@ def check_catalog(cancelled):
             if cancelled.is_set() or time.monotonic() >= deadline:
                 raise CatalogError('Lenovo catalog check stopped or timed out.')
             if worker.returncode != 0 or len(data) > 16384:
-                event('firmware','catalog_helper_failed',level='warning',stage='catalog',returncode=worker.returncode,
+                event('firmware','catalog_helper_failed',stage='catalog',returncode=worker.returncode,
                     reason='nonzero_exit' if worker.returncode else 'output_size')
                 raise CatalogError('Lenovo catalog check failed. Try again later.')
             return _json(data)

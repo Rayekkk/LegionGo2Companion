@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
-"""Shared one-button controller-update workflow and image authentication.
+"""Controller firmware updates: Lenovo feed, image authentication and fwupd install.
 
 The live model-specific Lenovo feed selects releases; the pinned vendor key and
 signed component footer authenticate images, including new release versions.
-Both frontends observe this one backend job. Original signed bytes are retained
-in memory; decoded bytes are used only for structural checks.
+fwupd's legion-hid plugin writes them. Both frontends observe this one backend
+job. Original signed bytes are kept in memory; decoded bytes are used only for
+structural checks.
 """
 from __future__ import annotations
 
 import base64
 import binascii
-import copy
 from dataclasses import dataclass, replace
 from datetime import date
 import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 import re
@@ -63,7 +65,7 @@ RELEASES = MappingProxyType({
 })
 SIGNATURE_BYTES = 384
 MIN_IMAGE_BYTES = SIGNATURE_BYTES + 192 + 4
-MAX_IMAGE_BYTES = 1024 * 1024  # Existing bounded C0 stream/staging envelope.
+MAX_IMAGE_BYTES = 1024 * 1024
 PUBLIC_KEY = b'''-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAuWzi2SQCB/Em+5aW7OUmRWgSCvnfY0aYlRNwgalwMtMUlrdijdELq10mTOa5ita1PdM1Xsr3IZflsXw4aH5Xq812JfR/rT7LvegJEdw4N5EkXpcfaDOxBI/ScUdJLqcetRVNgKpn036WKyv/mW/Jnjo97f2rbGuJDBiMhzwdBG+wFR0PsM+VY2whGO66t+xPqJ4FRNaZGRqRpM1pimkSvn1Pewy4nR4hKxkzU1BuAM5QSsgI9dBoBAAih19ydvaMyIMRTUUqK631ATv7/4OdB7ks4E+xWaDRXF2jVk61l3U7HumE3h3WtRqRJoOjopp1v4CWrnudLMJYWMNOZQX/8t/ykO06p0TcbWnzvsOmCarFsHuvP33U4emPBwaeMOhF/EzGSVZQHXS6HotZ6UMSKA9/gz4T2orq8mNKbtb2YGh0+hRz28t3g6lkK5iM7scuvt/BLcaQo8yVs5Jwpa0uxzHpCcwnzV3rmiGmGSVcJgVfDJ3bKHOcEuuYGsAQy8nBAgMBAAE=
 -----END PUBLIC KEY-----
@@ -114,32 +116,6 @@ def candidate_release(component, candidate):
     version_number(candidate['version'])
     return replace(reference, version=candidate['version'], size=0, sha256='',
         filename=candidate['url'].rsplit('/', 1)[1])
-
-
-def release_record(release):
-    """Private plan identity, not authorization from a caller-supplied hash."""
-    if not isinstance(release, Release):
-        raise FirmwareError('Invalid controller image identity.')
-    reference = release_for(release.component)
-    version_number(release.version)
-    if (release.label != reference.label or release.footer != reference.footer or
-            not valid_image_url(release.url) or type(release.size) is not int or
-            not MIN_IMAGE_BYTES <= release.size <= MAX_IMAGE_BYTES or
-            not isinstance(release.sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', release.sha256)):
-        raise FirmwareError('Invalid authenticated controller image identity.')
-    return {'version': release.version, 'url': release.url,
-        'size': release.size, 'sha256': release.sha256}
-
-
-def release_from_record(component, value):
-    if not isinstance(value, dict) or set(value) != {'version', 'url', 'size', 'sha256'}:
-        raise FirmwareError('Invalid controller image plan.')
-    if not valid_image_url(value['url']):
-        raise FirmwareError('Invalid controller image location.')
-    release = replace(release_for(component), version=value['version'], size=value['size'],
-        sha256=value['sha256'], filename=value['url'].rsplit('/', 1)[1])
-    release_record(release)
-    return release
 
 
 def _decode_sfc(original):
@@ -230,6 +206,11 @@ def validate_image(component, data, release=None):
     digest = hashlib.sha256(data).hexdigest()
     if release.sha256 and digest != release.sha256:
         raise FirmwareError('Firmware changed after validation.')
+    # shortcut: the image carries no verifiable version, so only pinned releases are
+    # caught under a wrong catalog label; an unpinned older image still passes.
+    if any(known.sha256 == digest and known.version != release.version for known in RELEASES.values()):
+        raise FirmwareError("Lenovo's catalog gives a known controller image a different version. "
+            'Nothing was installed. Try again later.')
     if data[-SIGNATURE_BYTES-4:-SIGNATURE_BYTES] != release.footer:
         raise FirmwareError('Firmware belongs to a different component.')
     _verify_signature(data)
@@ -321,322 +302,396 @@ def download_image(release, cancelled):
         worker.communicate(timeout=3)
 
 
-def read_reported_versions():
-    """Read driver-reported versions on the qualified console, without OTA.
+FWUPDTOOL = '/usr/bin/fwupdtool'
+FWUPDMGR = '/usr/bin/fwupdmgr'
+# Supervised same-version installs through the plugin passed on 2026-10-17 (right 69.5 s,
+# left 45.2 s, receiver 37.1 s). False is the kill switch; Check and Download stay available.
+INSTALL_ENABLED = True
+INSTALL_DISABLED_REASON = ('Installation is turned off in this build. '
+    'Use Legion Space on Windows to update the controllers.')
+CHECK_MAX_AGE = 15 * 60
+INSTALL_SECONDS = 600  # Per device; LVFS states 300 s for all three components.
+VERIFY_ATTEMPTS, VERIFY_DELAY = 10, 2  # The same version re-read budget fwupd legion-hid uses.
+CONTAINER_ORDER = ('receiver', 'left', 'right')
+INSTALL_ORDER = ('left', 'right', 'receiver')  # Pads are written through the MCU, so it restarts last.
+FWUPD_INSTANCES = MappingProxyType({'receiver': 'HIDRAW\\VEN_17EF&DEV_61EB',
+    'left': 'HIDRAW\\VEN_17EF&DEV_61EB&CHILD_LEFT', 'right': 'HIDRAW\\VEN_17EF&DEV_61EB&CHILD_RIGHT'})
+SYSFS_NODES = (('left', 'left_handle'), ('right', 'right_handle'), ('receiver', ''))
+UPDATER_PROCESSES = frozenset({'fwupdtool', 'fwupdmgr', 'steamos-firmwar'})  # comm is cut to 15 bytes.
 
-    These sysfs reads trigger version-query output in the HID driver, whose
-    attributes can return cached values after a timeout. They suffice for a
-    conservative catalog comparison, never for flash preflight or post-flash
-    success. The independent installer must query its owned USB channel.
-    """
-    from controller_firmware_usb_linux import observe_command_interface
-    before = observe_command_interface()
-    if before.driver != '/sys/bus/usb/drivers/usbhid':
-        raise FirmwareError('The controller is busy. Try again when it reconnects.')
-    base = Path(before.syspath)
-    roots = list((base / (base.name + ':1.2')).glob('0003:17EF:61EB.*'))
-    if len(roots) != 1:
-        raise FirmwareError('The supported controllers are not connected.')
+
+def _text(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def _read_versions_once(root):
     versions = {}
-    # RX image/OTA target1 belongs to the root MCU. TX dongle/target2 is
-    # different hardware, even when its firmware version happens to match.
-    for component, prefix in (('left', 'left_handle'), ('right', 'right_handle'), ('receiver', '')):
-        root = roots[0] / prefix
-        if (root / 'hardware_generation').read_text().strip() != '2':
+    for component, node in SYSFS_NODES:
+        if _text(root / node / 'hardware_generation') != '2':
             raise FirmwareError('This controller generation is not supported.')
-        value = (root / 'firmware_version').read_text().strip().upper()
+        value = (_text(root / node / 'firmware_version') or '').upper()
         version_number(value)
         versions[component] = value
-    after = observe_command_interface()
-    if not before.same_attachment(after) or before.driver != after.driver:
-        raise FirmwareError('The controller connection changed during the check.')
-    return {'versions': versions, 'attachment': (before.boot_id, before.syspath, before.instance,
-        before.bus, before.address), 'source': 'hid_driver_reported'}
+    return versions
+
+
+def read_installed_versions(sysfs=Path('/sys')):
+    """Versions reported by the in-tree hid-lenovo-go driver; read-only.
+
+    Each read makes the driver send its own version query. After a 50 ms
+    timeout it returns a cached value, so two equal reads are required.
+    """
+    dmi = sysfs / 'class/dmi/id'
+    if tuple(_text(dmi / name) for name in ('sys_vendor', 'product_name', 'product_version')) != (
+            'LENOVO', '83N0', 'Legion Go 8ASP2'):
+        raise FirmwareError('Controller updates are available only on the Legion Go 2 (83N0).')
+    usb = [path for path in (sysfs / 'bus/usb/devices').glob('*')
+        if _text(path / 'idVendor') == '17ef' and _text(path / 'idProduct') == '61eb']
+    roots = [path for path in (sysfs / 'bus/hid/devices').glob('0003:17EF:61EB.*')
+        if (path / 'firmware_version').is_file()]
+    if len(usb) != 1 or len(roots) != 1:
+        raise FirmwareError('The supported controllers are not connected.')
+    root = roots[0]
+    if (os.path.basename(os.path.realpath(root / 'driver')) != 'hid-lenovo-go' or
+            not Path(os.path.realpath(root)).is_relative_to(os.path.realpath(usb[0]))):
+        raise FirmwareError('The controllers are not managed by the hid-lenovo-go driver.')
+    first = _read_versions_once(root)
+    if _read_versions_once(root) != first:
+        raise FirmwareError('Controller versions changed while reading. Check again.')
+    return first
+
+
+def console_power():
+    supplies = list(Path('/sys/class/power_supply').iterdir())
+    if len(supplies) > 32: raise FirmwareError('Power supply inventory exceeds its bound.')
+    ac, batteries = False, []
+    for path in supplies:
+        kind = (path/'type').read_text().strip()
+        scope = (path/'scope').read_text().strip() if (path/'scope').exists() else None
+        if scope == 'Device':
+            continue
+        if kind in ('Mains','USB','USB_C','USB_PD') and (path/'online').exists():
+            ac = ac or (path/'online').read_text().strip() == '1'
+        # Same rule as battery_backend: ACPI batteries such as the Legion Go 2's BAT0 have no scope file.
+        if kind == 'Battery' and (scope == 'System' or (scope is None and re.fullmatch(r'BAT\d+', path.name))):
+            batteries.append(int((path/'capacity').read_text().strip()))
+    if len(batteries) > 1: raise FirmwareError('Console battery could not be identified.')
+    percent = batteries[0] if batteries else None
+    if not ac and (percent is None or not 30 <= percent <= 100):
+        raise FirmwareError('Connect power or charge the console to at least 30%.')
+    return ac, percent
+
+
+def build_container(images):
+    """fwupd legion-hid container: six LE u32 (size, version) for the receiver,
+    left and right images, then the three signed images unchanged.
+
+    fwupd rejects a zero-sized component and writes only the image whose
+    footer id matches the target device (receiver 2, left 7, right 8).
+    """
+    if set(images) != set(CONTAINER_ORDER) or any(not isinstance(images[c], ValidatedImage) or
+            images[c].release.component != c for c in CONTAINER_ORDER):
+        raise FirmwareError('All three verified controller images are required.')
+    header = b''.join(struct.pack('<II', len(images[c].original), version_number(images[c].release.version))
+        for c in CONTAINER_ORDER)
+    return header + b''.join(images[c].original for c in CONTAINER_ORDER)
+
+
+def _run_tool(argv, timeout, **streams):
+    from system_process import system_env
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=system_env(), **streams)
+
+
+def fwupd_devices():
+    """legion-hid device ids and versions from the running fwupd daemon (read-only)."""
+    try:
+        result = _run_tool([FWUPDMGR, 'get-devices', '--json'], 60, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        devices = json.loads(result.stdout).get('Devices') if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError) as exc:
+        raise FirmwareError('fwupd did not list the controllers.') from exc
+    if not isinstance(devices, list):
+        raise FirmwareError('fwupd did not list the controllers.')
+    found = {}
+    for component, instance in FWUPD_INSTANCES.items():
+        matches = [d for d in devices if isinstance(d, dict) and d.get('Plugin') == 'legion_hid'
+            and isinstance(d.get('InstanceIds'), list) and instance in d['InstanceIds']]
+        device = matches[0] if len(matches) == 1 else {}
+        if (not isinstance(device.get('DeviceId'), str) or not re.fullmatch('[0-9a-f]{40}', device['DeviceId']) or
+                not isinstance(device.get('Flags'), list) or 'updatable' not in device['Flags'] or
+                not isinstance(device.get('Version'), str)):
+            raise FirmwareError('fwupd does not list the controllers as updatable.')
+        found[component] = {'id': device['DeviceId'], 'version': device['Version'].upper()}
+    return found
+
+
+def updater_running(proc=Path('/proc')):
+    """Steam's steamos-firmware-update and any fwupd client could write the same device."""
+    return any(_text(path) in UPDATER_PROCESSES for path in proc.glob('[0-9]*/comm'))
+
+
+def install_blob(container, device_id, log_path):
+    """One fwupd write. As root, fwupdtool stops the daemon and runs its own engine."""
+    started = time.monotonic()
+    with open(log_path, 'wb') as log:
+        try:
+            returncode = _run_tool([FWUPDTOOL, 'install-blob', str(container), device_id,
+                '--no-reboot-check', '--verbose'], INSTALL_SECONDS, stdout=log, stderr=subprocess.STDOUT).returncode
+        except subprocess.TimeoutExpired:
+            returncode = None
+    with open(log_path, 'rb') as log:
+        log.seek(max(0, os.path.getsize(log_path) - 4096))
+        tail = log.read().decode('utf-8', 'replace')
+    return returncode, round(time.monotonic() - started, 1), tail
+
+
+PHASE_MESSAGES = MappingProxyType({
+    'idle': 'Check Lenovo for controller firmware updates.',
+    'checking': 'Reading controller versions and checking Lenovo.',
+    'up_to_date': 'Your controllers have the latest Lenovo firmware.',
+    'available': 'A newer controller firmware is available. Download it to verify the files.',
+    'downloading': 'Downloading and verifying the Lenovo firmware.',
+    'downloaded': 'The firmware is downloaded and verified.',
+    'installing': 'Installing. Keep AC power connected and do not detach the controllers.',
+    'verifying': 'Waiting for the controller to report the new version.',
+    'installed': 'The controller update was installed and verified.',
+    'failed': 'The last firmware step did not complete. Check again.',
+})
+BUSY_PHASES = frozenset({'checking', 'downloading', 'installing', 'verifying'})
 
 
 class FirmwarePreparation:
-    """Single bounded backend job, no device access and no persisted arm state."""
-    def __init__(self, *, installed_reader=None, installer=None):
-        self._lock = threading.RLock()
+    """One firmware step at a time: check, download, then install with a token.
+
+    Downloaded images live only in memory and stay bound to the check that
+    selected them. Nothing is persisted, so a failed step never locks retries.
+    """
+
+    def __init__(self, *, reader=None, sleep=time.sleep):
+        self._lock = threading.Lock()
         self._cancelled = threading.Event()
         self._thread = None
-        self._image = None
-        self._job = {'id': '', 'phase': 'idle', 'component': '', 'error': '',
-            'message': ('Check for Lenovo updates. Available controller updates are installed together.' if installer is not None else
-                'Check for Lenovo updates. Installation is not enabled in this experimental build.')}
-        self._catalog = {'phase': 'unchecked', 'checked_at': '', 'model': 'Legion Go 8ASP2',
-            'region': '', 'candidates': {}, 'error': ''}
-        self._installed_reader = installed_reader or read_reported_versions
-        # Only a qualified, independent Linux worker may be supplied here.
-        # No UI setting, path or flag can substitute for that capability.
-        self._installer = installer
-        self._installed = None
+        self._reader = reader or read_installed_versions
+        self._sleep = sleep
+        self._phase, self._component, self._error = 'idle', '', ''
+        self._check = None   # id, at, checked_at, installed, offers, newer
+        self._images = None  # All three ValidatedImage objects for self._check.
+        self._token = ''
 
     def status(self):
         with self._lock:
-            self._refresh_prior()
-            return {'stage': 'controller_updates', 'flash_available': self._installer is not None,
-                'reason': ('Experimental installation is enabled. Live OTA qualification is pending.' if self._installer is not None else
-                    'Device transfer is not enabled. Linux transport and recovery checks are pending.'),
-                'catalog_date': CATALOG_DATE, 'catalog_live': self._catalog['phase'] == 'checked',
-                'catalog': copy.deepcopy(self._catalog),
-                'installed_versions': copy.deepcopy(self._installed), 'job': copy.deepcopy(self._job),
-                'components': [{'id': r.component, 'label': r.label, 'version': r.version,
-                    'bytes': r.size, 'sha256': r.sha256} for r in RELEASES.values()]}
+            return self._status()
 
-    def check_updates(self):
-        """One action for both frontends; component selection is backend-only."""
-        from diagnostics import event
-        with self._lock:
-            self._refresh_prior()
-            if self._cancelled.is_set():
-                raise FirmwareError('The controller updater is closed.')
-            if self._job['phase'] == 'uncertain':
-                raise FirmwareError('The previous update has an unverified outcome. Do not retry it.')
-            if self._job['phase'] in ('installing','verifying','restoring'):
-                return self.status()
-            if self._thread is not None and self._thread.is_alive():
-                # Two frontends/double activation observe the same job.
-                return self.status()
-            self._installed = None
-            self._job = {'id': uuid.uuid4().hex, 'phase': 'checking', 'component': '',
-                'error': '', 'message': 'Checking Lenovo for controller updates.',
-                'pending': [], 'completed': []}
-            event('firmware','check_started',job_id=self._job['id'])
-            self._thread = threading.Thread(target=self._run_updates,
-                name='companion-controller-update', daemon=True)
-            self._thread.start()
-            return self.status()
+    def _status(self):
+        check = self._check or {}
+        installed, offers, newer = check.get('installed', {}), check.get('offers', {}), check.get('newer', ())
+        message = self._error or PHASE_MESSAGES[self._phase]
+        if self._component and not self._error:
+            message = RELEASES[self._component].label + ': ' + message
+        return {'phase': self._phase, 'message': message, 'error': self._error, 'component': self._component,
+            'install_enabled': INSTALL_ENABLED, 'install_reason': '' if INSTALL_ENABLED else INSTALL_DISABLED_REASON,
+            'checked_at': check.get('checked_at', ''), 'token': self._token,
+            'components': [{'id': c, 'label': r.label, 'installed': installed.get(c, ''),
+                'available': offers[c].version if c in offers else '', 'newer': c in newer,
+                'downloaded': self._images is not None and c in newer} for c, r in RELEASES.items()]}
 
-    def _refresh_prior(self):
-        """A backend restart observes the independent job, never replays it."""
-        if self._thread is not None and self._thread.is_alive(): return
-        reader = getattr(self._installer, 'previous_status', None)
-        if not callable(reader): return
-        previous = reader()
-        if previous and (not self._job['id'] or self._job['id'] == previous['id'] or
-                previous['phase'] in ('installing','verifying','restoring','uncertain')):
-            self._job = copy.deepcopy(previous)
+    def _busy(self):
+        return self._phase in BUSY_PHASES
 
-    def _update_phase(self, phase, message, **fields):
-        from diagnostics import event
-        with self._lock:
-            changed = self._job.get('phase') != phase
-            self._job.update(phase=phase, message=message, **fields)
-            if changed:
-                event('firmware','phase_changed',job_id=self._job['id'],phase=phase,
-                    level='warning' if phase in ('failed','uncertain') else 'info')
-
-    def _run_updates(self):
-        from controller_firmware_catalog import CatalogError, check_catalog
-        from diagnostics import event
-        installation_started = False
-        stage = 'qualification'
+    def _start(self, phase, target, *args):
+        if self._cancelled.is_set():
+            raise FirmwareError('The controller updater is closed.')
+        self._phase, self._component, self._error = phase, '', ''
+        self._thread = threading.Thread(target=target, args=args, name='companion-firmware', daemon=True)
         try:
-            before = self._installed_reader()
-            stage = 'catalog'
-            catalog = check_catalog(self._cancelled)
-            stage = 'qualification_readback'
-            after = self._installed_reader()
-            if before != after:
-                raise FirmwareError('Controller connection or versions changed. Check again.')
+            self._thread.start()
+        except RuntimeError:
+            self._phase, self._error = 'failed', 'The firmware step could not start. Try again.'
+            raise
+
+    def _fresh_check(self, phase):
+        check = self._check
+        if self._phase != phase or check is None:
+            raise FirmwareError('This step is not available now. Check for updates again.')
+        if time.monotonic() - check['at'] > CHECK_MAX_AGE:
+            # Leave the phase from which both UIs offer Check, or the stale step could never be retried.
+            self._check, self._images, self._token = None, None, ''
+            self._phase, self._component, self._error = 'failed', '', 'The update check is out of date. Check for updates again.'
+            raise FirmwareError(self._error)
+        return check
+
+    def check(self):
+        from diagnostics import event
+        with self._lock:
+            if self._busy():
+                return self._status()  # Both frontends observe the step already running.
+            self._check, self._images, self._token = None, None, ''
+            self._start('checking', self._run_check)
+            event('firmware', 'check_started')
+            return self._status()
+
+    def download(self):
+        with self._lock:
+            if self._busy():
+                return self._status()
+            self._start('downloading', self._run_download, self._fresh_check('available'))
+            return self._status()
+
+    def admit_install(self, token):
+        """Refuse before the caller pauses controller modules; no device access."""
+        with self._lock:
+            return self._admit(token)
+
+    def _admit(self, token):
+        if not INSTALL_ENABLED:
+            raise FirmwareError(INSTALL_DISABLED_REASON)
+        if self._busy():
+            raise FirmwareError('A firmware step is already running.')
+        check = self._fresh_check('downloaded')
+        if (not isinstance(token, str) or not self._token or self._images is None or
+                not hmac.compare_digest(token, self._token)):
+            raise FirmwareError('The confirmed update no longer matches the download. Check for updates again.')
+        try:
+            console_power()  # A refusal here keeps the verified download; _run_install re-checks it.
+        except (OSError, ValueError) as exc:
+            raise FirmwareError('Console power could not be read. Nothing was installed.') from exc
+        return check, self._images
+
+    def install(self, token, on_done):
+        """on_done runs exactly once: when the install ends or is refused."""
+        try:
+            with self._lock:
+                check, images = self._admit(token)
+                self._start('installing', self._run_install, check, images, on_done)
+                return self._status()
+        except BaseException:
+            on_done()
+            raise
+
+    def _finish(self, phase, **state):
+        with self._lock:
+            for key, value in state.items():
+                setattr(self, '_' + key, value)
             if self._cancelled.is_set():
-                raise FirmwareError('Controller update check stopped.')
-            versions = after['versions']
-            stage = 'selection'
-            candidates = catalog['candidates']
-            if set(versions) != set(RELEASES) or set(candidates) != set(RELEASES):
-                raise FirmwareError('Versions for all controller components are required.')
-            needed = []
-            for component in RELEASES:
-                version_number(versions[component])
-                candidate = candidates[component]
-                if candidate is None:
-                    raise FirmwareError('Lenovo did not return firmware for all controller components. Try again later.')
-                if update_needed(versions[component], candidate['version']):
-                    needed.append(component)
-            with self._lock:
-                self._installed = copy.deepcopy(versions)
-                self._job['pending'] = needed
-                self._catalog = dict(catalog, phase='checked', error='')
-            event('firmware','catalog_checked',job_id=self._job['id'],count=len(needed))
-            if not needed:
-                self._update_phase('up_to_date',
-                    'Lenovo lists no newer firmware for the versions reported by your controllers.')
-                return
-            offers = {c: candidate_release(c, candidates[c]) for c in needed}
-            if self._installer is None:
-                self._update_phase('blocked', 'An update is available. Installation is not enabled in this experimental build. Nothing was installed.')
-                return
-            images = []
-            for component in needed:
-                if self._cancelled.is_set():
-                    raise FirmwareError('Controller update stopped before installation.')
-                self._update_phase('downloading', 'Downloading the controller update.')
-                stage = 'download'
-                event('firmware','component_started',job_id=self._job['id'],scope=component,stage=stage,version=offers[component].version)
-                original = download_image(offers[component], self._cancelled)
-                self._update_phase('validating', 'Checking the controller update.')
-                stage = 'authentication'
-                images.append(validate_image(component, original, release=offers[component]))
-                event('firmware','component_authenticated',job_id=self._job['id'],scope=component,bytes=len(original))
-            # One independent worker owns the ENTIRE plan. It must revalidate
-            # fresh identity/power/versions, run serially, restore input, and
-            # report genuine post-update version queries before success.
-            with self._lock:
-                if self._cancelled.is_set():
-                    raise FirmwareError('Controller update stopped before installation.')
-                self._job.update(phase='installing',message='Updating controllers. Keep both controllers attached.')
-                installation_started = True
-            event('firmware','installation_admitted',job_id=self._job['id'],phase='installing',count=len(images))
-            stage = 'installer'
-            progress_open = True
-            def progress(phase, message, **fields):
-                with self._lock:
-                    if not progress_open:
-                        return
-                    if phase not in ('installing', 'verifying', 'restoring'):
-                        raise FirmwareError('The installer returned an invalid progress phase.')
-                    if self._job.get('phase') != phase:
-                        event('firmware','phase_changed',job_id=self._job['id'],phase=phase)
-                    self._job.update(phase=phase, message=message)
+                self._images, self._token = None, ''  # A closed updater still reports its outcome, but offers no install.
+            self._phase, self._component, self._error = phase, '', ''
+
+    def _step(self, phase, component):
+        with self._lock:
+            self._phase, self._component = phase, component
+
+    def _fail(self, stage, exc):
+        from controller_firmware_catalog import CatalogError
+        from diagnostics import event
+        message = (str(exc) if isinstance(exc, (FirmwareError, CatalogError)) else
+            'The firmware step did not complete. Check again.')
+        event('firmware', 'step_failed', level='warning', error=exc, stage=stage)
+        with self._lock:
+            self._check, self._images, self._token = None, None, ''
+            self._phase, self._component, self._error = 'failed', '', message
+
+    def _run_check(self):
+        from controller_firmware_catalog import check_catalog
+        from diagnostics import event
+        try:
+            before = self._reader()
+            catalog = check_catalog(self._cancelled)
+            if self._reader() != before:
+                raise FirmwareError('Controller versions changed during the check. Check again.')
+            candidates = catalog.get('candidates') if isinstance(catalog, dict) else None
+            if not isinstance(candidates, dict) or any(candidates.get(c) is None for c in RELEASES):
+                raise FirmwareError('Lenovo did not return firmware for all controller components. Try again later.')
+            offers = {c: candidate_release(c, candidates[c]) for c in RELEASES}
+            newer = tuple(c for c in RELEASES if update_needed(before[c], offers[c].version))
+            self._finish('available' if newer else 'up_to_date', check={'id': uuid.uuid4().hex,
+                'at': time.monotonic(), 'checked_at': str(catalog.get('checked_at', '')),
+                'installed': dict(before), 'offers': offers, 'newer': newer})
+            event('firmware', 'check_finished', count=len(newer))
+        except Exception as exc:
+            self._fail('check', exc)
+
+    def _run_download(self, check):
+        from diagnostics import event
+        try:
+            # fwupd needs all three images in the container, even for one device.
+            images = {c: validate_image(c, download_image(check['offers'][c], self._cancelled),
+                release=check['offers'][c]) for c in CONTAINER_ORDER}
+            identity = {'check': check['id'], 'targets': list(check['newer']), 'images': {c: [check['installed'][c],
+                image.release.version, image.release.sha256] for c, image in images.items()}}
+            token = hashlib.sha256(json.dumps(identity, sort_keys=True).encode('ascii')).hexdigest()
+            self._finish('downloaded', images=images, token=token)
+            event('firmware', 'download_finished', count=len(images))
+        except Exception as exc:
+            self._fail('download', exc)
+
+    def _verified(self, expected):
+        for _ in range(VERIFY_ATTEMPTS):
+            self._sleep(VERIFY_DELAY)
             try:
-                result = self._installer(tuple(images), copy.deepcopy(after), progress)
-            finally:
-                with self._lock:
-                    progress_open = False
-            worker_id = getattr(self._installer,'diagnostic_job_id','')
-            if isinstance(worker_id,str) and re.fullmatch('[0-9a-f]{32}',worker_id):
-                event('firmware','worker_observed',job_id=self._job['id'],worker_id=worker_id,
-                    outcome=result.get('phase','unknown') if isinstance(result,dict) else 'invalid')
-            if (isinstance(result,dict) and result.get('phase')=='failed_before_write' and
-                    result.get('restored') is True and result.get('cleanup_complete') is True and
-                    result.get('cleanup_errors')==[] and result.get('completed')==[] and
-                    result.get('versions')==versions):
-                message='The update did not start. Controller input was restored. Check the connection and power, then try again.'
-                self._update_phase('failed_before_write',message,error=message)
-                return
-            if (not isinstance(result, dict) or result.get('phase') != 'succeeded' or
-                    result.get('restored') is not True or result.get('cleanup_complete') is not True or
-                    result.get('cleanup_errors') != [] or result.get('error') != '' or
-                    result.get('completed') != needed):
-                self._update_phase('uncertain', 'The controller update could not be verified. Do not retry the update.')
-                return
-            observed = result.get('versions', {})
-            if (not isinstance(observed, dict) or set(observed) != set(RELEASES) or
-                    any(observed.get(c) != offers[c].version for c in needed) or
-                    any(observed.get(c) != versions[c] for c in RELEASES if c not in needed)):
-                self._update_phase('uncertain', 'The installed firmware could not be verified. Do not retry the update.')
-                return
-            with self._lock:
-                self._installed = copy.deepcopy(observed)
-            self._update_phase('succeeded', 'All required controller updates were installed and verified.', completed=needed)
-        except Exception as exc:
-            # Do not turn an exception AFTER admission into a safe-to-retry
-            # check failure. The independent worker owns restoration/result.
-            installing = installation_started
-            phase = 'uncertain' if installing else 'stopped' if self._cancelled.is_set() else 'failed'
-            message = ('Controller update could not be verified. Do not retry the update.' if installing else
-                str(exc) if isinstance(exc, (FirmwareError, CatalogError)) else 'The controller update check failed. Try again later.')
-            worker_id = getattr(self._installer,'diagnostic_job_id','')
-            event('firmware','check_failed',level='warning',error=exc,job_id=self._job['id'],stage=stage,
-                outcome=phase,worker_id=worker_id if isinstance(worker_id,str) and re.fullmatch('[0-9a-f]{32}',worker_id) else '')
-            self._update_phase(phase, message, error=message)
+                if self._reader() == expected:
+                    return True
+            except (OSError, FirmwareError):
+                pass  # The controller may still be restarting.
+        return False
 
-    def prepare(self, component):
-        release = release_for(component)
-        with self._lock:
-            if self._cancelled.is_set():
-                raise FirmwareError('Firmware preparation is closed.')
-            if self._thread is not None and self._thread.is_alive():
-                raise FirmwareError('A firmware check is already running.')
-            self._image = None
-            self._job = {'id': uuid.uuid4().hex, 'phase': 'downloading', 'component': component, 'error': ''}
-            self._thread = threading.Thread(target=self._run, args=(release,),
-                name='companion-firmware-prepare', daemon=True)
-            self._thread.start()
-            return self.status()
-
-    def check_catalog(self):
-        with self._lock:
-            if self._cancelled.is_set():
-                raise FirmwareError('Firmware preparation is closed.')
-            if self._thread is not None and self._thread.is_alive():
-                raise FirmwareError('A firmware check is already running.')
-            self._catalog['phase'] = 'checking'
-            self._catalog['error'] = ''
-            self._job = {'id': uuid.uuid4().hex, 'phase': 'checking_catalog', 'component': '', 'error': ''}
-            self._thread = threading.Thread(target=self._run_catalog,
-                name='companion-firmware-catalog', daemon=True)
-            self._thread.start()
-            return self.status()
-
-    def _run_catalog(self):
-        from controller_firmware_catalog import CatalogError, check_catalog
+    def _run_install(self, check, images, on_done):
         from diagnostics import event
         try:
-            catalog = check_catalog(self._cancelled)
-            for component, candidate in catalog['candidates'].items():
-                if candidate is not None:
-                    release = release_for(component)
-                    candidate['reviewed'] = (candidate['version'] == release.version and
-                        candidate['url'] == release.url)
-                    # Frontends need the version/review result, not a download link.
-                    del candidate['url']
-            with self._lock:
-                if self._cancelled.is_set():
-                    raise CatalogError('Lenovo catalog check stopped.')
-                self._catalog = dict(catalog, phase='checked', error='')
-                self._job['phase'] = 'catalog_checked'
+            installed = dict(check['installed'])
+            if not Path(FWUPDTOOL).is_file():
+                raise FirmwareError('fwupd is not available on this system. Nothing was installed.')
+            console_power()
+            with tempfile.TemporaryDirectory(prefix='companion-fwupd-') as directory:
+                container = Path(directory) / 'legion-go2-controllers.bin'
+                container.write_bytes(build_container(images))
+                for component in INSTALL_ORDER:
+                    if component not in check['newer']:
+                        continue
+                    label = RELEASES[component].label
+                    if self._reader() != installed:
+                        raise FirmwareError('Controller versions changed before installation. Check again.')
+                    devices = fwupd_devices()
+                    if any(devices[c]['version'] != installed[c] for c in devices):
+                        raise FirmwareError('fwupd and the controller driver report different versions. Check again.')
+                    if updater_running():
+                        raise FirmwareError('Another firmware update is running. Try again when it finishes.')
+                    self._step('installing', component)
+                    event('firmware', 'install_started', scope=component, version=images[component].release.version)
+                    returncode, seconds, tail = install_blob(container, devices[component]['id'],
+                        Path(directory) / 'fwupdtool.log')
+                    event('firmware', 'fwupd_finished', level='info' if returncode == 0 else 'warning',
+                        scope=component, returncode=returncode, duration_ms=seconds * 1000,
+                        error=None if returncode == 0 else tail[-512:] or 'no output')
+                    if returncode != 0:
+                        raise FirmwareError(f'{label}: fwupd did not complete the update. Check again to retry. '
+                            'If a controller does not respond, restart the console.')
+                    installed[component] = images[component].release.version
+                    self._step('verifying', component)
+                    if not self._verified(installed):
+                        raise FirmwareError(f'{label} did not report the new version. Check again to retry. '
+                            'If a controller does not respond, restart the console.')
+            self._finish('installed', check=dict(check, installed=installed, newer=()), images=None, token='')
+            event('firmware', 'install_finished', count=len(check['newer']))
         except Exception as exc:
-            event('firmware','catalog_check_failed',level='warning',error=exc,job_id=self._job['id'],stage='catalog')
-            with self._lock:
-                phase = 'stopped' if self._cancelled.is_set() else 'failed'
-                error = str(exc) if isinstance(exc, CatalogError) else 'Lenovo catalog check did not complete.'
-                # Keep the prior timestamp/results, explicitly stale after failure.
-                self._catalog.update(phase=phase, error=error)
-                self._job.update(phase=phase, error=error)
-
-    def _run(self, release):
-        from diagnostics import event
-        try:
-            original = download_image(release, self._cancelled)
-            with self._lock:
-                if self._cancelled.is_set():
-                    raise FirmwareError('Firmware preparation stopped.')
-                self._job['phase'] = 'validating'
-            validated = validate_image(release.component, original)
-            with self._lock:
-                if self._cancelled.is_set():
-                    raise FirmwareError('Firmware preparation stopped.')
-                self._image = validated
-                self._job['phase'] = 'validated'
-        except Exception as exc:
-            event('firmware','image_preparation_failed',level='warning',error=exc,scope=release.component,job_id=self._job['id'])
-            with self._lock:
-                self._image = None
-                self._job['phase'] = 'stopped' if self._cancelled.is_set() else 'failed'
-                self._job['error'] = (str(exc) if isinstance(exc, FirmwareError) else
-                    'Image preparation did not complete. No device was changed.')
+            self._fail('install', exc)
+        finally:
+            on_done()
 
     def close(self):
-        from diagnostics import event
         with self._lock:
-            if not self._cancelled.is_set():
-                event('firmware','observer_closed',job_id=self._job['id'],phase=self._job['phase'])
             self._cancelled.set()
-            if self._installer is not None and self._job['phase'] in ('installing','verifying','restoring'):
-                # An admitted frozen systemd worker owns the transaction. Its
-                # backend observer must not hold up unrelated module shutdown.
-                self._image = None
-                return
             worker = self._thread
-        if worker is not None:
+            installing = self._phase in ('installing', 'verifying')
+        # fwupd owns an admitted write; interrupting it is worse than letting it finish.
+        if worker is not None and not installing:
             worker.join(timeout=55)
             if worker.is_alive():
                 raise FirmwareError('Firmware preparation is still stopping.')
         with self._lock:
-            self._image = None
+            if not installing:
+                self._images, self._token = None, ''
 
 
 if __name__ == '__main__':
