@@ -2,9 +2,11 @@
 #include "logviewer.h"
 #include "rpcclient.h"
 #include <QDateTime>
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
@@ -28,19 +30,6 @@ QString fixedName(const QVariant &value, int limit = 80) {
     static const QRegularExpression syntax("^[A-Za-z0-9_.-]+$");
     return !text.isEmpty() && text.size() <= limit && syntax.match(text).hasMatch() ? text : QString();
 }
-QString safeText(QString text) {
-    text = text.left(4096);
-    static const QRegularExpression url("https?://[^\\s<>\"']+", QRegularExpression::CaseInsensitiveOption);
-    static const QRegularExpression secret("\\b(password|passwd|psk|token|secret|authorization|cookie|ssid|serial|uuid|app_?id)\\b\\s*[:=]\\s*[^\\r\\n]+", QRegularExpression::CaseInsensitiveOption);
-    static const QRegularExpression bearer("Bearer\\s+\\S+", QRegularExpression::CaseInsensitiveOption);
-    static const QRegularExpression path("(?:[A-Za-z]:[\\\\/]|/(?:home|Users|root)/)[^\\s\"']+");
-    static const QRegularExpression address("\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b");
-    static const QRegularExpression control("[\\x00-\\x1f\\x7f-\\x9f]");
-    text.replace(url,"[url]"); text.replace(secret,"\\1=[redacted]");
-    text.replace(bearer,"Bearer [redacted]"); text.replace(path,"[private-path]");
-    text.replace(address,"[address]"); text.replace(control," ");
-    return text.left(256);
-}
 QDateTime timestamp(const QVariant &value) {
     const auto text = value.toString();
     if(text.size()>48 || (!text.endsWith('Z') && !text.endsWith("+00:00"))) return {};
@@ -53,37 +42,14 @@ bool number(const QVariant &value) {
     return type==QMetaType::Int || type==QMetaType::UInt || type==QMetaType::LongLong
         || type==QMetaType::ULongLong || (type==QMetaType::Double && std::isfinite(value.toDouble()));
 }
-QVariantMap errorMetadata(const QVariant &value) {
-    const auto input=value.toMap();QVariantMap output;
-    const auto type=fixedName(input.value("type"));if(!type.isEmpty())output.insert("type",type);
-    if(number(input.value("errno")))output.insert("errno",input.value("errno"));
-    QVariantList frames;
-    for(const auto &item:input.value("frames").toList().mid(0,8)) {
-        const auto frame=item.toMap();QVariantMap safe;
-        const auto file=fixedName(frame.value("file")),function=fixedName(frame.value("function"));
-        if(!file.isEmpty())safe.insert("file",file);
-        if(!function.isEmpty())safe.insert("function",function);
-        if(number(frame.value("line")))safe.insert("line",frame.value("line"));
-        if(!safe.isEmpty())frames.append(safe);
-    }
-    if(!frames.isEmpty())output.insert("frames",frames);
-    QVariantList causes;
-    for(const auto &item:input.value("causes").toList().mid(0,3)) {
-        const auto cause=item.toMap();QVariantMap safe;
-        const auto causeType=fixedName(cause.value("type"));
-        if(!causeType.isEmpty())safe.insert("type",causeType);
-        if(number(cause.value("errno")))safe.insert("errno",cause.value("errno"));
-        if(!safe.isEmpty())causes.append(safe);
-    }
-    if(!causes.isEmpty())output.insert("causes",causes);
-    return output;
-}
-QVariantMap record(const QVariant &value, const QString &forcedSource={}) {
+// Backend rows were sanitized by diagnostics_reader.normalize_event; this process
+// writes no context or error details, so local rows keep fixed fields only.
+QVariantMap record(const QVariant &value, bool local=false) {
     const auto input=value.toMap();
     const auto time=timestamp(input.value("time"));
     const auto level=input.value("level").toString();
     const auto component=fixedName(input.value("component"),64),event=fixedName(input.value("event"),64);
-    const auto source=forcedSource.isEmpty()?input.value("source").toString():forcedSource;
+    const auto source=local?QString("desktop"):input.value("source").toString();
     if(!time.isValid() || component.isEmpty() || event.isEmpty()
         || !QStringList({"debug","info","warning","error","critical"}).contains(level)
         || !QStringList({"desktop","backend","fan","wifi","firmware"}).contains(source)) return {};
@@ -94,17 +60,9 @@ QVariantMap record(const QVariant &value, const QString &forcedSource={}) {
         const auto name=fixedName(input.value(key));if(!name.isEmpty())result.insert(key,name);
     }
     if(input.value("truncated").metaType().id()==QMetaType::Bool)result.insert("truncated",input.value("truncated"));
-    static const QStringList fields={"operation","stage","outcome","reason","scope","attribute","store","phase","component","job_id","worker_id","errno","returncode","duration_ms","pending","enabled","restored","source","count","retryable","supported","version","code","status","bytes","repeated","kernel","python","architecture"};
-    QVariantMap context;
-    const auto sourceContext=input.value("context").toMap();
-    for(const auto &key:fields) {
-        if(!sourceContext.contains(key))continue;
-        const auto item=sourceContext.value(key);
-        if(item.metaType().id()==QMetaType::QString)context.insert(key,safeText(item.toString()));
-        else if(number(item) || item.metaType().id()==QMetaType::Bool)context.insert(key,item);
-    }
-    if(!context.isEmpty())result.insert("context",context);
-    const auto error=errorMetadata(input.value("error"));if(!error.isEmpty())result.insert("error",error);
+    if(!local)
+        for(const auto &key:{"context","error"})
+            if(input.value(key).metaType().id()==QMetaType::QVariantMap)result.insert(key,input.value(key));
     if(QJsonDocument::fromVariant(result).toJson(QJsonDocument::Compact).size()>4096)return {};
     return result;
 }
@@ -155,7 +113,7 @@ LocalResult readLocal(const QString &directory) {
             if(line.size()>4096) { result.warnings.append("desktop_log_malformed");continue; }
             QJsonParseError parse;const auto json=QJsonDocument::fromJson(line,&parse);
             if(parse.error!=QJsonParseError::NoError || !json.isObject()) { result.warnings.append("desktop_log_malformed");continue; }
-            const auto safe=record(json.toVariant(),"desktop");
+            const auto safe=record(json.toVariant(),true);
             if(safe.isEmpty())result.warnings.append("desktop_log_malformed");else result.records.append(safe);
         }
     }
@@ -267,7 +225,7 @@ LogViewer::LogViewer(RpcClient *rpc,QString localLogDir,QString desktopDir,QObje
 }
 void LogViewer::refresh() {
     if(loading_)return;
-    loading_=true;localDone_=false;backendDone_=false;backendFailed_=false;
+    loading_=true;localDone_=false;backendDone_=false;backendFailed_=false;copied_=false;
     error_.clear();emit loadingChanged();emit changed();
     const auto result=std::make_shared<LocalResult>();const auto directory=localLogDir_;
     auto *thread=QThread::create([result,directory] { *result=readLocal(directory); });
@@ -296,6 +254,14 @@ void LogViewer::finishRefresh() {
     warnings_.removeDuplicates();stale_=backendFailed_ || localWarnings_.contains("desktop_logs_unavailable")
         || localWarnings_.contains("desktop_log_unreadable") || localWarnings_.contains("desktop_log_unsafe");
     error_=backendFailed_?QString("Backend logs are unavailable. Previously loaded entries are retained."):QString();
+    // Only the current backend session counts: an older run's failure is not today's state.
+    const auto session=latestSession();fileSinkUnavailable_=false;
+    for(const auto &item:snapshot_) {
+        const auto row=item.toMap();
+        if(row.value("component")!="diagnostics" || row.value("event")!="file_sink_unavailable")continue;
+        const auto rowSession=row.value("session").toString();
+        if(session.isEmpty() || rowSession.isEmpty() || rowSession==session) { fileSinkUnavailable_=true;break; }
+    }
     loading_=false;applyFilters();emit loadingChanged();emit changed();
 }
 void LogViewer::applyFilters() {
@@ -316,7 +282,7 @@ void LogViewer::applyFilters() {
     status_=QString("%1 of %2 entries").arg(filtered_.size()).arg(snapshot_.size());
     if(stale_)status_+=" · refresh incomplete";
 }
-void LogViewer::filterChanged() { applyFilters();emit filtersChanged();emit changed(); }
+void LogViewer::filterChanged() { copied_=false;applyFilters();emit filtersChanged();emit changed(); }
 void LogViewer::setSearch(const QString &value) { const auto next=value.left(256);if(search_!=next){search_=next;filterChanged();} }
 void LogViewer::setLevel(const QString &value) { const auto next=filterValue(value);if(level_!=next){level_=next;filterChanged();} }
 void LogViewer::setSource(const QString &value) { const auto next=filterValue(value);if(source_!=next){source_=next;filterChanged();} }
@@ -332,12 +298,45 @@ QStringList LogViewer::componentOptions() const {
     if(!component_.isEmpty())result.append(component_);
     result.removeDuplicates();result.sort();return result;
 }
+// Session of the newest backend start, when the snapshot still holds one.
+QString LogViewer::latestSession() const {
+    for(const auto &item:snapshot_) {
+        const auto row=item.toMap();
+        if(row.value("component")=="plugin" && row.value("event")=="startup")return row.value("session").toString();
+    }
+    return {};
+}
+// What a bug report needs even when the filter hides it: version, model, BIOS, SteamOS.
+QVariantList LogViewer::summaryRows() const {
+    const auto session=latestSession();QVariantList rows;QStringList seen;
+    for(const auto &item:snapshot_) {
+        const auto row=item.toMap();const auto event=row.value("event").toString();
+        if(row.value("component")!="plugin" || !QStringList({"startup","runtime","startup_complete"}).contains(event) || seen.contains(event))continue;
+        const auto rowSession=row.value("session").toString();
+        if(!session.isEmpty() && !rowSession.isEmpty() && rowSession!=session)continue;
+        seen.append(event);rows.prepend(row);
+    }
+    return rows;
+}
+QByteArray LogViewer::exportBytes() const {
+    QVariantMap filters{{"level",level_.isEmpty()?QString("all"):level_},{"source",source_.isEmpty()?QString("all"):source_},
+        {"module",component_.isEmpty()?QString("all"):component_},{"age_minutes",ageMinutes_}};
+    if(!search_.isEmpty())filters.insert("search",search_);
+    const QVariantMap header{{"type","export_header"},{"application","LegionGo2Companion logs"},
+        {"exported",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},{"times","UTC"},
+        {"events",int(filtered_.size())},{"filters",filters},
+        {"note","Startup records are always included, even when the filters hide them."}};
+    QByteArray bytes=QJsonDocument::fromVariant(header).toJson(QJsonDocument::Compact)+"\n";
+    for(const auto &row:summaryRows())
+        if(!filtered_.contains(row))bytes.append(QJsonDocument::fromVariant(row).toJson(QJsonDocument::Compact)+"\n");
+    for(const auto &row:filtered_)bytes.append(QJsonDocument::fromVariant(row).toJson(QJsonDocument::Compact)+"\n");
+    return bytes;
+}
 void LogViewer::exportFiltered() {
     if(exporting_)return;
-    if(filtered_.isEmpty()) { error_="There are no matching entries to export.";emit changed();return; }
-    QByteArray bytes;
-    for(const auto &row:filtered_)bytes.append(QJsonDocument::fromVariant(row).toJson(QJsonDocument::Compact)+"\n");
-    exporting_=true;exportedPath_.clear();error_.clear();emit exportingChanged();emit changed();
+    if(!exportable()) { error_="There are no matching entries to export.";emit changed();return; }
+    const auto bytes=exportBytes();
+    exporting_=true;copied_=false;exportedPath_.clear();error_.clear();emit exportingChanged();emit changed();
     const auto result=std::make_shared<ExportResult>();const auto directory=desktopDir_;
     const auto stamp=QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz'Z'");
     auto *thread=QThread::create([result,directory,bytes,stamp] { *result=writeExport(directory,bytes,stamp); });
@@ -346,6 +345,13 @@ void LogViewer::exportFiltered() {
         emit exportingChanged();emit changed();
     });
     connect(thread,&QThread::finished,thread,&QObject::deleteLater);thread->start();
+}
+void LogViewer::copyToClipboard() {
+    if(!exportable()) { error_="There are no matching entries to copy.";emit changed();return; }
+    auto *clipboard=qobject_cast<QGuiApplication *>(QCoreApplication::instance())?QGuiApplication::clipboard():nullptr;
+    if(!clipboard) { error_="The clipboard is unavailable.";emit changed();return; }
+    clipboard->setText(QString::fromUtf8(exportBytes()));
+    copied_=true;exportedPath_.clear();error_.clear();emit changed();
 }
 QString LogViewer::writeSnapshot(const QString &directory,const QByteArray &bytes,const QString &stamp,QString &error) {
     const auto result=writeExport(directory,bytes,stamp);error=result.error;return result.path;

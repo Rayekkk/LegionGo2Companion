@@ -80,8 +80,10 @@ int RpcClient::call(const QString &method, const QVariantList &args, bool mutati
     QTimer::singleShot(0, this, &RpcClient::startNext);
     return id;
 }
-void RpcClient::cancelReads() {
+void RpcClient::cancelReads(bool inFlight) {
     // Never cancel admitted writes or diagnostics cleanup on navigation/exit.
+    // On exit the running read is aborted too, so cleanup writes go out at once.
+    if (inFlight && reply_ && !active_.mutation) { cancelled_ = true; reply_->abort(); }
     QQueue<Request> retained;
     while (!queue_.isEmpty()) {
         auto request = queue_.dequeue();
@@ -110,15 +112,14 @@ void RpcClient::startNext() {
     request.setRawHeader("Authorization","Bearer " + token);
     request.setHeader(QNetworkRequest::ContentTypeHeader,"application/json");
     const int timeout=active_.mutation?155000:(active_.method=="get_version" || active_.method=="desktop_context"?4000:20000);
-    request.setTransferTimeout(timeout);
     const QJsonObject object {{"method",active_.method},{"args",QJsonArray::fromVariantList(active_.args)}};
-    response_.clear(); oversize_ = false;
+    response_.clear(); oversize_ = false; cancelled_ = false;
     reply_ = network_.post(request,QJsonDocument(object).toJson(QJsonDocument::Compact));
     reply_->setProperty("diagnosticStarted",clock_.elapsed());
     auto *deadline = new QTimer(reply_);
     deadline->setSingleShot(true);
     connect(deadline,&QTimer::timeout,reply_,&QNetworkReply::abort);
-    deadline->start(timeout); // Wall deadline as well as the transfer inactivity timeout.
+    deadline->start(timeout); // Wall deadline; it also bounds an inactive transfer.
     reply_->setReadBufferSize(512 * 1024 + 1);
     connect(reply_,&QIODevice::readyRead,this,[this] {
         response_.append(reply_->readAll());
@@ -130,17 +131,18 @@ void RpcClient::startNext() {
         QVariant result; QString message;
         QJsonParseError parse;
         const auto document = QJsonDocument::fromJson(response_,&parse);
-        if (oversize_ || response_.size() > 512 * 1024) message = "Backend response exceeded the limit.";
+        if (cancelled_) message = "Obsolete read.";
+        else if (oversize_ || response_.size() > 512 * 1024) message = "Backend response exceeded the limit.";
         else if (status >= 300 && status < 400) message = "Backend redirect rejected.";
         else if (status == 200 && reply_->error() != QNetworkReply::NoError)
-            message = "Connection lost. Refresh before retrying a change.";
+            message = "Connection lost. Check the value, then try again.";
         else if (parse.error != QJsonParseError::NoError || !document.isObject())
-            message = "Backend unavailable. Refresh before retrying a change.";
+            message = "Companion isn't responding. Try again in a moment.";
         else if (document.object().contains("error")) {
             message = document.object().value("error").toString().trimmed().left(1000);
-            if (message.isEmpty()) message = "The backend could not complete this request. Refresh its state.";
+            if (message.isEmpty()) message = "Companion couldn't complete this. Try again.";
         }
-        else if (status != 200 || !document.object().contains("result")) message = "Change not confirmed. Refresh its state.";
+        else if (status != 200 || !document.object().contains("result")) message = "The change wasn't confirmed. Check the current value.";
         else {
             result = document.object().value("result").toVariant();
             const auto map = result.toMap();
@@ -149,7 +151,7 @@ void RpcClient::startNext() {
                     message = map.value(key).toString().trimmed().left(1000);
                     if (!message.isEmpty()) break;
                 }
-                if (message.isEmpty()) message = "Change not confirmed. Refresh its state.";
+                if (message.isEmpty()) message = "The change wasn't confirmed. Check the current value.";
             }
         }
         CompanionDiagnostics::rpc(active_.method,active_.id,!message.isEmpty(),active_.mutation,

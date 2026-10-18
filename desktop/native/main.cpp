@@ -14,6 +14,7 @@
 #include <QQmlError>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QProcess>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QCommandLineParser>
@@ -38,11 +39,12 @@ int main(int argc, char **argv) {
     parser.addOption({"capture-page","Visual-test page.","page","overview"});
     parser.addOption({"capture-size","Visual-test window size (WIDTHxHEIGHT).","size"});
     parser.addOption({"capture-fullscreen","Visual-test fullscreen fan editor."});
+    parser.addOption({"tray","Start in the tray (the Desktop Mode autostart entry)."});
     parser.process(application);
     const auto path = parser.isSet("backend-session") ? parser.value("backend-session") :
         QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/legiongo2companion/session.json";
     QQuickStyle::setStyle("Basic");
-    const bool capture=parser.isSet("capture");
+    const bool capture=parser.isSet("capture"), tray=!capture && parser.isSet("tray");
     if(!capture && qEnvironmentVariable("QT_QPA_PLATFORM")!="offscreen") {
         CompanionDiagnostics::configure(QStandardPaths::writableLocation(QStandardPaths::GenericStateLocation)+"/legiongo2companion");
         CompanionDiagnostics::event("application_started");
@@ -56,6 +58,7 @@ int main(int argc, char **argv) {
     if(!capture) {
         QDir().mkpath(QFileInfo(instance).absolutePath());
         if(!lock.tryLock(100)) {
+            if(tray)return 0; // Already running; a login start must not bring its window up.
             QLocalSocket client;client.connectToServer(instance);
             if(client.waitForConnected(500)) { client.write("show");client.waitForBytesWritten(500);CompanionDiagnostics::event("instance_forwarded");return 0; }
             CompanionDiagnostics::event("instance_unavailable");
@@ -65,6 +68,7 @@ int main(int argc, char **argv) {
         if(!server.listen(instance)) { CompanionDiagnostics::event("instance_listener_failed");return 1; }
     }
     AppHost host(path,capture);
+    if(tray && !host.trayEnabled())return 0; // "Show tray icon" off also turns the login start off.
     RpcClient rpc(path);
     LogViewer logs(&rpc);
     QQmlApplicationEngine engine;
@@ -78,9 +82,13 @@ int main(int argc, char **argv) {
     QObject::connect(&engine,&QQmlApplicationEngine::objectCreationFailed,&application,[] {
         CompanionDiagnostics::event("qml_creation_failed");QCoreApplication::exit(1);
     },Qt::QueuedConnection);
+    if(tray)engine.setInitialProperties({{"visible",false}}); // Main.qml shows itself otherwise
     engine.loadFromModule("Companion","Main");
     if (engine.rootObjects().isEmpty()) { CompanionDiagnostics::event("qml_root_unavailable");return 1; }
-    host.setWindow(qobject_cast<QQuickWindow *>(engine.rootObjects().first()));
+    auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+    host.setWindow(window);
+    if(tray) { window->setWindowStates(Qt::WindowMaximized);host.startInTray(); } // shown later from the tray
+    else if(!capture)window->showMaximized();
     QObject::connect(&server,&QLocalServer::newConnection,&application,[&host,&server]{
         auto *client=server.nextPendingConnection();
         const auto show=[client,&host]{
@@ -94,7 +102,6 @@ int main(int argc, char **argv) {
         QTimer::singleShot(1000,client,[client]{client->disconnectFromServer();});
     });
     if (parser.isSet("capture")) {
-        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         if (parser.isSet("capture-size")) {
             const auto dimensions=parser.value("capture-size").split('x');
             bool widthOk=false,heightOk=false;
@@ -116,5 +123,11 @@ int main(int argc, char **argv) {
             application.exit(target && target->grabWindow().save(parser.value("capture")) ? 0 : 2);
         });
     }
-    return application.exec();
+    const int code=application.exec();
+    if(host.relaunchRequested()) {
+        server.close();lock.unlock();
+        // Same command as the .desktop entry; the launcher checks the new registration itself.
+        QProcess::startDetached("/usr/bin/python3",{host.launcherPath()});
+    }
+    return code;
 }

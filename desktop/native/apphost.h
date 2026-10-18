@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #pragma once
+#include <QElapsedTimer>
+#include <QHash>
 #include <QObject>
 #include <QProcess>
 #include <QSettings>
@@ -21,11 +23,25 @@ class AppHost final : public QObject {
     Q_PROPERTY(bool serviceBusy READ serviceBusy NOTIFY changed)
     Q_PROPERTY(QString serviceError READ serviceError NOTIFY changed)
     Q_PROPERTY(bool canStartService READ canStartService NOTIFY changed)
+    Q_PROPERTY(bool updateWaiting READ updateWaiting NOTIFY changed)
 public:
-    AppHost(QString sessionPath, bool capture, QObject *parent=nullptr, QString bundlePath={});
+    AppHost(QString sessionPath, bool capture, QObject *parent=nullptr);
     ~AppHost() override;
     static QString classifyService(const QByteArray &output);
-    static bool registered(const QString &bundle, const QString &sessionPath);
+    // runtime.json next to the session names the plugin folder, and its plugin.json still exists.
+    static bool registered(const QString &sessionPath);
+    static int trayCheckMs(bool hiddenInTray) { return hiddenInTray?1500:30000; }
+    // What to do once this executable was replaced or removed on disk: "stay", "quit" (plugin
+    // uninstalled), "wait" (the new version is not registered yet), "ask" (an unsaved edit is open)
+    // or "restart" (start the new version, then quit).
+    static QString replacedStep(bool replaced, bool launcher, bool registered, bool editing);
+    // The launcher's own precondition: runtime.json names an executable with the recorded SHA-256.
+    static bool registrationReady(const QString &runtimePath);
+    // A game's name from Steam's files under steamRoot (app manifests, non-Steam shortcuts), or "".
+    static QString steamName(const QString &steamRoot, const QString &appId);
+    bool updateWaiting() const { return updateWaiting_; }
+    bool relaunchRequested() const { return relaunch_; }
+    QString launcherPath() const;
     void setWindow(QQuickWindow *window);
     bool installed() const { return installed_; }
     bool desktopMode() const { return desktop_; }
@@ -44,13 +60,16 @@ public:
     Q_INVOKABLE void showWindow();
     Q_INVOKABLE void inspectService();
     Q_INVOKABLE void startService();
+    Q_INVOKABLE void restartNow();
+    Q_INVOKABLE QString gameName(const QString &appId);
+    // Desktop Mode login (autostart): the window stays hidden until the tray icon is used.
+    void startInTray();
 signals:
     void changed();
     void quitRequested();
 private:
     QString sessionPath_;
-    QString bundlePath_;
-    bool capture_=false, installed_=true, desktop_=false, trayAvailable_=false, starting_=false;
+    bool capture_=false, installed_=true, desktop_=false, trayAvailable_=false, starting_=false, updateWaiting_=false, relaunch_=false;
     QSettings settings_;
     QSystemTrayIcon tray_;
     QMenu menu_;
@@ -58,5 +77,8 @@ private:
     QProcess service_;
     QQuickWindow *window_=nullptr;
     QString serviceState_="unknown", serviceError_;
-    void update();
+    QHash<QString,QString> names_;
+    QElapsedTimer trayCheck_; // isSystemTrayAvailable() is a synchronous D-Bus call on Linux
+    void update(bool recheckTray=false);
+    void checkReplaced();
 };

@@ -18,25 +18,31 @@ TestCase {
         property string exportedPath:""
         property var warnings:[]
         property string search:""
-        property string level:"all"
+        property string level:"warning"
+        property bool copied:false
+        property bool fileSinkUnavailable:false
+        readonly property bool exportable:records.length>0
+        property int copies:0
         property string source:"all"
         property string component:"all"
         property int ageMinutes:0
         property var sourceOptions:["backend","desktop"]
         property var componentOptions:["fan","runtime"]
         property int filteredCount:records.length
-        property int totalCount:records.length
+        property int hidden:0
+        property int totalCount:records.length+hidden
         property int refreshes:0
         property int exports:0
         signal filtersChanged()
         function refresh(){refreshes++;}
+        function copyToClipboard(){copies++;copied=true;}
         function exportFiltered(){exports++;exportedPath="/home/deck/Desktop/LegionGoCompanion-logs.jsonl";}
     }
     Component { id:factory;LogsPage { width:1050;viewer:fake } }
     property var view
     function init(){
         fake.records=[];fake.refreshes=0;fake.exports=0;fake.loading=false;fake.error="";fake.status="";fake.warnings=[];fake.exportedPath="";
-        fake.search="";fake.level="all";fake.source="all";fake.component="all";fake.ageMinutes=0;
+        fake.search="";fake.level="warning";fake.copied=false;fake.copies=0;fake.hidden=0;fake.fileSinkUnavailable=false;fake.source="all";fake.component="all";fake.ageMinutes=0;
         view=createTemporaryObject(factory,this);verify(view!==null);
         view.Window.window.width=1100;view.Window.window.height=1000;
         waitForRendering(view);
@@ -79,5 +85,57 @@ TestCase {
         mouseClick(list,250,30);compare(view.selectedIndex,0);
         fake.records=[{time:"2026-10-14T12:01:00Z",event:"reconnected",component:"fan",source:"backend",level:"info"}];
         tryCompare(view,"selectedRecord",null);compare(view.selectedIndex,-1);
+    }
+    function row(index){const list=findChild(view,"logsList");tryCompare(list,"count",fake.records.length);return list.itemAtIndex(index);}
+    function test_rows_say_what_happened_in_plain_words(){
+        fake.records=[
+            {time:"2026-10-14T12:00:00Z",event:"startup",component:"plugin",source:"backend",level:"info"},
+            {time:"2026-10-14T12:01:00Z",event:"transaction",component:"wifi",source:"wifi",level:"error",context:{operation:"set_band_policy",outcome:"rolled_back",reason:"link_lost"},error:{type:"OSError"}},
+            {time:"2026-10-14T12:02:00Z",event:"cpu_power_restore_failed",component:"tdp",source:"backend",level:"warning"}];
+        compare(findChild(row(0),"logTitle").text,"Plugin started");
+        compare(findChild(row(1),"logTitle").text,"Wi-Fi change");
+        compare(findChild(row(1),"logDetail").text,"Wi-Fi · Set band policy · Outcome: rolled back · Reason: link lost · Error: OSError");
+        compare(findChild(row(2),"logTitle").text,"Cpu power restore failed");
+        compare(findChild(row(2),"logDetail").text,"TDP");
+    }
+    function test_time_is_shown_in_local_time(){
+        fake.records=[{time:"2026-10-14T23:30:00Z",event:"startup",component:"plugin",source:"backend",level:"info"}];
+        compare(findChild(row(0),"logTime").text,Qt.formatDateTime(new Date("2026-10-14T23:30:00Z"),"d MMM hh:mm:ss"));
+        verify(!findChild(row(0),"logTime").text.includes("T23"));
+    }
+    function test_problems_are_the_default_and_all_is_one_tap_away(){
+        fake.records=[{time:"2026-10-14T12:00:00Z",event:"a",component:"fan",source:"backend",level:"error"}];
+        compare(findChild(view,"option_warning").tone,"primary");
+        compare(findChild(view,"logsCount").text,"1 problem in 1 collected events");
+        mouseClick(findChild(view,"option_all"));compare(fake.level,"all");
+        compare(findChild(view,"option_all").tone,"primary");
+        compare(findChild(view,"logsCount").text,"1 of 1 collected events");
+        mouseClick(findChild(view,"logsReset"));compare(fake.level,"warning");
+    }
+    function test_empty_problem_list_points_to_all_events(){
+        compare(findChild(view,"logsEmpty").text,"No diagnostic events are available.");
+        fake.hidden=3;
+        compare(findChild(view,"logsEmpty").text,"No warnings or errors. Choose “All events” to see everything.");
+        fake.level="all";
+        compare(findChild(view,"logsEmpty").text,"No events match these filters.");
+    }
+    function test_copy_button_copies_and_reports_it(){
+        verify(!findChild(view,"logsCopy").enabled);
+        fake.records=[{time:"2026-10-14T12:00:00Z",event:"a",component:"fan",source:"backend",level:"error"}];
+        verify(findChild(view,"logsCopy").enabled);
+        mouseClick(findChild(view,"logsCopy"));compare(fake.copies,1);
+        compare(findChild(view,"logsExportedPath").text,"Copied to the clipboard.");
+    }
+    function test_file_sink_notice_only_when_the_backend_reports_it(){
+        verify(!findChild(view,"logsSinkNotice").visible);
+        fake.fileSinkUnavailable=true;
+        verify(findChild(view,"logsSinkNotice").visible);
+        verify(findChild(view,"logsSinkNotice").text.includes("event log file"));
+    }
+    function test_controls_meet_the_touch_size(){
+        for(const name of ["logsRefresh","logsCopy","logsExport","logsReset","option_warning","option_error","option_all","logsSource","logsAge","logsComponent","logsSearch"])
+            verify(findChild(view,name).height>=48,name+" is "+findChild(view,name).height);
+        fake.records=[{time:"2026-10-14T12:00:00Z",event:"a",component:"fan",source:"backend",level:"error"}];
+        verify(row(0).height>=48);
     }
 }

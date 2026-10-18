@@ -3,8 +3,6 @@ import asyncio
 import copy
 import io
 import json
-import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -13,7 +11,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_integration
+import support
 import main
 import fan_backend
 from fan_policy import DEFAULT_CURVE
@@ -31,30 +29,19 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
             directory = Path(raw)
             (directory / 'package.json').write_text('{"version":"2.1.0"}')
             marker = directory / 'dns-entered'
-            source = ("import runpy,socket,sys,time; from pathlib import Path\n"
-                "def resolver(*args,**kwargs):\n"
-                f" Path({str(marker)!r}).write_text('entered')\n"
-                " time.sleep(30)\n"
-                " raise OSError('controlled DNS failure')\n"
-                "socket.getaddrinfo=resolver\n"
-                f"sys.argv=[{str(Path(bounded_http.__file__).resolve())!r},'--fetch']\n"
-                f"runpy.run_path({str(Path(bounded_http.__file__).resolve())!r},run_name='__main__')\n")
+            source = support.dns_stall_source(marker)
             plugin = self.plugin()
             plugin._tdp = tdp_backend.Plugin()
             plugin._updates = CompanionUpdates(raw, raw, 1000, 1000)
-            bridge = DesktopBridge(plugin, directory, [method])
+            bridge = DesktopBridge(plugin, [method])
             plugin._desktop = bridge
             await bridge.start()
-            downloader = tdp_updater.Updater(user_agent='test', log_prefix='test', plugin_dir=raw, logger=Mock())
+            downloader = tdp_updater.Updater(user_agent='test')
             def ensure_helper(cancel=None):
                 downloader.download_to('https://github.com/test/helper', io.BytesIO(), 3, cancel=cancel)
                 return True
             children = []
-            original = subprocess.Popen
-            def launch(_args, **kwargs):
-                child = original([sys.executable, '-I', '-c', source], **kwargs)
-                children.append(child)
-                return child
+            launch = support.stalled_child_launcher(source, children)
             reader, writer = await asyncio.open_connection('127.0.0.1', bridge.port)
             body = json.dumps({'method': method, 'args': []}).encode()
             headers = (f'POST /rpc HTTP/1.1\r\nHost: 127.0.0.1:{bridge.port}\r\n'
@@ -62,7 +49,6 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 f'Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n').encode()
             shutdown = None
             with patch.object(bounded_http.subprocess, 'Popen', side_effect=launch), \
-                    patch.object(tdp_backend, '_wmi_only', return_value=False), \
                     patch.object(tdp_backend, '_ensure_ryzenadj', side_effect=ensure_helper):
                 try:
                     writer.write(headers + body)
@@ -94,10 +80,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     writer.close()
                     await writer.wait_closed()
                     await reader.read()
-                    for child in children:
-                        if child.poll() is None:
-                            child.kill()
-                        child.wait(timeout=3)
+                    support.reap(children)
 
     async def test_unload_cancels_update_dns_before_draining_real_desktop_rpc(self):
         await self.desktop_dns_shutdown('updates_check')
@@ -105,34 +88,88 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_unload_cancels_extras_dns_before_draining_real_desktop_rpc(self):
         await self.desktop_dns_shutdown('retry_extras')
 
-    async def test_unload_drains_lifecycle_components_without_optional_network_helper(self):
+    async def test_unload_restores_hardware_before_extras_and_bounds_a_hanging_one(self):
         plugin = self.plugin()
-        plugin._module_state = {}
+        order = []
         plugin._modules_started = True
-        plugin._firmware = Mock()
-        for name in main.MODULE_NAMES:
-            setattr(plugin, '_' + name, SimpleNamespace(_unload=AsyncMock()))
-        await plugin._unload()
-        for name in main.MODULE_NAMES:
-            getattr(plugin, '_' + name)._unload.assert_awaited_once()
-        self.assertFalse(plugin._modules_started)
+        plugin._stop_modules = AsyncMock(side_effect=lambda: order.append('modules'))
+        plugin._updates = Mock(close=Mock(side_effect=lambda: order.append('updates')))
+        plugin._firmware = Mock(close=Mock(side_effect=lambda: order.append('firmware')))
+        never = asyncio.Event()
+        async def hanging_close():
+            order.append('bridge')
+            await never.wait()
+        plugin._desktop = SimpleNamespace(close=hanging_close)
+        with patch.object(main, 'SHUTDOWN_BUDGET_S', .2):
+            started = time.monotonic()
+            await asyncio.wait_for(plugin._unload(), 2)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(order, ['modules', 'updates', 'bridge'])
+        plugin._tdp._helper_cancel.set.assert_called_once()
+        never.set()
 
-    async def test_firmware_history_status_never_blocks_other_backend_tasks(self):
-        from controller_firmware import FirmwarePreparation
-        class Installer:
-            def previous_status(self):
-                time.sleep(.08)  # Bounded systemctl/history I/O after restart.
-                return {'id':'existing','phase':'installing','message':'Updating','error':''}
-        plugin=self.plugin();plugin._firmware=FirmwarePreparation(installer=Installer())
-        for method in (plugin.firmware_get_status,plugin.firmware_check_updates):
-            ticks=[]
-            async def heartbeat():
-                deadline=time.monotonic()+.06
-                while time.monotonic()<deadline:
-                    ticks.append(time.monotonic());await asyncio.sleep(.005)
-            _,result=await asyncio.gather(heartbeat(),method())
-            self.assertGreaterEqual(len(ticks),3,'firmware result observation blocked Decky loop')
-            self.assertEqual(result['job']['phase'],'installing')
+    async def test_uninstall_after_unload_does_not_spend_a_second_shutdown_budget(self):
+        plugin = self.plugin()
+        plugin._ever_started = True
+        never = asyncio.Event()
+        async def hanging_close():
+            await never.wait()
+        plugin._desktop = SimpleNamespace(close=hanging_close)
+        stamps = {}
+        async def stage(name):
+            stamps[name] = time.monotonic()
+        plugin._run_stage = stage
+        with patch.object(main, 'SHUTDOWN_BUDGET_S', .5):
+            started = time.monotonic()
+            await plugin._unload()
+            await plugin._uninstall()
+        self.assertLess(stamps['_uninstall'] - started, .9)
+        never.set()
+
+    async def test_decky_listener_ends_at_eof_instead_of_starving_unload(self):
+        class Socket:  # Decky 3.2.10 UnixSocket's listener, with a bounded spin.
+            active = True
+            async def _read_single_line(self, reader):
+                try:
+                    return (await reader.readuntil()).decode()
+                except asyncio.IncompleteReadError as err:
+                    return err.partial.decode()
+            async def listen(self, reader, handled):
+                for _ in range(1000):
+                    line = await self._read_single_line(reader)
+                    handled.append(line)
+                return 'spun'
+        socket = Socket()
+        def closure(sandboxed):
+            async def emit(event, *args):
+                await sandboxed._socket.write(event)
+            return emit
+        reader, handled = asyncio.StreamReader(), []
+        with patch.object(main.decky, 'emit', closure(SimpleNamespace(_socket=socket))):
+            self.plugin()
+        reader.feed_data(b'{"id": 1}\n')
+        reader.feed_eof()
+        listener = asyncio.ensure_future(socket.listen(reader, handled))
+        unload = asyncio.ensure_future(asyncio.sleep(0, 'unloaded'))  # Needs the loop to run again.
+        await asyncio.wait([listener, unload])
+        self.assertTrue(listener.cancelled())
+        self.assertEqual(handled, ['{"id": 1}\n'])
+        self.assertEqual(unload.result(), 'unloaded')
+
+    async def test_firmware_calls_never_block_other_backend_tasks(self):
+        loop = asyncio.get_running_loop()
+        observed = []
+        def slow():
+            # The loop can only run this callback if the call is not executing on it.
+            beat = threading.Event()
+            loop.call_soon_threadsafe(beat.set)
+            observed.append(beat.wait(2))
+            return {'phase':'installing','message':'Installing','error':''}
+        plugin=self.plugin();plugin._firmware=Mock(status=Mock(side_effect=slow),check=Mock(side_effect=slow))
+        for method in (plugin.firmware_get_status,plugin.firmware_check):
+            result=await method()
+            self.assertEqual(result['phase'],'installing')
+        self.assertEqual(observed,[True,True],'firmware result observation blocked Decky loop')
 
     def plugin(self):
         plugin = main.Plugin()
@@ -148,7 +185,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(fan_backend, 'read_automatic', return_value={'valid': True, 'automatic': True,
                     'rpm': 1800, 'apu_temperature': 45, 'ownership': {'blocked': False}}):
             plugin._fan = fan_backend.Plugin(); plugin._fan._supported = True; plugin._fan._load()
-            bridge = DesktopBridge(plugin, Path(temporary.name), ['fan_get_state', 'fan_save_curve', 'fan_save_unit'])
+            bridge = DesktopBridge(plugin, ['fan_get_state', 'fan_save_curve', 'fan_save_unit'])
             before = await plugin.fan_get_state()  # Exactly the public Decky RPC.
             curve = copy.deepcopy(DEFAULT_CURVE); curve[6][0] = 94
             desktop = await bridge.dispatch('fan_save_curve', ['global', curve, before['settings']['revision']])
@@ -190,8 +227,6 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main.display_backend, '_gamescope_start_time', return_value=None):
             result = await plugin._desktop_display_restart()
             self.assertIn('Gaming Mode', result['restart_error'])
-            result = await plugin._desktop_modules_restart()
-            self.assertFalse(result['success'])
         plugin._display.restart_session.assert_not_awaited()
 
     async def test_gamescope_restart_retains_existing_rpc_guards(self):
@@ -230,10 +265,11 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_paused_modules_cannot_hide_firmware_outcome_or_enable_an_update(self):
         plugin=self.plugin();plugin._check_guard=AsyncMock();plugin._guard_blocked=True
-        plugin._firmware=Mock(status=Mock(return_value={'job':{'phase':'installing'}}))
-        self.assertEqual((await plugin.firmware_get_status())['job']['phase'],'installing')
-        with self.assertRaises(RuntimeError):await plugin.firmware_check_updates()
-        plugin._firmware.check_updates.assert_not_called()
+        plugin._firmware=Mock(status=Mock(return_value={'phase':'installing'}))
+        self.assertEqual((await plugin.firmware_get_status())['phase'],'installing')
+        for method in (plugin.firmware_check,plugin.firmware_download,lambda:plugin.firmware_install('token')):
+            with self.assertRaises(RuntimeError):await method()
+        plugin._firmware.check.assert_not_called();plugin._firmware.admit_install.assert_not_called()
 
     async def test_failed_publication_closes_bridge_without_stopping_modules(self):
         plugin = self.plugin()

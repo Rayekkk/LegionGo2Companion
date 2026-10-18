@@ -13,6 +13,9 @@ class LogViewer final : public QObject {
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool exporting READ exporting NOTIFY exportingChanged)
     Q_PROPERTY(bool stale READ stale NOTIFY changed)
+    Q_PROPERTY(bool copied READ copied NOTIFY changed)
+    Q_PROPERTY(bool exportable READ exportable NOTIFY changed)
+    Q_PROPERTY(bool fileSinkUnavailable READ fileSinkUnavailable NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(QString exportedPath READ exportedPath NOTIFY changed)
@@ -33,6 +36,9 @@ public:
     bool loading() const { return loading_; }
     bool exporting() const { return exporting_; }
     bool stale() const { return stale_; }
+    bool copied() const { return copied_; }
+    bool exportable() const { return !filtered_.isEmpty() || !summaryRows().isEmpty(); }
+    bool fileSinkUnavailable() const { return fileSinkUnavailable_; }
     QString error() const { return error_; }
     QString status() const { return status_; }
     QString exportedPath() const { return exportedPath_; }
@@ -53,6 +59,7 @@ public:
     void setAgeMinutes(int value);
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void exportFiltered();
+    Q_INVOKABLE void copyToClipboard();
 signals:
     void changed();
     void filtersChanged();
@@ -65,10 +72,14 @@ private:
     QString localLogDir_, desktopDir_;
     QVariantList backend_, local_, snapshot_, filtered_;
     QStringList backendWarnings_, localWarnings_, warnings_, availableSources_;
-    QString search_, level_, source_, component_, error_, status_, exportedPath_;
+    QString level_ = QStringLiteral("warning");
+    QString search_, source_, component_, error_, status_, exportedPath_;
     int ageMinutes_ = 0, request_ = 0;
-    bool loading_ = false, exporting_ = false, stale_ = false;
+    bool loading_ = false, exporting_ = false, stale_ = false, copied_ = false, fileSinkUnavailable_ = false;
     bool localDone_ = false, backendDone_ = false, backendFailed_ = false, truncated_ = false;
+    QString latestSession() const;
+    QVariantList summaryRows() const;
+    QByteArray exportBytes() const;
     void finishRefresh();
     void applyFilters();
     void filterChanged();

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # LegionGo2Companion managed Desktop launcher v1
 """Executes the native Qt app as the desktop user. No browser or root helper."""
+import ctypes
 import hashlib
 import json
 import os
@@ -11,6 +12,9 @@ import shutil
 import stat
 import subprocess
 import sys
+
+# The app links the distribution's Qt; it was built against this minimum.
+QT_MINIMUM = (6, 9)
 
 
 def private_json(path):
@@ -29,17 +33,6 @@ def private_json(path):
     return data
 
 
-def session_url(path):
-    data = private_json(path)
-    origin, token = data.get('origin', ''), data.get('token', '')
-    if (not isinstance(origin, str) or not isinstance(token, str) or
-            not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}', origin) or
-            not 1 <= int(origin.rsplit(':', 1)[1]) <= 65535 or
-            not re.fullmatch(r'[A-Za-z0-9_-]{43}', token)):
-        raise ValueError('Invalid Desktop session.')
-    return origin, token
-
-
 def native_command(directory):
     config = private_json(directory / 'runtime.json')
     bundle = Path(config.get('bundle', ''))
@@ -50,31 +43,53 @@ def native_command(directory):
         raise ValueError('Native application is missing.')
     if hashlib.sha256(executable.read_bytes()).hexdigest() != config['executable_sha256']:
         raise ValueError('Native application changed. Restart Companion to refresh its registration.')
-    environment = os.environ.copy()
-    # Unprivileged UI only; system graphics drivers and platform selection
-    # remain the desktop session's responsibility.
-    environment['LD_LIBRARY_PATH'] = str(bundle / 'lib')
-    environment['QT_PLUGIN_PATH'] = str(bundle / 'plugins')
-    environment['QML_IMPORT_PATH'] = str(bundle / 'qml')
-    environment.pop('QML2_IMPORT_PATH', None)
-    return [str(executable), '--backend-session', str(directory / 'session.json')], environment
+    return [str(executable), '--backend-session', str(directory / 'session.json')]
+
+
+def qt_problem(version):
+    try:
+        found = tuple(int(part) for part in version.split('.')[:2])
+    except ValueError:
+        found = ()
+    if len(found) != 2 or found[0] != QT_MINIMUM[0] or found < QT_MINIMUM:
+        return f'Qt {version} is installed.'
+    return None
+
+
+def system_qt_problem():
+    """Why the system Qt cannot run the app, or None. Uses the loader's own search."""
+    try:
+        core = ctypes.CDLL('libQt6Core.so.6')
+    except OSError:
+        return 'Qt 6 is not installed.'
+    core.qVersion.restype = ctypes.c_char_p
+    return qt_problem(core.qVersion().decode('ascii', 'replace'))
+
+
+def show_error(message):
+    dialog = shutil.which('kdialog')
+    if dialog:
+        subprocess.run([dialog, '--error', message], check=False, timeout=15)
+    else:
+        print(message, file=sys.stderr)
+    return 1
 
 
 def main():
     directory = Path(__file__).parent
     try:
-        command, environment = native_command(directory)
+        problem = system_qt_problem()
+        if problem:
+            return show_error(f'{problem} The Legion Go Companion Desktop app needs the system Qt '
+                              f'{QT_MINIMUM[0]}.{QT_MINIMUM[1]} or a newer Qt {QT_MINIMUM[0]} release '
+                              '(included in SteamOS 3.8 and later). The Decky panel is not affected.')
+        # The Desktop Mode autostart entry starts the app in the tray.
+        command = native_command(directory) + (['--tray'] if sys.argv[1:] == ['--tray'] else [])
         # The native app displays its offline state when Decky is unavailable.
         # Only a private file path, never a capability, appears in arguments.
-        os.execve(command[0], command, environment)
+        os.execv(command[0], command)
     except (OSError, ValueError, TypeError, KeyError) as exc:
-        message = 'Start Decky and Legion Go Companion, then reopen this app.\n' + str(exc)
-        dialog = shutil.which('kdialog')
-        if dialog:
-            subprocess.run([dialog, '--error', message], check=False, timeout=15)
-        else:
-            print(message, file=sys.stderr)
-        return 1
+        return show_error('Start Decky and Legion Go Companion, then reopen this app.\n' + str(exc))
 
 
 if __name__ == '__main__':

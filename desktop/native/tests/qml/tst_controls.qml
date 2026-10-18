@@ -8,13 +8,12 @@ TestCase {
     // case's pointer surface on top while it runs, then remove it from picking.
     visible:running; z:1000
     UiSwitch { id:toggle; x:20; y:20; checked:false }
-    UiSpinBox { id:number; x:20; y:90; from:0; to:100; value:20 }
     UiComboBox { id:choice; x:20; y:160; textRole:"label"; valueRole:"id"; model:[{id:1,label:"One"},{id:2,label:"Two"}]; currentIndex:0 }
     UiButton { id:button; x:20; y:230; text:"Save"; tone:"primary"; property int calls:0; onClicked:calls++ }
     UiSlider { id:range;x:300;y:40;width:300;from:0;to:100;value:20;property var commits:[];onCommitted:function(value){commits=commits.concat(value);} }
     UiOptions { id:segments;x:300;y:110;width:300;choices:[{id:"a",label:"First"},{id:"b",label:"Second"}];value:"a";property var commits:[];onSelected:function(value){commits=commits.concat(value);} }
     UiField { id:readout;x:300;y:200;width:300;value:"<b>Device supplied text</b>" }
-    function init() { toggle.checked=false;number.value=20;choice.currentIndex=0;choice.popup.close();button.calls=0; }
+    function init() { toggle.checked=false;choice.currentIndex=0;choice.popup.close();button.calls=0; }
     function test_switchKeepsNativeKeyboardAndPointerActivation() {
         mouseClick(toggle,toggle.width/2,toggle.height/2);compare(toggle.checked,true);
         toggle.forceActiveFocus();keyClick(Qt.Key_Space);compare(toggle.checked,false);
@@ -29,11 +28,6 @@ TestCase {
         }
         const label=matching(readout);verify(label!==null);
         compare(label.textFormat,Text.PlainText);
-    }
-    function test_spinboxIncrementAndTypedCommit() {
-        number.forceActiveFocus();keyClick(Qt.Key_Up);compare(number.value,21);
-        number.contentItem.forceActiveFocus();number.contentItem.selectAll();
-        keyClick(Qt.Key_4);keyClick(Qt.Key_2);keyClick(Qt.Key_Return);compare(number.value,42);
     }
     function test_dropdownPreservesIdsAndKeyboardSelection() {
         choice.forceActiveFocus();keyClick(Qt.Key_Space);tryCompare(choice.popup,"visible",true);

@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from pathlib import Path
 import secrets
 import diagnostics
+import module_runtime
 
 MAX_BODY = 64 * 1024
 MAX_CLIENTS = 24
@@ -21,9 +21,8 @@ RPC_SECONDS = 150
 
 
 class DesktopBridge:
-    def __init__(self, plugin, assets: Path, methods, context=None, overrides=None, read_logs=None):
+    def __init__(self, plugin, methods, context=None, overrides=None, read_logs=None):
         self.plugin = plugin
-        self.assets = assets
         self.methods = frozenset(methods)
         self.context = context
         self.overrides = overrides or {}
@@ -168,7 +167,8 @@ class DesktopBridge:
             result = await asyncio.wait_for(asyncio.shield(operation), RPC_SECONDS)
             await self._reply(writer, 200, {'result': result})
         except (ValueError, TypeError, RuntimeError) as exc:
-            diagnostics.event('desktop', 'rpc_rejected', level='warning', error=exc, repeat=60)
+            if not isinstance(exc, module_runtime.AdmissionClosed):
+                diagnostics.event('desktop', 'rpc_rejected', level='warning', error=exc, repeat=60)
             await self._reply(writer, 409, {'error': str(exc)[:1000]})
         except asyncio.TimeoutError:
             diagnostics.event('desktop', 'rpc_deadline', level='warning', outcome='refresh_required', repeat=60)
@@ -180,14 +180,10 @@ class DesktopBridge:
     async def _reply(self, writer, status, data, mime='application/json; charset=utf-8'):
         if not isinstance(data, bytes):
             data = json.dumps(data, allow_nan=False).encode('utf-8')
-        policy = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                  "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
-                  "base-uri 'none'; form-action 'none'")
         response = (f'HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\n'
                     f'Content-Length: {len(data)}\r\nConnection: close\r\n'
-                    f'Content-Security-Policy: {policy}\r\nCache-Control: no-store\r\n'
-                    'X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n'
-                    'Cross-Origin-Resource-Policy: same-origin\r\nReferrer-Policy: no-referrer\r\n\r\n').encode('ascii')
+                    'Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n'
+                    'Cross-Origin-Resource-Policy: same-origin\r\n\r\n').encode('ascii')
         try:
             writer.write(response + data)
             await asyncio.wait_for(writer.drain(), READ_SECONDS)

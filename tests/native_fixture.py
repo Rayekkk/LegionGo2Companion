@@ -7,7 +7,7 @@ CURVE=[[0,0],[45,1500],[55,2000],[65,2600],[75,3200],[85,3900],[95,4500],[100,48
 # A rendered page must reach its own read path, not merely the shared gate.
 # These are independent public RPC expectations, not copied UI field positions.
 MODULE_READS={
-    'tdp':{'get_settings','get_caps','get_extras_unlocked','get_power_source','get_tdp_info','get_cpu_power_controls'},
+    'tdp':{'get_settings','get_caps','get_extras_unlocked','get_power_source','get_tdp_info','get_cpu_power_controls','list_game_profiles'},
     'fan':{'fan_get_state'},
     'vibration':{'vibe_is_ready','vibe_get_settings','vibe_get_capabilities','vibe_get_driver_status'},
     'rgb':{'rgb_get_status'},'remap':{'remap_get_status'},'controller':{'controller_get_status'},
@@ -18,7 +18,7 @@ PAGE_READS={
     **MODULE_READS,
     'overview':{'get_settings','get_tdp_info','get_power_source','fan_get_state','battery_get_status',
                 'battery_get_controller_levels','controller_get_status','vibe_get_settings','vibe_get_capabilities','wifi_get_status'},
-    'controller':MODULE_READS['controller'] | MODULE_READS['vibration'] | MODULE_READS['rgb'] | MODULE_READS['remap']
+    'controller':MODULE_READS['controller'] | MODULE_READS['vibration'] | MODULE_READS['remap']
                  | {'battery_get_controller_levels','firmware_get_status'},
     'settings':set(),'modules':set(),'about':set(),
 }
@@ -45,6 +45,8 @@ def states():
         'get_tdp_info':{'success':True,'values':{'spl_limit':15,'sppt_limit':20,'fppt_limit':25,'package_draw':9}},
         'get_cpu_power_controls':{'success':True,'available':True,'cpu_boost':{'available':True,'enabled':True},'epp':{'available':True,'value':'balance_performance','profiles':['performance','balance_performance','balance_power','power'],'numeric_supported':True,'numeric_value':128,'min':0,'max':255},'profile':{'cpu_boost_enabled':True,'epp':'balance_performance'}},
         'get_game_profile':{'exists':False,'profile':{},'ac_profile':{},'ac_separate':False},
+        'list_game_profiles':{'profiles':[{'app_id':'250900','active':True,'ac_separate':True,'preset':'balanced','spl':15000,'ac_preset':'performance','ac_spl':25000},
+                                          {'app_id':'3000000001','active':False,'ac_separate':False,'preset':'custom','spl':12000,'ac_preset':'','ac_spl':12000}]},
         'fan_get_state':{'supported':True,'active_curve':'global','settings':{'enabled':False,'revision':0,'assign_tdp_presets':False,'display_unit':'rpm','global_curve':copy.deepcopy(CURVE),'presets':{}},
                          'templates':{name:copy.deepcopy(CURVE) for name in ('silent','balanced','aggressive')},'presets':['silent','balanced','performance','max','custom'],
                          'limits':{'min_rpm':1500,'max_rpm':4800,'step':1,'hard_max':100},'ownership':{'blocked':False},

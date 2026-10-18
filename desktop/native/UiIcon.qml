@@ -20,9 +20,7 @@ Item {
         modules:"M12 2L22 8L12 14L2 8Z M2 12L12 18L22 12 M2 16L12 22L22 16",
         settings:"M5 4H19V20H5Z M8 8H16 M8 12H16 M8 16H16",
         logs:"M5 3H16L20 7V21H5Z M16 3V7H20 M8 11H17 M8 15H17 M8 18H14",
-        about:"M12 3A9 9 0 1 1 12 21A9 9 0 1 1 12 3 M12 10V17 M12 7H12.1",
-        arrow:"M4 12H20 M14 6L20 12L14 18",
-        refresh:"M20 7V3 M20 7H16 M20 7A9 9 0 1 0 21 15"
+        about:"M12 3A9 9 0 1 1 12 21A9 9 0 1 1 12 3 M12 10V17 M12 7H12.1"
     })
     Item {
         width:24; height:24; scale:Math.min(icon.width,icon.height)/24

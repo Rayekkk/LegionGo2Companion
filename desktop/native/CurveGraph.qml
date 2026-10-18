@@ -2,6 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Shapes
+import "Fan.js" as Fan
 FocusScope {
     id:graph
     UiTheme { id:theme }
@@ -21,19 +22,22 @@ FocusScope {
     implicitHeight:310
     activeFocusOnTab:true
     Accessible.role:Accessible.Chart
-    Accessible.name:"Fan curve. Activate to edit. Left and right change temperature. Up and down change speed. Q and E select points. Escape ends editing."
-    function displaySpeed(rpm) { return unit==="percent"?Math.round(100*rpm/maximum)+"%":Math.round(rpm)+" RPM"; }
+    Accessible.name:"Fan curve. Activate to edit. Left and right change temperature. Up and down change speed. Q and E select points. The 100 °C point changes speed only. Escape ends editing."
+    function displaySpeed(rpm) { return Fan.speedText(rpm,unit,maximum); }
     function pointX(t) { return plot.x+plot.width*Math.max(0,Math.min(100,t))/100; }
     function pointY(r) { return plot.y+plot.height*(1-Math.max(0,Math.min(maximum,r))/maximum); }
     function editPoint(index, temp, speed) {
-        if (!writable || index<0 || index>=curve.length-1) return;
+        if (!writable || index<0 || index>=curve.length) return;
         const points=curve.map(p=>[p[0],p[1]]);
-        const loT=index?points[index-1][0]+1:0, hiT=points[index+1][0]-1;
-        const loR=index?points[index-1][1]:0, hiR=points[index+1][1];
+        // The 100 °C point keeps its temperature and can never stop.
+        const last=index===curve.length-1;
+        const loT=last?points[index][0]:index?points[index-1][0]+1:0, hiT=last?points[index][0]:points[index+1][0]-1;
+        const loR=Math.max(index?points[index-1][1]:0,last?minimumRunning:0), hiR=last?maximum:points[index+1][1];
         temp=Math.max(loT,Math.min(hiT,Math.round(temp)));
         speed=Math.max(loR,Math.min(hiR,Math.round(speed)));
         if (speed>0 && speed<minimumRunning) speed=speed>=minimumRunning/2?minimumRunning:0;
         speed=Math.max(loR,Math.min(hiR,speed));
+        if (last && speed===points[index][1]) return;
         points[index]=[temp,speed]; edited(points);
     }
     function nudge(dx,dy) {
@@ -65,7 +69,7 @@ FocusScope {
             required property int index
             x:plot.x; y:plot.y+plot.height*index/5; width:plot.width
             Rectangle { width:parent.width; height:1; color:theme.divider }
-            Label { textFormat:Text.PlainText; x:-66; y:-8; width:56; horizontalAlignment:Text.AlignRight; color:theme.muted; font.pixelSize:12; text:graph.unit==="percent"?(100-index*20)+"%":Math.round(graph.maximum*(1-index/5)) }
+            Label { textFormat:Text.PlainText; x:-66; y:-8; width:56; horizontalAlignment:Text.AlignRight; color:theme.muted; font.pixelSize:13; text:graph.unit==="percent"?(100-index*20)+"%":Math.round(graph.maximum*(1-index/5)) }
         }
     }
     Repeater {
@@ -74,7 +78,7 @@ FocusScope {
             required property int index
             x:plot.x+plot.width*index/10; y:plot.y; height:plot.height
             Rectangle { height:parent.height; width:1; color:theme.input }
-            Label { textFormat:Text.PlainText; x:-18; y:plot.height+12; width:36; horizontalAlignment:Text.AlignHCenter; color:theme.muted; font.pixelSize:12; text:(index*10)+"°" }
+            Label { textFormat:Text.PlainText; x:-18; y:plot.height+12; width:36; horizontalAlignment:Text.AlignHCenter; color:theme.muted; font.pixelSize:13; text:(index*10)+"°" }
         }
     }
     Shape {
@@ -88,16 +92,20 @@ FocusScope {
         }
     }
     Repeater {
-        model:graph.curve
+        // A count, not the array: every edit replaces the array, and a new model would
+        // destroy the delegate whose MouseArea is still handling the drag.
+        model:graph.curve.length
         delegate:Rectangle {
             required property int index
-            required property var modelData
-            width:index===graph.selected?16:12; height:width; radius:width/2
+            readonly property var modelData:graph.curve[index]
+            width:index===graph.selected?22:16; height:width; radius:width/2
             x:graph.pointX(modelData[0])-width/2; y:graph.pointY(modelData[1])-height/2
             color:index===graph.selected?theme.text:theme.accentText; border.width:2; border.color:theme.sidebar
             MouseArea {
-                anchors { fill:parent; margins:-8 } cursorShape:index===graph.curve.length-1?Qt.ArrowCursor:Qt.SizeAllCursor
-                onPressed: { graph.selected=index; graph.forceActiveFocus(); graph.editing=graph.writable && index<graph.curve.length-1; }
+                objectName:"curvePointHit"
+                // A finger needs at least 48x48 px whatever the drawn dot size.
+                anchors { fill:parent; margins:-(48-parent.width)/2 } cursorShape:index===graph.curve.length-1?Qt.SizeVerCursor:Qt.SizeAllCursor
+                onPressed: { graph.selected=index; graph.forceActiveFocus(); graph.editing=graph.writable; }
                 onPositionChanged: function(mouse) {
                     if (!pressed || !graph.editing) return;
                     const p=mapToItem(graph,mouse.x,mouse.y);
@@ -112,9 +120,9 @@ FocusScope {
     }
     Label { textFormat:Text.PlainText;
         anchors { left:parent.left; right:parent.right; bottom:parent.bottom; margins:12 }
-        horizontalAlignment:Text.AlignHCenter; color:graph.editing?theme.text:theme.muted; font.pixelSize:12
-        text:graph.curve.length ? "Point " +(graph.selected+1)+": "+graph.curve[graph.selected][0]+"°C · "+graph.displaySpeed(graph.curve[graph.selected][1])+
-             (graph.selected===graph.curve.length-1?" · fixed maximum":graph.editing?" · ← → temperature   ↑ ↓ speed   Q / E point   Esc done":" · Enter to edit, or drag a point") : "Waiting for fan settings"
+        horizontalAlignment:Text.AlignHCenter; color:graph.editing?theme.text:theme.muted; font.pixelSize:14
+        text:graph.curve.length ? "Point " +(graph.selected+1)+": "+graph.curve[graph.selected][0]+" °C · "+graph.displaySpeed(graph.curve[graph.selected][1])+
+             (graph.selected===graph.curve.length-1?" · speed only":"") : "Waiting for fan settings"
         wrapMode:Text.WordWrap
     }
 }

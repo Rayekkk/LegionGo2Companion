@@ -186,7 +186,8 @@ inline void rpc(const QString &method,int request,bool failed,bool mutation,int 
                 QMutexLocker guard(&s.mutex);s.states.remove(key);
             }
         }
-        else if(mutation)event("rpc_completed",method,request,http,network,duration,false);
+        // The panel lease fires on every page change; only its failures are worth a record.
+        else if(mutation && method!="set_panel_active")event("rpc_completed",method,request,http,network,duration,false);
     } catch(...) { }
 }
 } // namespace CompanionDiagnostics

@@ -76,11 +76,12 @@ class DesktopInstall:
         finally:
             os.close(fd)
 
-    def _write(self, relative, filename, content):
+    def _write(self, relative, filename, content, mode=0o600):
         directory = self._directory(relative)
         temp = '.companion-' + secrets.token_hex(12)
         try:
-            if self._ours(directory, filename) is False:
+            # The executable cannot carry the marker; its fixed name in our 0700 directory is the claim.
+            if filename != APP_ID and self._ours(directory, filename) is False:
                 raise ValueError('An unrecognized file occupies the Desktop app path.')
             fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
             try:
@@ -89,6 +90,7 @@ class DesktopInstall:
                     target.flush()
                     os.fsync(fd)
                 os.fchown(fd, self.uid, self.gid)
+                os.fchmod(fd, mode)
             finally:
                 os.close(fd)
             os.replace(temp, filename, src_dir_fd=directory, dst_dir_fd=directory)
@@ -99,6 +101,23 @@ class DesktopInstall:
             except FileNotFoundError:
                 pass
             os.close(directory)
+
+    def _published(self, relative, filename, expected):
+        directory = self._directory(relative)
+        try:
+            fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(directory)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o700:
+                return False
+            with os.fdopen(fd, 'rb', closefd=False) as current:
+                return hashlib.sha256(current.read()).hexdigest() == expected
+        finally:
+            os.close(fd)
 
     def install(self, origin, token):
         bundle = self.source.parent / 'dist' / 'desktop'
@@ -116,13 +135,17 @@ class DesktopInstall:
                 data = source.read()
             if data[:6] != b'\x7fELF\x02\x01' or hashlib.sha256(data).hexdigest() != expected:
                 raise ValueError('Native Desktop payload checksum mismatch.')
-            # Windows-created ZIPs do not reliably retain execute permissions.
-            os.fchmod(fd, 0o755)
         finally:
             os.close(fd)
         private = '.local/share/' + APP_ID
+        # The app runs a private copy: Decky's in-place ZIP extraction cannot rewrite a running
+        # executable (ETXTBSY). Replacing the copy unlinks a running one, which then restarts.
+        # An unchanged build keeps its inode, so a plain backend restart leaves the app running.
+        if not self._published(private, APP_ID, expected):
+            self._write(private, APP_ID, data, 0o700)
         self._write(private, 'runtime.json', json.dumps({'managed_by': MARKER,
-                    'bundle': str(bundle.resolve()), 'executable_sha256': expected}).encode())
+                    'bundle': str(Path(self.home) / private), 'plugin': str(self.source.parent.resolve()),
+                    'executable_sha256': expected}).encode())
         self._write(private, 'launch.py', (self.source / 'launch.py').read_bytes())
         icon = b'<!-- ' + MARKER.encode() + b' -->\n' + (self.source / 'icon.svg').read_bytes()
         self._write(private, 'icon.svg', icon)
@@ -135,20 +158,37 @@ class DesktopInstall:
                  f'Icon={self.home}/{private}/icon.svg\nTerminal=false\nCategories=Game;Settings;\n'
                  'StartupNotify=true\n').encode()
         self._write('.local/share/applications', APP_ID + '.desktop', entry)
+        # Plasma (Desktop Mode) only: the app starts hidden with its tray icon. "Show tray icon" off skips it.
+        autostart = (f'# {MARKER} v1\n[Desktop Entry]\nType=Application\nName=Legion Go Companion\n'
+                     f'Exec=/usr/bin/python3 "{quoted}" --tray\n'
+                     f'Icon={self.home}/{private}/icon.svg\nTerminal=false\nOnlyShowIn=KDE;\nNoDisplay=true\n').encode()
+        self._write('.config/autostart', APP_ID + '.desktop', autostart)
         self._write(private, 'session.json', json.dumps({'managed_by': MARKER, 'origin': origin, 'token': token}).encode())
 
     def remove(self, uninstall=False):
-        paths = [('.local/share/' + APP_ID, name) for name in ('session.json', 'open.html')]
+        paths = [('.local/share/' + APP_ID, 'session.json')]
         if uninstall:
-            paths += [('.local/share/' + APP_ID, name) for name in ('launch.py', 'icon.svg', 'runtime.json')]
-            paths += [('.local/share/applications', APP_ID + '.desktop')]
+            paths += [('.local/share/' + APP_ID, name) for name in (APP_ID, 'launch.py', 'icon.svg', 'runtime.json')]
+            paths += [('.local/share/applications', APP_ID + '.desktop'), ('.config/autostart', APP_ID + '.desktop')]
         for relative, filename in paths:
             try:
                 directory = self._directory(relative, create=False)
             except FileNotFoundError:
                 continue
             try:
-                if self._ours(directory, filename):
+                ours = self._ours(directory, filename)
+                if ours or (ours is False and filename == APP_ID):
                     os.unlink(filename, dir_fd=directory)
             finally:
                 os.close(directory)
+        if uninstall:
+            try:
+                parent = self._directory('.local/share', create=False)
+            except FileNotFoundError:
+                return
+            try:
+                os.rmdir(APP_ID, dir_fd=parent)
+            except OSError:
+                pass  # Missing, or still holds files that are not ours.
+            finally:
+                os.close(parent)

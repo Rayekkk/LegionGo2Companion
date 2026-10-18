@@ -17,7 +17,7 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--exe',type=Path,required=True)
 parser.add_argument('--qt',type=Path,required=True)
 parser.add_argument('--output',type=Path,required=True)
-parser.add_argument('--pages',nargs='+',choices=tuple(PAGE_READS),default=['overview','tdp','fan','controller','battery','display','wifi','settings','modules','about'])
+parser.add_argument('--pages',nargs='+',choices=tuple(PAGE_READS),default=['overview','tdp','fan','controller','rgb','battery','display','wifi','modules','about'])
 parser.add_argument('--fullscreen',action='store_true')
 parser.add_argument('--size',help='Capture the native window at WIDTHxHEIGHT.')
 parser.add_argument('--modules-off',nargs='*',choices=tuple(MODULE_READS),default=[])
@@ -45,7 +45,9 @@ with ThreadingHTTPServer(('127.0.0.1',0),Handler) as server,tempfile.TemporaryDi
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     session=Path(temporary)/'session.json'
     session.write_text(json.dumps({'origin':f'http://127.0.0.1:{server.server_port}','token':'a'*43}));session.chmod(0o600)
-    env=os.environ.copy();env['PATH']=str(args.qt.resolve()/'bin')+os.pathsep+env.get('PATH','');env['QT_QUICK_BACKEND']='software';env['QT_QPA_PLATFORM']='offscreen';env['QT_FORCE_STDERR_LOGGING']='1'
+    env=os.environ.copy();qt=args.qt.resolve();env['PATH']=str(qt/'bin')+os.pathsep+env.get('PATH','')
+    # The shipped binary has no RUNPATH; point it at this Qt (build or newer runtime).
+    env.update(LD_LIBRARY_PATH=str(qt/'lib'),QT_PLUGIN_PATH=str(qt/'plugins'),QML_IMPORT_PATH=str(qt/'qml'),LD_BIND_NOW='1');env['QT_QUICK_BACKEND']='software';env['QT_QPA_PLATFORM']='offscreen';env['QT_FORCE_STDERR_LOGGING']='1'
     if os.name=='nt':
         fonts=Path(temporary)/'fonts';fonts.mkdir()
         for name in ('segoeui.ttf','segoeuib.ttf','seguisym.ttf'):
@@ -78,6 +80,6 @@ with ThreadingHTTPServer(('127.0.0.1',0),Handler) as server,tempfile.TemporaryDi
     # Viewing a panel must never implicitly change any hardware settings.
     for name in args.modules_off:
         assert not any(read_owner(call['method'])==name for call in calls),(name,'Disabled module was polled')
-    assert all(call['method'].startswith(('get_','fan_get_','vibe_get_','vibe_is_','rgb_get_','remap_get_','controller_get_','firmware_get_','battery_get_','display_get_','wifi_get_')) or call['method'] in ('desktop_context','set_panel_active') for call in calls)
+    assert all(call['method'].startswith(('get_','fan_get_','vibe_get_','vibe_is_','rgb_get_','remap_get_','controller_get_','firmware_get_','battery_get_','display_get_','wifi_get_')) or call['method'] in ('desktop_context','set_panel_active','list_game_profiles') for call in calls)
     (args.output/'rpc-calls.json').write_text(json.dumps(calls,indent=2))
     server.shutdown();thread.join()

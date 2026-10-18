@@ -16,7 +16,7 @@ Item {
     property bool invalidated:false
     readonly property real displayedValue:pending?draft:value
     signal committed(real value)
-    implicitHeight:30; implicitWidth:240
+    implicitHeight:theme.target; implicitWidth:240
     opacity:enabled?1:0.42
     function cancel() { settle.stop();pending=false;invalidated=true;draft=value; }
     function flush() {
@@ -69,7 +69,7 @@ Item {
         }
         handle:Rectangle {
             x:slider.leftPadding+slider.visualPosition*(slider.availableWidth-width);y:(slider.height-height)/2
-            width:18;height:18;radius:9;color:control.hue?Qt.hsva(slider.value/359,1,1,1):theme.accentText
+            width:28;height:28;radius:14;color:control.hue?Qt.hsva(slider.value/359,1,1,1):theme.accentText
             border.width:slider.activeFocus?3:2;border.color:slider.activeFocus?theme.text:theme.card
         }
     }

@@ -4,7 +4,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import test_integration
+import support
 import main
 
 
@@ -27,7 +27,7 @@ class DesktopLogCollectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(plugin._diagnostics_read.done())
                 release.set()
                 self.assertEqual((await second)['events'],[])
-                self.assertEqual(len(calls),1)
+                self.assertEqual(calls,[main.diagnostics.LOG_DIR])
             finally:
                 release.set()
                 await asyncio.gather(first,return_exceptions=True)

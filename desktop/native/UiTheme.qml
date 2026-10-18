@@ -4,7 +4,6 @@ QtObject {
     readonly property color background: "#171c24"
     readonly property color sidebar: "#131820"
     readonly property color card: "#202731"
-    readonly property color cardBottom: "#202731"
     readonly property color input: "#2b3441"
     readonly property color inputHover: "#354151"
     readonly property color border: "#35404e"
@@ -20,4 +19,15 @@ QtObject {
     readonly property color success: "#5fd19b"
     readonly property color warning: "#e6ba6b"
     readonly property color danger: "#ec6370"
+    // Touch first: 48 px targets, 16 px body text, notes never below 13 px.
+    readonly property int target: 48
+    readonly property int font: 16
+    readonly property int fontSmall: 14
+    readonly property int fontTiny: 13
+    // Layout: pages stop growing at contentWidth (left aligned under the title); a page with one
+    // card keeps it at formWidth; two cards per row from twoColumns; one gap between all cards.
+    readonly property int contentWidth: 1240
+    readonly property int formWidth: 760
+    readonly property int twoColumns: 960
+    readonly property int gap: 18
 }

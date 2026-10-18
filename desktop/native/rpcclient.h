@@ -16,7 +16,7 @@ public:
     explicit RpcClient(QString sessionPath, QObject *parent = nullptr);
     int pending() const;
     Q_INVOKABLE int call(const QString &method, const QVariantList &args = {}, bool mutation = false);
-    Q_INVOKABLE void cancelReads();
+    Q_INVOKABLE void cancelReads(bool inFlight = false);
     Q_INVOKABLE double monotonicSeconds() const;
     static bool readSession(const QString &path, QString &origin, QByteArray &token, QString &error);
 signals:
@@ -33,6 +33,7 @@ private:
     Request active_ {};
     QByteArray response_;
     bool oversize_ = false;
+    bool cancelled_ = false;
     int nextId_ = 1;
     void startNext();
 };

@@ -78,6 +78,22 @@ TestCase {
         fake.clock=12;view.tick=fake.clock;
         compare(findChild(view,"overviewPower").value,"—");
     }
+    function test_fanControlUsesTheSharedFanHeadline() {
+        fake.data=Object.assign({},fake.data,{fan_get_state:Object.assign({supported:true},fake.data.fan_get_state)});
+        compare(findChild(view,"overviewFanControl").value,"Automatic");
+        const on={supported:true,settings:{enabled:true},active_curve:"global",readings:{valid:false},ownership:{blocked:true,state:"unavailable"}};
+        fake.data=Object.assign({},fake.data,{fan_get_state:on});
+        compare(findChild(view,"overviewFanControl").value,"Starting your curve…");
+        fake.data=Object.assign({},fake.data,{fan_get_state:Object.assign({},on,{telemetry:{active:true}})});
+        compare(findChild(view,"overviewFanControl").value,"Global curve");
+    }
+    function test_powerLimitAndPresetUseTheCanonicalWording() {
+        compare(findChild(view,"overviewPowerLimit").value,"20 W (boost 25/30 W)");
+        fake.data=Object.assign({},fake.data,{get_settings:{active_preset:"max"}});
+        compare(findChild(view,"overviewPreset").text,"Maximum");
+        fake.data=Object.assign({},fake.data,{vibe_get_settings:{settings:{level:2,mode:0}},vibe_get_capabilities:{intensity:["off","low","medium","high"],mode:["fps","racing"]}});
+        compare(findChild(view,"overviewVibration").value,"Medium · FPS");
+    }
     function test_disabledFanCannotPresentItsLastSampleAsLive() {
         // Clean module disable can retain ready=true in the real backend.
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{fan:{enabled:false,ready:true}}}});

@@ -28,12 +28,10 @@ class DesktopBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.assets = Path(self.temp.name)
-        (self.assets / 'index.html').write_text('local UI')
         self.plugin = Plugin()
         async def context():
             return {'app_id': '123', 'gamescope': False}
-        self.bridge = DesktopBridge(self.plugin, self.assets, ['get_version', 'change'], context)
+        self.bridge = DesktopBridge(self.plugin, ['get_version', 'change'], context)
         await self.bridge.start()
 
     async def asyncTearDown(self):
@@ -65,7 +63,7 @@ class DesktopBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.request()
         self.assertIn(b'HTTP/1.1 200', result)
         self.assertIn(b'"version": "test"', result)
-        self.assertIn(b"frame-ancestors 'none'", result)
+        self.assertIn(b'Cross-Origin-Resource-Policy: same-origin', result)
         self.assertIn(b'Cache-Control: no-store', result)
         self.assertNotIn(self.bridge.token.encode(), result)
 
@@ -163,25 +161,24 @@ class DesktopBridgeTests(unittest.IsolatedAsyncioTestCase):
     def test_rpc_contract_matches_shared_frontend(self):
         import re
         import inspect
-        import test_integration
+        import support
         import main
         root = Path(__file__).resolve().parents[1]
         expected = set()
         for file in (root / 'src').glob('*.tsx'):
             expected.update(re.findall(r'callable\s*<[\s\S]*?>\s*\(\s*"([a-z_]+)"', file.read_text(encoding='utf-8')))
-        expected -= {'set_active_app', 'vibe_set_active_app'}
         for method in expected:
             self.assertTrue(inspect.iscoroutinefunction(getattr(main.Plugin, method, None)), method)
-        contract = root / 'dist/desktop/rpc-methods.json'
-        if contract.exists():
-            self.assertEqual(set(json.loads(contract.read_text())), expected)
-        # Clean backend CI has no build artifacts; the frontend job verifies
-        # the generated contract and self-contained runtime separately.
+        # Same exclusions as scripts/desktop-contract.mjs (Steam app hints, RPCs the app never calls).
+        expected -= {'set_active_app', 'vibe_set_active_app', 'is_ready', 'modules_restart_session'}
+        expected |= {'list_game_profiles'}  # read-only, shown only by the native app
+        self.assertTrue(inspect.iscoroutinefunction(main.Plugin.list_game_profiles))
+        contract = root / 'desktop/native/rpc-methods.json'
+        self.assertEqual(set(json.loads(contract.read_text())), expected)
         # The method set may grow with a legitimate shared feature. Compare
         # the actual generated contract, not a frozen count of today's RPCs.
-        self.assertIn('firmware_check_updates', expected)
-        self.assertNotIn('firmware_prepare', expected)
-        self.assertNotIn('firmware_check_catalog', expected)
+        self.assertTrue({'firmware_get_status', 'firmware_check', 'firmware_download', 'firmware_install'} <= expected)
+        self.assertNotIn('firmware_check_updates', expected)
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "../rpcclient.h"
 #include "../diagnostics.h"
-#include <QtTest>
+#include "wait.h"
 #include <QTemporaryDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -77,11 +77,11 @@ private slots:
         QVERIFY(CompanionDiagnostics::configure(path));
         QVERIFY(QDir().mkdir(QDir(path).filePath("desktop-events.jsonl")));
         RpcClient client(directory.filePath("missing-session"));QSignalSpy replies(&client,&RpcClient::finished);
-        client.call("get_version");QTRY_COMPARE(replies.size(),1);
+        client.call("get_version");WAIT_COMPARE(replies.size(),1);
         QVERIFY(!replies[0][3].toString().isEmpty());
         QVERIFY(QFileInfo(QDir(path).filePath("desktop-events.jsonl")).isDir());
         QVERIFY(QDir().rmdir(QDir(path).filePath("desktop-events.jsonl")));
-        client.call("get_version");QTRY_COMPARE(replies.size(),2);
+        client.call("get_version");WAIT_COMPARE(replies.size(),2);
         QVERIFY(!replies[1][3].toString().isEmpty());
         QFile recovered(QDir(path).filePath("desktop-events.jsonl"));QVERIFY(recovered.open(QIODevice::ReadOnly));
         QVERIFY(recovered.readAll().contains("backend_session_unavailable"));
@@ -118,7 +118,7 @@ private slots:
             });connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
         });
         RpcClient client(path);QSignalSpy replies(&client,&RpcClient::finished);
-        client.call("fan_set_enabled",{QString("privateArgumentMarker")},true);QTRY_COMPARE(replies.size(),1);
+        client.call("fan_set_enabled",{QString("privateArgumentMarker")},true);WAIT_COMPARE(replies.size(),1);
         QCOMPARE(replies[0][3].toString(),QString("privateResponseMarker"));
         QFile log(QDir(logs).filePath("desktop-events.jsonl"));QVERIFY(log.open(QIODevice::ReadOnly));const auto bytes=log.readAll();
         QVERIFY(bytes.contains("rpc_failed"));QVERIFY(bytes.contains("fan_set_enabled"));
@@ -157,7 +157,7 @@ private slots:
             connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
         });
         RpcClient client(path); QSignalSpy replies(&client,&RpcClient::finished);
-        client.call("fan_set_enabled",{false},true); QTRY_COMPARE(replies.size(),1);
+        client.call("fan_set_enabled",{false},true); WAIT_COMPARE(replies.size(),1);
         QCOMPARE(!replies[0][3].toString().isEmpty(),failed);
     }
     void sessionValidation() {
@@ -180,7 +180,7 @@ private slots:
         RpcClient client("missing"); QSignalSpy replies(&client,&RpcClient::finished);
         client.call("set_active_app",{"42"},true);
         client.call("fan_set_enabled",{true},true);
-        QTRY_COMPARE(replies.size(),2);
+        WAIT_COMPARE(replies.size(),2);
         QVERIFY(!replies[0][3].toString().isEmpty());
         QVERIFY(!replies[1][3].toString().isEmpty());
         QVERIFY(client.monotonicSeconds()>=0);
@@ -204,10 +204,11 @@ private slots:
             connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
         });
         RpcClient client(path); QSignalSpy replies(&client,&RpcClient::finished);
-        client.call("get_version"); QTRY_COMPARE(replies.size(),1);
+        client.call("get_version"); WAIT_COMPARE(replies.size(),1);
         QVERIFY(request.startsWith("POST /rpc HTTP/1.1"));
-        QVERIFY(request.contains("Authorization: Bearer " + QByteArray(43,'a')));
-        QVERIFY(request.contains("Origin: " + origin.toUtf8()));
+        // Header names are case-insensitive; Qt 6.9 sends them lower-cased.
+        QVERIFY(request.toLower().contains("authorization: bearer " + QByteArray(43,'a')));
+        QVERIFY(request.toLower().contains("origin: " + origin.toUtf8()));
         QCOMPARE(replies[0][3].toString(),QString("Backend redirect rejected."));
     }
     void truncatedHttpCannotConfirmMutationEvenWithValidJson() {
@@ -229,8 +230,8 @@ private slots:
             connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
         });
         RpcClient client(path); QSignalSpy replies(&client,&RpcClient::finished);
-        client.call("fan_set_enabled",{false},true); QTRY_COMPARE(replies.size(),1);
-        QCOMPARE(replies[0][3].toString(),QString("Connection lost. Refresh before retrying a change."));
+        client.call("fan_set_enabled",{false},true); WAIT_COMPARE(replies.size(),1);
+        QCOMPARE(replies[0][3].toString(),QString("Connection lost. Check the value, then try again."));
     }
     void hungVersionReadIsBoundedAndFreshSessionReconnects() {
         QTcpServer server;QVERIFY(server.listen(QHostAddress::LocalHost));QTemporaryDir directory;
@@ -253,11 +254,33 @@ private slots:
             connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
         });
         write(QString(43,'a'));RpcClient client(path);QSignalSpy replies(&client,&RpcClient::finished);
-        QElapsedTimer time;time.start();client.call("get_version");QTRY_COMPARE_WITH_TIMEOUT(replies.size(),1,6000);
+        QElapsedTimer time;time.start();client.call("get_version");WAIT_COMPARE_T(replies.size(),1,6000);
         QVERIFY(time.elapsed()<6000);QVERIFY(!replies[0][3].toString().isEmpty());
-        write(QString(43,'b'));client.call("get_version");QTRY_COMPARE(replies.size(),2);
+        write(QString(43,'b'));client.call("get_version");WAIT_COMPARE(replies.size(),2);
         QCOMPARE(requests,2);QVERIFY(observed.contains("Bearer "+QByteArray(43,'b')));
         QCOMPARE(replies[1][3].toString(),QString());
+    }
+    void closingAbortsTheRunningReadButNotWrites() {
+        QTcpServer server; QVERIFY(server.listen(QHostAddress::LocalHost));
+        QTemporaryDir directory; const auto path=directory.filePath("session.json");
+        QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QJsonDocument(QJsonObject{{"origin",QString("http://127.0.0.1:%1").arg(server.serverPort())},{"token",QString(43,'a')}}).toJson());
+        file.close(); file.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner);
+        int requests=0; // Silent server: every request hangs until the client gives up.
+        connect(&server,&QTcpServer::newConnection,this,[&]{
+            auto *socket=server.nextPendingConnection();
+            connect(socket,&QTcpSocket::readyRead,this,[&,socket]{ socket->readAll(); if(!socket->property("seen").toBool()){socket->setProperty("seen",true);++requests;} });
+        });
+        RpcClient client(path); QSignalSpy replies(&client,&RpcClient::finished);
+        client.call("get_settings"); WAIT_COMPARE(requests,1);
+        client.cancelReads(); QCOMPARE(replies.size(),0); // Navigation leaves the running read alone.
+        QElapsedTimer time; time.start(); client.cancelReads(true);
+        WAIT_COMPARE(replies.size(),1); QVERIFY(time.elapsed()<1000);
+        QCOMPARE(replies[0][3].toString(),QString("Obsolete read.")); QCOMPARE(client.pending(),0);
+        client.call("fan_set_enabled",{false},true); WAIT_COMPARE(requests,2);
+        client.cancelReads(true); QTest::qWait(200); QCOMPARE(replies.size(),1); QCOMPARE(client.pending(),1);
+        for(auto *socket:server.findChildren<QTcpSocket *>())socket->abort();
+        WAIT_COMPARE(replies.size(),2); QVERIFY(!replies[1][3].toString().isEmpty());
     }
 };
 QTEST_GUILESS_MAIN(TransportTests)

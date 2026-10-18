@@ -19,12 +19,15 @@ QtObject {
     property string cpuApp: ""
     property bool cpuAc: false
     property string gameProfileApp:""
+    property string editApp:"" // a saved profile edited on the TDP page instead of the running game's
     property real overviewDetailsAt:-1000
     property real networkDetailsAt:-1000
     property real controllerDetailsAt:-1000
+    property real panelLeaseAt:-1000 // backend lease TTL is 90 s; renew every 30 s, not every poll
     signal changed(string method)
     signal mutationDone(string method, var result, bool success)
 
+    function profileApp() { return editApp || String(state("desktop_context").app_id || ""); }
     function state(method) { return snapshots[method] === undefined ? {} : snapshots[method]; }
     function now() { return transport.monotonicSeconds(); }
     function age(method) { return received[method] === undefined ? Infinity : now()-received[method]; }
@@ -39,21 +42,23 @@ QtObject {
         return !name || !!entry && entry.enabled!==false && entry.ready===true && !entry.pending && !entry.maintenance;
     }
     function moduleError(name) { for(const method of Object.keys(readErrors))if(owner(method)===name && readErrors[method])return readErrors[method];return ""; }
-    function issue(method, args, mutation, blocking, poll) {
+    function issue(method, args, mutation, blocking, poll, then) {
         if (!transport || (host && !host.installed)) return;
         const id = transport.call(method, args || [], mutation || false);
         const copy = Object.assign({}, requests);
-        copy[id] = {method:method, args:args || [], mutation:!!mutation, blocking:!!blocking, generation:generation, started:now(), poll:!!poll};
+        copy[id] = {method:method, args:args || [], mutation:!!mutation, blocking:!!blocking, generation:generation, started:now(), poll:!!poll, then:then || null};
         requests = copy;
     }
-    function mutate(method, args) {
+    // then: {method, args} sent only after this mutation succeeds. It lives here, not in a page,
+    // so leaving the page cannot drop or retarget the second half of one user choice.
+    function mutate(method, args, then) {
         if (busy || !connected || (host && !host.installed)) return;
         busy = true; error = "";
         if(method.startsWith("firmware_")) {
             const times=Object.assign({},received);delete times.firmware_get_status;received=times;
         }
         transport.cancelReads();
-        issue(method, args, true, true);
+        issue(method, args, true, true, false, then);
     }
     function panelMethods() {
         if(page === "controller") {
@@ -61,7 +66,7 @@ QtObject {
             if(now()-controllerDetailsAt>=3) {
                 controllerDetailsAt=now();
                 methods=methods.concat(["vibe_is_ready","vibe_get_settings","vibe_get_capabilities",
-                    "vibe_get_driver_status","rgb_get_status","remap_get_status","battery_get_controller_levels"]);
+                    "vibe_get_driver_status","remap_get_status","battery_get_controller_levels"]);
             }
             return methods;
         }
@@ -79,11 +84,9 @@ QtObject {
             return methods;
         }
         const panels = {
-            tdp:["get_settings","get_caps","get_extras_unlocked","get_power_source","get_tdp_info","get_cpu_power_controls"],
+            tdp:["get_settings","get_caps","get_extras_unlocked","get_power_source","get_tdp_info","get_cpu_power_controls","list_game_profiles"],
             fan:["fan_get_state"],
-            vibration:["vibe_is_ready","vibe_get_settings","vibe_get_capabilities","vibe_get_driver_status"],
-            rgb:["rgb_get_status"], remap:["remap_get_status"],
-            controller:["controller_get_status"],
+            rgb:["rgb_get_status"],
             battery:["battery_get_status","battery_get_controller_levels"],
             display:["display_get_state"], wifi:["wifi_get_status"], modules:[], about:[]
         };
@@ -106,9 +109,9 @@ QtObject {
         if(!windowActive) { if(host && host.trayVisible)issue("desktop_context");return; }
         issue("desktop_context");
         for (const method of panelMethods()) if(canRead(method)) issue(method,method==="get_cpu_power_controls"?[cpuApp,cpuAc]:[]);
-        if(page==="tdp" && state("desktop_context").app_id && canRead("get_game_profile"))issue("get_game_profile",[state("desktop_context").app_id]);
+        if(page==="tdp" && profileApp() && canRead("get_game_profile"))issue("get_game_profile",[profileApp()]);
         if(page==="controller" && diagnosticToken && canRead("controller_get_diagnostics"))issue("controller_get_diagnostics",[diagnosticToken]);
-        if((page==="overview" || page==="tdp" || page==="vibration" || page==="controller") && canRead("set_panel_active"))issue("set_panel_active",[true]);
+        if((page==="overview" || page==="tdp" || page==="controller") && canRead("set_panel_active") && now()-panelLeaseAt>=30) { panelLeaseAt=now();issue("set_panel_active",[true]); }
     }
     function refreshNow() {
         overviewDetailsAt=-1000;
@@ -118,6 +121,8 @@ QtObject {
     }
     function navigate() {
         generation++;
+        // Leaving the TDP page can destroy the page that set this, so it is cleared here.
+        editApp = "";
         if(page === "overview") { overviewDetailsAt=-1000;networkDetailsAt=-1000; }
         if(page === "controller") controllerDetailsAt=-1000;
         transport.cancelReads();
@@ -125,17 +130,16 @@ QtObject {
             issue("controller_stop_diagnostics",[diagnosticToken],true);
             diagnosticToken = "";
         }
-        if (page !== "overview" && page !== "tdp" && page !== "vibration" && page !== "controller") if(canRead("set_panel_active") && connected)issue("set_panel_active",[false],true);
+        if (page !== "overview" && page !== "tdp" && page !== "controller") { panelLeaseAt=-1000;if(canRead("set_panel_active") && connected)issue("set_panel_active",[false],true); }
         if (!Object.keys(requests).length) refresh();
     }
     function shutdown() {
-        windowActive = false;
-        transport.cancelReads();
         if (diagnosticToken) {
             issue("controller_stop_diagnostics",[diagnosticToken],true);
             diagnosticToken = "";
         }
-        if(canRead("set_panel_active") && connected)issue("set_panel_active",[false],true);
+        transport.cancelReads(true);
+        windowActive = false; // onWindowActiveChanged releases the panel lease once
     }
     property Connections connection: Connections {
         target: backend.transport
@@ -149,13 +153,18 @@ QtObject {
                 if(request.mutation)backend.mutationDone(method,result,false);
                 return;
             }
+            // A dropped or failed lease must not block the next poll from re-sending it for 30 s.
+            if(method==="set_panel_active" && request.args[0]===true && problem)backend.panelLeaseAt=-1000;
             if (problem === "Obsolete read." || (!request.mutation && request.generation!==backend.generation)) return;
             if(!problem && method==="get_version" && (!result || typeof result!=="object" || Array.isArray(result) || typeof result.blocked!=="boolean"))
-                problem="Module status is unavailable. Refresh before changing settings.";
+                problem="Module status is unavailable. Try again in a moment.";
             if(!problem && method==="desktop_context" && (!result || typeof result!=="object" || Array.isArray(result) || typeof result.app_id!=="string" || typeof result.gamescope!=="boolean"))
                 problem="Desktop session status is unavailable. Reconnect before changing settings.";
             const readErrors=Object.assign({},backend.readErrors);
             if(!request.mutation) { readErrors[method]=problem;backend.readErrors=readErrors; }
+            // The backend ends a capture itself after 30 s or a 3 s lease gap.
+            if (method==="controller_get_diagnostics" && request.args[0]===backend.diagnosticToken
+                && (result?.active===false || String(problem).indexOf("no longer available")>=0)) backend.diagnosticToken="";
             if (problem) {
                 if(method.startsWith("firmware_")) {
                     const times=Object.assign({},backend.received);delete times.firmware_get_status;backend.received=times;
@@ -164,10 +173,10 @@ QtObject {
                 if(request.blocking)backend.error = problem;
                 if (method === "get_version" || method === "desktop_context") backend.connected = false;
             } else if (request.generation === backend.generation || request.mutation) {
-                if (method==="get_game_profile" && request.args[0]!==String(backend.state("desktop_context").app_id || "")) return;
+                if (method==="get_game_profile" && request.args[0]!==backend.profileApp()) return;
                 if (method==="get_cpu_power_controls" && (String(request.args[0] || "")!==backend.cpuApp || !!request.args[1]!==backend.cpuAc)) return;
                 if (method==="get_game_profile") backend.gameProfileApp=request.args[0];
-                if (method==="desktop_context" && String(result.app_id || "")!==String(backend.state("desktop_context").app_id || "")) backend.gameProfileApp="";
+                if (method==="desktop_context" && !backend.editApp && String(result.app_id || "")!==String(backend.state("desktop_context").app_id || "")) backend.gameProfileApp="";
                 let key = method;
                 if (method.startsWith("fan_")) key = "fan_get_state";
                 else if (method.startsWith("firmware_")) key = "firmware_get_status";
@@ -176,6 +185,11 @@ QtObject {
                 }
                 else if (method === "battery_set_enabled" || method === "battery_release_control") {
                     if (result.status) { key = "battery_get_status"; result = result.status; }
+                }
+                // RGB writes return the new status: hue and saturation are sent together,
+                // so the next slider must start from it, not from the last poll.
+                else if (method.startsWith("rgb_set_") || method==="rgb_restore_original") {
+                    if (result?.status) { key = "rgb_get_status"; result = result.status; }
                 }
                 if (method === "get_version") {
                     backend.connected = true;
@@ -200,6 +214,7 @@ QtObject {
             if (request.mutation) {
                 if (request.blocking) backend.controllerDetailsAt=-1000;
                 backend.mutationDone(method,result,!problem);
+                if (request.then && !problem && result?.success!==false) backend.mutate(request.then.method, request.then.args);
                 Qt.callLater(backend.refresh);
             }
         }
@@ -212,6 +227,7 @@ QtObject {
     }
     onPageChanged: navigate()
     onWindowActiveChanged: {
+        panelLeaseAt=-1000;
         if (windowActive) refresh();
         else if (transport) { transport.cancelReads(); if(canRead("set_panel_active") && connected)issue("set_panel_active",[false],true); }
     }
