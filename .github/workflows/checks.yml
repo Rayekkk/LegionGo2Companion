@@ -53,22 +53,30 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run typecheck
       - run: npm run test:frontend
+      - name: Committed Desktop RPC allowlist is current
+        run: node scripts/desktop-contract.mjs --check
       - run: npm run build
       - name: Native build tools and platform dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ libgl1-mesa-dev libegl1-mesa-dev libfontconfig1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 libxcb-sync1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libgssapi-krb5-2 libbrotli1
           python -m pip install aqtinstall==3.3.0
+          # Minimum supported Qt (= SteamOS 3.8 system Qt) to build; newest Qt 6 to check forward compatibility.
+          python -m aqt install-qt linux desktop 6.9.1 linux_gcc_64 -O /tmp/companion-qt
           python -m aqt install-qt linux desktop 6.11.2 linux_gcc_64 -O /tmp/companion-qt
-      - name: Build and test native C++ and QML
+      - name: Build against Qt 6.9 and test native C++ and QML
         run: |
-          python scripts/build-native.py --qt /tmp/companion-qt/6.11.2/gcc_64 --build /tmp/companion-native --test
-          python tests/native_capture.py --exe /tmp/companion-native/legiongo2companion --qt /tmp/companion-qt/6.11.2/gcc_64 --output /tmp/companion-screens
-      - name: Bundle matching Qt runtime and notices
+          python scripts/build-native.py --qt /tmp/companion-qt/6.9.1/gcc_64 --build /tmp/companion-native --test --bundle dist/desktop
+          python tests/native_capture.py --exe /tmp/companion-native/legiongo2companion --qt /tmp/companion-qt/6.9.1/gcc_64 --output /tmp/companion-screens
+      - name: Same binaries on the newest Qt 6 runtime
+        env:
+          LD_BIND_NOW: '1'
+          LD_LIBRARY_PATH: /tmp/companion-qt/6.11.2/gcc_64/lib
+          QT_PLUGIN_PATH: /tmp/companion-qt/6.11.2/gcc_64/plugins
+          QML_IMPORT_PATH: /tmp/companion-qt/6.11.2/gcc_64/qml
         run: |
-          python scripts/prepare-native-licenses.py --output /tmp/companion-licenses
-          python scripts/bundle-native.py --exe /tmp/companion-native/legiongo2companion --qt /tmp/companion-qt/6.11.2/gcc_64 --licenses /tmp/companion-licenses --output /tmp/companion-runtime
-          cp -a /tmp/companion-runtime/. dist/desktop/
+          QT_QUICK_BACKEND=software ctest --test-dir /tmp/companion-native --output-on-failure
+          python tests/native_capture.py --exe /tmp/companion-native/legiongo2companion --qt /tmp/companion-qt/6.11.2/gcc_64 --output /tmp/companion-screens-newest
           node scripts/check-desktop-build.mjs --runtime
       - run: npm run package -- --check
       - run: npm run package

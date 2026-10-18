@@ -17,6 +17,7 @@ function visit(node) {
 visit(source);
 for (const name of ["react", "react/jsx-runtime", "react-dom", "@decky/ui", "@decky/manifest"])
   assert.ok(!imports.includes(name), `Unresolved Decky external: ${name}`);
+assert.ok(!code.includes("__PLUGIN_VERSION__"), "The plugin version must be injected at build time");
 for (const name of ["SP_REACT", "SP_JSX", "DFL"])
   assert.ok(identifiers.has(name), `Missing Steam global: ${name}`);
 assert.ok(source.statements.some(node => ts.isExportAssignment(node) || ts.isExportDeclaration(node)),
