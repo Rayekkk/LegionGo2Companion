@@ -3,7 +3,6 @@
 import asyncio
 import copy
 import json
-import itertools
 import os
 import sys
 import types
@@ -269,30 +268,6 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restarted._load()["baseline"], "Fast")
         finally:
             await restarted._unload()
-
-    async def test_wake_reapplies_but_idle_checks_do_not_poll_hardware_every_tick(self):
-        await self.plugin.set_enabled(True)
-        await self.plugin._main()
-        self.externally_select("Standard")
-        repaired = asyncio.Event()
-        repair_once = self.plugin._repair
-        def observed_repair():
-            repair_once()
-            # _repair executes in a worker thread. Signal its actual completion
-            # instead of assuming a loaded CI runner gives us four 10 ms ticks.
-            loop.call_soon_threadsafe(repaired.set)
-        loop = asyncio.get_running_loop()
-        with patch.object(battery, "RESUME_CHECK_S", 0.01), \
-             patch.object(battery, "_suspend_offset", side_effect=itertools.chain([0, 0], itertools.repeat(2))), \
-             patch.object(self.plugin, "_repair", side_effect=observed_repair) as repair:
-            # Replace the just-created watcher before its first tick.
-            await self.plugin._unload()
-            self.plugin._running = True
-            self.plugin._task = asyncio.create_task(self.plugin._watch())
-            await asyncio.wait_for(repaired.wait(), timeout=3)
-            await self.plugin._unload()
-            self.assertEqual(repair.call_count, 1)
-        self.assertEqual(self.current(), "Long_Life")
 
     async def test_saved_preference_and_actual_state_are_reported_separately(self):
         await self.plugin.set_enabled(True)

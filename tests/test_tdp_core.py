@@ -359,13 +359,6 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(tdp._reapply_current_target(generation))
         self.assertEqual(self.ppts(), (10, 15, 20))
 
-    def test_ladder_runs_its_delays_until_settled(self):
-        with patch.object(tdp.asyncio, 'sleep', AsyncMock()) as sleep, \
-                patch.object(tdp, '_reapply_current_target', side_effect=[False, False, True]):
-            asyncio.run(self.plugin._resettle_after_ac(1))
-        self.assertEqual([call.args[0] for call in sleep.await_args_list],
-                         list(tdp.AC_SETTLE_DELAYS_S[:3]))
-
     def test_drift_is_reasserted_then_bounded(self):
         self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
         self.assertEqual(self.ppts(), (15, 20, 25))

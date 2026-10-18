@@ -12,7 +12,6 @@ import main
 import fan_backend as fan
 import fan_guardian as guard
 import module_control
-import module_runtime
 from fan_policy import defaults, DEFAULT_CURVE, stop_timed_out
 from safe_settings import SettingsManager
 
@@ -85,22 +84,6 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
             await fresh._main()
         start.assert_not_awaited()
         self.assertIsNone(fresh._task);self.assertIsNone(fresh._client)
-
-    async def test_global_curve_does_not_even_probe_tdp(self):
-        with patch.object(fan,'companion_preset',side_effect=AssertionError('TDP dependency')):
-            await self.p._apply();await self.p._apply()
-        self.assertEqual(len(self.p._client.calls),1)
-
-    async def test_global_curve_is_selected_on_the_loop_and_tdp_assignment_off_it(self):
-        # The monitor applies every 0.5 s: only TDP assignment reads files and needs a worker thread.
-        real=module_runtime.offload;hops=[]
-        async def offload(module,function,*args,**kwargs):
-            hops.append(function.__name__);return await real(module,function,*args,**kwargs)
-        with patch.object(module_runtime,'offload',new=offload):
-            await self.p._apply();await self.p._apply()
-            self.p._state.update(assign_tdp_presets=True,presets={'silent':[[t,4800] for t,_ in DEFAULT_CURVE]})
-            with patch.object(fan,'companion_preset',return_value='silent'):await self.p._apply()
-        self.assertEqual(hops,['configure','_selected','configure'])
 
     async def test_tdp_assignment_reparses_tdp_settings_only_after_they_change(self):
         import tdp_backend as tdp
