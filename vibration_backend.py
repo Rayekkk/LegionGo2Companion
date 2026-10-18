@@ -77,6 +77,11 @@ DEFAULT_PROFILE = {
 
 SETTINGS_KEY_GAME_PROFILES = "game_profiles"
 SETTINGS_KEY_SCHEMA        = "schema_version"
+# Driver values found before the first write: {"pending": True} until captured,
+# {} when unknown (an existing install), else {attribute: value}.
+SETTINGS_KEY_BASELINE      = "baseline"
+_PROFILE_ATTRS = ('rumble_intensity', 'left_handle/rumble_mode', 'right_handle/rumble_mode',
+                  'touchpad/vibration_intensity', 'touchpad/vibration_enabled')
 CURRENT_SCHEMA             = 2
 
 # Pre-schema-2 keys. Read once during migration, never written again.
@@ -146,7 +151,6 @@ def _discover() -> tuple[str | None, str | None]:
             found_any = True
             candidate = os.path.join(dev.sys_path, _SIGNATURE_ATTR)
             if os.path.exists(candidate):
-                event("vibration", "device_discovered", source="pyudev", supported=True)
                 return dev.sys_path, "pyudev"
         if not found_any:
             event("vibration", "device_discovery", level="warning", source="pyudev",
@@ -164,7 +168,6 @@ def _discover() -> tuple[str | None, str | None]:
     for pattern, method in patterns:
         for match in glob.glob(pattern):
             path = os.path.dirname(match)
-            event("vibration", "device_discovered", source=method, supported=True)
             return path, method
 
     event("vibration", "device_discovery", level="warning", source="all",
@@ -234,7 +237,6 @@ def _capabilities(sys_path: str) -> dict[str, list[str]]:
             "tp_intensity": _read_enum(sys_path, 'touchpad/vibration_intensity', LEVEL_NAMES),
         }
         _capabilities_cache[sys_path] = caps
-        event("vibration", "capabilities_read", level="debug", count=len(caps))
     return caps
 
 
@@ -287,13 +289,49 @@ def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False) -
                 raise OSError("The controller did not confirm the requested value")
             time.sleep(_READBACK_DELAY_S)
         _attr_cache[key] = value
-        event("vibration", "attribute_write", level="debug", attribute=rel_path, outcome="confirmed")
         return True
     except (OSError, UnicodeError) as exc:
         _attr_cache.pop(key, None)
         event("vibration", "attribute_write", level="error", error=exc,
               attribute=rel_path, outcome="failed", repeat=60)
         return False
+
+
+def _capture_baseline(sys_path: str) -> None:
+    """Persist the driver's values once, before the plugin first writes them."""
+    with _settings_lock:
+        if settings.getSetting(SETTINGS_KEY_BASELINE, None) != {"pending": True}:
+            return
+        values = {}
+        try:
+            for attr in _PROFILE_ATTRS:
+                with open(os.path.join(sys_path, attr), encoding="ascii") as handle:
+                    values[attr] = handle.read(64).strip()
+        except (OSError, UnicodeError):
+            values = {}  # unknown; never retried after our own write
+        settings.setSetting(SETTINGS_KEY_BASELINE, values)
+        settings.commit()
+
+
+def _restore_baseline() -> bool:
+    """Release: the captured driver values, else DEFAULT_PROFILE."""
+    global _last_applied_values
+    with _settings_lock:
+        _read_valid_settings()
+        device = _get_device_path()
+        if device is not None:
+            _capture_baseline(device)  # a pending baseline must not fall through to DEFAULT_PROFILE
+        baseline = settings.getSetting(SETTINGS_KEY_BASELINE, None)
+    if isinstance(baseline, dict) and set(baseline) == set(_PROFILE_ATTRS):
+        with _apply_lock:
+            p = _get_device_path()
+            caps = _capabilities(p) if p is not None else {}
+            allowed = dict(zip(_PROFILE_ATTRS, (caps.get("intensity"), caps.get("mode"), caps.get("mode"),
+                                                caps.get("tp_intensity"), ["true", "false"])))
+            if p is not None and all(baseline[a] in (allowed[a] or ()) for a in allowed):
+                _last_applied_values = None
+                return all([_write_attr(p, attr, baseline[attr], True) for attr in _PROFILE_ATTRS])
+    return _apply_settings(dict(DEFAULT_PROFILE), None, True)
 
 
 async def _offload(fn, *args):
@@ -320,6 +358,9 @@ def _apply_settings(values: dict, sys_path: str | None = None,
     # than a loaded profile. They must also preserve unrecoverable user state.
     with _settings_lock:
         _read_valid_settings()
+        target = sys_path or _get_device_path()
+        if target is not None:
+            _capture_baseline(target)  # before _apply_lock: lock order is settings, then apply
     with _apply_lock:
         p = sys_path or _get_device_path()
         if p is None:
@@ -469,6 +510,11 @@ def _migrate() -> None:
             schema = int(settings.getSetting(SETTINGS_KEY_SCHEMA, 1))
         except (TypeError, ValueError):
             schema = 1
+        if settings.getSetting(SETTINGS_KEY_BASELINE, None) is None:
+            # Only an empty store proves the controller still holds its own values.
+            fresh = not settings.settings
+            settings.setSetting(SETTINGS_KEY_BASELINE, {"pending": True} if fresh else {})
+            settings.commit()
         if schema >= CURRENT_SCHEMA:
             return
         profiles = settings.getSetting(SETTINGS_KEY_GAME_PROFILES, {}) or {}
@@ -536,24 +582,13 @@ async def _emit_device_status() -> None:
         event('vibration','device_status_notification_failed',level='warning',error=exc,repeat=60)
 
 
-def _suspend_offset() -> float | None:
-    clock = getattr(time, "CLOCK_BOOTTIME", None)
-    if clock is None or not hasattr(time, "clock_gettime"):
-        return None
-    try:
-        return time.clock_gettime(clock) - time.monotonic()
-    except (OSError, ValueError):
-        return None
+_suspend_offset = module_runtime.suspend_offset
 
 
 def _resume_detected() -> bool:
     global _last_suspend_offset
-    current = _suspend_offset()
-    if current is None:
-        return False
-    previous = _last_suspend_offset
-    _last_suspend_offset = current
-    return previous is not None and current - previous >= 1.0
+    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
+    return resumed
 
 
 def _update_active(field: str, value, *, profiles: dict | None = None,
@@ -600,9 +635,8 @@ def _has_rumble(node: str) -> bool:
             bits = bytearray(32)
             fcntl.ioctl(fh.fileno(), _EVIOCGBIT_FF, bits)
             return bool(bits[_FF_RUMBLE // 8] & (1 << (_FF_RUMBLE % 8)))
-    except OSError as exc:
-        event('vibration','ff_probe_failed',level='debug',error=exc,source='evdev')
-        return False
+    except OSError:
+        return False  # Not every input node answers the force-feedback ioctl.
 
 
 def _find_ff_device() -> str | None:
@@ -706,6 +740,8 @@ async def _monitor_hotplug() -> None:
                     await _handle_device_added(sys_path, action)
                 except module_runtime.ControllerPaused:
                     continue
+                except Exception as exc:  # One failed event (e.g. a settings read) must not end hotplug handling.
+                    event('vibration', 'hotplug_event_failed', level='warning', error=exc, repeat=60)
             elif action in ('remove', 'unbind') and sys_path == _device_path:
                 # Events can arrive out of order: an unbind/rebind cycle
                 # delivers the removal after the device is already back. Trust
@@ -770,7 +806,7 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
         # A pause can arrive during the preceding discovery wait. Keep the
         # hotplug consumer alive; the paused gate forbids this reapply.
         return
-    transition("vibration", "profile_apply", ok, source=action,
+    transition("vibration", "profile_apply", ok, source=action, initial=False,
                level="info" if ok else "warning", outcome="confirmed" if ok else "deferred")
     await _emit_device_status()
 
@@ -806,7 +842,7 @@ class Plugin:
                     return _apply_settings(_active_values())
 
                 ok = await _offload(_verify)
-                transition("vibration", "profile_apply", ok, stage="periodic",
+                transition("vibration", "profile_apply", ok, stage="periodic", initial=False,
                            level="info" if ok else "warning", outcome="confirmed" if ok else "deferred")
                 last_check = now
             except asyncio.CancelledError:
@@ -844,7 +880,6 @@ class Plugin:
     async def _main(self):
         Plugin._setup_error = getattr(self, '_migration_error', None)
         global _monitor_task, _drift_task, _last_suspend_offset
-        event("vibration", "startup", supported=_PYUDEV, source="pyudev")
         try:
             def _start() -> bool:
                 global _last_suspend_offset
@@ -852,7 +887,7 @@ class Plugin:
                 values = _active_values()
                 return _apply_settings(values, force=True)
             confirmed = await _offload(_start)
-            transition("vibration", "profile_apply", bool(confirmed),
+            transition("vibration", "profile_apply", bool(confirmed), initial=False,
                        level="info" if confirmed else "warning", stage="startup",
                        outcome="confirmed" if confirmed else "deferred")
             _monitor_task = module_runtime.background_task(_monitor_hotplug())
@@ -883,7 +918,7 @@ class Plugin:
         decky.logger.info("[lego-vibe] unloaded")
 
     async def _uninstall(self):
-        """Put the controller back on the driver defaults.
+        """Put the controller back on the values found before the first write.
 
         The sysfs values live in the driver, not in the plugin, so uninstalling
         while intensity is 'off' would otherwise leave a silent controller and
@@ -894,7 +929,7 @@ class Plugin:
         _apply_lock, so the two cannot interleave and leave the hardware holding
         half of each profile.
         """
-        restored = await _offload(_apply_settings, dict(DEFAULT_PROFILE), None, True)
+        restored = await _offload(_restore_baseline)
         event("vibration", "restore", level="info" if restored else "warning",
               stage="uninstall", restored=bool(restored),
               outcome="confirmed" if restored else "unconfirmed")
@@ -936,8 +971,6 @@ class Plugin:
             if (not changed and getattr(self, "_active_applied", False)
                     and _last_applied_values == values):
                 return {"success": True, "changed": False, **payload}
-            event("vibration", "foreground_profile", level="debug",
-                  scope="global" if payload["profile_id"] == DEFAULT_APP else "game")
             ok = _apply_settings(values)
             self._active_applied = ok
             return {"success": ok, "changed": changed, **payload}
@@ -1022,16 +1055,13 @@ class Plugin:
         while True:
             result = await _offload(_do)
             if result["success"] or time.monotonic() >= deadline:
-                transition("vibration", "profile_apply", result["success"],
+                transition("vibration", "profile_apply", result["success"], initial=False,
                            level="info" if result["success"] else "warning",
                            stage="resume", outcome="confirmed" if result["success"] else "deferred")
                 return result
             await asyncio.sleep(_REAPPLY_STEP_S)
 
     # ---- Per-game profiles ------------------------------------------ #
-
-    async def get_game_profiles(self) -> dict:
-        return await _offload(_load_profiles)
 
     async def set_profile_overwrite(self, app_id: str, enabled: bool,
                                     name: str = "") -> dict:
@@ -1065,21 +1095,6 @@ class Plugin:
             ok = _apply_settings(values)
             return {"success": ok, "settings": values, "app_id": running,
                     "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
-        return await _offload(_do)
-
-    async def delete_game_profile(self, app_id: str) -> dict:
-        app_id = _normalise_app_id(app_id, allow_default=False)
-        if app_id is None:
-            return {"success": False, "error": "invalid app id"}
-
-        def _do() -> dict:
-            profiles = _load_profiles()
-            if profiles.pop(app_id, None) is None:
-                return {"success": False, "error": "No such profile"}
-            _save_profiles(profiles)
-            values = _active_values(profiles)
-            ok = _apply_settings(values)
-            return {"success": ok, "settings": values}
         return await _offload(_do)
 
     # ---- Driver status ---------------------------------------------- #

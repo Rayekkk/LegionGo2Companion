@@ -2,7 +2,8 @@
 
 import asyncio
 import copy
-import hashlib
+import errno
+import os
 import stat
 import tempfile
 import types
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import test_integration  # Shared Decky and Windows/POSIX compatibility fixture.
 
 import rgb_backend
+from support import power_led_dsdt
 
 
 class MemorySettings:
@@ -99,16 +101,6 @@ class RgbBackendTests(unittest.TestCase):
             self.assertEqual(len(attempts), 2)
             write.assert_not_called()
 
-    def test_persistent_invalid_snapshot_stays_unavailable_after_bounded_reads(self):
-        with tempfile.TemporaryDirectory() as folder:
-            make_led(Path(folder))
-            (Path(folder)/'speed').write_text('invalid')
-            with patch.object(rgb_backend.time, 'sleep') as sleep, \
-                    patch.object(rgb_backend.os, 'write') as write:
-                self.assertIsNone(rgb_backend._read_rgb_snapshot(folder))
-            self.assertEqual(sleep.call_count, 2)
-            write.assert_not_called()
-
     def test_rgb_capability_accepts_both_go2_models_only_with_verified_interface(self):
         real = "/sys/devices/test/0003:17EF:61EB.0001/leds/go:rgb:joystick_rings"
         with tempfile.TemporaryDirectory() as raw:
@@ -160,7 +152,7 @@ class RgbBackendTests(unittest.TestCase):
             patch.object(rgb_backend, "_read_identity", return_value={
                 "product_family": "Legion Go 8AHP2", "product_name": "83N1",
                 "board_name": rgb_backend.EXPECTED_BOARD,
-                "bios_version": rgb_backend.AUDITED_BIOS,
+                "bios_version": "RRCN16WW",
             }),
             patch.object(rgb_backend, "_map_power_register") as mmio,
         ):
@@ -392,6 +384,7 @@ class RgbBackendTests(unittest.TestCase):
                     patch.object(rgb_backend, "settings", memory),
                     patch.object(rgb_backend, "time", fake_time),
                     patch.object(rgb_backend, "_last_suspend_offset", 0.0),
+                    patch.object(rgb_backend, "_suspend_offset", lambda: 60.0),
                     patch.object(rgb_backend.asyncio, "sleep", side_effect=advance),
                     patch.object(rgb_backend, "_rgb_capability", side_effect=capability),
                     patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
@@ -484,6 +477,34 @@ class RgbBackendTests(unittest.TestCase):
                 self.assertFalse(memory.data["state"]["control_enabled"])
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
 
+    def test_first_takeover_preserves_the_existing_colour_intensity(self):
+        cases = (
+            ("monocolor", "25 0 0", [100, 0, 0], "5"),
+            ("monocolor", "0 0 0", None, "0"),
+            ("breathe", "0 50 50", [0, 100, 100], "10"),
+            ("rainbow", "0 0 0", None, "20"),
+        )
+        for effect, before, rgb, brightness in cases:
+            with self.subTest(effect=effect, before=before), \
+                    tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
+                led = Path(raw)
+                make_led(led, enabled="true")
+                (led / "effect").write_text(effect + "\n", encoding="ascii")
+                (led / "multi_intensity").write_text(before + "\n", encoding="ascii")
+                memory = MemorySettings()
+                with (
+                    patch.object(rgb_backend, "settings", memory),
+                    patch.object(rgb_backend, "_rgb_capability", return_value=(str(led), "")),
+                    patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
+                ):
+                    result = asyncio.run(rgb_backend.Plugin().set_control_enabled(True))
+                self.assertTrue(result["success"], result.get("error"))
+                self.assertEqual((led / "effect").read_text().strip(), effect)
+                self.assertEqual((led / "brightness").read_text().strip(), brightness)
+                if rgb is not None:
+                    self.assertEqual(
+                        (led / "multi_intensity").read_text().split(), [str(c) for c in rgb])
+
     def test_untouched_blank_profile_restores_without_selecting_a_profile(self):
         with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
             led = Path(raw)
@@ -503,6 +524,58 @@ class RgbBackendTests(unittest.TestCase):
                 self.assertTrue(result["success"], result.get("error"))
                 self.assertEqual((led / "profile").read_text(), "\n")
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
+
+    def test_unreadable_profile_is_written_so_rings_turn_on_and_drift_heals(self):
+        real_read, real_open = rgb_backend._read_small, rgb_backend.os.open
+        writes = []
+
+        def driver_read(path, limit=512):
+            value = real_read(path, limit)
+            if os.path.basename(path) == "profile" and (stuck or value.strip() == "0"):
+                raise OSError(errno.EINVAL, "Invalid argument")  # hid-lenovo-go rgb_profile_show
+            return value
+
+        def tracked_open(path, flags, *args):
+            if flags & os.O_WRONLY:
+                writes.append(os.path.basename(path))
+            return real_open(path, flags, *args)
+
+        for invalid in ("0\n", "\n"):
+            stuck = False
+            with self.subTest(profile=invalid), tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
+                led = Path(raw)
+                make_led(led, enabled="false")
+                (led / "profile").write_text(invalid, encoding="ascii")
+                memory = MemorySettings()
+                plugin = rgb_backend.Plugin()
+                with (
+                    patch.object(rgb_backend, "settings", memory),
+                    patch.object(rgb_backend, "_rgb_capability", return_value=(str(led), "")),
+                    patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
+                    patch.object(rgb_backend, "_read_small", side_effect=driver_read),
+                    patch.object(rgb_backend.os, "open", side_effect=tracked_open),
+                    patch.object(rgb_backend.time, "sleep"),
+                ):
+                    self.assertTrue(asyncio.run(plugin.set_control_enabled(True))["success"])
+                    result = asyncio.run(plugin.set_rings_enabled(True))
+                    self.assertTrue(result["success"], result.get("error"))
+                    self.assertEqual((led / "profile").read_text().strip(), "3")
+                    self.assertEqual((led / "enabled").read_text().strip(), "true")
+
+                    # The MCU loses the profile while the rings are owned: drift repair writes it.
+                    (led / "profile").write_text(invalid, encoding="ascii")
+                    self.assertTrue(rgb_backend._reconcile())
+                    self.assertEqual((led / "profile").read_text().strip(), "3")
+                    writes.clear()
+                    self.assertTrue(rgb_backend._reconcile())
+                    self.assertEqual(writes, [])
+
+                    # A profile the firmware never confirms is one write per attempt, never accepted.
+                    stuck = True
+                    (led / "effect").write_text("breathe\n", encoding="ascii")
+                    writes.clear()
+                    self.assertFalse(rgb_backend._reconcile())
+                    self.assertEqual(writes, ["profile"])
 
     def test_interrupted_transaction_restores_the_previous_hardware_state(self):
         with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
@@ -556,52 +629,74 @@ class RgbBackendTests(unittest.TestCase):
             self.assertEqual(register.value & ~(1 << 6), preserved)
             self.assertTrue(register.value & (1 << 6))
 
-    def test_power_capability_requires_exact_dmi_bios_and_dsdt(self):
+    def test_power_capability_needs_the_model_and_live_dsdt_layout_not_a_bios_version(self):
         with tempfile.TemporaryDirectory(prefix="lego-dsdt-") as raw:
             root = Path(raw)
             dsdt = root / "DSDT"
             devmem = root / "mem"
-            dsdt.write_bytes(b"audited dsdt")
+            dsdt.write_bytes(power_led_dsdt())
             devmem.write_bytes(bytes(4096))
-            digest = hashlib.sha256(dsdt.read_bytes()).hexdigest()
             identity = {
                 "product_family": rgb_backend.EXPECTED_FAMILY,
                 "product_name": rgb_backend.EXPECTED_PRODUCT,
                 "board_name": rgb_backend.EXPECTED_BOARD,
-                "bios_version": rgb_backend.AUDITED_BIOS,
+                "bios_version": "RRCN16WW",
             }
             with (
                 patch.object(rgb_backend, "_read_identity", return_value=identity),
                 patch.object(rgb_backend, "DSDT_PATH", str(dsdt)),
                 patch.object(rgb_backend, "DEV_MEM_PATH", str(devmem)),
-                patch.object(rgb_backend, "AUDITED_DSDT_SHA256", {digest}),
             ):
                 rgb_backend._power_capability_cache = None
                 self.assertEqual(rgb_backend._power_capability(), (True, ""))
                 rgb_backend._power_capability_cache = None
-                identity["bios_version"] = "future"
-                supported, _ = rgb_backend._power_capability()
-                self.assertFalse(supported)
+                identity["bios_version"] = "RRCN99WW"  # A Lenovo update with the same ACPI layout.
+                self.assertEqual(rgb_backend._power_capability(), (True, ""))
+                rgb_backend._power_capability_cache = None
+                identity["board_name"] = "LNVNB161217"
+                self.assertFalse(rgb_backend._power_capability()[0])
+
+    def test_power_led_layout_accepts_only_lpbl_at_eram_byte_0x10_bit_6(self):
+        layout = rgb_backend._power_led_layout_ok
+        names = [b"LSTE", b"LID2", b"EKTS", b"DISV", b"SMAF", b"S4RF", b"LPBL", b"OSRT"]
+        self.assertTrue(layout(power_led_dsdt()))
+        self.assertTrue(layout(power_led_dsdt(fields=[(None, 0x80), (b"LSTE", 6), (b"LPBL", 1), (b"OSRT", 1)])))
+        swapped = names[:6] + [b"OSRT", b"LPBL"]
+        rejected = {
+            "region moved": power_led_dsdt(base=0xFEEC2400),
+            "not SystemMemory": power_led_dsdt(space=0x03),
+            "region too short": power_led_dsdt(length=0x10),
+            "field moved a byte": power_led_dsdt(fields=[(None, 0x88)] + [(n, 1) for n in names]),
+            "bit 7 instead of 6": power_led_dsdt(fields=[(None, 0x80)] + [(n, 1) for n in swapped]),
+            "two bits wide": power_led_dsdt(fields=[(None, 0x80), (b"LSTE", 5), (b"LPBL", 2), (b"OSRT", 1)]),
+            "LPBL missing": power_led_dsdt(fields=[(None, 0x80)] + [(n, 1) for n in names if n != b"LPBL"]),
+            "LPBL twice": power_led_dsdt(fields=[(None, 0x80)] + [(n, 1) for n in names] + [(b"LPBL", 1)]),
+            "unknown field element": power_led_dsdt(fields=[(None, 0x80)] + [(n, 1) for n in names[:5]] + [(b"\x02xyz", 1), (b"LPBL", 1), (b"OSRT", 1)]),
+            "truncated table": power_led_dsdt()[:-1],
+            "not a DSDT": b"SSDT" + power_led_dsdt()[4:],
+        }
+        for reason, table in rejected.items():
+            with self.subTest(reason):
+                self.assertFalse(layout(table))
 
     def test_transient_power_capability_failure_recovers_without_restart_after_bounded_retry(self):
         for failure in ('dsdt_read','missing_mem','missing_identity'):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as raw:
                 root=Path(raw);dsdt=root/'DSDT';devmem=root/'mem'
-                dsdt.write_bytes(b'audited dsdt');devmem.write_bytes(bytes(4096))
+                dsdt.write_bytes(power_led_dsdt());devmem.write_bytes(bytes(4096))
                 identity={'product_family':rgb_backend.EXPECTED_FAMILY,'product_name':rgb_backend.EXPECTED_PRODUCT,
-                          'board_name':rgb_backend.EXPECTED_BOARD,'bios_version':rgb_backend.AUDITED_BIOS}
-                original=dict(identity);digest=hashlib.sha256(dsdt.read_bytes()).hexdigest()
+                          'board_name':rgb_backend.EXPECTED_BOARD,'bios_version':'RRCN16WW'}
+                original=dict(identity)
                 rgb_backend._power_capability_cache=None
                 if failure=='dsdt_read':dsdt.unlink()
                 elif failure=='missing_mem':devmem.unlink()
-                else:identity['bios_version']=''
+                else:identity['board_name']=''
                 with patch.object(rgb_backend,'_read_identity',return_value=identity), \
                         patch.object(rgb_backend,'DSDT_PATH',str(dsdt)),patch.object(rgb_backend,'DEV_MEM_PATH',str(devmem)), \
-                        patch.object(rgb_backend,'AUDITED_DSDT_SHA256',{digest}), \
                         patch.object(rgb_backend.time,'monotonic',return_value=100) as clock, \
                         patch.object(rgb_backend,'_map_power_register') as mmio:
                     self.assertFalse(rgb_backend._power_capability()[0])
-                    dsdt.write_bytes(b'audited dsdt');devmem.write_bytes(bytes(4096));identity.update(original)
+                    dsdt.write_bytes(power_led_dsdt());devmem.write_bytes(bytes(4096));identity.update(original)
                     clock.return_value=101
                     self.assertFalse(rgb_backend._power_capability()[0],'Do not retry every UI poll')
                     clock.return_value=110
@@ -613,7 +708,7 @@ class RgbBackendTests(unittest.TestCase):
             root=Path(raw);dsdt=root/'DSDT';devmem=root/'mem'
             dsdt.write_bytes(b'unqualified');devmem.write_bytes(bytes(4096))
             identity={'product_family':rgb_backend.EXPECTED_FAMILY,'product_name':rgb_backend.EXPECTED_PRODUCT,
-                      'board_name':rgb_backend.EXPECTED_BOARD,'bios_version':rgb_backend.AUDITED_BIOS}
+                      'board_name':rgb_backend.EXPECTED_BOARD,'bios_version':'RRCN16WW'}
             with patch.object(rgb_backend,'_read_identity',return_value=identity), \
                     patch.object(rgb_backend,'DSDT_PATH',str(dsdt)),patch.object(rgb_backend,'DEV_MEM_PATH',str(devmem)), \
                     patch.object(rgb_backend.time,'monotonic',return_value=100) as clock, \

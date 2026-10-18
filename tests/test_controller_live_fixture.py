@@ -9,7 +9,7 @@ sample must remain distinct from a missing or unrecognized input report.
 
 import unittest
 
-import test_integration  # Install the existing isolated Decky environment.
+import support  # Install the existing isolated Decky environment.
 import controller_backend as controller
 
 

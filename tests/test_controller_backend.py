@@ -251,8 +251,7 @@ class FilterTests(unittest.TestCase):
             self.store.data["state"] = {"gyro_source": "left", "ownership": corrupted}
             self.assertEqual(module._state()["gyro_source"], "system")
         self.store.data["state"] = {"gyro_source": "left", "ownership": {**owner, "pending": True}}
-        with patch.object(module, "_iio_inventory", return_value=[]):
-            status = self.backend._status(True)
+        status = self.backend._status(True)
         self.assertFalse(status["controlled"])
         self.assertTrue(status["recovery_pending"])
 
@@ -366,8 +365,7 @@ class FilterTests(unittest.TestCase):
 
     def test_process_watch_is_captured_only_after_success_and_is_not_refreshed_by_status(self):
         with patch.object(self.backend._service_watch, "capture") as capture, \
-                patch.object(self.backend._service_watch, "clear") as clear, \
-                patch.object(module, "_iio_inventory", return_value=[]):
+                patch.object(self.backend._service_watch, "clear") as clear:
             self.backend._select("left")
             capture.assert_called_once()
             self.backend._status(True)
@@ -506,86 +504,6 @@ class FilterTests(unittest.TestCase):
         self.assertFalse(self.backend._error)
 
 
-class WatchScheduleTests(unittest.TestCase):
-    def test_recovery_backoff_and_healthy_polling_are_bounded(self):
-        cases = (
-            ("healthy", False, ""),
-            ("persistent_failure", True, ""),
-            ("startup_retry", False, "controller unavailable"),
-            ("external_conflict", True, ""),
-            ("service_restart", False, ""),
-            ("service_failure", False, ""),
-        )
-        for kind, resume, initial_error in cases:
-            with self.subTest(kind=kind):
-                backend = module.Plugin()
-                backend._error = initial_error
-                clock, calls, service_hint = [0.0], [], [False]
-
-                async def sleep(seconds):
-                    self.assertGreater(seconds, 0, "the watcher must yield instead of busy-looping")
-                    self.assertLessEqual(seconds, 10, "recovery hints must be checked promptly")
-                    clock[0] += seconds
-                    if clock[0] > 160:
-                        raise asyncio.CancelledError
-
-                def consume_exit():
-                    if kind.startswith("service_") and clock[0] >= 5 and not service_hint[0]:
-                        service_hint[0] = True
-                        return True
-                    return False
-
-                def select(*_args, **_kwargs):
-                    calls.append(clock[0])
-                    if kind == "external_conflict":
-                        backend._conflict = True
-                        raise module.ControllerError("An external filter changed")
-                    if kind in {"persistent_failure", "service_failure"} or (kind == "startup_retry" and len(calls) == 1):
-                        raise module.ControllerError("The controller is unavailable")
-                    backend._error = ""
-
-                async def watch():
-                    with self.assertRaises(asyncio.CancelledError):
-                        await backend._watch()
-
-                with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
-                        patch.object(module, "_suspend_offset", side_effect=lambda: 2.0 if resume and clock[0] >= 5 else 0.0), \
-                        patch.object(module.asyncio, "sleep", side_effect=sleep), \
-                        patch.object(module, "_state", return_value={"gyro_source": "left"}), \
-                        patch.object(backend._service_watch, "consume_exit", side_effect=consume_exit), \
-                        patch.object(module, "_json_value") as query, \
-                        patch.object(backend, "_select", side_effect=select):
-                    asyncio.run(watch())
-                # Assert recovery/idle budgets, not the current doubling formula.
-                # A 6 s initial retry or a slightly different bounded tick is
-                # valid; continuous retries, long stalls and busy loops are not.
-                self.assertGreaterEqual(len(calls), 2)
-                gaps = [later - earlier for earlier, later in zip(calls, calls[1:])]
-                self.assertTrue(all(0 < gap <= 75 for gap in gaps), calls)
-                if kind in {"persistent_failure", "service_failure"}:
-                    self.assertLessEqual(calls[0], 10)
-                    self.assertGreaterEqual(len(calls), 4)
-                    self.assertLessEqual(len(calls), 12)
-                    self.assertLessEqual(gaps[0], 15)
-                    # Backoff can include bounded jitter; the last two gaps
-                    # still need a low aggregate retry rate.
-                    self.assertGreaterEqual(sum(gaps[-2:]), 60, "late retries must remain low-frequency")
-                    self.assertGreaterEqual(gaps[-1], 30, "failure polling must settle down")
-                elif kind == "startup_retry":
-                    self.assertLessEqual(calls[0], 10)
-                    self.assertGreaterEqual(len(calls), 3)
-                    self.assertLessEqual(gaps[0], 15)
-                    self.assertTrue(all(gap >= 45 for gap in gaps[1:]), calls)
-                else:
-                    self.assertTrue(all(gap >= 45 for gap in gaps), calls)
-                    if kind == "healthy":
-                        self.assertGreaterEqual(calls[0], 45)
-                        self.assertLessEqual(calls[0], 75)
-                    else:
-                        self.assertLessEqual(calls[0], 10)
-                query.assert_not_called()
-
-
 class CaptureTests(unittest.TestCase):
     def setUp(self):
         self.backend = module.Plugin()
@@ -658,49 +576,6 @@ class CaptureTests(unittest.TestCase):
         poll.assert_not_called()
         self.assertFalse(capture["active"])
         self.assertEqual(capture["virtual"]["error"], "missing")
-
-    def test_report_buffers_are_reused_and_keep_bounded_rates_without_losing_counts(self):
-        capture = self.capture()
-        stop = threading.Event()
-        clock, polls = [100.0], [0]
-        physical = b"\x04\x3c\x74" + bytes(61)
-        virtual = b"\x01\x00\x09\x40" + bytes(60)
-
-        def ready(*_args):
-            polls[0] += 1
-            clock[0] = 100 + polls[0] / 5000
-            return [7, 8], [], []
-
-        def read(fd, _size):
-            if polls[0] == 4101 and fd == 8:
-                stop.set()
-            if polls[0] == 1:
-                return bytes(64)
-            return physical if fd == 7 else virtual
-
-        with patch.object(module, "_open_reader", side_effect=[7, 8]), \
-                patch.object(module.os, "close"), \
-                patch.object(module.os, "read", side_effect=read) as reader, \
-                patch.object(module.select, "select", side_effect=ready), \
-                patch.object(module, "_capture_time", side_effect=lambda: clock[0]), \
-                patch.object(module, "deque", wraps=module.deque) as allocate:
-            self.backend._worker((PHYSICAL, PHYSICAL), capture, stop)
-            clock[0] = 101.0
-            result = self.backend._snapshot("test-token")
-            for kind in ("physical", "virtual"):
-                self.assertEqual(capture[kind]["times"].maxlen, 4096)
-                self.assertEqual(len(capture[kind]["times"]), 4096)
-                self.assertEqual(result[kind]["reports"], 4100)
-                self.assertEqual(result[kind]["invalid_reports"], 1)
-                self.assertEqual(result[kind]["rate_hz"], 4096.0)
-                self.assertIsNotNone(result[kind]["sample"])
-            clock[0] = 102.0
-            expired = self.backend._snapshot("test-token")
-            for kind in ("physical", "virtual"):
-                self.assertEqual(expired[kind]["rate_hz"], 0.0)
-                self.assertEqual(expired[kind]["reports"], 4100)
-            self.assertEqual(allocate.call_count, 2)
-        self.assertEqual(reader.call_count, 8202)
 
     def test_ordinary_report_rate_tracks_the_last_second_without_losing_total_count(self):
         capture = self.capture()

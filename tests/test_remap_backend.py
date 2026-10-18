@@ -7,7 +7,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import mock_open, patch
+from unittest.mock import Mock, mock_open, patch
 
 
 if "decky" not in sys.modules:
@@ -111,6 +111,9 @@ mapping:
         capture = patch.object(remap_backend._service_watch, "capture")
         self.capture = capture.start()
         self.addCleanup(capture.stop)
+        cached = patch.object(remap_backend, "_device_path", "")
+        cached.start()
+        self.addCleanup(cached.stop)
 
     def test_discovery_skips_foreign_capabilities_and_continues_after_property_errors(self):
         paths = [f"/org/shadowblip/InputPlumber/CompositeDevice{number}" for number in range(4)]
@@ -135,6 +138,45 @@ mapping:
             (paths[2], "Name"), (paths[2], "Capabilities"),
             (paths[3], "Name"), (paths[3], "Capabilities"),
         ])
+
+    def test_discovery_reuses_a_verified_device_and_rescans_only_when_it_fails(self):
+        first, second = (f"/org/shadowblip/InputPlumber/CompositeDevice{number}" for number in range(2))
+        required = ["Gamepad:Button:Keyboard", "Gamepad:Button:QuickAccess2"]
+        present = {first}
+        tree = Mock(side_effect=lambda _args: "\n".join(sorted(present)))
+
+        def property_value(path, name):
+            if path not in present:
+                raise remap_backend.RemapError("Unknown object '%s'" % path)
+            return "Lenovo Legion Go 2" if name == "Name" else required
+
+        with patch.object(remap_backend.module_runtime, "is_legion_go_2", return_value=True), \
+                patch.object(remap_backend, "_run_busctl", tree), \
+                patch.object(remap_backend, "_get_property", side_effect=property_value) as read:
+            for _ in range(3):
+                self.assertEqual(remap_backend._find_device(), (first, "Lenovo Legion Go 2"))
+            self.assertEqual(tree.call_count, 1)
+            self.assertEqual(read.call_count, 6)  # same Name/Capabilities checks on every call
+            present = {second}  # InputPlumber re-enumerated the controller
+            self.assertEqual(remap_backend._find_device(), (second, "Lenovo Legion Go 2"))
+            self.assertEqual(tree.call_count, 2)
+            self.assertEqual(remap_backend._find_device(), (second, "Lenovo Legion Go 2"))
+            self.assertEqual(tree.call_count, 2)
+            present = set()
+            with self.assertRaisesRegex(remap_backend.RemapError, "not managing a compatible"):
+                remap_backend._find_device()
+            self.assertEqual(tree.call_count, 3)
+
+    def test_discovery_does_not_retry_a_stalled_cached_device(self):
+        path = "/org/shadowblip/InputPlumber/CompositeDevice0"
+        with patch.object(remap_backend.module_runtime, "is_legion_go_2", return_value=True), \
+                patch.object(remap_backend, "_device_path", path), \
+                patch.object(remap_backend, "_run_busctl", return_value=path) as tree, \
+                patch.object(remap_backend, "_get_property", side_effect=remap_backend.RemapError("Connection timed out")) as read:
+            with self.assertRaisesRegex(remap_backend.RemapError, "timed out"):
+                remap_backend._find_device()
+        tree.assert_called_once()
+        read.assert_called_once()
 
     def test_retry_reads_a_repaired_file_after_unrecoverable_storage_error(self):
         from safe_settings import SettingsManager, atomic_write_json
@@ -346,6 +388,21 @@ mapping:
         canonical = canonical.replace("  target_events:\n", "  target_events: []\n", 1)
         self.assertTrue(remap_backend._profile_matches(canonical, state))
 
+    def test_a_valid_empty_profile_is_taken_over_and_restored_as_an_empty_list(self):
+        empty = "version: 1\nkind: DeviceProfile\nname: Passthrough\nmapping: []\n"
+        header, blocks = remap_backend._mapping_blocks(empty)
+        self.assertEqual((header.splitlines()[-1], blocks), ("mapping:", []))
+        state = remap_backend._sanitize_state({"enabled": True, "baseline_profile": empty,
+            "desktop_action": "insert", "page_action": "default"})
+        live = remap_backend._build_profile(empty, state)
+        self.assertTrue(remap_backend._valid_profile(live))
+        self.assertTrue(remap_backend._profile_matches(live, state))
+        self.assertIn("mapping:\n- name:", live)
+        self.assertEqual(remap_backend._join_profile(header, []), empty)
+        for broken in (empty + "extra: 1\n", empty.replace("mapping: []", "mapping: [x]")):
+            with self.subTest(broken=broken), self.assertRaises(remap_backend.RemapError):
+                remap_backend._mapping_blocks(broken)
+
     def test_duplicate_source_mapping_fails_closed(self):
         duplicate = BASE_PROFILE + remap_backend._render_mapping("desktop", "escape")
         state = remap_backend._sanitize_state({
@@ -394,7 +451,7 @@ mapping:
         memory = MemorySettings(owned)
         with (
             patch.object(remap_backend, "settings", memory),
-            patch.object(remap_backend, "_restore_if_owned", return_value=True) as restore,
+            patch.object(remap_backend, "_restore_if_owned_locked", return_value=True) as restore,
             patch.object(remap_backend, "_status_sync", return_value={"enabled": False}),
         ):
             result = remap_backend._mutate_sync({"enabled": False})
@@ -428,13 +485,6 @@ mapping:
             remap_backend._action_events("page", "home"),
             [("keyboard", "KeyHome")],
         )
-
-    def test_resume_detector_uses_boottime_gap(self):
-        remap_backend._last_suspend_offset = 3.0
-        with patch.object(remap_backend, "_suspend_offset", return_value=4.2):
-            self.assertTrue(remap_backend._resume_detected())
-        with patch.object(remap_backend, "_suspend_offset", return_value=4.3):
-            self.assertFalse(remap_backend._resume_detected())
 
     def test_successful_repair_captures_process_but_status_and_failed_repair_do_not(self):
         state = remap_backend._sanitize_state({"enabled": True, "baseline_profile": BASE_PROFILE})

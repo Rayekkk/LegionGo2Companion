@@ -16,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import module_runtime
+
 SYS_ROOT = Path("/sys")
 HID_DEVICES = Path("/sys/bus/hid/devices")
 SIDES = ("left", "right")
@@ -79,9 +81,7 @@ def _values(device: Path) -> dict[str, bool]:
 
 
 def _discover() -> Path:
-    dmi = SYS_ROOT / "class/dmi/id"
-    if (_read(dmi / "sys_vendor") != "LENOVO"
-            or _read(dmi / "product_name") not in {"83N0", "83N1"}):
+    if not module_runtime.is_legion_go_2(SYS_ROOT / "class/dmi/id"):
         raise ImuError("IMU control is available only on Lenovo Legion Go 2.")
     matches = []
     for entry in HID_DEVICES.iterdir():

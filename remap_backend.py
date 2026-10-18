@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
-import os
 import re
 import subprocess
 import threading
@@ -26,21 +24,16 @@ from system_process import system_env
 import module_runtime
 
 from safe_settings import SettingsManager
-from inputplumber_process import ProcessWatch
+from inputplumber_process import (
+    DEVICE_PATH_RE, INTERFACE, SERVICE, InputPlumberError as RemapError, ProcessWatch,
+    json_value as _json_value, run_busctl as _run_busctl,
+)
 
 
-BUSCTL = "/usr/bin/busctl"
 INPUTPLUMBER = "/usr/bin/inputplumber"
 VERSION_CACHE_TTL_S = 300.0
 VERSION_RETRY_S = 10.0
-SERVICE = "org.shadowblip.InputPlumber"
-INTERFACE = "org.shadowblip.Input.CompositeDevice"
-DEVICE_PATH_RE = re.compile(
-    r"^/org/shadowblip/InputPlumber/CompositeDevice[0-9]+$"
-)
 EXPECTED_NAMES = {"Lenovo Legion Go 2"}
-EXPECTED_PRODUCTS = {"83N0", "83N1"}
-EXPECTED_VENDOR = "LENOVO"
 MAX_PROFILE_BYTES = 128 * 1024
 PROFILE_NAME = "Legion Go 2 Companion Buttons"
 CHECK_INTERVAL_S = 60.0
@@ -106,11 +99,7 @@ _last_error = ""
 _last_suspend_offset: float | None = None
 _service_watch = ProcessWatch()
 _version_lock = threading.Lock()
-_version_cache: tuple[tuple[int, ...], float, str] | None = None
-
-
-class RemapError(RuntimeError):
-    pass
+_version_cache: tuple[str, float] | None = None
 
 
 def _valid_profile(value: Any) -> bool:
@@ -121,7 +110,7 @@ def _valid_profile(value: Any) -> bool:
     return bool(
         re.search(r"(?m)^version:\s*1\s*$", value)
         and re.search(r"(?m)^kind:\s*DeviceProfile\s*$", value)
-        and re.search(r"(?m)^mapping:\s*$", value)
+        and re.search(r"(?m)^mapping:\s*(?:\[\s*\]\s*)?$", value)
     )
 
 
@@ -165,58 +154,42 @@ def _save_state(state: dict[str, Any]) -> None:
         settings.commit()
 
 
-def _run_busctl(args: list[str], *, timeout: float = 5.0) -> str:
-    if not os.path.isfile(BUSCTL):
-        raise RemapError("InputPlumber control interface is unavailable.")
-    try:
-        result = subprocess.run(
-            [BUSCTL, *args],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-            env=system_env(LC_ALL="C"),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RemapError(f"InputPlumber did not respond: {exc}") from exc
-    if result.returncode != 0:
-        message = (result.stderr or result.stdout).strip()
-        raise RemapError(message[:500] or "InputPlumber rejected the request.")
-    return result.stdout
-
-
-def _json_value(args: list[str]) -> Any:
-    raw = _run_busctl(["--json=short", *args])
-    try:
-        payload = json.loads(raw)
-        return payload["data"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise RemapError("InputPlumber returned an invalid D-Bus response.") from exc
-
-
 def _get_property(path: str, name: str) -> Any:
     return _json_value([
         "get-property", SERVICE, path, INTERFACE, name,
     ])
 
 
+_REQUIRED_CAPABILITIES = {"Gamepad:Button:Keyboard", "Gamepad:Button:QuickAccess2"}
+_device_path = ""  # last compatible CompositeDevice: re-verified each call, so the full tree runs only when it fails
+
+
+def _compatible_name(path: str) -> str | None:
+    name = _get_property(path, "Name")
+    if name not in EXPECTED_NAMES:
+        return None
+    capabilities = _get_property(path, "Capabilities")
+    if isinstance(capabilities, list) and _REQUIRED_CAPABILITIES.issubset(set(capabilities)):
+        return str(name)
+    return None
+
+
 def _find_device() -> tuple[str, str]:
-    identity = {}
-    for name in ("sys_vendor", "product_name"):
-        try:
-            with open(f"/sys/class/dmi/id/{name}", encoding="ascii") as handle:
-                identity[name] = handle.read(128).strip()
-        except (OSError, UnicodeError):
-            identity[name] = ""
-    if (
-        identity.get("sys_vendor") != EXPECTED_VENDOR
-        or identity.get("product_name") not in EXPECTED_PRODUCTS
-    ):
+    global _device_path
+    if not module_runtime.is_legion_go_2():
         raise RemapError("Button remapping is limited to the Lenovo Legion Go 2.")
+
+    failure = None
+    stalled = ""
+    if _device_path:
+        try:
+            name = _compatible_name(_device_path)
+            if name:
+                return _device_path, name
+        except RemapError as exc:
+            if not _ABSENT.search(str(exc)):
+                failure, stalled = exc, _device_path  # do not wait on the same stalled path twice
+        _device_path = ""
 
     tree = _run_busctl(["tree", SERVICE, "--list", "--no-pager"])
     candidates = sorted({
@@ -224,22 +197,18 @@ def _find_device() -> tuple[str, str]:
         if DEVICE_PATH_RE.fullmatch(line.strip())
     })
     for path in candidates:
+        if path == stalled:
+            continue
         try:
-            name = _get_property(path, "Name")
-            if name not in EXPECTED_NAMES:
-                continue
-            capabilities = _get_property(path, "Capabilities")
-        except RemapError:
+            name = _compatible_name(path)
+        except RemapError as exc:
+            if not _ABSENT.search(str(exc)):
+                failure = exc  # a stalled lookup does not prove the controller is gone
             continue
-        if not isinstance(capabilities, list):
-            continue
-        required = {
-            "Gamepad:Button:Keyboard",
-            "Gamepad:Button:QuickAccess2",
-        }
-        if required.issubset(set(capabilities)):
-            return path, str(name)
-    raise RemapError("InputPlumber is not managing a compatible Go 2 controller.")
+        if name:
+            _device_path = path
+            return path, name
+    raise failure or RemapError("InputPlumber is not managing a compatible Go 2 controller.")
 
 
 def _get_profile(path: str) -> str:
@@ -260,12 +229,18 @@ def _mapping_blocks(profile: str) -> tuple[str, list[str]]:
     if not _valid_profile(profile):
         raise RemapError("Cannot safely edit this InputPlumber profile.")
     lines = profile.splitlines(keepends=True)
-    mapping_indexes = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == "mapping:"]
+    mapping_indexes = [i for i, line in enumerate(lines)
+                       if re.fullmatch(r"mapping:\s*(?:\[\s*\]\s*)?", line.rstrip("\r\n"))]
     if len(mapping_indexes) != 1:
         raise RemapError("Unexpected InputPlumber profile layout.")
     start = mapping_indexes[0]
-    header = "".join(lines[: start + 1])
     body = lines[start + 1 :]
+    if lines[start].rstrip("\r\n") != "mapping:":
+        # A valid empty list ("mapping: []"): nothing may follow it, and the header ends in a block list again.
+        if any(line.strip() for line in body):
+            raise RemapError("Unexpected InputPlumber profile layout.")
+        lines[start], body = "mapping:\n", []
+    header = "".join(lines[: start + 1])
     starts = [i for i, line in enumerate(body) if line.startswith("- name:")]
     if body and not starts:
         raise RemapError("InputPlumber profile mappings could not be identified.")
@@ -409,6 +384,8 @@ def _replace_name(header: str, name_header: str) -> str:
 
 
 def _join_profile(header: str, blocks: list[str]) -> str:
+    if not blocks:
+        header = re.sub(r"(?m)^mapping:[ \t]*$", "mapping: []", header)  # A bare key would load as null.
     result = "".join(part if part.endswith("\n") else part + "\n"
                      for part in [header, *blocks])
     if len(result.encode("utf-8")) > MAX_PROFILE_BYTES:
@@ -541,16 +518,36 @@ def _apply_state(state: dict[str, Any], *, adopt_external: bool) -> tuple[dict[s
     return working, applied
 
 
-def _restore_if_owned(state: dict[str, Any]) -> bool:
-    with _operation_lock:
-        return _restore_if_owned_locked(state)
-
-
 def _restore_current_if_owned() -> bool:
     # A cancelled monitor can still finish its worker. Read the final durable
     # ownership only after acquiring the same lock as that operation.
     with _operation_lock:
         return _restore_if_owned_locked(_load_state())
+
+
+def _system_stopping() -> bool:
+    try:
+        result = subprocess.run(["/usr/bin/systemctl", "is-system-running"], env=system_env(LC_ALL="C"),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, timeout=2.0, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip() == "stopping"
+
+
+def _restore_at_unload() -> bool:
+    """False when InputPlumber was lost because the system is shutting down.
+
+    systemd stops InputPlumber before Decky, so that loss is expected; the next
+    start confirms the profile again. Any other failure is still raised.
+    """
+    try:
+        _restore_current_if_owned()
+    except RemapError:
+        if _system_stopping():
+            return False
+        raise
+    return True
 
 
 def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
@@ -581,30 +578,45 @@ def _restore_if_owned_locked(state: dict[str, Any]) -> bool:
     desired = _join_profile(header, output)
     if desired == current:
         return False
-    restored = _load_profile(path, desired)
-    if restored != desired:
+    if not _restore_confirmed(_load_profile(path, desired), desired):
         raise RemapError("InputPlumber did not restore the original profile.")
     return True
 
 
-def _inputplumber_signature() -> tuple[int, ...]:
-    info = os.stat(INPUTPLUMBER)
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+def _restore_confirmed(restored: str, desired: str) -> bool:
+    # Semantic like apply: a newer InputPlumber may re-serialize equivalent YAML.
+    if restored == desired:
+        return True
+    if _profile_name(restored) != _profile_name(desired):
+        return False
+    try:
+        got, want = _mapping_blocks(restored)[1], _mapping_blocks(desired)[1]
+    except RemapError:
+        return False
+    return len(got) == len(want) and all(map(_mapping_matches, got, want))
+
+
+# busctl/remap wording that proves none of our mappings can be live: the service,
+# the bus or the controller is gone. A timeout is not proof: InputPlumber may be stalled.
+_ABSENT = re.compile(r"not activatable|not provided by any \.service files|Unknown object|"
+                     r"Failed to connect to bus|not managing a compatible Go 2 controller")
+
+
+def _device_reachable() -> bool:
+    try:
+        _find_device()
+    except RemapError as exc:
+        return not _ABSENT.search(str(exc))
+    return True
 
 
 def _inputplumber_version() -> str:
     """Cache only the binary's label, never live profiles or hardware state."""
     global _version_cache
     with _version_lock:
-        try:
-            signature = _inputplumber_signature()
-        except OSError:
-            _version_cache = None
-            return ""
-        if (_version_cache is not None and _version_cache[0] == signature
-                and time.monotonic() < _version_cache[1]):
-            return _version_cache[2]
-        _version_cache = None
+        now = time.monotonic()
+        if _version_cache is not None and now < _version_cache[1]:
+            return _version_cache[0]
         value = ""
         try:
             result = subprocess.run(
@@ -623,15 +635,9 @@ def _inputplumber_version() -> str:
                 value = result.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
-        try:
-            if signature != _inputplumber_signature():
-                return ""
-        except OSError:
-            return ""
         # A failed metadata probe must not hide a working D-Bus controller, nor
         # launch another process for every simultaneous status request.
-        ttl = VERSION_CACHE_TTL_S if value else VERSION_RETRY_S
-        _version_cache = (signature, time.monotonic() + ttl, value)
+        _version_cache = (value, now + (VERSION_CACHE_TTL_S if value else VERSION_RETRY_S))
         return value
 
 
@@ -702,7 +708,14 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
         else:
             try:
                 if before["enabled"]:
-                    _restore_if_owned(before)
+                    try:
+                        _restore_if_owned_locked(before)
+                    except RemapError:
+                        # InputPlumber is down: its restart loads its own profile, so
+                        # nothing of ours stays live. Refusing would let the watchdog
+                        # re-adopt that profile and re-apply mappings the user turned off.
+                        if _device_reachable():
+                            raise
                 desired["baseline_profile"] = None
                 desired["previous_actions"] = None
                 _save_state(desired)
@@ -720,13 +733,13 @@ def _repair_sync() -> bool:
         state = _load_state()
         if not state["enabled"]:
             _service_watch.clear()
-            transition("remap", "managed_profile", True, outcome="unmanaged")
+            transition("remap", "managed_profile", True, outcome="unmanaged", initial=False)
             return True
         try:
             state, _ = _apply_state(state, adopt_external=True)
             _service_watch.capture(_json_value)
             _last_error = ""
-            transition("remap", "managed_profile", True, outcome="confirmed")
+            transition("remap", "managed_profile", True, outcome="confirmed", initial=False)
             return True
         except Exception as exc:
             _last_error = str(exc)
@@ -735,24 +748,13 @@ def _repair_sync() -> bool:
             return False
 
 
-def _suspend_offset() -> float | None:
-    clock = getattr(time, "CLOCK_BOOTTIME", None)
-    if clock is None or not hasattr(time, "clock_gettime"):
-        return None
-    try:
-        return time.clock_gettime(clock) - time.monotonic()
-    except (OSError, ValueError):
-        return None
+_suspend_offset = module_runtime.suspend_offset
 
 
 def _resume_detected() -> bool:
     global _last_suspend_offset
-    current = _suspend_offset()
-    if current is None:
-        return False
-    previous = _last_suspend_offset
-    _last_suspend_offset = current
-    return previous is not None and current - previous >= 1.0
+    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
+    return resumed
 
 
 async def _watch_loop() -> None:
@@ -812,7 +814,8 @@ class Plugin:
             except asyncio.CancelledError:
                 pass
         try:
-            await module_runtime.offload('remap', _restore_current_if_owned)
+            if not await module_runtime.offload('remap', _restore_at_unload):
+                event('remap', 'restore', outcome='deferred', reason='system_stopping', stage='unload', pending=True)
         except Exception as exc:
             event('remap','restore_failed',level='warning',error=exc,stage='unload',pending=True,restored=False)
         finally:
@@ -856,7 +859,3 @@ class Plugin:
             return {"success": True, "status": status}
         except Exception as exc:
             return {"success": False, "error": str(exc), "status": await self.get_status()}
-
-    async def reapply(self):
-        await module_runtime.offload('remap', _repair_sync)
-        return await self.get_status()

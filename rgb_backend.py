@@ -3,8 +3,8 @@
 """Low-overhead lighting control for the Lenovo Legion Go 2.
 
 Joystick-ring control uses the kernel's hid-lenovo-go LED-class ABI.  The
-power-button LED uses one audited MMIO bit from the machine's own DSDT and is
-disabled unless every identity and firmware check matches the tested device.
+power-button LED uses one MMIO bit that the machine's own DSDT names LPBL; it is
+disabled unless the model matches and the live DSDT still has that layout.
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import colorsys
 import copy
+import errno
 import fcntl
-import hashlib
 import mmap
 import os
 import stat
@@ -44,16 +44,13 @@ RGB_SUPPORTED_MODELS = frozenset({
     ("Legion Go 8AHP2", "83N1"),
 })
 
-# Power-button MMIO is independently restricted to the audited machine below.
+# Power-button MMIO is independently restricted to this model (any BIOS version
+# whose DSDT passes _power_led_layout_ok).
 EXPECTED_FAMILY = "Legion Go 8ASP2"
 EXPECTED_PRODUCT = "83N0"
 EXPECTED_BOARD = "LNVNB161216"
-AUDITED_BIOS = "RRCN16WW"
-AUDITED_DSDT_SHA256 = {
-    "1b4231432de76a52e016eb239d38162c78d59e8d0afdb2084c0c86ed84f00f6b",
-}
 
-# RRCN16WW DSDT: OperationRegion ERAM at 0xFEEC2300, LPBL at offset
+# DSDT (RRCN16WW and later, checked live): OperationRegion ERAM at 0xFEEC2300, LPBL at offset
 # 0x10 bit 6.  Logic is inverted: zero is on and one is off.  This deliberately
 # does not use HueSync's older 0xFE0B0300/0x52 mapping, which does not match the
 # DSDT read from the user's Go 2.
@@ -64,6 +61,7 @@ POWER_LED_ADDRESS = POWER_MMIO_BASE + POWER_MMIO_OFFSET
 POWER_LED_MASK = 1 << POWER_LED_BIT
 POWER_LOCK_PATH = "/run/lock/legiongo2companion-power-led.lock"
 DSDT_PATH = "/sys/firmware/acpi/tables/DSDT"
+DSDT_LIMIT = 4 << 20
 DEV_MEM_PATH = "/dev/mem"
 
 SCHEMA_VERSION = 1
@@ -102,6 +100,7 @@ _last_suspend_offset: float | None = None
 _last_error = ""
 _power_capability_cache: tuple[bool, str] | None = None
 _power_capability_retry_at = 0.0
+_power_bios = ""
 POWER_CAPABILITY_RETRY_S = 5.0
 
 
@@ -217,7 +216,15 @@ def _write_attr(path: str, attr: str, value: str, *, force: bool = False) -> boo
     expected = _normalise_attr(attr, value)
     try:
         if not force:
-            current = _normalise_attr(attr, _read_small(target))
+            try:
+                current = _normalise_attr(attr, _read_small(target))
+            except ValueError:
+                current = None  # blank/garbage value: write it, readback still has to confirm
+            except OSError as exc:
+                # hid-lenovo-go refuses to show a profile outside 1..3 but accepts writing one.
+                if exc.errno != errno.EINVAL:
+                    raise
+                current = None
             if current == expected:
                 return True
         flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0)
@@ -312,29 +319,19 @@ def _read_rgb_snapshot_once(path: str) -> dict[str, Any] | None:
             profile = None
     except (OSError, UnicodeError, ValueError):
         return None
-    if (
-        enabled_text not in ("true", "false")
-        or mode not in ("dynamic", "custom")
-        or effect not in RGB_EFFECTS
-        or len(maxima) != 3
-        or any(maximum <= 0 or channel < 0 or channel > maximum
-               for channel, maximum in zip(rgb, maxima))
-        or brightness < 0 or brightness > brightness_max
-        or speed < 0 or speed > 100
-        or (profile is not None and profile not in (1, 2, 3))
-    ):
+    if enabled_text not in ("true", "false"):
         return None
-    return {
+    return _sanitize_snapshot({
         "profile": profile,
         "mode": mode,
         "effect": effect,
         "brightness": brightness,
         "brightness_max": brightness_max,
-        "rgb": list(rgb),
-        "rgb_max": list(maxima),
+        "rgb": rgb,
+        "rgb_max": maxima,
         "speed": speed,
         "enabled": enabled_text == "true",
-    }
+    })
 
 
 def _sanitize_snapshot(raw: Any) -> dict[str, Any] | None:
@@ -458,11 +455,15 @@ def _seed_from_snapshot(state: dict[str, Any], snapshot: dict[str, Any]) -> None
         channel / maximum
         for channel, maximum in zip(snapshot["rgb"], snapshot["rgb_max"])
     )
-    hue, saturation, _value = colorsys.rgb_to_hsv(red, green, blue)
+    hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+    # _target_for_state renders the colour at full value, so a colour-driven effect
+    # keeps its intensity only if the value moves into brightness (black stays dark).
+    if snapshot["effect"] not in ("monocolor", "breathe"):
+        value = 1.0
     state["hue"] = min(359, round(hue * 360))
     state["saturation"] = round(saturation * 100)
     state["brightness"] = round(
-        snapshot["brightness"] * 100 / snapshot["brightness_max"]
+        snapshot["brightness"] * 100 * value / snapshot["brightness_max"]
     )
     state["speed"] = snapshot["speed"]
     state["effect"] = snapshot["effect"]
@@ -558,57 +559,122 @@ def _rgb_matches(state: dict[str, Any], current: dict[str, Any], path: str) -> b
     ))
 
 
+def _aml_pkglen(data: bytes, i: int) -> tuple[int, int]:
+    lead = data[i]
+    if not lead >> 6:
+        return lead & 0x3F, 1
+    value = lead & 0x0F
+    for k in range(lead >> 6):
+        value |= data[i + 1 + k] << (4 + 8 * k)
+    return value, 1 + (lead >> 6)
+
+
+def _aml_integer(data: bytes, i: int) -> tuple[int, int]:
+    if data[i] in (0x00, 0x01):  # Zero, One
+        return data[i], 1
+    size = {0x0A: 1, 0x0B: 2, 0x0C: 4, 0x0E: 8}[data[i]]  # KeyError: not a constant.
+    return int.from_bytes(data[i + 1:i + 1 + size], "little"), 1 + size
+
+
+def _power_led_layout_ok(data: bytes) -> bool:
+    """The live DSDT still defines LPBL as bit 6 of SystemMemory 0xFEEC2310.
+
+    One OperationRegion(ERAM, SystemMemory, 0xFEEC2300, >0x10) and exactly one
+    1-bit LPBL at ERAM bit 0x86 across every Field(ERAM). An element this parser
+    does not know rejects the layout.
+    """
+    try:
+        if data[:4] != b"DSDT" or int.from_bytes(data[4:8], "little") != len(data):
+            return False
+        region = data.find(b"\x5b\x80ERAM")
+        if region < 0 or data.find(b"\x5b\x80ERAM", region + 1) >= 0:
+            return False
+        i = region + 6
+        if data[i] != 0x00:  # SystemMemory
+            return False
+        base, size = _aml_integer(data, i + 1)
+        length, _ = _aml_integer(data, i + 1 + size)
+        if base != POWER_MMIO_BASE or length <= POWER_MMIO_OFFSET:
+            return False
+        found = []
+        start = data.find(b"\x5b\x81")
+        while start >= 0:
+            try:
+                package, count = _aml_pkglen(data, start + 2)
+            except IndexError:
+                break  # Opcode bytes at the very end of the table.
+            name = start + 2 + count
+            if data[name:name + 4] == b"ERAM":
+                end, p, bit = start + 2 + package, name + 5, 0
+                while p < end:
+                    op = data[p]
+                    if op == 0x00:  # ReservedField
+                        width, count = _aml_pkglen(data, p + 1)
+                        bit += width; p += 1 + count
+                    elif op == 0x01:  # AccessField
+                        p += 3
+                    elif op == 0x03:  # ExtendedAccessField
+                        p += 4
+                    elif 0x41 <= op <= 0x5A or op == 0x5F:  # NamedField
+                        width, count = _aml_pkglen(data, p + 4)
+                        if data[p:p + 4] == b"LPBL":
+                            found.append((bit, width))
+                        bit += width; p += 4 + count
+                    else:
+                        return False
+                if p != end:
+                    return False
+            start = data.find(b"\x5b\x81", start + 2)
+        return found == [(POWER_MMIO_OFFSET * 8 + POWER_LED_BIT, 1)]
+    except (IndexError, KeyError):
+        return False
+
+
 def _power_capability() -> tuple[bool, str]:
-    global _power_capability_cache, _power_capability_retry_at
+    global _power_capability_cache, _power_capability_retry_at, _power_bios
     if _power_capability_cache is not None and (
             _power_capability_cache[0] or time.monotonic() < _power_capability_retry_at):
         return _power_capability_cache
     # A transient DMI/DSDT/interface read failure is not a permanent hardware
     # classification. Retry finitely without requiring a Decky process restart.
-    # Every retry still proves the same exact BIOS and DSDT before MMIO access.
+    # Every retry still proves the model and the DSDT layout before MMIO access.
     _power_capability_retry_at = time.monotonic() + POWER_CAPABILITY_RETRY_S
     identity = _read_identity()
     expected = {
         "product_family": EXPECTED_FAMILY,
         "product_name": EXPECTED_PRODUCT,
         "board_name": EXPECTED_BOARD,
-        "bios_version": AUDITED_BIOS,
     }
-    for key, value in expected.items():
-        if identity.get(key) != value:
-            _power_capability_cache = (
-                False,
-                "Power-button control is disabled because this hardware/BIOS "
-                "does not match the audited Go 2 configuration.",
-            )
-            return _power_capability_cache
+    if any(identity.get(key) != value for key, value in expected.items()):
+        _power_capability_cache = (
+            False, "Power-button light control supports only the Legion Go 2 (83N0 / 8ASP2).")
+        return _power_capability_cache
     try:
-        digest = hashlib.sha256()
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(DSDT_PATH, flags)
         try:
-            while True:
+            data = b""
+            while len(data) <= DSDT_LIMIT:
                 block = os.read(fd, 65536)
                 if not block:
                     break
-                digest.update(block)
+                data += block
         finally:
             os.close(fd)
     except OSError:
-        _power_capability_cache = (False, "The BIOS DSDT could not be verified.")
+        _power_capability_cache = (False, "The BIOS ACPI table could not be read.")
         return _power_capability_cache
-    if digest.hexdigest().lower() not in AUDITED_DSDT_SHA256:
+    if not _power_led_layout_ok(data):
         _power_capability_cache = (
-            False,
-            "Power-button control needs a new audit after this BIOS/DSDT change.",
-        )
+            False, "Power-button light is unavailable: this BIOS uses a different ACPI layout for it.")
         return _power_capability_cache
     if not os.path.exists(DEV_MEM_PATH) or not os.access(
         DEV_MEM_PATH, os.R_OK | os.W_OK
     ):
         _power_capability_cache = (False, "The verified power-button interface is unavailable.")
         return _power_capability_cache
+    _power_bios = identity.get("bios_version", "")
     _power_capability_cache = (True, "")
     return _power_capability_cache
 
@@ -839,7 +905,7 @@ def _status() -> dict[str, Any]:
             "current": power_current,
             "managed": state["power_led_managed"],
             "drift": power_drift,
-            "bios": AUDITED_BIOS if power_supported else "",
+            "bios": _power_bios if power_supported else "",
         },
         "recovery_required": state.get("pending") is not None,
         "error": _last_error,
@@ -888,29 +954,18 @@ def _reconcile(*, force: bool = False) -> bool:
         if ok:
             _last_error = ""
         transition("rgb", "reconcile", "confirmed" if ok else failure,
-                   level="info" if ok else "warning",
+                   level="info" if ok else "warning", initial=False,
                    reason="confirmed" if ok else (failure or "hardware_unconfirmed"))
         return ok
 
 
-def _suspend_offset() -> float | None:
-    clock = getattr(time, "CLOCK_BOOTTIME", None)
-    if clock is None or not hasattr(time, "clock_gettime"):
-        return None
-    try:
-        return time.clock_gettime(clock) - time.monotonic()
-    except (OSError, ValueError):
-        return None
+_suspend_offset = module_runtime.suspend_offset
 
 
 def _resume_detected() -> bool:
     global _last_suspend_offset
-    current = _suspend_offset()
-    if current is None:
-        return False
-    previous = _last_suspend_offset
-    _last_suspend_offset = current
-    return previous is not None and current - previous >= 1.0
+    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
+    return resumed
 
 
 async def _offload(function: Callable, *args, **kwargs):
@@ -918,8 +973,6 @@ async def _offload(function: Callable, *args, **kwargs):
 
 
 class Plugin:
-    _setup_error = ""
-
     async def _drift_loop(self) -> None:
         last_check = time.monotonic()
         retry_pending = False
@@ -954,7 +1007,6 @@ class Plugin:
 
     async def _main(self) -> None:
         global _drift_task, _last_suspend_offset
-        Plugin._setup_error = ""
         try:
             await _offload(_ensure_settings_file)
             _last_suspend_offset = _suspend_offset()
@@ -966,7 +1018,6 @@ class Plugin:
             _drift_task = module_runtime.background_task(self._drift_loop())
             decky.logger.info("[lego-rgb] lighting module ready")
         except Exception as exc:
-            Plugin._setup_error = str(exc)
             event('rgb','startup_failed',level='error',error=exc)
             raise
 
@@ -1051,7 +1102,7 @@ class Plugin:
         success, error = await _offload(_change)
         return {"success": success, "error": error, "status": await self.get_status()}
 
-    async def _set_rgb_field(self, field: str, value: Any) -> dict[str, Any]:
+    async def _set_rgb_field(self, **fields: Any) -> dict[str, Any]:
         def _change() -> tuple[bool, str]:
             with _apply_lock:
                 if not _recover_pending():
@@ -1064,7 +1115,7 @@ class Plugin:
                 if path is None or before is None:
                     return False, reason or "The joystick-ring state could not be read."
                 candidate = copy.deepcopy(state)
-                candidate[field] = value
+                candidate.update(fields)
                 candidate = _sanitize_state(candidate, include_pending=False)
                 return _transaction(
                     state,
@@ -1079,52 +1130,29 @@ class Plugin:
     async def set_rings_enabled(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
             return {"success": False, "error": "enabled must be a boolean"}
-        return await self._set_rgb_field("rings_enabled", enabled)
+        return await self._set_rgb_field(rings_enabled=enabled)
 
     async def set_effect(self, effect: str) -> dict[str, Any]:
         if not isinstance(effect, str) or effect.lower() not in RGB_EFFECTS:
             return {"success": False, "error": "unsupported lighting effect"}
-        return await self._set_rgb_field("effect", effect.lower())
+        return await self._set_rgb_field(effect=effect.lower())
 
     async def set_color(self, hue: int, saturation: int) -> dict[str, Any]:
         if type(hue) is not int or type(saturation) is not int:
             return {"success": False, "error": "color values must be integers"}
         if not 0 <= hue <= 359 or not 0 <= saturation <= 100:
             return {"success": False, "error": "color value is outside the supported range"}
-
-        def _change() -> tuple[bool, str]:
-            with _apply_lock:
-                if not _recover_pending():
-                    return False, "Automatic recovery must finish first."
-                state = _load_state()
-                if not state["control_enabled"]:
-                    return False, "Enable RGB control first."
-                path, reason = _rgb_capability()
-                before = _read_rgb_snapshot(path) if path else None
-                if path is None or before is None:
-                    return False, reason or "The joystick-ring state could not be read."
-                candidate = copy.deepcopy(state)
-                candidate["hue"] = hue
-                candidate["saturation"] = saturation
-                return _transaction(
-                    state,
-                    candidate,
-                    before_rgb=before,
-                    apply=lambda: _apply_rgb_target(candidate),
-                )
-
-        success, error = await _offload(_change)
-        return {"success": success, "error": error, "status": await self.get_status()}
+        return await self._set_rgb_field(hue=hue, saturation=saturation)
 
     async def set_brightness(self, brightness: int) -> dict[str, Any]:
         if type(brightness) is not int or not 0 <= brightness <= 100:
             return {"success": False, "error": "brightness must be from 0 to 100"}
-        return await self._set_rgb_field("brightness", brightness)
+        return await self._set_rgb_field(brightness=brightness)
 
     async def set_speed(self, speed: int) -> dict[str, Any]:
         if type(speed) is not int or not 0 <= speed <= 100:
             return {"success": False, "error": "speed must be from 0 to 100"}
-        return await self._set_rgb_field("speed", speed)
+        return await self._set_rgb_field(speed=speed)
 
     async def set_power_led(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:

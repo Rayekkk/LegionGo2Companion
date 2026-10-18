@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import math
 import os
 import re
 import secrets
@@ -33,8 +32,10 @@ from typing import Any
 import decky
 from diagnostics import event, transition
 from safe_settings import SettingsManager
-from remap_backend import SERVICE, INTERFACE, DEVICE_PATH_RE, _json_value, _run_busctl
-from inputplumber_process import ProcessWatch
+from inputplumber_process import (
+    DEVICE_PATH_RE, INTERFACE, SERVICE, ProcessWatch,
+    json_value as _json_value, run_busctl as _run_busctl,
+)
 import controller_imu
 import module_runtime
 
@@ -45,7 +46,6 @@ async def _offload(function, *args, **kwargs):
 
 settings = SettingsManager("controller_settings", decky.DECKY_PLUGIN_SETTINGS_DIR)
 HID_CLASS = Path("/sys/class/hidraw")
-IIO_CLASS = Path("/sys/bus/iio/devices")
 DMI_ROOT = Path("/sys/class/dmi/id")
 GO2_PIDS = {0x61EB, 0x61EC, 0x61ED, 0x61EE}
 SOURCES = {"system", "combined", "left", "right"}
@@ -71,17 +71,8 @@ def _text(path: Path) -> str | None:
         return None
 
 
-def _number(path: Path) -> float | None:
-    try:
-        value = float(_text(path) or "")
-        return value if math.isfinite(value) else None
-    except ValueError:
-        return None
-
-
 def _is_go2() -> bool:
-    return (_text(DMI_ROOT / "sys_vendor") == "LENOVO"
-            and _text(DMI_ROOT / "product_name") in {"83N0", "83N1"})
+    return module_runtime.is_legion_go_2(DMI_ROOT)
 
 
 def _hid_inventory() -> tuple[dict | None, dict | None]:
@@ -116,24 +107,6 @@ def _hid_inventory() -> tuple[dict | None, dict | None]:
     # Ambiguity is not resolved by choosing whichever device was enumerated first.
     return (physical[0] if len(physical) == 1 else None,
             virtual[0] if len(virtual) == 1 else None)
-
-
-def _iio_inventory() -> list[dict]:
-    result = []
-    if not _is_go2():
-        return result
-    for path in list(IIO_CLASS.glob("iio:device*"))[:32]:
-        name = _text(path / "name")
-        if name not in {"gyro_3d", "accel_3d"}:
-            continue
-        prefix = "in_anglvel" if name == "gyro_3d" else "in_accel"
-        frequency = _number(path / f"{prefix}_sampling_frequency")
-        if frequency is None:
-            frequency = _number(path / "sampling_frequency")
-        result.append({"name": name, "path": str(path), "frequency": frequency,
-                       "scale": _number(path / f"{prefix}_scale"),
-                       "raw": {axis: _number(path / f"{prefix}_{axis}_raw") for axis in "xyz"}})
-    return result
 
 
 def _axes(packet: bytes, offsets: tuple[int, int, int], endian: str) -> dict:
@@ -349,10 +322,7 @@ def _capture_time() -> float:
 
 
 def _suspend_offset() -> float:
-    try:
-        return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
-    except (AttributeError, OSError):
-        return 0.0
+    return module_runtime.suspend_offset() or 0.0
 
 
 class Plugin:
@@ -479,7 +449,7 @@ class Plugin:
                 result = {"available": available, "reason": reason, "gyro_source": state["gyro_source"],
                           "applied_source": applied, "controlled": controlled, "conflict": self._conflict,
                           "error": self._error, "physical": physical, "virtual": virtual,
-                          "iio": _iio_inventory(), "imu": imu,
+                          "imu": imu,
                           "recovery_pending": bool(state["ownership"] and state["ownership"].get("pending"))}
                 self._status_cache = (now, copy.deepcopy(result))
             with self._capture_lock:
@@ -882,7 +852,7 @@ class Plugin:
             next_check = now + CHECK_SECONDS
             try:
                 await self._watch_check(resumed)
-                transition("controller", "managed_profile", True, outcome="confirmed")
+                transition("controller", "managed_profile", True, outcome="confirmed", initial=False)
                 retry_delay = RECOVERY_RETRY_SECONDS
             except module_runtime.ControllerPaused:
                 continue
@@ -910,7 +880,7 @@ class Plugin:
         try:
             if source != "system":
                 await _offload(self._select, source, reconcile=True)
-                transition("controller", "managed_profile", True, outcome="confirmed")
+                transition("controller", "managed_profile", True, outcome="confirmed", initial=False)
         except Exception as exc:
             self._error = str(exc)
             transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
@@ -944,6 +914,3 @@ class Plugin:
             await _offload(self._release, persist=True)
         except Exception as exc:
             event('controller','restore_failed',level='warning',error=exc,stage='uninstall',pending=True,restored=False)
-
-    async def _migration(self) -> None:
-        pass

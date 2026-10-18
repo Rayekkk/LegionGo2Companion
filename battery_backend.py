@@ -92,10 +92,7 @@ def _parse_modes(value: str) -> tuple[list[str], str]:
 
 
 def _detect() -> dict[str, Any]:
-    identity = SYS_ROOT / "class/dmi/id"
-    vendor = _read_attr(identity / "sys_vendor", 128)
-    product = _read_attr(identity / "product_name", 128)
-    if vendor != "LENOVO" or product not in {"83N0", "83N1"}:
+    if not module_runtime.is_legion_go_2(SYS_ROOT / "class/dmi/id"):
         raise BatteryError("Battery protection is supported only on Lenovo Legion Go 2.")
     batteries = []
     for candidate in (SYS_ROOT / "class/power_supply").iterdir():
@@ -141,14 +138,7 @@ def _write_mode(path: Path, mode: str) -> None:
         os.close(fd)
 
 
-def _suspend_offset() -> float | None:
-    clock = getattr(time, "CLOCK_BOOTTIME", None)
-    if clock is None or not hasattr(time, "clock_gettime"):
-        return None
-    try:
-        return time.clock_gettime(clock) - time.monotonic()
-    except (OSError, ValueError):
-        return None
+_suspend_offset = module_runtime.suspend_offset
 
 
 class Plugin:
@@ -369,7 +359,7 @@ class Plugin:
                 state = self._load()
                 if not state["managed"]:
                     self._error = ""
-                    transition("battery", "managed_profile", True, outcome="unmanaged")
+                    transition("battery", "managed_profile", True, outcome="unmanaged", initial=False)
                     return
                 device = _detect()
                 target = "Long_Life" if state["requested_enabled"] else state["normal_mode"]
@@ -377,7 +367,7 @@ class Plugin:
                     state["last_applied"] = target
                     self._transact(device, target, state)
                 self._error = ""
-                transition("battery", "managed_profile", True, outcome="confirmed")
+                transition("battery", "managed_profile", True, outcome="confirmed", initial=False)
             except Exception as exc:
                 message = str(exc)
                 transition("battery", "managed_profile", False, level="warning", error=exc,
