@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-import test_integration
+import support
 import wifi_backend as wifi
 import test_wifi_strict as strict_tests
 
@@ -105,22 +105,51 @@ class BandEnforcementTests(unittest.TestCase):
                 result = asyncio.run(self.plugin._verify_band_policy(mode, UUID, timeout=0.01))
             self.assertFalse(result["success"], result)
 
+    def test_verification_never_sleeps_past_its_deadline(self):
+        sleeps = []
+        async def sleep(seconds):
+            sleeps.append(seconds)
+        with patch.object(self.plugin, "_get_link_frequency", return_value=None),              patch.object(wifi.asyncio, "sleep", new=sleep):
+            asyncio.run(self.plugin._verify_band_policy(wifi.BAND_POLICY_OFF, UUID, timeout=0.01))
+        self.assertTrue(sleeps and max(sleeps) < 0.5, sleeps)  # not the full 1 s step
+
     def test_preference_allows_a_connected_2_4_ghz_fallback(self):
         with patch.object(self.plugin, "_get_link_frequency", return_value=2412):
             result = asyncio.run(self.plugin._verify_band_policy(
                 wifi.BAND_POLICY_HIGH_ONLY, UUID, timeout=0.01))
         self.assertTrue(result["success"], result)
 
-    def test_ambiguity_blocks_restart_and_off_without_touching_recovery(self):
+    def test_ambiguity_blocks_an_iwd_restart_without_touching_recovery(self):
         with patch.object(self.plugin, "_get_iwd_profile_conflict", return_value="Ambiguous profiles"), \
              patch.object(self.plugin, "_schedule_band_policy_rollback") as schedule, \
-             patch.object(self.plugin, "_restore_iwd_rank_modifier") as restore:
-            result = self.change(wifi.BAND_POLICY_OFF)
+             patch.object(self.plugin, "_set_iwd_rank_modifier") as write:
+            result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
         self.assertFalse(result["success"], result)
         self.assertEqual(result["error"], "ambiguous_iwd_profiles")
         schedule.assert_not_called()
-        restore.assert_not_called()
-        self.assertTrue(self.iwd.exists())
+        write.assert_not_called()
+        self.assertIn("BandModifier2_4GHz=0.01", self.iwd.read_text(encoding="utf-8"))
+        self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+
+    def test_off_and_uninstall_restore_iwd_for_any_saved_profile_count(self):
+        # 33 saved profiles exceed the verification bound while connected.
+        saved = "".join(f"{UUID[:-2]}{i:02x}:802-11-wireless\n" for i in range(32))
+        saved += f"{UUID}:802-11-wireless\n"
+
+        def command(argv, **kwargs):
+            if argv[-3:] == ["UUID,TYPE", "con", "show"]:
+                return {"success": True, "stdout": saved}
+            return {"success": True, "stdout": "active\n"}
+
+        self.commands.side_effect = command
+        conflict = wifi.Plugin._get_iwd_profile_conflict.__get__(self.plugin)
+        self.assertTrue(conflict(UUID, allow_disabled_duplicates=True))
+        # _uninstall and module withdrawal both release through set_band_policy(OFF).
+        with patch.object(self.plugin, "_get_iwd_profile_conflict", side_effect=conflict), \
+             patch.object(self.plugin, "set_band_policy", side_effect=self.plugin._set_band_policy_impl):
+            asyncio.run(self.plugin._uninstall())
+        self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
+        self.assertFalse(self.settings.exists(), "uninstall confirmed the restore")
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 
 
@@ -134,9 +163,14 @@ class ProfileInventoryTests(unittest.TestCase):
         if listing is None:
             listing = "\n".join(entry[0] + ":802-11-wireless" for entry in entries)
         if body is None:
-            body = "\n\n".join("\n".join((uid, "802-11-wireless", "yes" if auto else "no",
-                                          ssid, "yes" if hidden else "no", key))
-                                  for uid, ssid, key, auto, hidden in entries) + "\n"
+            # `nmcli -t -f` output: "key:value" lines, blank line between profiles,
+            # a profile without security (open network) has no key-mgmt line.
+            body = "\n\n".join("\n".join(filter(None, (
+                f"connection.uuid:{uid}", "connection.type:802-11-wireless",
+                f"connection.autoconnect:{'yes' if auto else 'no'}",
+                f"802-11-wireless.ssid:{ssid}", f"802-11-wireless.hidden:{'yes' if hidden else 'no'}",
+                f"802-11-wireless-security.key-mgmt:{key}" if key else "")))
+                for uid, ssid, key, auto, hidden in entries) + "\n"
         with patch.object(plugin, "_get_iwd_known_network_preferences", return_value=preferences), \
              patch.object(plugin, "_run_cmd", side_effect=[
             {"success": True, "stdout": listing},
@@ -150,6 +184,12 @@ class ProfileInventoryTests(unittest.TestCase):
     def test_single_sae_or_psk_profile_is_unchanged(self):
         for key in ("sae", "wpa-psk"):
             self.assertEqual(self.inventory([(UUID, "Target", key)]), "")
+
+    def test_open_profile_in_any_position_does_not_block_verification(self):
+        open_entry = (self.OTHER, "Cafe", "")
+        for entries in ([(UUID, "Home", "sae"), open_entry], [open_entry, (UUID, "Home", "sae")]):
+            self.assertEqual(self.inventory(entries), "")
+        self.assertEqual(self.inventory([(UUID, "Cafe", ""), (self.OTHER, "Home", "sae")]), "")
 
     def test_other_ssid_or_different_security_family_does_not_collide(self):
         for ssid, key in (("Other", "wpa-psk"), ("Target", "wpa-eap")):
@@ -296,6 +336,64 @@ class ReconnectAmbiguityTests(unittest.TestCase):
                 result = plugin._reconnect_profile(UUID, cycle=cycle)
             self.assertFalse(result["success"])
             run.assert_not_called()
+
+
+class WifiConnectionIdentityTests(unittest.TestCase):
+    OWN = 'da58df8b-cdb1-447d-80ab-19d11a634e7e'
+    OTHER = '85194f4c-d496-4eec-bae0-d880b4cbcf26'
+
+    def test_ui_connection_requires_completed_networkmanager_activation(self):
+        plugin = wifi.Plugin()
+        for state, expected in (('50 (connecting (configuring))', None),
+                                ('70 (connecting (getting IP configuration))', None),
+                                ('100 (connected)', self.OWN), ('100', self.OWN),
+                                ('1000', None), ('', None)):
+            with self.subTest(state=state), patch.object(plugin, '_run_cmd', return_value={
+                    'success': True, 'stdout': state + '\n' + self.OWN}) as command:
+                self.assertEqual(plugin._get_active_connection_uuid(
+                    'wlan0', require_connected=True), expected)
+                self.assertEqual(command.call_count, 1)
+                self.assertIn('GENERAL.STATE,GENERAL.CON-UUID', command.call_args.args[0])
+                self.assertEqual(command.call_args.kwargs['timeout'], 2)
+
+    def responses(self, device_uuid):
+        def run(argv, **kwargs):
+            if argv[-2:] == ['device', 'show']:
+                raise AssertionError('A UUID read must name its interface.')
+            if 'GENERAL.CON-UUID' in argv:
+                self.assertEqual(argv[-1], 'wlan0')
+                return {'success': True, 'stdout': device_uuid + '\n'}
+            if 'GENERAL.STATE,GENERAL.CON-UUID' in argv:
+                self.assertEqual(argv[-1], 'wlan0')
+                return {'success': True, 'stdout': f'100 (connected)\n{device_uuid}\n'}
+            raise AssertionError(argv)
+        return run
+
+    def test_selected_interface_cannot_inherit_another_adapters_profile(self):
+        plugin = wifi.Plugin()
+        with patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
+                patch.object(plugin, '_run_cmd', side_effect=self.responses(self.OWN)):
+            self.assertEqual(plugin._get_active_connection_uuid(), self.OWN)
+
+    def test_disconnected_interface_cannot_borrow_another_active_profile(self):
+        plugin = wifi.Plugin()
+        for value in ('', '--', 'invalid', self.OWN + '\n' + self.OTHER):
+            with self.subTest(value=value), \
+                    patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
+                    patch.object(plugin, '_run_cmd', side_effect=self.responses(value)):
+                self.assertIsNone(plugin._get_active_connection_uuid())
+
+    def test_captured_interface_reuses_discovery_and_activity_belongs_to_that_adapter(self):
+        plugin = wifi.Plugin()
+        with patch.object(plugin, '_get_wifi_interface') as discovery, \
+                patch.object(plugin, '_run_cmd', side_effect=self.responses(self.OWN)) as command:
+            self.assertEqual(plugin._get_active_connection_uuid('wlan0'), self.OWN)
+            discovery.assert_not_called()
+            self.assertEqual(command.call_count, 1, 'A captured interface needs one device UUID query.')
+            self.assertTrue(plugin._profile_is_active(self.OWN, 'wlan0'))
+            self.assertFalse(plugin._profile_is_active(self.OTHER, 'wlan0'))
+            self.assertFalse(plugin._profile_is_active('unknown', 'wlan0'))
+            discovery.assert_not_called()
 
 
 if __name__ == "__main__":

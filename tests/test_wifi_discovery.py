@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_integration
+import support
 import wifi_backend as wifi
 import test_wifi_strict as strict_tests
 
@@ -405,14 +405,72 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(radio.call_count, 1)
         self.assertEqual(scan.call_count, 1)
 
+    async def test_no_carrier_backs_off_nmcli_and_resumes_within_one_poll(self):
+        plugin = wifi.Plugin()
+        stop = threading.Event()
+        clock = [0.0]
+        carrier_at = 600.0  # radio off / out of range for 10 minutes
+        spawns, found = [], []
+
+        def up():
+            return clock[0] >= carrier_at
+
+        def command(argv, **_kwargs):
+            spawns.append(clock[0])
+            if argv[-2:] == ["dev", "status"]:
+                return {"success": True, "stdout": "wlan0:wifi\np2p-dev-wlan0:wifi-p2p\n"}
+            if argv[-3:-1] == ["device", "show"]:
+                state = (f"100 (connected)\n{UUID}\n/org/freedesktop/NetworkManager/ActiveConnection/5\n"
+                         if up() else "30 (disconnected)\n\n\n")
+                return {"success": True, "stdout": state}
+            return {"success": True, "stdout": "\tfreq: 2412\n"}
+
+        def sysfs(path, *_args, **_kwargs):
+            if path.endswith("/ifindex"):
+                return io.StringIO("3\n")
+            if path.endswith("/operstate"):
+                return io.StringIO("up\n" if up() else "down\n")
+            raise OSError(path)
+
+        async def worker(fn, *args, **_kwargs):
+            return fn(*args)
+
+        async def sleep(seconds):
+            clock[0] += seconds
+
+        def discover(_link, _stop):
+            found.append(clock[0])
+            stop.set()
+            return {"success": True, "frequency": 2412}
+
+        with patch.object(wifi, "_load_settings", return_value=SETTINGS), \
+             patch.object(wifi, "open", side_effect=sysfs, create=True), \
+             patch.object(wifi.os.path, "realpath", return_value="/sys/bus/pci/drivers/mt7921e"), \
+             patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(wifi.asyncio, "sleep", side_effect=sleep), \
+             patch.object(plugin, "_worker_complete", side_effect=worker), \
+             patch.object(plugin, "_run_cmd", side_effect=command), \
+             patch.object(plugin, "_suspend_offset", return_value=0.0), \
+             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
+             patch.object(plugin, "_release_band_policy_file_lock"), \
+             patch.object(plugin, "_discover_high_bands", side_effect=discover):
+            await plugin._high_band_monitor(stop)
+        offline = [t for t in spawns if t < carrier_at]
+        # Two nmcli per full check, at most one full check per idle period.
+        self.assertLessEqual(len(offline), 2 * (carrier_at // wifi.HIGH_BAND_IDLE_SECONDS + 1), offline)
+        self.assertEqual(len(found), 1)
+        self.assertLessEqual(found[0] - carrier_at, wifi.HIGH_BAND_MONITOR_SECONDS)
+
     async def monitor(self, observations, offsets=None, results=None):
         plugin = wifi.Plugin()
         stop = threading.Event()
         clock = [0.0]
         index = [0]
+        self.sleeps = []
         async def worker(fn, *args, **_kwargs):
             return fn(*args)
         async def sleep(seconds):
+            self.sleeps.append(seconds)
             clock[0] += seconds
             index[0] += 1
             if index[0] >= len(observations):
@@ -463,6 +521,25 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_already_six_ghz_does_not_scan(self):
         self.assertEqual(await self.monitor([link(6295)] * 5), 0)
 
+    async def test_polling_backs_off_when_there_is_nothing_left_to_try(self):
+        await self.monitor([link(6295)] * 3)
+        six = self.sleeps
+        await self.monitor([link()] * 10)
+        fast = self.sleeps[0]
+        self.assertTrue(all(delay > fast for delay in six), six)
+        self.assertEqual(self.sleeps[:5], [fast] * 5)  # still retrying: fast cadence
+        self.assertGreater(self.sleeps[-1], fast)  # budget used up
+
+    async def test_new_connection_returns_polling_to_the_fast_cadence(self):
+        await self.monitor([link()] * 9 + [link(path=6)] * 2)
+        fast = self.sleeps[0]
+        self.assertGreater(self.sleeps[8], fast)
+        self.assertEqual(self.sleeps[-1], fast)
+
+    async def test_dropping_below_six_ghz_returns_polling_to_the_fast_cadence(self):
+        await self.monitor([link(6295)] * 3 + [link()])
+        self.assertGreater(self.sleeps[0], self.sleeps[-1])
+
     async def test_disconnect_and_lower_band_after_six_reset_budget(self):
         self.assertEqual(await self.monitor([link(), None, link(), link(6295), link()]), 3)
 
@@ -509,18 +586,14 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_main_starts_discovery_without_frontend_call(self):
         plugin = wifi.Plugin()
         with ExitStack() as stack:
-            for name, value in {"_rotate_logs": None, "_acquire_band_policy_file_lock": object(),
+            for name, value in {"_acquire_band_policy_file_lock": object(),
                                 "_release_band_policy_file_lock": None,
-                                "_recover_power_save_journal": {"success": True},
                                 "_recover_band_policy_journal": {"success": True},
-                                "_detect_distro": {"id": "steamos", "name": "SteamOS"},
-                                "_get_wifi_interface": None, "_get_current_backend": None,
-                                "_atomic_write_json": None}.items():
+                                "_get_wifi_interface": None}.items():
                 stack.enter_context(patch.object(plugin, name, return_value=value))
             stack.enter_context(patch.object(plugin, "get_device_info", new=AsyncMock(return_value=SETTINGS)))
             stack.enter_context(patch.object(wifi, "_load_settings", return_value=dict(SETTINGS)))
             stack.enter_context(patch.object(wifi, "_save_settings"))
-            stack.enter_context(patch.object(wifi.os, "remove"))
             start = stack.enter_context(patch.object(plugin, "_start_high_band_monitor"))
             self.assertTrue((await plugin._main())["success"])
             start.assert_called_once()
@@ -592,6 +665,81 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(plugin._high_band_monitor_task)
             gate.release()
             self.assertTrue((await asyncio.wait_for(off, 1))["success"])
+
+
+class WifiLockCancellationTests(unittest.TestCase):
+    def test_wifi_cancel_retains_lock_until_worker_stops(self):
+        plugin = wifi.Plugin()
+        started, finish, ended = threading.Event(), threading.Event(), threading.Event()
+        released_while_running = []
+        def worker():
+            started.set()
+            finish.wait(timeout=5)
+            ended.set()
+            return {"success": True}
+        def unlock(handle):
+            released_while_running.append(started.is_set() and not ended.is_set())
+        async def scenario():
+            task = asyncio.create_task(plugin.rescan_and_reconnect())
+            for _ in range(200):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            self.assertTrue(started.is_set())
+            try:
+                task.cancel()
+                await asyncio.sleep(0.02)
+                self.assertFalse(task.done())
+                self.assertEqual(released_while_running, [])
+                finish.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                finish.set()
+        with patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
+             patch.object(plugin, "_release_band_policy_file_lock", side_effect=unlock), \
+             patch.object(plugin, "_rescan_and_reconnect_sync", side_effect=worker):
+            asyncio.run(scenario())
+        self.assertEqual(released_while_running, [False])
+
+    def test_cancel_during_wifi_lock_acquisition_releases_obtained_handle(self):
+        plugin = wifi.Plugin()
+        started, finish = threading.Event(), threading.Event()
+        handle = object()
+        def acquire():
+            started.set()
+            finish.wait(3)
+            return handle
+        async def scenario():
+            task = asyncio.create_task(plugin.rescan_and_reconnect())
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            task.cancel()
+            await asyncio.sleep(0.01)
+            self.assertFalse(task.done())
+            finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        with patch.object(plugin, "_acquire_band_policy_file_lock", side_effect=acquire), \
+             patch.object(plugin, "_release_band_policy_file_lock") as release, \
+             patch.object(plugin, "_rescan_and_reconnect_sync") as mutate:
+            asyncio.run(scenario())
+            release.assert_called_once_with(handle)
+            mutate.assert_not_called()
+
+
+class WifiLockFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_file_lock_reports_error_without_synchronous_settings_io(self):
+        plugin = wifi.Plugin()
+        with patch.object(plugin, '_acquire_band_policy_file_lock', side_effect=PermissionError('lock unavailable')), \
+                patch.object(wifi, '_load_settings', side_effect=AssertionError('Settings I/O on the event loop')) as read, \
+                patch.object(plugin, '_set_band_policy_impl') as mutate:
+            result = await plugin.set_band_policy(wifi.BAND_POLICY_HIGH_ONLY)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error'], 'band_policy_lock_failed')
+        self.assertIn('lock unavailable', result['detail'])
+        read.assert_not_called()
+        mutate.assert_not_called()
 
 
 if __name__ == "__main__":

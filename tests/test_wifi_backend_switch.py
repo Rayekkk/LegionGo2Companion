@@ -2,8 +2,9 @@
 """Native SteamOS backend/profile changes must not revive an old manager."""
 import asyncio
 import json
+import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 import test_wifi_strict as strict
 import wifi_backend as wifi
@@ -171,6 +172,8 @@ class BackendSwitchTests(unittest.TestCase):
         self.plugin._reconnect_profile.assert_not_called()
 
     def status_commands(self, argv, **kwargs):
+        if argv == ["/usr/bin/nmcli", "--version"]:
+            return {"success": True, "stdout": "nmcli tool, version 1.52.1"}
         if "GENERAL.STATE,GENERAL.CON-UUID" in argv:
             return {"success": True, "stdout": "100 (connected)\n" + NEW}
         if argv[-1] == "link":
@@ -185,7 +188,7 @@ class BackendSwitchTests(unittest.TestCase):
         state.update(device_family="legion_go_2", driver="mt7921e")
         wifi._save_settings(state)
         with patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
-             patch.object(self.plugin, "_get_support_tier", return_value=2), \
+\
              patch.object(self.plugin, "_run_cmd", side_effect=self.status_commands):
             result = self.plugin._get_status_sync()
         self.assertTrue(result["success"], result)
@@ -193,15 +196,16 @@ class BackendSwitchTests(unittest.TestCase):
         self.assertEqual(result["live"]["connection_state"], "connected")
         self.assertEqual(result["live"]["ssid"], " spaced name ")
         self.assertEqual(result["live"]["band_policy"], wifi.BAND_POLICY_OFF)
-        self.assertEqual(result["live"]["saved_band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
+        self.assertEqual(result["settings"]["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
         self.assertTrue(result["live"]["saved_policy_inactive"])
         self.assertTrue(result["live"]["band_policy_restore_available"])
+        self.assertIs(result["live"]["six_ghz_only_supported"], False)
 
     def test_profile_change_during_status_invalidates_cached_radio_and_ssid(self):
         self.use_wpa()
         self.plugin._get_active_connection_uuid.return_value = strict.UUID
         with patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
-             patch.object(self.plugin, "_get_support_tier", return_value=2), \
+\
              patch.object(self.plugin, "_run_cmd", side_effect=self.status_commands):
             result = self.plugin._get_status_sync()
         self.assertTrue(result["success"], result)
@@ -220,7 +224,6 @@ class ConnectionStateTests(unittest.TestCase):
                  patch.object(plugin, "_get_current_backend", return_value="iwd"), \
                  patch.object(plugin, "_get_network_recovery_issues", return_value=[]), \
                  patch.object(plugin, "_load_band_policy_journal", return_value=None), \
-                 patch.object(plugin, "_load_power_save_journal", return_value=None), \
                  patch.object(plugin, "_run_cmd", return_value=response):
                 status = plugin._get_status_sync()
             self.assertTrue(status["success"], status)
@@ -229,15 +232,46 @@ class ConnectionStateTests(unittest.TestCase):
 
     def test_state_names_distinguish_activation_from_connection(self):
         plugin = wifi.Plugin()
-        for state, expected in (("30 (disconnected)", "disconnected"),
-                                ("50 (connecting (configuring))", "connecting"),
-                                ("70", "connecting"), ("100 (connected)", "connected"),
-                                ("invalid", "unknown")):
-            with self.subTest(state=state), patch.object(plugin, "_run_cmd", return_value={
-                    "success": True, "stdout": state + "\n" + NEW}):
+        # Real nmcli -g output: a device without an active profile prints an empty CON-UUID line.
+        for stdout, expected in (("30 (disconnected)\n\n", "disconnected"),
+                                 ("20 (unavailable)\n\n", "disconnected"),
+                                 ("50 (connecting (configuring))\n" + NEW + "\n", "connecting"),
+                                 ("70\n" + NEW + "\n", "connecting"),
+                                 ("100 (connected)\n" + NEW + "\n", "connected"),
+                                 ("invalid\n\n", "unknown")):
+            done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+            with self.subTest(stdout=stdout), patch.object(wifi.subprocess, "run", return_value=done):
                 self.assertEqual(plugin._get_connection_state("wlan0")["connection_state"], expected)
         with patch.object(plugin, "_run_cmd", return_value={"success": False}):
             self.assertEqual(plugin._get_connection_state("wlan0")["connection_state"], "unknown")
+
+    def test_effective_networkmanager_config_overrides_distribution_file(self):
+        plugin = wifi.Plugin()
+        distro = "[device]\nwifi.backend=iwd\n"  # /usr/lib default; an /etc override wins in NM
+        effective = ("# NetworkManager configuration: /usr/lib/NetworkManager/conf.d/"
+                     "10-steamos-defaults.conf, /etc/NetworkManager/conf.d/zz-user.conf\n\n"
+                     "[main]\ndns=systemd-resolved\n\n[device-wlan1]\nwifi.backend=iwd\n\n"
+                     "[device]\nwifi.backend=wpa_supplicant\nwifi.iwd.autoconnect=yes\n")
+        services = {"success": True, "stdout": "active"}
+
+        def run(cmd, timeout=5, preserve_stdout=False):
+            if cmd[-1] == "--print-config":
+                return {"success": True, "stdout": effective}
+            return services
+
+        opener = patch("builtins.open", mock_open(read_data=distro))
+        with opener, patch.object(plugin, "_run_cmd", side_effect=run):
+            self.assertEqual(plugin._get_current_backend(), "wpa_supplicant")
+        effective = effective.replace("wifi.backend=wpa_supplicant", "wifi.backend=iwd")
+        with opener, patch.object(plugin, "_run_cmd", side_effect=run):
+            self.assertEqual(plugin._get_current_backend(), "iwd")
+        # Without wifi.backend NM uses its built-in default: only one running service decides.
+        effective = "[device]\nwifi.iwd.autoconnect=yes\n"
+        with opener, patch.object(plugin, "_run_cmd", side_effect=run):
+            self.assertIsNone(plugin._get_current_backend())
+        # print-config failing keeps the file-based detection.
+        with opener, patch.object(plugin, "_run_cmd", return_value={"success": False, "stdout": ""}):
+            self.assertEqual(plugin._get_current_backend(), "iwd")
 
     def test_unconfigured_backend_with_competing_services_is_unknown(self):
         plugin = wifi.Plugin()

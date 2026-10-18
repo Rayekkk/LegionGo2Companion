@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-import test_integration  # Install isolated Decky stubs before backend imports.
+import support  # Install isolated Decky stubs before backend imports.
 import module_control
 import wifi_backend as wifi
 
@@ -30,7 +30,6 @@ class StrictWifiTests(unittest.TestCase):
             "BAND_POLICY_STATE_DIR": str(self.journal_dir),
             "BAND_POLICY_RUNTIME_DIR": str(self.runtime_dir),
             "BAND_POLICY_JOURNAL_FILE": str(self.journal_dir / "band-policy-transaction.json"),
-            "POWER_SAVE_JOURNAL_FILE": str(self.journal_dir / "power-save-transaction.json"),
             "BAND_POLICY_LOCK_FILE": str(self.runtime_dir / "band-policy.lock"),
             "_SETTINGS_MANAGER": None, "_SETTINGS_MANAGER_PATH": "",
         }.items():
@@ -74,16 +73,7 @@ class StrictWifiTests(unittest.TestCase):
 
     def change(self, mode, allow_unverified_scan=False):
         return asyncio.run(self.plugin._set_band_policy_impl(
-            mode, lock_already_held=True,
-            allow_unverified_scan=allow_unverified_scan))
-
-    def test_pending_power_save_recovery_blocks_band_change_without_rewriting_it(self):
-        journal = {"schema": 1, "phase": "applying", "operation_id": "test-pending"}
-        self.plugin._save_power_save_journal(journal)
-        result = self.change(wifi.BAND_POLICY_OFF)
-        self.assertEqual(result["error"], "network_recovery_required")
-        self.assertEqual(self.plugin._load_power_save_journal(), journal)
-        self.commands.assert_not_called()
+            mode, allow_unverified_scan=allow_unverified_scan))
 
     def test_preference_to_strict_writes_iwd_once_and_preserves_baseline(self):
         original_write = self.plugin._set_iwd_rank_modifier
@@ -97,6 +87,38 @@ class StrictWifiTests(unittest.TestCase):
         self.assertFalse(saved["band_preference_enabled"])
         self.assertEqual(saved["band_policy_state"]["original"]["iwd"], self.baseline)
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+
+    def test_turning_a_policy_off_is_not_rolled_back_by_a_failed_reconnect(self):
+        failed = {"success": False, "stderr": "No network with SSID found."}
+        with patch.object(self.plugin, "_reconnect_profile", return_value=failed):
+            result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertTrue(result["success"], result)
+        self.assertFalse(result["rolled_back"])
+        self.assertFalse(result["reconnected"])
+        self.assertFalse(self.iwd.exists() and "BandModifier2_4GHz" in self.iwd.read_text(encoding="utf-8"))
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
+        self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+
+    def test_six_only_off_keeps_the_cleared_band_when_no_ap_is_reachable(self):
+        self.iwd.unlink()
+        state = dict(wifi.DEFAULT_SETTINGS)
+        state.update(band_policy=wifi.BAND_POLICY_SIX_ONLY, band_policy_state={
+            "schema": 1, "mode": wifi.BAND_POLICY_SIX_ONLY, "connection_uuid": UUID,
+            "original": {"nm_band": "", "iwd": self.baseline},
+            "owns_nm_band": True, "owns_iwd": False,
+            "applied": {"nm_band": "6GHz", "iwd_modifier_present": False, "iwd_modifier_value": ""}})
+        self.settings.write_text(json.dumps(state), encoding="utf-8")
+        fields = {"802-11-wireless.band": "6GHz"}
+        plugin = self.plugin
+        with patch.object(plugin, "_get_current_backend", return_value="wpa_supplicant"), \
+             patch.object(plugin, "_nmcli_get", side_effect=lambda _u, f, **k: (fields.get(f, ""), {"success": True})), \
+             patch.object(plugin, "_nmcli_modify", side_effect=lambda _u, f, v, **k: (fields.__setitem__(f, v), {"success": True})[1]), \
+             patch.object(plugin, "_get_link_frequency", return_value=None), \
+             patch.object(plugin, "_reconnect_profile", return_value={"success": False, "stderr": "No AP"}):
+            result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(fields["802-11-wireless.band"], "")
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
 
     def test_failed_strict_connection_rolls_back_preference_and_iwd_file(self):
         with patch.object(self.plugin, "_verify_band_policy", new_callable=AsyncMock,
@@ -196,6 +218,25 @@ class StrictWifiTests(unittest.TestCase):
             fresh = self.plugin._get_band_policy_capabilities_sync(True)
             self.assertTrue(fresh["five_six_only_available"])
 
+    def test_six_ghz_only_preflight_skips_the_5ghz_searches(self):
+        scans = []
+        def command(argv, **_kwargs):
+            scans.append(argv)
+            return {"success": True, "stdout": "first" if len(scans) == 1 else ""}
+        five = [5180, 5200] + list(range(5260, 5340, 20)) + list(range(5500, 5740, 20))
+        with patch.object(self.plugin, "_get_profile_ssid", return_value="Home"), \
+             patch.object(self.plugin, "_iw_scan_command", side_effect=lambda _i, _s, freqs: ["iw", *map(str, freqs)]), \
+             patch.object(self.plugin, "_iw_scan_bss", side_effect=lambda out, _s: [{"frequency": 6295}] if out == "first" else []), \
+             patch.object(self.plugin, "_nmcli_wifi_bss", return_value=None):
+            self.commands.side_effect = command
+            for need_five, expected in ((False, 1), (True, 2 + 16)):
+                with self.subTest(need_five=need_five):
+                    scans.clear(); self.plugin._visible_band_cache = None
+                    bands = self.plugin._get_visible_bands_for_active_ssid(
+                        "wlan0", "uuid", True, five_ghz_frequencies=five, six_ghz_frequencies=[6295],
+                        need_five=need_five)
+                    self.assertEqual((bands["six_ghz"], len(scans)), (1, expected))
+
     def test_invalid_policy_types_do_not_start_network_transaction(self):
         for value in (None, 1, [], {}, "5ghz"):
             result = self.change(value)
@@ -225,13 +266,12 @@ class StrictWifiTests(unittest.TestCase):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
         self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")
         with patch.object(self.plugin, "_get_wifi_interface", return_value=None), \
-             patch.object(self.plugin, "_get_active_connection_uuid", return_value=None), \
-             patch.object(self.plugin, "_get_support_tier", return_value=2):
+             patch.object(self.plugin, "_get_active_connection_uuid", return_value=None):
             status = self.plugin._get_status_sync()
         self.assertTrue(status["success"])
         self.assertFalse(status["connected"])
         self.assertTrue(status["drift"]["band_policy"])
-        self.assertIn("outside WiFi Optimizer", status["live"]["band_policy_error"])
+        self.assertIn("outside Legion Go 2 Companion", status["live"]["band_policy_error"])
 
     def test_module_resume_remembers_exact_strict_policy(self):
         state = wifi._load_settings()
@@ -241,7 +281,6 @@ class StrictWifiTests(unittest.TestCase):
         self.assertEqual(intent["band_policy"], wifi.BAND_POLICY_STRICT_HIGH)
         component = Mock()
         component.set_band_policy = AsyncMock(return_value={"success": True})
-        component.set_power_save = AsyncMock(return_value={"success": True})
         asyncio.run(module_control.restore_intent("wifi", component, intent))
         component.set_band_policy.assert_awaited_once_with(wifi.BAND_POLICY_STRICT_HIGH)
 

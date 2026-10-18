@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-import test_integration  # Install isolated Decky/Linux doubles for standalone discovery.
+import support  # Install isolated Decky/Linux doubles for standalone discovery.
 import wifi_backend as wifi
 
 
@@ -151,12 +151,14 @@ class WifiScanFormatTests(unittest.TestCase):
                 with self.subTest(separator=repr(separator), duplicate=duplicate):
                     ssid = 'A' + separator + 'B'
                     def run(argv, **_kwargs):
-                        if '-t' in argv:
+                        if 'UUID,TYPE' in argv:
                             output = f'{UUID}:802-11-wireless\n{other}:802-11-wireless\n'
                         else:
-                            output = (f'{UUID}\n802-11-wireless\nyes\n{ssid}\nno\nwpa-psk\n\n'
-                                      f'{other}\n802-11-wireless\nyes\n'
-                                      f'{ssid if duplicate else "AB"}\nno\nwpa-psk\n')
+                            def record(uid, name):
+                                return (f'connection.uuid:{uid}\nconnection.type:802-11-wireless\n'
+                                        f'connection.autoconnect:yes\n802-11-wireless.ssid:{name}\n'
+                                        '802-11-wireless.hidden:no\n802-11-wireless-security.key-mgmt:wpa-psk\n')
+                            output = record(UUID, ssid) + '\n' + record(other, ssid if duplicate else 'AB')
                         return subprocess.CompletedProcess(argv, 0, output, '')
                     with patch.object(wifi.subprocess, 'run', side_effect=run):
                         conflict = wifi.Plugin()._get_iwd_profile_conflict(UUID)
