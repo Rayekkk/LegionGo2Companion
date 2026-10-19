@@ -43,6 +43,17 @@ from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 MODULE_NAMES = ('tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
 FIRMWARE_RPCS = frozenset({'firmware_get_status', 'firmware_check', 'firmware_download', 'firmware_install'})
 UPDATE_RPCS = frozenset({'updates_check', 'updates_download'}) | FIRMWARE_RPCS
+# Admission exceptions (_guard_component_calls). By default a public RPC waits for startup, is refused while the
+# conflict guard is blocked/failed or the plugin closes, and needs its module (_rpc_module) enabled, ready and
+# not paused; module-less calls (modules_*, updates) also wait while controllers are paused and drain admitted RPCs.
+_UNGUARDED_RPCS = frozenset({'get_version'})
+# Paused or disabled modules cannot hide the update state; this snapshot never opens a controller.
+_ALWAYS_ADMITTED_RPCS = frozenset({'firmware_get_status'})
+_RPC_RESOURCE = {'battery_get_controller_levels': 'controller'}  # Pauses with the controllers, not the battery.
+_PAUSE_EXEMPT_RPCS = FIRMWARE_RPCS  # The firmware handoff itself.
+_PAUSE_EXEMPT_MODULE_CHANGES = tuple(name for name in MODULE_NAMES if name not in module_runtime.CONTROLLER_MODULES)
+_BACKGROUND_RPCS = UPDATE_RPCS | {'retry_extras', 'set_extras_unlocked'}  # May download (Extras: RyzenAdj).
+_UPDATER_RPCS = UPDATE_RPCS - FIRMWARE_RPCS  # Need the companion updater started.
 GUARD_FAILURE_LIMIT = 3  # Consecutive failed scans (~15 s of periodic checks) before modules are withdrawn.
 UPDATER_WAIT_S = len(INSTALL_ORDER) * INSTALL_SECONDS  # One fwupd time limit per controller component.
 UPDATER_POLL_S = 2.0
@@ -214,15 +225,14 @@ def _end_decky_listener_at_eof():
 def _guard_component_calls(cls):
     """Default-deny every public component RPC, including future additions."""
     for name, method in tuple(vars(cls).items()):
-        if name.startswith("_") or name == "get_version" or not inspect.iscoroutinefunction(method):
+        if name.startswith("_") or name in _UNGUARDED_RPCS or not inspect.iscoroutinefunction(method):
             continue
         def wrap(fn):
+            name = fn.__name__
             @functools.wraps(fn)
             async def guarded(self, *args, **kwargs):
                 await self._ensure_guard()
-                if fn.__name__ == 'firmware_get_status':
-                    # Paused or disabled modules cannot hide the update state.
-                    # This snapshot never opens a controller.
+                if name in _ALWAYS_ADMITTED_RPCS:
                     return await fn(self, *args, **kwargs)
                 if self._startup is not None:
                     # A request must not reach modules before _main has started them.
@@ -230,25 +240,22 @@ def _guard_component_calls(cls):
                 async with self._guard_lock:
                     if self._guard_blocked or self._guard_error or self._closing:
                         raise module_runtime.AdmissionClosed(self._guard_message())
-                    module = _rpc_module(fn.__name__)
-                    resource = 'controller' if fn.__name__ == 'battery_get_controller_levels' else module
-                    if module_runtime.is_paused(resource):
-                        raise module_runtime.ControllerPaused('Controller operations are paused for firmware maintenance.')
-                    module_runtime.require_available(resource)
-                    module_change = (args[0] if args else kwargs.get('name')) if fn.__name__ == 'modules_set_enabled' else None
-                    unaffected_change = fn.__name__ == 'modules_set_enabled' and module_change in MODULE_NAMES and module_change not in module_runtime.CONTROLLER_MODULES
-                    if module is None and fn.__name__ not in FIRMWARE_RPCS and not unaffected_change and module_runtime.is_paused('controller'):
+                    module = _rpc_module(name)
+                    resource = _RPC_RESOURCE.get(name, module)
+                    if module_runtime.is_paused(resource) or (module is None and module_runtime.is_paused('controller')
+                                                              and not _pause_exempt(name, args, kwargs)):
                         # Lifecycle/update admission must not tear down paused
                         # consumers or mutate module choices during a handoff.
                         raise module_runtime.ControllerPaused('Controller operations are paused for firmware maintenance.')
+                    module_runtime.require_available(resource)
                     if module and not self._module_enabled(module):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
                     if module and self._module_health.get(module, {}).get('ready') is False:
                         raise RuntimeError('This module could not start. Retry it in Manage Modules.')
-                    if fn.__name__ in UPDATE_RPCS or fn.__name__ in ('retry_extras', 'set_extras_unlocked'):  # may download RyzenAdj
+                    if name in _BACKGROUND_RPCS:
                         # Register download work before releasing the admission
                         # gate, but never hold hardware controls behind networking.
-                        if fn.__name__ in UPDATE_RPCS and fn.__name__ not in FIRMWARE_RPCS:
+                        if name in _UPDATER_RPCS:
                             self._ensure_updates()
                         task = asyncio.create_task(fn(self, *args, **kwargs))
                         self._update_jobs.add(task)
@@ -266,9 +273,15 @@ def _guard_component_calls(cls):
                         await module_runtime.complete(self._drain_rpc_jobs())
                         return await module_runtime.complete(fn(self, *args, **kwargs))
                 return await module_runtime.complete(task)
-            return _logged_rpc(guarded, fn.__name__)
+            return _logged_rpc(guarded, name)
         setattr(cls, name, wrap(method))
     return cls
+
+
+def _pause_exempt(name, args, kwargs):
+    if name == 'modules_set_enabled':
+        return (args[0] if args else kwargs.get('name')) in _PAUSE_EXEMPT_MODULE_CHANGES
+    return name in _PAUSE_EXEMPT_RPCS
 
 
 @_guard_component_calls

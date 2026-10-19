@@ -336,6 +336,18 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(module_runtime.is_paused('vibration'))
         self.plugin._vibration._main.assert_not_awaited()
 
+    async def test_firmware_pause_refuses_controller_work_and_lifecycle_changes_that_touch_it(self):
+        module_runtime.pause_controller()
+        self.addCleanup(module_runtime.resume_controller)
+        for method, args, kwargs in [('battery_get_controller_levels', (), {}), ('rgb_get_status', (), {}),
+                                     ('updates_check', (), {}), ('modules_set_enabled', ('rgb', False), {}),
+                                     ('modules_set_enabled', (), {'name': 'controller', 'enabled': False}),
+                                     ('modules_set_enabled', ('bogus', False), {})]:
+            with self.subTest(method=method, args=args, kwargs=kwargs), self.assertRaises(module_runtime.ControllerPaused):
+                await getattr(self.plugin, method)(*args, **kwargs)
+        self.assertEqual(await self.plugin.battery_get_status(), {'success': True})
+        self.assertTrue((await self.plugin.modules_set_enabled('fan', True))['fan']['enabled'])
+
     async def test_interrupted_reenable_finishes_saved_intent_on_startup(self):
         self.plugin._module_state['controller'] = {'enabled': True, 'resume': {'source': 'right'}}
         self.plugin._controller.set_gyro_source = AsyncMock()
