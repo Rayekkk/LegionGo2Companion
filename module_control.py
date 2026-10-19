@@ -22,8 +22,7 @@ def capture_intent(name):
     if name == 'wifi':
         import wifi_backend as b
         s = b._load_settings()
-        return {'band_policy': s.get('band_policy', b.BAND_POLICY_OFF),
-                'enabled': s.get('band_preference_enabled') is True}
+        return {'band_policy': s.get('band_policy', b.BAND_POLICY_OFF)}
     if name == 'display':
         import display_backend as b
         return {'panel_mode': b.settings.getSetting('panel_mode', None)}
@@ -47,10 +46,6 @@ async def restore_intent(name, component, intent):
         policy = intent.get('band_policy')
         if isinstance(policy, str) and policy in backend.BAND_POLICIES - {backend.BAND_POLICY_OFF}:
             check(await component.set_band_policy(policy))
-        elif policy is None and intent.get('enabled') is True:
-            # Resume records written by older Companion versions contain only
-            # the preference boolean, never the exact band policy.
-            check(await component.set_band_preference(True))
     elif name == 'display' and intent.get('panel_mode') in ('gamma22', 'pq', 'hybrid'):
         result = await component.set_panel_mode(intent['panel_mode'])
         # Native retirement only disables the legacy display controls. Keep

@@ -80,23 +80,6 @@ class WifiSafetyTests(unittest.TestCase):
         with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=baseline):
             self.assertTrue(plugin._band_policy_ownership_error(settings, allow_restored=True))
 
-    def test_invalid_preference_never_starts_a_network_transaction(self):
-        plugin = wifi.Plugin()
-        with patch.object(plugin, "set_band_policy", new_callable=AsyncMock) as change:
-            for invalid in ("false", "true", 0, 1, None, [], {}):
-                result = asyncio.run(plugin.set_band_preference(invalid))
-                self.assertFalse(result["success"])
-                self.assertEqual(result["error"], "invalid_band_preference_state")
-            change.assert_not_awaited()
-
-    def test_boolean_preferences_still_select_the_expected_policy(self):
-        plugin = wifi.Plugin()
-        with patch.object(plugin, "set_band_policy", new_callable=AsyncMock) as change:
-            for enabled, target in ((True, wifi.BAND_POLICY_HIGH_ONLY),
-                                    (False, wifi.BAND_POLICY_OFF)):
-                asyncio.run(plugin.set_band_preference(enabled))
-                change.assert_awaited_with(target)
-
     def test_lost_ownership_cannot_be_reported_as_preference_off(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "wifi_settings.json"
@@ -131,7 +114,8 @@ class WifiSafetyTests(unittest.TestCase):
                  patch.object(wifi, "_SETTINGS_MANAGER", None), \
                  patch.object(wifi, "_SETTINGS_MANAGER_PATH", ""):
                 loaded = wifi._load_settings()
-            self.assertTrue(loaded["band_preference_enabled"])
+            self.assertEqual(loaded["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
+            self.assertNotIn("band_preference_enabled", loaded)  # pre-2.2.1 field dropped
             self.assertEqual(loaded["band_policy_state"], state["band_policy_state"])
 
 

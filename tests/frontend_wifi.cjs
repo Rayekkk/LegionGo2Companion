@@ -37,11 +37,11 @@ run(async () => {
   network.respond('wifi_get_status', wifi); await settle();
   assert.equal(network.writes, beforeOldRead, 'old Wi-Fi status cannot overwrite the mutation');
   assert.equal(network.calls.filter(c => c.name === 'wifi_get_status').length, 3, 'Wi-Fi confirms status after the earlier read finishes');
-  network.respond('wifi_get_status', { ...wifi, settings: { ...wifi.settings, band_policy: 'off', band_preference_enabled: false } }); await settle();
+  network.respond('wifi_get_status', { ...wifi, settings: { ...wifi.settings, band_policy: 'off' } }); await settle();
   assert.equal(band(network.render()).props.selectedOption, 'off'); network.unmount();
 
   const manualWpa = harness('wifi.tsx', 'WifiPage'); manualWpa.render();
-  const automaticWpa = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'off', band_preference_enabled: false },
+  const automaticWpa = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'off' },
     live: { wifi_backend: 'wpa_supplicant', frequency: '5260', six_ghz_only_supported: true } };
   manualWpa.respond('wifi_get_status', automaticWpa); await settle();
   assert.deepEqual(options(manualWpa.render()), ['Automatic', 'Only 6 GHz'], 'WPA offers no iwd band choices');
@@ -94,13 +94,13 @@ run(async () => {
   assert.deepEqual(strictWifi.calls.find(c => c.name === 'wifi_set_band_policy').args, ['five_six_only', true]);
   strictWifi.respond('wifi_set_band_policy', { success: true, message: 'Saved' }); await settle();
   strictWifi.respond('wifi_get_status', { ...wifi, connected: false,
-    settings: { ...wifi.settings, band_policy: 'five_six_only', band_preference_enabled: false } }); await settle();
+    settings: { ...wifi.settings, band_policy: 'five_six_only' } }); await settle();
   assert.equal(band(strictWifi.render()).props.description, 'No 5/6 GHz network. Choose Automatic or Prefer 5/6 GHz.');
   assert.deepEqual(options(strictWifi.render()), ['Automatic', 'Prefer 5/6 GHz', 'Only 5/6 GHz'], 'strict mode can be disabled when disconnected');
   strictWifi.unmount();
 
   const oldPolicy = harness('wifi.tsx', 'WifiPage'); oldPolicy.render();
-  const six = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'six_ghz_only', band_preference_enabled: false },
+  const six = { ...wifi, connected: true, settings: { ...wifi.settings, band_policy: 'six_ghz_only' },
     live: { ...wifi.live, wifi_backend: 'wpa_supplicant', frequency: 5975 } };
   oldPolicy.respond('wifi_get_status', six); await settle();
   assert.equal(band(oldPolicy.render()).props.selectedOption, 'six_ghz_only');
@@ -128,7 +128,7 @@ run(async () => {
 
   // Native SteamOS switches and failed polls invalidate cached action callbacks.
   const switched = harness('wifi.tsx', 'WifiPage'); switched.render();
-  const automaticIwd = {...wifi,settings:{...wifi.settings,band_policy:'off',band_preference_enabled:false}};
+  const automaticIwd = {...wifi,settings:{...wifi.settings,band_policy:'off'}};
   switched.respond('wifi_get_status', automaticIwd); await settle();
   const staleTree = switched.render();
   switched.fire(); switched.respond('wifi_get_status', automaticWpa); await settle();

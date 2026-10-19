@@ -40,7 +40,6 @@ class StrictWifiTests(unittest.TestCase):
         state = dict(wifi.DEFAULT_SETTINGS)
         state.update({
             "band_policy": wifi.BAND_POLICY_HIGH_ONLY,
-            "band_preference_enabled": True,
             "band_policy_state": {
                 "schema": 1, "mode": wifi.BAND_POLICY_HIGH_ONLY,
                 "connection_uuid": UUID,
@@ -83,7 +82,6 @@ class StrictWifiTests(unittest.TestCase):
         self.assertIn("BandModifier2_4GHz=0.0", self.iwd.read_text(encoding="utf-8"))
         saved = wifi._load_settings()
         self.assertEqual(saved["band_policy"], wifi.BAND_POLICY_STRICT_HIGH)
-        self.assertFalse(saved["band_preference_enabled"])
         self.assertEqual(saved["band_policy_state"]["original"]["iwd"], self.baseline)
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 

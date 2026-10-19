@@ -63,7 +63,7 @@ IWD_SECTION_RE = re.compile(r"^\s*\[([^]]+)]\s*(?:[#;].*)?(?:\r?\n)?$")
 
 BAND_POLICY_OFF = "off"
 BAND_POLICY_SIX_ONLY = "six_ghz_only"
-# Keep this persisted legacy value for the existing fallback preference.
+# Persisted value of the preference that keeps 2.4 GHz as a fallback; do not rename.
 BAND_POLICY_HIGH_ONLY = "five_six_no_24"
 BAND_POLICY_STRICT_HIGH = "five_six_only"
 IWD_BAND_POLICIES = (BAND_POLICY_HIGH_ONLY, BAND_POLICY_STRICT_HIGH)
@@ -117,7 +117,6 @@ DEFAULT_SETTINGS = {
     "device_label": "Unknown Device",
     "band_policy": BAND_POLICY_OFF,
     "band_policy_state": {},
-    "band_preference_enabled": False,
     "last_applied": 0,
 }
 
@@ -160,13 +159,7 @@ def _load_settings() -> dict:
             + manager.recovery_error
         )
     original = copy.deepcopy(manager.settings)
-    data = copy.deepcopy(original)
-
-    # Retain the old boolean as a compatibility view of the preference mode.
-    # The exact policy field distinguishes preference from strict 5/6 GHz.
-    data["band_preference_enabled"] = data.get("band_policy") == BAND_POLICY_HIGH_ONLY
-
-    merged = {**DEFAULT_SETTINGS, **data}
+    merged = {**DEFAULT_SETTINGS, **original}
     normalized = {k: v for k, v in merged.items() if k in DEFAULT_SETTINGS}
     # Persist migrations and remove stale fields once, rather than rewriting
     # settings on every status poll.
@@ -1534,9 +1527,6 @@ class Plugin:
         return {
             "band_policy": settings.get("band_policy", BAND_POLICY_OFF),
             "band_policy_state": settings.get("band_policy_state", {}),
-            "band_preference_enabled": bool(
-                settings.get("band_preference_enabled")
-            ),
         }
 
     def _schedule_band_policy_rollback(self, journal: dict) -> dict:
@@ -3326,7 +3316,6 @@ class Plugin:
             settings_after = {
                 "band_policy": mode,
                 "band_policy_state": next_state,
-                "band_preference_enabled": mode == BAND_POLICY_HIGH_ONLY,
             }
             journal["settings_after"] = settings_after
             journal["phase"] = "verified"
@@ -3354,18 +3343,6 @@ class Plugin:
             return _refusal("band_policy_apply_failed", str(e), band_policy=current_mode,
                             rolled_back=rollback.get("rolled_back", False),
                             rollback_conflicts=rollback.get("conflicts", []))
-
-    async def set_band_preference(self, enabled: bool, band: str = "a") -> dict:
-        """Prefer 5/6 GHz while retaining 2.4 GHz as a fallback."""
-        if type(enabled) is not bool:
-            return {
-                "success": False,
-                "error": "invalid_band_preference_state",
-                "message": "Band preference must be a boolean.",
-            }
-        return await self.set_band_policy(
-            BAND_POLICY_HIGH_ONLY if enabled else BAND_POLICY_OFF
-        )
 
 
 

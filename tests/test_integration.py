@@ -159,7 +159,6 @@ class IntegrationTests(unittest.TestCase):
             iwd_path = root / "main.conf"
             payload = dict(wifi_backend.DEFAULT_SETTINGS)
             payload["band_policy"] = wifi_backend.BAND_POLICY_HIGH_ONLY
-            payload["band_preference_enabled"] = True
             payload["band_policy_state"] = {
                 "schema": 1,
                 "mode": wifi_backend.BAND_POLICY_HIGH_ONLY,

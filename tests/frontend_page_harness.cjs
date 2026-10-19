@@ -59,7 +59,7 @@ const rgb = { success: true, settings: { configured: true, control_enabled: true
   hue: 255, saturation: 100, brightness: 50, speed: 50 }, rgb: { supported: true, effects: [] }, power_led: { supported: false } };
 const remap = { supported: true, enabled: true, desktop_action: 'f1', page_action: 'f2', actions: [{ id: 'f1', label: 'F1' }, { id: 'f3', label: 'F3' }] };
 const display = { panel_mode: 'pq', active_mode: 'pq', setup_done: true, panel_ok: true, enabled: true, edid_fix: true };
-const wifi = { success: true, connected: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_policy: 'five_six_no_24', band_preference_enabled: true }, live: {wifi_backend:'iwd', connection_state:'connected', connection_uuid:'fixture-profile', ssid:'Target', frequency:'5260'} };
+const wifi = { success: true, connected: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_policy: 'five_six_no_24' }, live: {wifi_backend:'iwd', connection_state:'connected', connection_uuid:'fixture-profile', ssid:'Target', frequency:'5260'} };
 const cases = [
   ['display.tsx', 'DisplayPage', 'display_get_state', display],
   ['rgb.tsx', 'RgbPage', 'rgb_get_status', rgb],

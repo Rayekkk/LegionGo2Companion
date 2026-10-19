@@ -10,7 +10,6 @@ interface WifiSettings {
   device_label?: string;
   driver?: string;
   band_policy?: "off" | "five_six_no_24" | "five_six_only" | "six_ghz_only";
-  band_preference_enabled?: boolean;
 }
 
 interface WifiLiveStatus {
@@ -71,8 +70,7 @@ const POLICY_LABELS: Record<Policy, string> = {
 };
 type WifiAction = "off" | "prefer" | "strict" | "high" | "six" | "sixOnly";
 const POLICY_ACTIONS: Record<Policy, WifiAction> = { off: "off", five_six_no_24: "prefer", five_six_only: "strict", six_ghz_only: "sixOnly" };
-const savedPolicy = (status: WifiStatus): Policy => status.settings?.band_policy ??
-  (status.settings?.band_preference_enabled ? "five_six_no_24" : "off");
+const savedPolicy = (status: WifiStatus): Policy => status.settings?.band_policy ?? "off";
 /** A saved policy the active backend cannot use (iwd choices under WPA, or 6 GHz only under iwd). */
 const inactivePolicy = (status: WifiStatus) => {
   const backend = status.live?.wifi_backend, saved = savedPolicy(status);
