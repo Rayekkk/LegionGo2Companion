@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import os
 import re
 import secrets
@@ -40,8 +41,7 @@ import controller_imu
 import module_runtime
 
 
-async def _offload(function, *args, **kwargs):
-    return await module_runtime.offload('controller', function, *args, **kwargs)
+_offload = functools.partial(module_runtime.offload, 'controller')
 
 
 settings = SettingsManager("controller_settings", decky.DECKY_PLUGIN_SETTINGS_DIR)

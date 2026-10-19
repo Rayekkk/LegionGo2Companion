@@ -23,6 +23,7 @@ import asyncio
 import copy
 from diagnostics import event as diagnostic_event, transition as diagnostic_transition
 import errno
+import functools
 import glob
 import hashlib
 import math
@@ -232,9 +233,7 @@ settings = SettingsManager(
 _settings_lock = threading.RLock()
 
 
-def _offload(fn, *args):
-    """Run a blocking call off the event loop."""
-    return module_runtime.offload('display', fn, *args)
+_offload = functools.partial(module_runtime.offload, 'display')
 
 
 # -- EDID parsing --

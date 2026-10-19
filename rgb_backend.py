@@ -14,6 +14,7 @@ import colorsys
 import copy
 import errno
 import fcntl
+import functools
 import mmap
 import os
 import stat
@@ -964,8 +965,7 @@ def _resume_detected() -> bool:
     return resumed
 
 
-async def _offload(function: Callable, *args, **kwargs):
-    return await module_runtime.offload('rgb', function, *args, **kwargs)
+_offload = functools.partial(module_runtime.offload, 'rgb')
 
 
 class Plugin:

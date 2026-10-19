@@ -54,14 +54,15 @@ def _checked_path(path: Path) -> Path:
 
 def _read_attr(path: Path, limit: int = 512) -> str:
     resolved = _checked_path(path)
-    fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                 | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise BatteryError("Battery interface changed during access.")
-        data = os.read(fd, limit + 1)
-    finally:
-        os.close(fd)
+    with module_runtime.firmware_lock:  # battery attributes are read through ACPI/WMI too
+        fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                     | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BatteryError("Battery interface changed during access.")
+            data = os.read(fd, limit + 1)
+        finally:
+            os.close(fd)
     if len(data) > limit:
         raise BatteryError("Battery interface returned an oversized value.")
     return data.decode("ascii", errors="strict").strip()
@@ -126,16 +127,17 @@ def _write_mode(path: Path, mode: str) -> None:
     if mode not in ALLOWED_MODES:
         raise BatteryError("Unsupported battery mode.")
     resolved = _checked_path(path)
-    fd = os.open(resolved, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
-                 | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise BatteryError("Battery interface changed during access.")
-        payload = (mode + "\n").encode("ascii")
-        if os.write(fd, payload) != len(payload):
-            raise BatteryError("The kernel accepted only part of the battery setting.")
-    finally:
-        os.close(fd)
+    with module_runtime.firmware_lock:
+        fd = os.open(resolved, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+                     | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BatteryError("Battery interface changed during access.")
+            payload = (mode + "\n").encode("ascii")
+            if os.write(fd, payload) != len(payload):
+                raise BatteryError("The kernel accepted only part of the battery setting.")
+        finally:
+            os.close(fd)
 
 
 _suspend_offset = module_runtime.suspend_offset

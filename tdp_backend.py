@@ -198,6 +198,12 @@ def _read_sysfs(path: str) -> str:
         return ""
 
 
+def _read_profile(path: str) -> str:
+    """platform_profile is read through a WMI method, so it shares the firmware lock."""
+    with module_runtime.firmware_lock:
+        return _read_sysfs(path)
+
+
 def _get_ac_online() -> bool:
     """True when an external charger is present.
 
@@ -577,7 +583,7 @@ def _capture_baseline() -> None:
                 not marker["after_boot"] or _read_sysfs(BOOT_ID_PATH) in ("", marker["after_boot"])):
             return
         path = _profile_path()
-        profile = _read_sysfs(path) if path else ""
+        profile = _read_profile(path) if path else ""
         settings.setSetting(SETTINGS_KEY_BASELINE, {
             # 'custom' is the plugin's own mode, never a baseline.
             "platform_profile": profile if profile and profile != "custom" else None,
@@ -745,7 +751,8 @@ def _wmi_path(key: str, leaf: str) -> str:
 
 def _wmi_read(key: str, leaf: str) -> int | None:
     try:
-        with open(_wmi_path(key, leaf)) as f:
+        # Reading a firmware attribute also runs a WMI method, so it shares the write lock.
+        with module_runtime.firmware_lock, open(_wmi_path(key, leaf)) as f:
             return int(f.read().strip())
     except (OSError, ValueError):
         return None
@@ -778,7 +785,7 @@ def _profile_path() -> str | None:
 
 def _write_profile(path: str, value: str) -> bool:
     try:
-        with open(path, "w") as f:
+        with module_runtime.firmware_lock, open(path, "w") as f:
             f.write(value)
         return True
     except OSError as exc:
@@ -790,7 +797,7 @@ def _write_profile(path: str, value: str) -> bool:
 def _write_ppt(spl_w: int, sppt_w: int, fppt_w: int, retried: bool = False) -> None:
     for key, val in (("spl", spl_w), ("sppt", sppt_w), ("fppt", fppt_w)):
         try:
-            with open(_wmi_path(key, "current_value"), "w") as f:
+            with module_runtime.firmware_lock, open(_wmi_path(key, "current_value"), "w") as f:
                 f.write(str(val))
         except OSError as exc:
             # A refused in-place write is normal: the profile bounce below writes again.
@@ -813,7 +820,7 @@ def _apply_wmi(spl_w: int, sppt_w: int, fppt_w: int) -> dict:
         return _fail("no custom platform profile")
 
     # Fast path: if we can latch a write in place, skip the visible profile bounce.
-    if _read_sysfs(path) == "custom":
+    if _read_profile(path) == "custom":
         _write_ppt(spl_w, sppt_w, fppt_w, retried=True)
         if _ppt_matches(spl_w, sppt_w, fppt_w):
             decky.logger.info(f"[legotdp] wmi apply {spl_w}W/{sppt_w}W/{fppt_w}W")
@@ -988,7 +995,7 @@ def _wmi_profile_lost() -> bool:
     if _last_source != "wmi":
         return False
     path = _profile_path()
-    return path is not None and _read_sysfs(path) != "custom"
+    return path is not None and _read_profile(path) != "custom"
 
 
 # On the ryzenadj path a limits read spawns a process and the enforce loop asks every
@@ -1394,7 +1401,7 @@ def _restore_defaults_locked() -> dict:
         if path:
             target = (saved if isinstance(saved, str) and saved != "custom"
                       and saved in _profile_choices(path) else "balanced")
-            if not _write_profile(path, target) or _read_sysfs(path) != target:
+            if not _write_profile(path, target) or _read_profile(path) != target:
                 return _fail(f"{target.capitalize()} firmware profile was not confirmed")
             _last_source, _applied_mw, _applied_at = "", (), 0.0
             _invalidate_limits_cache()

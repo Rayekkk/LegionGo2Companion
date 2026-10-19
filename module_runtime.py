@@ -5,12 +5,17 @@ import contextlib
 import contextvars
 import functools
 import os
+import threading
 import time
 from diagnostics import event
 
 DMI_ROOT = "/sys/class/dmi/id"
 
 _workers = {}
+# The Legion's AML aborts EC/WMI methods that run concurrently ("cannot release
+# Mutex [ECMT]"). Hold only around one firmware-backed sysfs write, innermost,
+# from worker threads only: never take another lock or block on I/O beyond it.
+firmware_lock = threading.Lock()
 CONTROLLER_MODULES = frozenset({'controller', 'remap', 'rgb', 'vibration'})
 _controller_paused = False
 _controller_generation = 0

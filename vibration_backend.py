@@ -16,6 +16,7 @@ import time
 import asyncio
 import struct
 import fcntl
+import functools
 import threading
 from safe_settings import CorruptSettings, SettingsManager
 
@@ -315,12 +316,13 @@ def _restore_baseline() -> bool:
     return _apply_settings(dict(DEFAULT_PROFILE), None, True)
 
 
-async def _offload(fn, *args):
-    """Run blocking sysfs/settings work off the loop so RPCs and hotplug keep draining."""
-    def run():
-        with _settings_lock:
-            return fn(*args)
-    return await module_runtime.offload('vibration', run)
+def _settings_locked(fn, *args):
+    with _settings_lock:
+        return fn(*args)
+
+
+# Blocking sysfs/settings work runs off the loop, serialised with the settings file.
+_offload = functools.partial(module_runtime.offload, 'vibration', _settings_locked)
 
 
 def _apply_settings(values: dict, sys_path: str | None = None,
