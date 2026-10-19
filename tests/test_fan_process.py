@@ -186,6 +186,15 @@ class FanProcessTests(unittest.TestCase):
                 if state['kind']=='closed':raise AssertionError('Controller closed: '+json.dumps(state))
         last=(self.root/'last.json').read_text() if (self.root/'last.json').exists() else ''
         raise AssertionError('Missing '+kind+': '+last)
+    @staticmethod
+    def until(condition,timeout,step=.05):
+        """Poll a condition owned by another process (no event to wait on) up to `timeout` s."""
+        end=time.monotonic()+timeout
+        while not condition():
+            if time.monotonic()>=end:return False
+            time.sleep(step)
+        return True
+
     def put(self,name,value):
         # Atomic like sysfs: write_text truncates first and the guardian may read an empty file.
         tmp=self.root/(name+'.tmp');tmp.write_text(value);os.replace(tmp,self.root/name)
@@ -242,10 +251,13 @@ class FanProcessTests(unittest.TestCase):
 
     def test_silent_plugin_keeps_control_without_any_lease(self):
         # Desktop/Gaming switches can stall the plugin for seconds; the guardian runs the curve itself.
-        self.configure();time.sleep(4)
-        while select.select([self.ipc],[],[],0)[0]:
-            state=json.loads(self.ipc.recv(16384))
-            self.assertNotEqual(state['kind'],'closed',state)
+        # Silence past the backup's progress lease proves no plugin-side lease exists.
+        from fan_policy import LEASE_S
+        self.configure();end=time.monotonic()+LEASE_S+.5
+        while time.monotonic()<end:
+            if select.select([self.ipc],[],[],max(0,end-time.monotonic()))[0]:
+                state=json.loads(self.ipc.recv(16384))
+                self.assertNotEqual(state['kind'],'closed',state)
         state=self.receive_kind('telemetry',1.5)
         self.assertTrue(state['active']);self.assertEqual(state['override'],1800)
         self.assertIsNone(self.p.poll())
@@ -261,12 +273,11 @@ class FanProcessTests(unittest.TestCase):
         st=self.configure();backup=st['backup_pid']
         os.kill(self.p.pid,signal.SIGTERM);os.kill(backup,signal.SIGTERM)
         self.assertEqual(self.wait_release()['outcome'],'pause')
-        deadline=time.monotonic()+3
-        while time.monotonic()<deadline:
+        def gone():
             try:os.kill(backup,0)
-            except ProcessLookupError:break
-            time.sleep(.05)
-        else:self.fail('Backup survived SIGTERM')
+            except ProcessLookupError:return True
+            return False
+        self.assertTrue(self.until(gone,3),'Backup survived SIGTERM')
 
     def test_sleep_pause_then_a_new_session_rearms(self):
         self.configure();(self.root/'prepare-sleep').touch()
@@ -351,14 +362,10 @@ class FanProcessTests(unittest.TestCase):
         # Each process holds its own sleep inhibitor: the owner's dies with the owner.
         self.assertTrue((self.root/('inhibit-'+str(self.p.pid))).exists());self.assertTrue(backup_inhibitor.exists())
         os.kill(self.p.pid,signal.SIGKILL);self.assertEqual(self.wait_release()['outcome'],'retry')
-        end=time.monotonic()+2
-        while backup_inhibitor.exists() and time.monotonic()<end:time.sleep(.05)
-        self.assertFalse(backup_inhibitor.exists(),'the backup closes its inhibitor only after the release')
+        self.assertTrue(self.until(lambda:not backup_inhibitor.exists(),2),'the backup closes its inhibitor only after the release')
 
     def released(self,timeout=5):
-        end=time.monotonic()+timeout
-        while (self.p.poll() is None or self.override()) and time.monotonic()<end:time.sleep(.05)
-        return self.override()==0 and self.p.poll() is not None
+        return self.until(lambda:self.p.poll() is not None and self.override()==0,timeout)
 
     def test_unwritable_stop_marker_never_blocks_the_owners_own_release(self):
         self.configure();(self.root/'enospc-stop').touch()
@@ -367,23 +374,19 @@ class FanProcessTests(unittest.TestCase):
     def test_unwritable_stop_marker_never_blocks_release_after_the_owner_died(self):
         st=self.configure();(self.root/'enospc-stop').touch()
         os.kill(self.p.pid,signal.SIGKILL);self.p.wait(timeout=2)
-        end=time.monotonic()+5
-        while self.override() and time.monotonic()<end:time.sleep(.05)
+        self.until(lambda:self.override()==0,5)
         self.assertEqual(self.override(),0,'a backup that saw the owner die releases without the marker')
 
     def test_backup_retries_after_a_transient_ec_error_although_the_owner_is_gone(self):
         st=self.configure();(self.root/'release-fails').write_text('8')
         os.kill(self.p.pid,signal.SIGKILL);self.p.wait(timeout=2)
-        end=time.monotonic()+6
-        while self.override() and time.monotonic()<end:time.sleep(.05)
+        self.until(lambda:self.override()==0,6)
         self.assertEqual(self.override(),0,'killing an already dead owner (ESRCH) must not end recovery')
         self.assertEqual((self.root/'release-fails').read_text(),'0')
 
     def test_full_runtime_dir_never_blocks_the_release(self):
         self.configure();(self.root/'enospc').touch()
-        self.ipc.close()
-        end=time.monotonic()+5
-        while (self.p.poll() is None or self.override()) and time.monotonic()<end:time.sleep(.05)
+        self.ipc.close();self.released()
         self.assertEqual(self.override(),0,'session records that cannot be written never keep the override')
         self.assertIsNotNone(self.p.poll())
 
@@ -547,18 +550,12 @@ class FanProcessTests(unittest.TestCase):
         self.put('ec-temperature','45')
         os.kill(self.p.pid,signal.SIGSTOP);self.put('temperature','100')
         # Frozen worker cannot service heat; backup sets max before progress-lease recovery.
-        end=time.monotonic()+1.5
-        while time.monotonic()<end:
-            data=(self.root/'ports-model').read_bytes()
-            if int.from_bytes(data[0xC6C8:0xC6CA],'little')==4800:break
-            time.sleep(.05)
-        else:self.fail('Independent backup did not impose hard maximum')
+        self.assertTrue(self.until(lambda:self.override()==4800,1.5),'Independent backup did not impose hard maximum')
         self.wait_release();self.assertEqual(self.p.wait(timeout=1),-signal.SIGKILL)
 
     def test_prepare_sleep_releases_before_inhibitor_close(self):
         self.configure();(self.root/'prepare-sleep').touch();self.assertEqual(self.wait_release()['outcome'],'pause')
-        end=time.monotonic()+1
-        while list(self.root.glob('inhibit-*')) and time.monotonic()<end:time.sleep(.05)
+        self.until(lambda:not list(self.root.glob('inhibit-*')),1)
         self.assertEqual(list(self.root.glob('inhibit-*')),[])
 
     def crash_during_target_byte(self,position):
@@ -615,7 +612,7 @@ class FanProcessTests(unittest.TestCase):
         client.configure(True,fan_policy.DEFAULT_CURVE)
         plugin._applied=(True,json.dumps(fan_policy.DEFAULT_CURVE))
         def slow_save(value):
-            time.sleep(3.5)
+            time.sleep(fan_policy.LEASE_S+.5)  # Longer than the backup's progress lease.
             plugin._state=copy.deepcopy(value)
         async def run():
             plugin._task=asyncio.create_task(plugin._monitor())
@@ -682,6 +679,7 @@ class FanProcessTests(unittest.TestCase):
         stop=[[t,0 if i<7 else fan_policy.MAX_RPM] for i,(t,_) in enumerate(fan_policy.DEFAULT_CURVE)]
         st=client.configure(True,stop)
         plugin=fan_backend.Plugin();plugin._client=client;plugin._loaded=plugin._supported=True
+        plugin.BACKOFF_S,plugin.POLL_S=(.05,),.05  # The monitor's pacing is not under test, its decisions are.
         plugin._state=dict(fan_policy.defaults(),enabled=True,global_curve=stop);plugin._applied=(True,json.dumps(stop))
         os.kill(st['backup_pid'],signal.SIGKILL);os.kill(self.p.pid,signal.SIGKILL);self.p.wait(timeout=2)
         override=lambda:(self.root/'ports-model').read_bytes()[0xC6C8:0xC6CA]

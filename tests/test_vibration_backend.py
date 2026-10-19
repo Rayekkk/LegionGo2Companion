@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Vibration release against a fake hid-lenovo-go attribute tree."""
+"""Vibration driven through its RPCs against a fake hid-lenovo-go attribute tree and a real settings store."""
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import tempfile
@@ -26,28 +26,76 @@ DRIVER = {'rumble_intensity': 'high', 'left_handle/rumble_mode': 'standard',
 DEFAULTS = {'rumble_intensity': 'medium', 'left_handle/rumble_mode': 'fps',
             'right_handle/rumble_mode': 'fps', 'touchpad/vibration_intensity': 'medium',
             'touchpad/vibration_enabled': 'true'}
+# Global level 2 (medium); game 111 overrides with level 0 (off), game 222 with level 1 (low).
+PROFILES = {key: {'overwrite': key != '0', 'settings': {**vibe.DEFAULT_PROFILE, 'level': level}}
+            for key, level in (('0', 2), ('111', 0), ('222', 1))}
 
 
-class VibrationBaselineTests(unittest.TestCase):
+class FakeDevice(unittest.IsolatedAsyncioTestCase):
+    """Fake attribute tree, a real settings store, a controllable clock and running game.
+
+    `self.ignored` holds attributes whose writes the driver accepts but does not apply.
+    """
+    driver = DRIVER
+    profiles = None  # game_profiles to seed; None leaves a fresh store
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
         self.device = self.root / 'hid'
-        for name, value in DRIVER.items():
+        for name, value in self.driver.items():
             path = self.device / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value, encoding='ascii')
         self.store = AtomicSettingsManager('vibration_settings', str(self.root / 'settings'))
-        for name, value in {'settings': self.store, '_device_path': str(self.device),
-                            '_attr_cache': {}, '_capabilities_cache': {},
-                            '_last_applied_values': None}.items():
+        if self.profiles is not None:
+            self.store.replace({'schema_version': 2, 'game_profiles': copy.deepcopy(self.profiles)})
+        self.clock = 100.0
+        self.running = ''
+        self.writes = []
+        self.ignored = set()
+        real_open = builtins.open
+
+        def opened(path, mode='r', *args, **kwargs):
+            if 'w' in mode and Path(path).is_relative_to(self.device):
+                relative = Path(path).relative_to(self.device).as_posix()
+                self.writes.append(relative)
+                if relative in self.ignored:
+                    return io.StringIO()
+            return real_open(path, mode, *args, **kwargs)
+        for name, value in {
+            'settings': self.store, '_device_path': str(self.device), '_attr_cache': {},
+            '_capabilities_cache': {}, '_last_applied_values': None,
+            '_active_app_id': '', '_active_app_ts': None,
+        }.items():
             self.stack.enter_context(patch.object(vibe, name, value))
+        self.stack.enter_context(patch.object(vibe, 'time', types.SimpleNamespace(
+            monotonic=lambda: self.clock, sleep=vibe.time.sleep)))
+        self.scan = self.stack.enter_context(patch.object(
+            vibe, 'scan_proc_for_appid', side_effect=lambda: self.running))
         self.stack.enter_context(patch.object(vibe, '_discover', return_value=(str(self.device), 'fixture')))
+        self.stack.enter_context(patch('builtins.open', side_effect=opened))
+        self.plugin = vibe.Plugin()
+
+    async def asyncTearDown(self):
+        await module_runtime.drain('vibration')
 
     def hardware(self):
         return {name: (self.device / name).read_text(encoding='ascii').strip() for name in DRIVER}
 
+    def intensity(self):
+        return self.hardware()['rumble_intensity']
+
+    def persisted(self):
+        return AtomicSettingsManager('vibration_settings', str(self.root / 'settings')).getSetting('game_profiles')
+
+    def lookups(self, *answers):
+        """Running-game answers for successive process scans: a second scan would see a different game."""
+        return patch.object(vibe, 'scan_proc_for_appid', side_effect=list(answers))
+
+
+class VibrationBaselineTests(FakeDevice):
     def test_fresh_install_restores_the_driver_values_found_before_the_first_write(self):
         vibe._migrate()
         self.assertEqual(self.store.getSetting('baseline'), {'pending': True})
@@ -77,6 +125,11 @@ class VibrationBaselineTests(unittest.TestCase):
         vibe._migrate()
         self.assertEqual(self.store.getSetting('baseline'), {})
 
+    def test_partial_profile_failure_attempts_and_confirms_other_attributes(self):
+        self.ignored.add('right_handle/rumble_mode')
+        self.assertFalse(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE), str(self.device), True))
+        self.assertEqual(self.hardware(), {**DEFAULTS, 'right_handle/rumble_mode': 'racing'})
+
 
 class VibrationEditTests(unittest.TestCase):
     def test_vibration_concurrent_fields_preserve_both_edits(self):
@@ -101,105 +154,118 @@ class VibrationEditTests(unittest.TestCase):
                 saved = manager.getSetting("game_profiles")["0"]["settings"]
             self.assertEqual((saved["level"], saved["touchpadEnabled"]), (3, False))
 
-    def test_vibration_overwrite_change_rejects_queued_edit(self):
-        profiles = {key: {"overwrite": False, "settings": dict(vibe.DEFAULT_PROFILE)}
-                    for key in ("0", "111")}
-        with patch.object(vibe, "_active_app_id", "111"), \
-             patch.object(vibe, "_load_profiles", return_value=profiles), \
-             patch.object(vibe, "_save_profiles") as save:
-            result = asyncio.run(vibe.Plugin().set_intensity(3, "111", "111"))
-            self.assertFalse(result["success"])
-            save.assert_not_called()
+    def test_saved_profile_levels_are_clamped(self):
+        for raw, expected in ((9, 3), (4, 3), (3, 3), (0, 0), (-5, 0)):
+            with self.subTest(raw=raw):
+                profile = vibe._coerce_profile({vibe.PKEY_LEVEL: raw, vibe.PKEY_TP_INT: raw})
+                self.assertEqual((profile[vibe.PKEY_LEVEL], profile[vibe.PKEY_TP_INT]), (expected, expected))
 
 
-class VibrationProfileContextTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.stack = ExitStack()
-        self.addCleanup(self.stack.close)
-        self.folder = self.stack.enter_context(tempfile.TemporaryDirectory())
-        self.store = AtomicSettingsManager('vibration_settings', self.folder)
-        self.profiles = {key: {'overwrite': key != '0', 'settings': {**vibe.DEFAULT_PROFILE, 'level': level}}
-            for key, level in (('0', 2), ('111', 0), ('222', 1))}
-        self.store.replace({'game_profiles': self.profiles})
-        self.stack.enter_context(patch.object(vibe, 'settings', self.store))
-        self.stack.enter_context(patch.object(vibe, '_active_app_ts', None))
-        self.plugin = vibe.Plugin()
+class VibrationProfileTests(FakeDevice):
+    profiles = PROFILES
 
-    async def asyncTearDown(self):
-        await module_runtime.drain('vibration')
-
-    def persisted(self):
-        return AtomicSettingsManager('vibration_settings', self.folder).getSetting('game_profiles')
+    async def test_live_requests_are_clamped_before_they_are_stored_and_written(self):
+        for method, key, attr in (('set_intensity', vibe.PKEY_LEVEL, 'rumble_intensity'),
+                                  ('set_touchpad_intensity', vibe.PKEY_TP_INT, 'touchpad/vibration_intensity')):
+            for raw, expected, written in ((9, 3, 'high'), (4, 3, 'high'), (-5, 0, 'off')):
+                with self.subTest(method=method, raw=raw):
+                    self.assertTrue((await getattr(self.plugin, method)(raw))['success'])
+                    self.assertEqual(self.persisted()['0']['settings'][key], expected)
+                    self.assertEqual(self.hardware()[attr], written)
 
     async def test_expected_game_and_mutation_share_one_process_lookup(self):
-        with patch.object(vibe, 'scan_proc_for_appid', side_effect=['111', '222']) as process, \
-                patch.object(vibe, '_apply_settings', return_value=True) as apply:
+        with self.lookups('111', '222'):
             result = await self.plugin.set_intensity(3, '111', '111')
         self.assertTrue(result['success'])
         self.assertEqual((result['app_id'], result['profile_id']), ('111', '111'))
-        self.assertEqual(process.call_count, 1)
         saved = self.persisted()
         self.assertEqual(saved['111']['settings']['level'], 3)
         self.assertEqual(saved['222']['settings']['level'], 1)
-        apply.assert_called_once_with(saved['111']['settings'])
+        self.assertEqual(self.intensity(), 'high')
 
     async def test_expected_global_profile_cannot_be_replaced_by_new_game_override_between_reads(self):
-        self.profiles['111']['overwrite'] = False
-        self.store.replace({'game_profiles': self.profiles})
-        with patch.object(vibe, 'scan_proc_for_appid', side_effect=['111', '222']) as process, \
-                patch.object(vibe, '_apply_settings', return_value=True):
+        self.store.replace({'game_profiles': {**PROFILES, '111': {**PROFILES['111'], 'overwrite': False}}})
+        with self.lookups('111', '222'):
             result = await self.plugin.set_touchpad_enabled(False, '111', '0')
         self.assertTrue(result['success'])
-        self.assertEqual(process.call_count, 1)
         saved = self.persisted()
         self.assertFalse(saved['0']['settings']['touchpadEnabled'])
         self.assertTrue(saved['222']['settings']['touchpadEnabled'])
+        self.assertEqual(self.hardware()['touchpad/vibration_enabled'], 'false')
+
+    async def test_overwrite_change_rejects_queued_edit_without_saving_or_writing(self):
+        self.store.replace({'game_profiles': {**PROFILES, '111': {**PROFILES['111'], 'overwrite': False}}})
+        before = self.persisted()
+        self.running = '111'
+        result = await self.plugin.set_intensity(3, '111', '111')
+        self.assertFalse(result['success'])
+        self.assertEqual(self.persisted(), before)
+        self.assertEqual((self.writes, self.hardware()), ([], DRIVER))
 
     async def test_stale_reset_rejects_game_change_without_saving_or_writing(self):
         before = self.persisted()
-        with patch.object(vibe, 'scan_proc_for_appid', return_value='222'), \
-                patch.object(vibe, '_save_profiles') as save, \
-                patch.object(vibe, '_apply_settings') as apply:
-            result = await self.plugin.reset_to_default('111', '111')
+        self.running = '222'
+        result = await self.plugin.reset_to_default('111', '111')
         self.assertFalse(result['success'])
         self.assertEqual(result['profile_id'], '222')
-        save.assert_not_called()
-        apply.assert_not_called()
         self.assertEqual(self.persisted(), before)
+        self.assertEqual((self.writes, self.hardware()), ([], DRIVER))
 
     async def test_stale_reset_rejects_overwrite_change_for_the_same_game(self):
-        self.profiles['111']['overwrite'] = False
-        self.store.replace({'game_profiles': self.profiles})
+        self.store.replace({'game_profiles': {**PROFILES, '111': {**PROFILES['111'], 'overwrite': False}}})
         before = self.persisted()
-        with patch.object(vibe, 'scan_proc_for_appid', return_value='111'), \
-                patch.object(vibe, '_save_profiles') as save, \
-                patch.object(vibe, '_apply_settings') as apply:
-            result = await self.plugin.reset_to_default('111', '111')
+        self.running = '111'
+        result = await self.plugin.reset_to_default('111', '111')
         self.assertFalse(result['success'])
         self.assertEqual(result['profile_id'], '0')
-        save.assert_not_called()
-        apply.assert_not_called()
         self.assertEqual(self.persisted(), before)
+        self.assertEqual((self.writes, self.hardware()), ([], DRIVER))
 
     async def test_reset_uses_checked_context_once_and_remains_compatible_without_arguments(self):
-        with patch.object(vibe, 'scan_proc_for_appid', side_effect=['111', '222']) as process, \
-                patch.object(vibe, '_apply_settings', return_value=True) as apply:
+        with self.lookups('111', '222'):
             result = await self.plugin.reset_to_default('111', '111')
-            self.assertEqual(process.call_count, 1)
             self.assertEqual(self.persisted()['111']['settings'], vibe.DEFAULT_PROFILE)
             self.assertEqual(self.persisted()['222']['settings']['level'], 1)
+            self.assertEqual(self.hardware(), DEFAULTS)
+            (self.device / 'rumble_intensity').write_text('off', encoding='ascii')
             compatible = await self.plugin.reset_to_default()
         self.assertTrue(result['success'])
         self.assertTrue(compatible['success'])
         self.assertEqual(compatible['profile_id'], '222')
-        self.assertEqual(apply.call_count, 2)
+        self.assertEqual(self.persisted()['222']['settings'], vibe.DEFAULT_PROFILE)
+        self.assertEqual(self.hardware(), DEFAULTS)
+
+    async def test_failed_reset_hardware_apply_returns_committed_settings(self):
+        self.running = '111'
+        self.ignored.add('rumble_intensity')
+        result = await self.plugin.reset_to_default('111', '111')
+        self.assertFalse(result['success'])
+        self.assertEqual(result['settings'], vibe.DEFAULT_PROFILE)
+        self.assertEqual(result['settings'], self.persisted()['111']['settings'])
+        self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('111', '111', True))
+
+    async def test_profile_toggle_reports_committed_scope_when_hardware_apply_fails(self):
+        self.running = '111'
+        self.ignored.add('rumble_intensity')
+        result = await self.plugin.set_profile_overwrite('111', False)
+        self.assertFalse(result['success'])
+        self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('111', '0', False))
+        self.assertFalse(self.persisted()['111']['overwrite'])
+
+    async def test_toggle_of_inactive_profile_returns_actual_running_scope(self):
+        with self.lookups('222', '111'):
+            result = await self.plugin.set_profile_overwrite('111', False)
+        self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('222', '222', True))
+        self.assertEqual(self.intensity(), 'low')
+
+    async def test_new_profile_is_seeded_from_the_single_admitted_running_snapshot(self):
+        with self.lookups('222', '111'):
+            result = await self.plugin.set_profile_overwrite('333', True)
+        self.assertEqual(self.persisted()['333']['settings'], PROFILES['222']['settings'])
+        self.assertEqual(result['app_id'], '222')
 
 
-class VibrationCapacityTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = VibrationProfileContextTests.asyncSetUp
-    asyncTearDown = VibrationProfileContextTests.asyncTearDown
-    persisted = VibrationProfileContextTests.persisted
-
+class VibrationCapacityTests(FakeDevice):
     def fill(self, count):
         self.store.replace({'game_profiles': {str(i): {
             'overwrite': i != 0, 'settings': dict(vibe.DEFAULT_PROFILE), 'name': f'Game {i}'
@@ -208,71 +274,30 @@ class VibrationCapacityTests(unittest.IsolatedAsyncioTestCase):
     async def test_capacity_rejects_creation_before_commit_or_hardware_write(self):
         self.fill(vibe.MAX_GAME_PROFILES)
         before = self.persisted()
-        with patch.object(vibe, '_running_app_id', return_value='9999'), \
-                patch.object(vibe, '_apply_settings') as hardware:
-            result = await self.plugin.set_profile_overwrite('9999', True)
+        self.running = '9999'
+        result = await self.plugin.set_profile_overwrite('9999', True)
         self.assertFalse(result['success'])
         self.assertIn('limit', result['error'])
         self.assertEqual(result['profile_id'], '0')
         self.assertEqual(self.persisted(), before)
-        hardware.assert_not_called()
+        self.assertEqual(self.writes, [])
 
     async def test_existing_profiles_can_be_edited_at_capacity(self):
         self.fill(vibe.MAX_GAME_PROFILES)
-        with patch.object(vibe, '_running_app_id', return_value='111'), \
-                patch.object(vibe, '_apply_settings', return_value=True):
-            self.assertTrue((await self.plugin.set_intensity(3, '111', '111'))['success'])
+        self.running = '111'
+        self.assertTrue((await self.plugin.set_intensity(3, '111', '111'))['success'])
         saved = self.persisted()
         self.assertEqual(len(saved), vibe.MAX_GAME_PROFILES)
         self.assertEqual(saved['111']['settings']['level'], 3)
+        self.assertEqual(self.intensity(), 'high')
 
     async def test_legacy_over_capacity_store_survives_unrelated_edit(self):
         self.fill(vibe.MAX_GAME_PROFILES + 1)
         before = self.persisted()
-        with patch.object(vibe, '_running_app_id', return_value='0'), \
-                patch.object(vibe, '_apply_settings', return_value=True):
-            self.assertTrue((await self.plugin.set_intensity(3, '0', '0'))['success'])
+        self.assertTrue((await self.plugin.set_intensity(3, '0', '0'))['success'])
         after = self.persisted()
         self.assertEqual(set(after), set(before))
         self.assertEqual(after[str(vibe.MAX_GAME_PROFILES)], before[str(vibe.MAX_GAME_PROFILES)])
-
-    async def test_profile_toggle_reports_committed_scope_when_hardware_apply_fails(self):
-        with patch.object(vibe, '_running_app_id', return_value='111'), \
-                patch.object(vibe, '_apply_settings', return_value=False):
-            result = await self.plugin.set_profile_overwrite('111', False)
-        self.assertFalse(result['success'])
-        self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('111', '0', False))
-        self.assertFalse(self.persisted()['111']['overwrite'])
-
-    async def test_toggle_of_inactive_profile_returns_actual_running_scope(self):
-        with patch.object(vibe, 'scan_proc_for_appid', side_effect=['222', '111']) as scan, \
-                patch.object(vibe, '_apply_settings', return_value=True):
-            result = await self.plugin.set_profile_overwrite('111', False)
-        self.assertEqual(scan.call_count, 1)
-        self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('222', '222', True))
-
-    async def test_new_profile_is_seeded_from_the_single_admitted_running_snapshot(self):
-        with patch.object(vibe, 'scan_proc_for_appid', side_effect=['222', '111']) as scan, \
-                patch.object(vibe, '_apply_settings', return_value=True):
-            result = await self.plugin.set_profile_overwrite('333', True)
-        self.assertEqual(scan.call_count, 1)
-        self.assertEqual(self.persisted()['333']['settings'], self.profiles['222']['settings'])
-        self.assertEqual(result['app_id'], '222')
-
-
-class VibrationResetStateTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = VibrationProfileContextTests.asyncSetUp
-    asyncTearDown = VibrationProfileContextTests.asyncTearDown
-    persisted = VibrationProfileContextTests.persisted
-
-    async def test_failed_reset_hardware_apply_returns_committed_settings(self):
-        with patch.object(vibe, 'scan_proc_for_appid', return_value='111'), \
-                patch.object(vibe, '_apply_settings', return_value=False):
-            result = await self.plugin.reset_to_default('111', '111')
-        self.assertFalse(result['success'])
-        self.assertEqual(result['settings'], vibe.DEFAULT_PROFILE)
-        self.assertEqual(result['settings'], self.persisted()['111']['settings'])
-        self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('111', '111', True))
 
 
 class VibrationEndpointTests(unittest.TestCase):
@@ -311,12 +336,12 @@ class VibrationDescriptorTests(unittest.IsolatedAsyncioTestCase):
         await module_runtime.drain('vibration')
 
     @contextmanager
-    def playable(self, *, pause=None, start_error=False, id_error=False):
+    def playable(self, *, pause=None, start_error=False, id_error=False, ids=(0x17ef, 0x61eb)):
         def ioctl(_fd, request, payload):
             if request == vibe._EVIOCGID:
                 if id_error:
                     raise OSError('descriptor disappeared')
-                payload[:] = struct.pack('HHHH', 3, 0x17ef, 0x61eb, 1)
+                payload[:] = struct.pack('HHHH', 3, *ids, 1)
             elif request == vibe._EVIOCSFF:
                 struct.pack_into('<h', payload, 2, 1)
             return 0
@@ -369,6 +394,15 @@ class VibrationDescriptorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls.call_count, 1)
             close.assert_called_once_with(43)
 
+    async def test_test_rechecks_open_descriptor_before_upload_or_output(self):
+        self.assertEqual(vibe._EVIOCGID, 0x80084502)  # struct input_id from Linux UAPI.
+        with self.playable(ids=(0x045e, 0x02ea)) as (close, writes, calls):
+            result = await vibe.Plugin().test_vibration(100)
+        self.assertFalse(result['success'], 'A reused descriptor must be rejected before its device receives output.')
+        writes.assert_not_called()
+        self.assertNotIn(vibe._EVIOCSFF, [call.args[1] for call in calls.call_args_list])
+        close.assert_called_once_with(43)
+
     async def test_repeated_cancellation_waits_for_effect_cleanup_and_keeps_busy_guard(self):
         entered, release = threading.Event(), threading.Event()
         def pause(_seconds):
@@ -394,30 +428,6 @@ class VibrationDescriptorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(writes.call_count, 2)
             self.assertEqual(calls.call_args_list[-1].args, (43, vibe._EVIOCRMFF, 1))
             close.assert_called_once_with(43)
-
-    async def test_test_rechecks_open_descriptor_before_upload_or_output(self):
-        def ioctl(_fd, request, payload):
-            if request == 0x80084502:  # EVIOCGID, struct input_id from Linux UAPI.
-                payload[:] = struct.pack('HHHH', 3, 0x045e, 0x02ea, 1)
-            elif request == vibe._EVIOCSFF:
-                struct.pack_into('<h', payload, 2, 1)
-            return 0
-        with patch.object(vibe, '_ff_busy', False), \
-                patch.object(vibe, '_ff_device_cache', {'node': '/dev/input/event9'}), \
-                patch.object(vibe, '_active_values', return_value={vibe.PKEY_LEVEL: 2}), \
-                patch.object(vibe, '_find_ff_device', return_value='/dev/input/event9'), \
-                patch.object(vibe, '_get_device_path', return_value='/sys/hid/0003:17EF:61EB.0001'), \
-                patch.object(vibe.os, 'open', return_value=43), \
-                patch.object(vibe.os, 'close') as close, \
-                patch.object(vibe.os, 'write', return_value=24) as output, \
-                patch.object(vibe.fcntl, 'ioctl', side_effect=ioctl, create=True) as calls, \
-                patch.object(vibe.asyncio, 'sleep', new=AsyncMock()), \
-                patch.object(vibe.time, 'sleep'):
-            result = await vibe.Plugin().test_vibration(100)
-        self.assertFalse(result['success'], 'A reused descriptor must be rejected before its device receives output.')
-        output.assert_not_called()
-        self.assertNotIn(vibe._EVIOCSFF, [call.args[1] for call in calls.call_args_list])
-        close.assert_called_once_with(43)
 
 
 class GameLeaseTests(unittest.TestCase):
@@ -447,196 +457,43 @@ class GameLeaseTests(unittest.TestCase):
                     [str(bad), str(Path(raw, 'missing'))], [str(environment)]]):
                 self.assertEqual(active_app.scan_proc_for_appid(), '222')
 
-    def profiles(self):
-        return {key: {'overwrite': key != '0', 'settings': {**vibe.DEFAULT_PROFILE, 'level': level}}
-                for key, level in (('0', 2), ('111', 0), ('222', 1))}
 
-    def test_vibration_uses_current_process_or_global_after_report_expires(self):
-        with patch.object(vibe, '_active_app_id', '111'), patch.object(vibe, '_active_app_ts', 100), \
-                patch.object(vibe.time, 'monotonic', return_value=113), \
-                patch.object(vibe, '_load_profiles', return_value=self.profiles()), \
-                patch.object(vibe, 'scan_proc_for_appid', return_value='') as process:
-            self.assertEqual(vibe._active_values()['level'], 2)
-            payload = vibe._settings_payload()
-            self.assertEqual((payload['app_id'], payload['profile_id']), ('0', '0'))
-            process.return_value = '111'
-            self.assertEqual(vibe._active_values()['level'], 0, 'A still-running game keeps its profile')
-            process.return_value = '222'
-            self.assertEqual(vibe._settings_payload()['app_id'], '222')
-            self.assertEqual(vibe._active_values()['level'], 1)
+class VibrationForegroundTests(FakeDevice):
+    driver = DEFAULTS
+    profiles = {key: {'overwrite': key != '0', 'settings': {
+        'level': level, 'mode': mode, 'touchpadIntensity': 2, 'touchpadEnabled': True}}
+        for key, level, mode in (('0', 2, 0), ('111', 0, 0), ('222', 3, 1))}
 
-    def test_unchanged_heartbeat_renews_lease_without_another_hardware_write(self):
-        clock = [106]
-        plugin = vibe.Plugin()
-        plugin._active_applied = True
-        with patch.object(vibe, '_active_app_id', '111'), patch.object(vibe, '_active_app_ts', 100), \
-                patch.object(vibe.time, 'monotonic', side_effect=lambda: clock[0]), \
-                patch.object(vibe, '_load_profiles', return_value=self.profiles()), \
-                patch.object(vibe, '_last_applied_values', self.profiles()['111']['settings']), \
-                patch.object(vibe, '_apply_settings') as apply, \
-                patch.object(vibe, 'scan_proc_for_appid', return_value='') as process:
-            result = asyncio.run(plugin.set_active_app('111'))
-            self.assertTrue(result['success'])
-            self.assertFalse(result['changed'])
-            self.assertEqual(vibe._active_app_ts, 106)
-            clock[0] = 117
-            self.assertEqual(vibe._active_values()['level'], 0)
-            apply.assert_not_called()
-            process.assert_not_called()
-
-    def test_returning_frontend_reapplies_after_fallback_changed_effective_profile(self):
-        plugin = vibe.Plugin()
-        plugin._active_applied = True
-        with patch.object(vibe, '_active_app_id', '111'), patch.object(vibe, '_active_app_ts', 100), \
-                patch.object(vibe.time, 'monotonic', return_value=113), \
-                patch.object(vibe, '_load_profiles', return_value=self.profiles()), \
-                patch.object(vibe, 'scan_proc_for_appid', return_value=''), \
-                patch.object(vibe, '_apply_settings', return_value=True) as apply:
-            self.assertEqual(vibe._active_values()['level'], 2)
-            result = asyncio.run(plugin.set_active_app('111'))
-            self.assertTrue(result['changed'])
-            self.assertEqual(result['settings']['level'], 0)
-            apply.assert_called_once()
-
-
-class VibrationReadbackTests(unittest.TestCase):
     def setUp(self):
-        self.cache = patch.object(vibe, '_attr_cache', {})
-        self.cache.start()
-        self.addCleanup(self.cache.stop)
-
-    def test_fresh_write_is_confirmed_before_caching(self):
-        opened = mock_open(read_data='high\n')
-        with patch('builtins.open', opened):
-            self.assertTrue(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
-        opened.return_value.read.assert_called_once()
-        self.assertEqual(vibe._attr_cache[('/mock', 'rumble_intensity')], 'high')
-
-    def test_delayed_readback_is_bounded_and_can_confirm(self):
-        opened = mock_open()
-        opened.return_value.read.side_effect = ['low\n', 'high\n']
-        with patch('builtins.open', opened), patch.object(vibe.time, 'sleep') as pause:
-            self.assertTrue(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
-        self.assertEqual(opened.return_value.read.call_count, 2)
-        pause.assert_called_once_with(vibe._READBACK_DELAY_S)
-
-    def test_ignored_write_returns_failure_without_a_confirmed_cache_entry(self):
-        opened = mock_open(read_data='low\n')
-        with patch('builtins.open', opened), patch.object(vibe.time, 'sleep'):
-            self.assertFalse(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
-        self.assertEqual(opened.return_value.read.call_count, vibe._READBACK_ATTEMPTS)
-        self.assertNotIn(('/mock', 'rumble_intensity'), vibe._attr_cache)
-
-    def test_device_disappearing_during_readback_is_not_success(self):
-        opened = mock_open()
-        opened.return_value.read.side_effect = FileNotFoundError('controller disconnected')
-        with patch('builtins.open', opened):
-            self.assertFalse(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
-        self.assertFalse(vibe._attr_cache)
-
-    def test_partial_profile_failure_attempts_and_confirms_other_attributes(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            initial = {'rumble_intensity': 'off', 'left_handle/rumble_mode': 'racing',
-                'right_handle/rumble_mode': 'racing', 'touchpad/vibration_intensity': 'off',
-                'touchpad/vibration_enabled': 'false'}
-            for relative, value in initial.items():
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(value)
-            ignored = root / 'right_handle/rumble_mode'
-            real_open = open
-            def file(path, mode='r', *args, **kwargs):
-                if Path(path) == ignored and mode == 'w':
-                    return io.StringIO()  # Accept the write but leave sysfs unchanged.
-                return real_open(path, mode, *args, **kwargs)
-            caps = {'intensity': vibe.LEVEL_NAMES, 'mode': vibe.RUMBLE_MODES,
-                    'tp_intensity': vibe.LEVEL_NAMES}
-            with patch.object(vibe, '_read_valid_settings'), \
-                    patch.object(vibe, '_capabilities', return_value=caps), \
-                    patch('builtins.open', side_effect=file), patch.object(vibe.time, 'sleep'):
-                self.assertFalse(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE), raw, True))
-            self.assertEqual((root / 'left_handle/rumble_mode').read_text().strip(), 'fps')
-            self.assertEqual((root / 'right_handle/rumble_mode').read_text().strip(), 'racing')
-            self.assertEqual((root / 'touchpad/vibration_enabled').read_text().strip(), 'true')
-            self.assertNotIn((raw, 'right_handle/rumble_mode'), vibe._attr_cache)
-
-
-class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
-    async def test_successful_retry_clears_transient_startup_error(self):
-        plugin = vibe.Plugin()
-        with patch.object(vibe.Plugin, '_setup_error', None), \
-                patch.object(vibe, '_last_suspend_offset', None), \
-                patch.object(vibe, '_active_app_ts', None), \
-                patch.object(vibe, '_monitor_task', None), patch.object(vibe, '_drift_task', None), \
-                patch.object(vibe, '_suspend_offset', return_value=0), \
-                patch.object(vibe, '_active_values', side_effect=[OSError('settings unreadable'), dict(vibe.DEFAULT_PROFILE)]), \
-                patch.object(vibe, '_apply_settings', return_value=True), \
-                patch.object(vibe, '_monitor_hotplug', new=AsyncMock()), \
-                patch.object(plugin, '_drift_loop', new=AsyncMock()):
-            try:
-                with self.assertRaisesRegex(OSError, 'settings unreadable'):
-                    await plugin._main()
-                self.assertFalse((await plugin.is_ready())['ready'])
-                await plugin._unload()
-                await plugin._main()
-                self.assertTrue((await plugin.is_ready())['ready'])
-                self.assertEqual((await plugin.is_ready())['error'], '')
-            finally:
-                await plugin._unload()
-                await module_runtime.drain('vibration')
-
-
-class VibrationForegroundEdgeTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.stack = ExitStack()
-        self.addCleanup(self.stack.close)
-        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
-        self.device = self.root / 'hid'
-        self.device.mkdir()
-        for name, value in {
-            'rumble_intensity': 'medium', 'left_handle/rumble_mode': 'fps',
-            'right_handle/rumble_mode': 'fps', 'touchpad/vibration_intensity': 'medium',
-            'touchpad/vibration_enabled': 'true',
-        }.items():
-            path = self.device / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(value, encoding='ascii')
-        self.store = AtomicSettingsManager('vibration_settings', str(self.root / 'settings'))
-        self.store.replace({'schema_version': 2, 'game_profiles': {
-            key: {'overwrite': key != '0', 'settings': {
-                'level': level, 'mode': mode, 'touchpadIntensity': 2, 'touchpadEnabled': True}}
-            for key, level, mode in (('0', 2, 0), ('111', 0, 0), ('222', 3, 1))
-        }})
-        self.clock = 100.0
+        super().setUp()
         self.running = '111'
-        self.writes = []
-        real_open = builtins.open
-        def opened(path, mode='r', *args, **kwargs):
-            if 'w' in mode and Path(path).is_relative_to(self.device):
-                self.writes.append((Path(path).relative_to(self.device).as_posix(), mode))
-            return real_open(path, mode, *args, **kwargs)
-        for name, value in {
-            'settings': self.store, '_device_path': str(self.device), '_attr_cache': {},
-            '_capabilities_cache': {}, '_last_applied_values': None,
-            '_active_app_id': '111', '_active_app_ts': None,
-        }.items():
-            self.stack.enter_context(patch.object(vibe, name, value))
-        self.stack.enter_context(patch.object(vibe, 'time', types.SimpleNamespace(
-            monotonic=lambda: self.clock, sleep=vibe.time.sleep)))
-        self.stack.enter_context(patch.object(vibe, 'scan_proc_for_appid', side_effect=lambda: self.running))
-        self.stack.enter_context(patch.object(vibe, '_discover', return_value=(str(self.device), 'fixture')))
-        self.stack.enter_context(patch('builtins.open', side_effect=opened))
-        self.plugin = vibe.Plugin()
 
-    async def asyncTearDown(self):
-        await module_runtime.drain('vibration')
+    async def test_vibration_uses_current_process_or_global_after_report_expires(self):
+        await self.plugin.set_active_app('111')
+        self.clock = 113
+        self.running = ''
+        payload = await self.plugin.get_settings()
+        self.assertEqual((payload['app_id'], payload['profile_id'], payload['settings']['level']), ('0', '0', 2))
+        self.running = '111'
+        self.assertEqual((await self.plugin.get_settings())['settings']['level'], 0,
+                         'A still-running game keeps its profile')
+        self.running = '222'
+        payload = await self.plugin.get_settings()
+        self.assertEqual((payload['app_id'], payload['settings']['level']), ('222', 3))
 
-    def intensity(self):
-        return (self.device / 'rumble_intensity').read_text(encoding='ascii').strip()
-
-    def persisted(self):
-        return AtomicSettingsManager('vibration_settings', str(self.root / 'settings')).settings
+    async def test_unchanged_heartbeat_renews_lease_without_another_hardware_write_or_process_scan(self):
+        await self.plugin.set_active_app('111')
+        self.scan.reset_mock()
+        count = len(self.writes)
+        self.clock = 106
+        result = await self.plugin.set_active_app('111')
+        self.assertTrue(result['success'])
+        self.assertFalse(result['changed'])
+        self.scan.assert_not_called()
+        self.clock = 117  # Lease renewed at 106, not 100: still the game's profile without a scan.
+        self.running = ''
+        self.assertEqual((await self.plugin.get_settings())['settings']['level'], 0)
+        self.assertEqual(len(self.writes), count)
 
     async def test_expired_report_with_new_process_foreground_applies_then_heartbeats_stay_idle(self):
         self.assertTrue((await self.plugin.set_active_app('111'))['success'])
@@ -656,6 +513,17 @@ class VibrationForegroundEdgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await self.plugin.set_active_app('222'))['success'])
         self.assertEqual(len(self.writes), count)
         self.assertEqual(self.persisted(), before)
+
+    async def test_returning_frontend_reapplies_after_fallback_changed_effective_profile(self):
+        await self.plugin.set_active_app('111')
+        self.clock = 113
+        self.running = ''  # The process scan no longer sees the game; only the frontend report does.
+        self.assertEqual((await self.plugin.get_settings())['settings']['level'], 2)
+        (self.device / 'rumble_intensity').write_text('medium', encoding='ascii')
+        result = await self.plugin.set_active_app('111')
+        self.assertTrue(result['changed'])
+        self.assertEqual(result['settings']['level'], 0)
+        self.assertEqual(self.intensity(), 'off')
 
     async def test_same_report_after_background_fallback_applied_another_profile_restores_immediately(self):
         await self.plugin.set_active_app('111')
@@ -683,16 +551,12 @@ class VibrationForegroundEdgeTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.set_active_app('111')
         self.clock = 113
         self.running = '222'
-        real_open = builtins.open
-        def ignored(path, mode='r', *args, **kwargs):
-            if Path(path) == self.device / 'right_handle/rumble_mode' and mode == 'w':
-                return io.StringIO()
-            return real_open(path, mode, *args, **kwargs)
-        with patch('builtins.open', side_effect=ignored):
-            failed = await self.plugin.set_active_app('222')
+        self.ignored.add('right_handle/rumble_mode')
+        failed = await self.plugin.set_active_app('222')
         self.assertFalse(failed['success'])
         self.assertEqual(self.intensity(), 'high')
         self.assertEqual((self.device / 'right_handle/rumble_mode').read_text().strip(), 'fps')
+        self.ignored.clear()
         retried = await self.plugin.set_active_app('222')
         self.assertTrue(retried['success'])
         self.assertEqual((self.device / 'right_handle/rumble_mode').read_text().strip(), 'racing')
@@ -718,6 +582,57 @@ class VibrationForegroundEdgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.intensity(), 'high')
 
 
+class VibrationReadbackTests(unittest.TestCase):
+    def setUp(self):
+        self.cache = patch.object(vibe, '_attr_cache', {})
+        self.cache.start()
+        self.addCleanup(self.cache.stop)
+
+    def test_delayed_readback_is_bounded_and_can_confirm(self):
+        opened = mock_open()
+        opened.return_value.read.side_effect = ['low\n', 'high\n']
+        with patch('builtins.open', opened), patch.object(vibe.time, 'sleep'):
+            self.assertTrue(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
+        self.assertEqual(opened.return_value.read.call_count, 2)
+
+    def test_ignored_write_is_reported_as_failure_after_bounded_readback(self):
+        opened = mock_open(read_data='low\n')
+        with patch('builtins.open', opened), patch.object(vibe.time, 'sleep'):
+            self.assertFalse(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
+        self.assertEqual(opened.return_value.read.call_count, vibe._READBACK_ATTEMPTS)
+
+    def test_device_disappearing_during_readback_is_not_success(self):
+        opened = mock_open()
+        opened.return_value.read.side_effect = FileNotFoundError('controller disconnected')
+        with patch('builtins.open', opened):
+            self.assertFalse(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
+
+
+class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_retry_clears_transient_startup_error(self):
+        plugin = vibe.Plugin()
+        with patch.object(vibe.Plugin, '_setup_error', None), \
+                patch.object(vibe, '_last_suspend_offset', None), \
+                patch.object(vibe, '_active_app_ts', None), \
+                patch.object(vibe, '_monitor_task', None), patch.object(vibe, '_drift_task', None), \
+                patch.object(vibe, '_suspend_offset', return_value=0), \
+                patch.object(vibe, '_active_values', side_effect=[OSError('settings unreadable'), dict(vibe.DEFAULT_PROFILE)]), \
+                patch.object(vibe, '_apply_settings', return_value=True), \
+                patch.object(vibe, '_monitor_hotplug', new=AsyncMock()), \
+                patch.object(plugin, '_drift_loop', new=AsyncMock()):
+            try:
+                with self.assertRaisesRegex(OSError, 'settings unreadable'):
+                    await plugin._main()
+                self.assertFalse((await plugin.is_ready())['ready'])
+                await plugin._unload()
+                await plugin._main()
+                self.assertTrue((await plugin.is_ready())['ready'])
+                self.assertEqual((await plugin.is_ready())['error'], '')
+            finally:
+                await plugin._unload()
+                await module_runtime.drain('vibration')
+
+
 class HotplugMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_failed_event_keeps_the_monitor_running(self):
         events, readers, handled = [], [], []
@@ -734,7 +649,12 @@ class HotplugMonitorTests(unittest.IsolatedAsyncioTestCase):
         async def handle(path, _action):
             handled.append(path)
             if len(handled) == 1: raise OSError('settings read failed')
-        with patch.object(vibe, '_PYUDEV', True),                 patch.object(vibe, '_pyudev', types.SimpleNamespace(Monitor=Monitor), create=True),                 patch.object(vibe, '_udev_ctx', None, create=True),                 patch.object(vibe, '_handle_device_added', new=handle),                 patch.object(vibe.module_runtime, 'is_paused', return_value=False),                 patch.object(vibe.asyncio, 'get_running_loop', return_value=Loop()):
+        with patch.object(vibe, '_PYUDEV', True), \
+                patch.object(vibe, '_pyudev', types.SimpleNamespace(Monitor=Monitor), create=True), \
+                patch.object(vibe, '_udev_ctx', None, create=True), \
+                patch.object(vibe, '_handle_device_added', new=handle), \
+                patch.object(vibe.module_runtime, 'is_paused', return_value=False), \
+                patch.object(vibe.asyncio, 'get_running_loop', return_value=Loop()):
             task = asyncio.create_task(vibe._monitor_hotplug())
             await asyncio.sleep(0)
             events.extend(types.SimpleNamespace(action='change', sys_path=path) for path in ('/a', '/b'))

@@ -1,14 +1,16 @@
-"""Gamescope may leave HDR_APP unset until the first HDR transition."""
+# SPDX-License-Identifier: BSD-3-Clause
+"""Hybrid PQ / gamma 2.2 rules, HDR feedback, brightness forwarding and session-safe release."""
 import asyncio
 from contextlib import ExitStack
 import copy
 from pathlib import Path
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest.mock import call, patch
 
-import support  # noqa: F401  (installs the decky stub)
+import support  # Decky/Linux doubles before importing the backend.
 import display_backend as display
 import safe_settings
 from safe_settings import AtomicSettingsManager
@@ -214,7 +216,7 @@ class DisplayBaselineTests(unittest.TestCase):
         self.assertEqual(writes, [120.0, 120.0, 250.0])
         self.assertEqual(display._as_float(self.props[display.ATOM_SDR_NITS]), 250.0)
 
-    def test_gate_reasons_and_which_release_runs(self):
+    def test_gate_reasons_and_when_brightness_is_released(self):
         display.Plugin._baseline = 250.0
         cases = (
             ({}, {}, True, 'forwarding slider to gamescope', None, False),
@@ -254,8 +256,8 @@ class DisplayBaselineTests(unittest.TestCase):
                      patch.object(display, '_write_atom_int', return_value=not fail_write) as atom:
                     self.assertIs(display.Plugin._refresh_gate_locked(), allowed)
                 self.assertEqual(self.state['reason'], reason)
-                self.assertEqual([name for name, mock in (('_release', plain), ('_release_locked', locked))
-                                  if mock.called], [release] if release else [])
+                # Whether the gate hands brightness back, not which internal entry point does it.
+                self.assertEqual(plain.called or locked.called, bool(release))
                 self.assertEqual(atom.called, wrote)
 
     def test_hdr_commit_failure_blocks_force_and_mode_writes_then_retry_has_durable_baseline(self):
@@ -345,15 +347,6 @@ class DisplaySessionTests(unittest.TestCase):
             self.assertTrue(display.Plugin._release())
         nits.assert_called_once_with(250.0)
 
-    def test_stale_gate_cannot_forward_brightness_to_a_new_compositor(self):
-        display.Plugin._baseline = 250.0
-        display.Plugin._last_written = 120.0
-        with patch.object(display, '_gamescope_start_time', return_value=200.0), \
-                patch.object(display, '_write_nits') as writes:
-            self.assertIsNone(display.Plugin._forward_nits(180.0))
-        writes.assert_not_called()
-        self.assertFalse(self.state['active'])
-
     def test_stale_hybrid_pass_cannot_write_before_the_new_session_is_adopted(self):
         self.state.update(active_mode='hybrid', panel_mode='hybrid')
         display.Plugin._hdr_baseline = False
@@ -372,7 +365,8 @@ class DisplaySessionTests(unittest.TestCase):
             return True
         with patch.object(display, '_gamescope_start_time', return_value=200.0), \
                 patch.object(display, '_write_nits', side_effect=write) as writes:
-            self.assertIsNone(display.Plugin._forward_nits(180.0))
+            self.assertIsNone(display.Plugin._forward_nits(180.0), 'a stale gate never reaches a new compositor')
+            self.assertFalse(self.state['active'])
             display.Plugin._sync_loaded_script()
             self.assertTrue(display.Plugin._refresh_gate())
             self.state['active'] = True  # The worker admits the fresh gate.
@@ -709,6 +703,166 @@ class XpropIdentityTests(unittest.TestCase):
         self.assertEqual(run([line, [], line, [], line]), [])
         # Gamescope stays reachable but xprop never reconnects.
         self.assertEqual(run([line, [], [], [], [], []]), ['property_watcher_disconnected'])
+
+
+class HybridTimingTests(unittest.TestCase):
+    """PQ at once; gamma 2.2 only after continuous SDR and a minimum PQ stay."""
+
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.now = 0.0
+        self.props = {display.ATOM_IS_EXTERNAL: 0, display.ATOM_FORCE_HDR_SUPPORT: 1,
+                      display.ATOM_HDR_ENABLED: 0, display.ATOM_HDR_APP: 0, display.ATOM_HDR_OUT: 0}
+        self.writes = []
+        self.named = []
+        self.sticks = True
+        state = dict(display.Plugin._state, active_mode=display.MODE_HYBRID,
+                     panel_mode=display.MODE_HYBRID, setup_done=True, reset_in_progress=False)
+        for name, value in {'_state': state, '_hdr_baseline': False, '_hybrid_suspended_external': False,
+                            '_hybrid_pq_hold_until': 0.0, '_hybrid_sdr_since': None,
+                            '_hdr_fights': 0, '_hdr_fight_target': None, '_hdr_fight_at': 0.0, '_hdr_backoff_until': 0.0}.items():
+            self.stack.enter_context(patch.object(display.Plugin, name, value))
+        self.stack.enter_context(patch.object(display.Plugin, 'native_display_active', return_value=False))
+        self.stack.enter_context(patch.object(display.Plugin, '_ownership_session_current', return_value=True))
+        self.stack.enter_context(patch.object(display.Plugin, '_session_props',
+                                              side_effect=lambda names, **kwargs: dict(self.props)))
+        self.stack.enter_context(patch.object(display, 'time', types.SimpleNamespace(monotonic=lambda: self.now)))
+        def write(name, value):
+            self.writes.append((self.now, value))
+            self.named.append((name, value))
+            if self.sticks:
+                self.props[name] = value
+            return True
+        self.stack.enter_context(patch.object(display, '_write_atom_int', side_effect=write))
+
+    def tick(self, at, content=None):
+        self.now = at
+        if content is not None:
+            self.props[display.ATOM_HDR_APP] = content
+        display.Plugin._hybrid_pass()
+
+    def test_one_pass_decides_from_the_atoms_it_read(self):
+        F, E, A, O, X = (display.ATOM_FORCE_HDR_SUPPORT, display.ATOM_HDR_ENABLED,
+                         display.ATOM_HDR_APP, display.ATOM_HDR_OUT, display.ATOM_IS_EXTERNAL)
+        g22, pq = 'no HDR content, panel in gamma 2.2', 'HDR content on screen, panel in PQ'
+        wait = 'no HDR content, waiting for a stable switch to gamma 2.2'
+        ext = 'external display, not ours to drive'
+        # (atoms over the defaults, None = unset; baseline, suspended, SDR since)
+        #   -> (writes, reason, hdr_now, baseline after)
+        cases = [
+            ({}, False, False, None, [], g22, False, False),
+            ({A: 1}, False, False, None, [(E, 1)], pq, True, False),
+            ({A: 1, E: 1}, False, False, None, [], pq, True, False),
+            ({E: 1}, False, False, None, [], wait, True, False),
+            ({F: 0}, False, False, None, [(F, 1)], g22, False, False),
+            # Forced with the input unset: output feedback is synthetic, so write the mode.
+            ({E: None}, False, False, 0.0, [(E, 0)], g22, False, False),
+            ({E: None, A: 1, O: 1}, False, False, None, [(E, 1)], pq, True, False),
+            # Unforced with the input unset: output feedback is the real starting mode.
+            ({F: 0, E: None, O: 1}, False, False, None, [(F, 1)], wait, True, False),
+            ({X: 1, O: 1}, False, False, None, [(F, 0)], ext, True, False),
+            ({X: 1, O: 1}, False, True, None, [], ext, None, False),
+            ({X: None}, False, False, None, [], 'could not verify the active display', None, False),
+            ({E: 1}, None, False, None, [], wait, True, True),
+            ({E: None, O: 1}, None, False, None, [], wait, True, False),
+            # Back from a dock with no baseline: the panel's own output, not the monitor's request.
+            ({F: 0, E: 1, O: 0}, None, True, None, [(F, 1)], wait, True, False),
+        ]
+        self.now = 10.0
+        self.stack.enter_context(patch.object(display.Plugin, '_edid_recheck_until', 0.0))
+        self.stack.enter_context(patch.object(display.Plugin, '_remember_hdr_baseline',
+            side_effect=lambda value: setattr(display.Plugin, '_hdr_baseline', bool(value))))
+        defaults = dict(self.props)
+        for atoms, baseline, suspended, sdr_since, writes, reason, hdr_now, after in cases:
+            with self.subTest(atoms=atoms, baseline=baseline, suspended=suspended):
+                self.props = {k: v for k, v in {**defaults, **atoms}.items() if v is not None}
+                self.named.clear()
+                display.Plugin._state.update(hdr_now=None, hybrid_reason=None)
+                display.Plugin._hdr_baseline = baseline
+                display.Plugin._hybrid_suspended_external = suspended
+                display.Plugin._hybrid_sdr_since = sdr_since
+                display.Plugin._hybrid_pq_hold_until = 0.0
+                display.Plugin._hdr_fights, display.Plugin._hdr_fight_target = 0, None
+                display.Plugin._hybrid_pass()
+                self.assertEqual(self.named, writes)
+                self.assertEqual(display.Plugin._state['hybrid_reason'], reason)
+                self.assertEqual(display.Plugin._state['hdr_now'], hdr_now)
+                self.assertEqual(display.Plugin._hdr_baseline, after)
+
+    def test_pq_at_once_and_gamma_only_after_the_hold_and_continuous_sdr(self):
+        self.tick(0.0, content=1)
+        self.assertEqual(self.writes, [(0.0, 1)])
+        self.tick(0.5, content=0)       # SDR from 0.5: debounce alone would allow 2.5
+        self.tick(2.5)
+        self.tick(2.9)
+        self.assertEqual(self.writes, [(0.0, 1)], 'PQ is held for 3 s after entering it')
+        self.tick(3.0)
+        self.assertEqual(self.writes, [(0.0, 1), (3.0, 0)])
+
+    def test_returning_hdr_restarts_the_sdr_debounce(self):
+        self.tick(0.0, content=1)
+        self.tick(10.0, content=0)
+        self.tick(11.0, content=1)      # back to HDR before 2 s of SDR
+        self.tick(11.5, content=0)
+        self.tick(13.4)
+        self.assertEqual(self.writes, [(0.0, 1)])
+        self.tick(13.5)
+        self.assertEqual(self.writes, [(0.0, 1), (13.5, 0)])
+
+    def test_four_undone_corrections_then_stand_off_for_sixty_seconds(self):
+        self.sticks = False             # another writer keeps reverting the mode
+        self.props[display.ATOM_HDR_APP] = 1
+        for second in range(8):
+            self.tick(float(second))
+        self.assertEqual(self.writes, [(0.0, 1), (1.0, 1), (2.0, 1), (3.0, 1)])
+        self.assertIn('standing off', display.Plugin._state['hybrid_reason'])
+        self.tick(4.0 + display.HDR_BACKOFF_S - 0.1)
+        self.assertEqual(len(self.writes), 4)
+        self.tick(4.0 + display.HDR_BACKOFF_S)
+        self.assertEqual(self.writes[-1], (4.0 + display.HDR_BACKOFF_S, 1))
+
+    def test_undone_gamma_switches_also_stand_off(self):
+        self.sticks = False             # another writer keeps putting the panel back into PQ
+        self.props[display.ATOM_HDR_ENABLED] = 1
+        for step in range(60):
+            self.tick(step / 2)
+        self.assertEqual(self.writes, [(2.0, 0), (4.5, 0), (7.0, 0), (9.5, 0)])
+        self.assertIn('standing off', display.Plugin._state['hybrid_reason'])
+
+    def test_a_writer_that_undoes_us_a_pass_later_still_ends_in_a_stand_off(self):
+        # Our write sticks for one pass, so the panel reads as settled before it is undone.
+        self.props[display.ATOM_HDR_APP] = 1
+        for second in range(40):
+            self.tick(float(second))
+            if self.props[display.ATOM_HDR_ENABLED] == 1 and second % 2 == 0:
+                self.props[display.ATOM_HDR_ENABLED] = 0    # reverted after our pass
+        self.assertEqual(len(self.writes), display.HDR_FIGHT_LIMIT)
+        self.assertIn('standing off', display.Plugin._state['hybrid_reason'])
+
+    def test_a_display_hand_off_starts_the_argument_afresh(self):
+        self.sticks = False             # another writer keeps reverting the mode
+        self.props[display.ATOM_HDR_APP] = 1
+        for second in range(4):
+            self.tick(float(second))
+        self.assertEqual(len(self.writes), 4)
+        self.props[display.ATOM_IS_EXTERNAL] = 1
+        self.tick(4.0)
+        self.props[display.ATOM_IS_EXTERNAL] = 0
+        self.props[display.ATOM_FORCE_HDR_SUPPORT] = 1
+        self.props[display.ATOM_HDR_ENABLED] = 0
+        self.tick(5.0)
+        self.assertEqual(self.writes[-1], (5.0, 1))  # corrected again, not a stand-off
+        self.assertNotIn('standing off', display.Plugin._state['hybrid_reason'])
+
+    def test_corrections_far_apart_or_to_another_target_never_stand_off(self):
+        self.props[display.ATOM_HDR_APP] = 1
+        for n in range(8):                  # one undone switch every 40 s
+            at = n * 40.0
+            self.props[display.ATOM_HDR_ENABLED] = 0
+            self.tick(at)
+            self.assertEqual(self.writes[-1], (at, 1))
+        self.assertNotIn('standing off', display.Plugin._state['hybrid_reason'])
 
 
 if __name__ == '__main__':

@@ -14,10 +14,8 @@ import diagnostics
 import display_backend as display
 import fan_backend as fan
 import wifi_backend as wifi
-import test_display_native_edid as edid_fixture
-import test_display_native_migration as native_fixture
-import test_display_reset as reset_fixture
-import test_display_write_recovery as write_fixture
+import test_display_edid as edid_fixture
+import test_display_lifecycle as lifecycle_fixture
 import test_wifi_manual_wpa as wpa_fixture
 
 
@@ -102,13 +100,13 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertEqual(case.backup.read_bytes(), case.original)
 
     def test_repeated_brightness_release_failure_is_coalesced(self):
-        self.fixture(native_fixture.NativeDisplayMigrationTests)
+        self.fixture(lifecycle_fixture.NativeDisplayMigrationTests)
         with patch.object(display, '_write_nits', return_value=False):
             for _ in range(7): self.assertFalse(display.Plugin._release_locked())
         self.assertEqual(len(self.events('display', 'brightness_restore_failed')), 1)
 
     def test_display_setup_keeps_private_failure_in_ui_and_logs_exception_metadata(self):
-        self.fixture(reset_fixture.DisplayResetTests)
+        self.fixture(lifecycle_fixture.DisplayResetTests)
         marker = 'unlabelled-private-setup-marker'
         with patch.object(display, '_install_script', side_effect=PermissionError(errno.EACCES, marker)), \
                 patch.object(display, '_select_mode'), patch.object(display.decky, 'logger') as legacy:
@@ -121,7 +119,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertNotIn(marker, repr(legacy.mock_calls))
 
     def test_display_restart_logs_numeric_attempt_failures_without_subprocess_details(self):
-        case = self.fixture(reset_fixture.DisplayResetTests)
+        case = self.fixture(lifecycle_fixture.DisplayResetTests)
         marker = 'unlabelled-private-restart-marker'
         for exception in (False, True):
             with self.subTest(exception=exception):
@@ -146,7 +144,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
                 self.assertNotIn(marker, repr(legacy.mock_calls))
 
     def test_edid_rollback_with_failed_metadata_clear_reports_actual_pending_recovery(self):
-        case = self.fixture(write_fixture.DisplayWriteRecoveryTests)
+        case = self.fixture(edid_fixture.DisplayWriteRecoveryTests)
         store = display.Plugin._store_settings
         def commit(values, **kwargs):
             if values.get('edid_write_pending', 'other') is None:
@@ -164,7 +162,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertNotIn('unlabelled-private-clear-marker', json.dumps(self.records))
 
     def test_native_handoff_failure_has_one_deferred_event_and_one_recovery(self):
-        case = self.fixture(native_fixture.NativeDisplayMigrationTests)
+        case = self.fixture(lifecycle_fixture.NativeDisplayMigrationTests)
         with patch.object(display.Plugin, '_native_store', side_effect=OSError('Fixture native journal is full')):
             for _ in range(4): case.refresh()
         self.assertEqual([row['context']['status'] for row in self.events('display', 'native_cleanup')], ['deferred'])
@@ -212,13 +210,13 @@ class PlatformDiagnosticTests(unittest.TestCase):
                 journal['phase'] = phase
                 case.plugin._save_band_policy_journal(journal)
                 self.records.clear(); diagnostics._seen.clear()
-                writes, reconnects = case.modify.call_count, case.reconnect.call_count
+                writes, reconnects = len(case.writes()), case.reconnect.call_count
                 with patch.object(case.plugin, '_restore_band_policy_transaction',
                                   wraps=case.plugin._restore_band_policy_transaction) as restore:
                     self.assertTrue(case.plugin._recover_band_policy_journal()['success'])
                 restore.assert_not_called()
-                self.assertEqual(case.frequency, 6295)
-                self.assertEqual((case.modify.call_count, case.reconnect.call_count), (writes, reconnects))
+                self.assertEqual(case.nm.frequency, 6295)
+                self.assertEqual((len(case.writes()), case.reconnect.call_count), (writes, reconnects))
                 context = self.events('wifi', 'band_recovery')[0]['context']
                 self.assertEqual(context['outcome'], 'completed')
                 self.assertFalse(context['restored'])
@@ -234,7 +232,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
                 context = self.events('wifi', 'band_recovery')[0]['context']
                 self.assertEqual(context['restored'], phase == 'rolled_back')
                 self.assertEqual(context['outcome'], 'restored' if phase == 'rolled_back' else 'completed')
-        case.modify.assert_not_called(); case.reconnect.assert_not_called()
+        self.assertEqual(case.writes(), []); case.reconnect.assert_not_called()
 
     def test_independent_wifi_watchdog_failure_records_pending_without_private_journal(self):
         case = self.fixture(wpa_fixture.ManualWpaTests); case.configure()
