@@ -72,5 +72,5 @@ TestCase {
         mousePress(graph,graph.pointX(45)+20,graph.pointY(1500)-20);compare(graph.selected,1);verify(graph.editing);
         mouseRelease(graph,graph.pointX(45)+20,graph.pointY(1500)-20);
     }
-    function test_percentFormatting() { graph.unit="percent";compare(graph.displaySpeed(2400),"50%");graph.unit="rpm";compare(graph.displaySpeed(2400),"2400 RPM"); }
+    function test_percentFormatting() { graph.unit="percent";compare(graph.displaySpeed(2400),"50.0%");graph.unit="rpm";compare(graph.displaySpeed(2400),"2400 RPM"); }
 }

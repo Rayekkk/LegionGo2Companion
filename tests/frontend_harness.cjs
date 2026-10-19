@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 const ts = require(path.join(root, 'node_modules/typescript'));
 // Shared src modules always run for real, even where tests stub other pages.
-const REAL_MODULES = new Set(['./shared']);
+const REAL_MODULES = new Set(['./shared']);  // and every desktop/native/*.mjs shared with the Desktop app
 
 // Fake timers leave no native event-loop handle, so a pending top-level promise
 // would let Node exit successfully; require explicit completion instead.
@@ -113,6 +113,7 @@ function mount(file, options = {}) {
       if (request === '@decky/api') return api;
       if (request === '@decky/ui') return ui;
       if (REAL_MODULES.has(request)) { const file = request.slice(2) + '.tsx'; return (loaded.get(file) ?? load(file)).exports; }
+      if (request.startsWith('../desktop/native/')) return (loaded.get(request) ?? load(request)).exports;
       const stub = typeof options.modules === 'function' ? options.modules(request) : options.modules?.[request];
       if (stub !== undefined) return stub;
       throw Error(request);

@@ -2,7 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "Fan.js" as Fan
+import "fan.mjs" as Fan
 ColumnLayout {
     id:overview
     objectName:"deviceOverview"
@@ -73,7 +73,7 @@ ColumnLayout {
             }
             Rectangle { Layout.fillWidth:true; implicitHeight:1; color:theme.divider; Layout.topMargin:6 }
             UiReadout { objectName:"overviewPowerLimit"; Layout.fillWidth:true; label:"Power limit"; value:overview.performanceFresh && overview.watts("spl_limit")!=="—"?overview.watts("spl_limit")+" W (boost "+overview.watts("sppt_limit")+"/"+overview.watts("fppt_limit")+" W)":"—" }
-            UiReadout { objectName:"overviewFanControl"; Layout.fillWidth:true; label:"Fan control"; value:fresh("fan_get_state",3)?Fan.status(overview.fan).headline:"—" }
+            UiReadout { objectName:"overviewFanControl"; Layout.fillWidth:true; label:"Fan control"; value:fresh("fan_get_state",3)?Fan.fanStatus(overview.fan).headline:"—" }
             Item { Layout.fillHeight:true }
             RowLayout { Layout.fillWidth:true; spacing:10
                 UiButton { text:"Power limits"; onClicked:overview.navigate("tdp") }

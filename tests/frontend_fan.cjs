@@ -108,17 +108,23 @@ run(async()=>{
   assert.equal(h.exports.editPoint(lowLast,6,1,4000,limits)[6][1],3000,'Point 7 cannot rise above point 8');
   assert.equal(h.exports.editPoint(lowLast,7,1,2000,limits)[7][1],2900,'Point 8 cannot drop below point 7');
   assert.equal(h.exports.editPoint(curve,4,1,1501,limits)[4][1],3960,'Lower neighbour bounds RPM');
-  assert.equal(h.exports.editPoint(curve,0,1,100,limits)[0][1],0,'Deadband descending snaps to stop');
+  assert.equal(h.exports.editPoint(curve,0,1,100,limits)[0][1],0,'Below half the running minimum snaps to stop');
   const stopped=json(curve);stopped[0][1]=0;
-  assert.equal(h.exports.editPoint(stopped,0,1,1,limits)[0][1],1500,'Deadband rising snaps to running minimum');
+  assert.equal(h.exports.editPoint(stopped,0,1,749,limits)[0][1],0,'Below half the running minimum snaps to stop');
+  assert.equal(h.exports.editPoint(stopped,0,1,750,limits)[0][1],1500,'Half the running minimum snaps to the minimum');
 
   assert.equal(h.exports.editPoint(curve,0,0,-50,limits)[0][0],0);
   assert.equal(h.exports.editPoint(curve,0,0,100,limits)[0][0],56);
   assert.equal(h.exports.editPoint(curve,4,1,9999,limits)[4][1],4800);
   assert.equal(h.exports.editPoint(curve,2,1,9999,limits)[2][1],3960);
   const zeroPair=json(curve);zeroPair[0][1]=zeroPair[1][1]=0;
-  assert.equal(h.exports.editPoint(zeroPair,0,1,1,limits)[0][1],0,'A following stopped point prevents a rising deadband snap');
+  assert.equal(h.exports.editPoint(zeroPair,0,1,1000,limits)[0][1],0,'A following stopped point prevents a rising deadband snap');
   assert.equal(h.exports.editPoint(curve,2,1,0,limits)[2][1],3120,'Cannot stop after a running neighbour');
+  const {nudgeSpeed}=await import(require('node:url').pathToFileURL(require('node:path').join(__dirname,'../desktop/native/fan.mjs')).href);
+  assert.equal(nudgeSpeed(0,100,1500),1500,'A step up from a stopped fan starts at the running minimum');
+  assert.equal(nudgeSpeed(1500,-100,1500),0,'A step down below the running minimum stops the fan');
+  assert.equal(nudgeSpeed(1500,100,1500),1600);
+  assert.equal(nudgeSpeed(0,-100,1500),0);
   for(const delta of [-5000,-500,-100,-48,-1,1,48,100,500,5000])for(const base of [curve,low,lowLast])for(let i=0;i<8;i++){
     const result=h.exports.editPoint(base,i,1,base[i][1]+delta,limits);
     assert.ok(result.every((p,j)=>j===0||p[1]>=result[j-1][1]));
@@ -304,7 +310,7 @@ run(async()=>{
     [s=>{s.telemetry.automatic=false;},['Returning fan to automatic…','No action needed.']],
     [s=>{s.settings.assign_tdp_presets=false;},['Automatic','Uses your saved global curve.']],
   ];
-  for(const [change,[headline,detail],startingFor] of cases)assert.deepEqual(json(status(change,startingFor)),json({headline,detail}),headline);
+  for(const [change,[headline,detail],startingFor] of cases){const r=status(change,startingFor);assert.deepEqual([r.headline,r.detail||undefined],[headline,detail],headline);}
   assert.equal(late.exports.fanSummary(undefined),'APU — · — RPM · Reading fan…');
   // Own ON/OFF bumps the revision without CAS; unsaved drafts (current and other scopes) must stay saveable.
   const on=json(initial);on.settings.enabled=true;on.telemetry={active:true,automatic:false};

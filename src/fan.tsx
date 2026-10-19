@@ -5,6 +5,7 @@ import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, Game
   DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 import { errorText, infoRow } from "./shared";
+import { curveName as title, editPoint, fanStatus, nudgeSpeed, speedText } from "../desktop/native/fan.mjs";
 
 export type Curve = [number, number][];
 export interface FanState {
@@ -48,12 +49,8 @@ const ordered = (operation: () => Promise<FanState>) => {
   return result;
 };
 const clone = (curve: Curve): Curve => curve.map(([t, r]) => [t, r]);
-const title = (name: string) => name === "max" ? "Maximum" : name[0].toUpperCase() + name.slice(1);
-export const speedLabel = (rpm: number | undefined, state: Pick<FanState, "settings" | "limits">) => {
-  const percent = state.settings.display_unit === "percent";
-  if (rpm === undefined || !Number.isFinite(rpm)) return percent ? "—%" : "— RPM";
-  return percent ? `${Math.min(100, Math.max(0, rpm/state.limits.max_rpm*100)).toFixed(1)}%` : `${rpm} RPM`;
-};
+export const speedLabel = (rpm: number | undefined, state: Pick<FanState, "settings" | "limits">) =>
+  speedText(rpm, state.settings.display_unit, state.limits?.max_rpm);
 const RPM_EDIT_STEPS = [1,10,50,100,200,500];
 const PERCENT_EDIT_STEPS = [1,2,5,10];
 export const speedEditStep = (rpmStep: number, state: Pick<FanState, "settings" | "limits">) => {
@@ -69,47 +66,10 @@ export const fanReadingLabel = (state?: FanState, now = Date.now()) => {
       !Number.isFinite(r.apu_temperature) || !Number.isInteger(r.rpm)) return `APU — · ${state ? speedLabel(undefined, state) : "— RPM"}`;
   return `APU ${r.apu_temperature!.toFixed(1)}°C · ${speedLabel(r.rpm, state!)}`;
 };
-const STARTING_STUCK_MS = 30000;
-/**
- * One status for every fan view, evaluated top-down from fields the backend
- * already returns: a headline, and the line the toggle shows (detail).
- * `startingFor` is how long the curve has been starting, for the stuck hint.
- */
-export const fanStatus = (state?: FanState, startingFor = 0): { headline: string; detail?: string } => {
-  if (!state) return { headline: "Reading fan…" };
-  if (!state.supported) return { headline: "Not available on this console", detail: state.error || undefined };
-  const enabled = state.settings.enabled;
-  // Pause/retry keeps Fan Control on and reports why; a latched fault turns it off.
-  if (enabled && state.error) return { headline: "Paused, resuming automatically", detail: "No action needed." };
-  if (enabled && !state.telemetry?.active) return { headline: "Starting your curve…", detail: startingFor >= STARTING_STUCK_MS
-    ? "Still starting. Turn Fan Control off and on to retry." : "No action needed." };
-  if (!enabled && state.error) return { headline: "Turned off after an error", detail: `${state.error} Turn on to try again.` };
-  if (!enabled && state.ownership?.blocked) return { headline: "Another app controls the fan", detail: state.ownership.reason };
-  if (enabled) return { headline: state.active_curve === "global" ? "Global curve" : `${title(state.active_curve)} TDP curve`,
-    detail: "Turn off to return the fan to automatic." };
-  if (state.readings?.valid && state.readings.automatic === false) return { headline: "Another app controls the fan" };
-  if (state.telemetry && !state.telemetry.automatic) return { headline: "Returning fan to automatic…", detail: "No action needed." };
-  return { headline: "Automatic", detail: state.settings.assign_tdp_presets
-    ? "Global curve with optional Companion TDP assignments." : "Uses your saved global curve." };
-};
+export { editPoint, fanStatus };
 export const fanMode = (state?: FanState) => fanStatus(state).headline;
 export const fanSummary = (state?: FanState) => `${fanReadingLabel(state)} · ${fanMode(state)}`;
 const notify = (body: string) => toaster.toast({ title: "Fan Control", body });
-
-export function editPoint(curve: Curve, index: number, axis: 0 | 1, value: number, limits: FanState["limits"]): Curve {
-  const next = clone(curve);
-  const last = index === curve.length-1;
-  if (!Number.isFinite(value) || index < 0 || index >= curve.length || !Number.isInteger(index) || last && axis === 0) return next;
-  if (axis === 0) {
-    next[index][0] = Math.max(index ? curve[index-1][0]+1 : 0, Math.min(curve[index+1][0]-1, Math.round(value)));
-  } else {
-    let rpm = Math.round(value/limits.step)*limits.step;
-    if (rpm > 0 && rpm < limits.min_rpm) rpm = value > curve[index][1] ? limits.min_rpm : 0;
-    // The 100°C point stays at 100°C and can never stop.
-    next[index][1] = Math.max(index ? curve[index-1][1] : 0, last ? limits.min_rpm : 0, Math.min(last ? limits.max_rpm : curve[index+1][1], limits.max_rpm, rpm));
-  }
-  return next;
-}
 
 export const graphLayout = (fullscreen: boolean, width=800, height=308) => {
   if(!fullscreen)return {width:400,height:248,left:76,span:292,bottom:202,rise:170,font:12,scale:1};
@@ -147,7 +107,7 @@ export const CurveGraph: FC<{curve: Curve; selected: number; status: FanState; d
     if ([GamepadButton.DIR_LEFT,GamepadButton.DIR_RIGHT,GamepadButton.DIR_UP,GamepadButton.DIR_DOWN].includes(button)) {
       event.preventDefault();event.stopPropagation();
       if (button === GamepadButton.DIR_LEFT || button === GamepadButton.DIR_RIGHT) edit(0, curve[selected][0]+(button === GamepadButton.DIR_LEFT ? -1 : 1));
-      else edit(1, curve[selected][1]+(button === GamepadButton.DIR_UP ? rpmStep : -rpmStep));
+      else edit(1, nudgeSpeed(curve[selected][1], button === GamepadButton.DIR_UP ? rpmStep : -rpmStep, status.limits.min_rpm));
     }
   };
   const move = (event: React.PointerEvent<SVGSVGElement>) => {
@@ -412,7 +372,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
         <div style={{fontSize:13,color:"#afb7c0",marginTop:4}}>{fanState.headline}</div>
       </div>
       <PanelSectionRow><ToggleField label="Enable Fan Control" checked={status.settings.enabled}
-        disabled={busy || !status.supported || (!status.settings.enabled && !!status.ownership?.blocked) || ((dirty || status.needs_curve_review) && !status.settings.enabled)}
+        disabled={busy || !status.settings.enabled && (!status.supported || !!status.ownership?.blocked || dirty || !!status.needs_curve_review)}
         description={enableDescription}
         onChange={toggle} /></PanelSectionRow>
     </PanelSection>
@@ -433,7 +393,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
         onClick={useGlobal}>Use global curve for {title(scope)}</ButtonItem></PanelSectionRow>}
     </PanelSection>
     <PanelSection title="Settings">
-      <PanelSectionRow><ToggleField label="Assign curves to TDP presets" checked={assignmentMode} disabled={busy || !!status.needs_curve_review}
+      <PanelSectionRow><ToggleField label="Assign curves to TDP presets" checked={assignmentMode} disabled={busy || dirty || !!status.needs_curve_review}
         description={failure("assign") ?? <span data-fan-assignment-note="true">{ASSIGNMENT_NOTE}</span>} onChange={switchAssignments} /></PanelSectionRow>
       {/* The page's last row is never disabled; mutate() ignores it while another change runs. */}
       <PanelSectionRow><ToggleField label="Show fan speed as percentage" checked={unit === "percent"}

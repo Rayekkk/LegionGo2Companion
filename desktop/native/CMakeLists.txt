@@ -13,7 +13,7 @@ set_target_properties(legiongo2companion PROPERTIES WIN32_EXECUTABLE TRUE BUILD_
     QT_QMLCACHEGEN_ARGUMENTS --only-bytecode)
 qt_add_qml_module(legiongo2companion URI Companion VERSION 1.0
     QML_FILES Main.qml Backend.qml FanPage.qml CurveGraph.qml ModulePage.qml OverviewPage.qml
-        UiCard.qml UiField.qml UiTheme.qml UiButton.qml UiSwitch.qml UiComboBox.qml UiBadge.qml UiIcon.qml UiMetric.qml UiReadout.qml UiSlider.qml UiOptions.qml ModuleStatus.qml UiModuleNotice.qml UiConfirm.qml AppSettings.qml LogsPage.qml Fan.js Tdp.js
+        UiCard.qml UiField.qml UiTheme.qml UiButton.qml UiSwitch.qml UiComboBox.qml UiBadge.qml UiIcon.qml UiMetric.qml UiReadout.qml UiSlider.qml UiOptions.qml ModuleStatus.qml UiModuleNotice.qml UiConfirm.qml AppSettings.qml LogsPage.qml Tdp.js fan.mjs
     RESOURCES rpc-methods.json)
 target_link_libraries(legiongo2companion PRIVATE Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 if(MSVC)

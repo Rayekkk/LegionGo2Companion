@@ -39,7 +39,7 @@ TestCase {
         compare(findChild(view,"overviewPower").value,"18.0 W");
         compare(findChild(view,"overviewFan").value,"2400 RPM");
         fake.data=Object.assign({},fake.data,{fan_get_state:Object.assign({},fake.data.fan_get_state,{settings:{display_unit:"percent"}})});
-        compare(findChild(view,"overviewFan").value,"50%");
+        compare(findChild(view,"overviewFan").value,"50.0%");
     }
     function test_staleAndDisconnectedValuesAreNotShownAsLive() {
         fake.clock=14;view.tick=fake.clock;

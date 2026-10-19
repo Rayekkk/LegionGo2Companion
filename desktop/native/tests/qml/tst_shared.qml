@@ -264,6 +264,29 @@ TestCase {
         fan.dirty=true;verify(!toggle.enabled);compare(toggle.note,"Save or discard your curve changes first.");
         fan.dirty=false;verify(toggle.enabled);
     }
+    function test_fanSaveAndUseGlobalFollowTheDeckyRules() {
+        const curve=[[0,0],[45,1500],[55,2000],[65,2600],[75,3200],[85,3900],[95,4500],[100,4800]];
+        model.snapshots=Object.assign({},model.snapshots,{fan_get_state:{supported:true,ownership:{blocked:false},presets:["max"],limits:{min_rpm:1500,max_rpm:4800},
+            settings:{revision:1,enabled:false,global_curve:curve,presets:{},assign_tdp_presets:true,display_unit:"rpm"}}});
+        model.received={get_version:fake.clock,fan_get_state:fake.clock};
+        const fan=createTemporaryObject(fanFactory,this,{backend:model});verify(fan!==null);
+        const save=findChild(fan,"fanSave"),useGlobal=findChild(fan,"fanUseGlobal");
+        compare(save.text,"Save global curve");verify(!save.enabled,"nothing to save");
+        fan.switchScope("max");compare(save.text,"Assign curve to Maximum");
+        verify(save.enabled,"an inheriting preset can take its own copy unchanged");verify(!fan.hasOwnCurve,"no Use global: it already uses the global curve");
+        model.snapshots=Object.assign({},model.snapshots,{fan_get_state:Object.assign({},model.snapshots.fan_get_state,{needs_curve_review:true,
+            settings:Object.assign({},model.snapshots.fan_get_state.settings,{presets:{max:curve}})})});
+        verify(fan.hasOwnCurve && useGlobal.enabled);verify(save.enabled,"an unchanged curve confirms the review");
+        fan.dirty=true;verify(!useGlobal.enabled,"unsaved changes first");
+    }
+    function test_fanStillStartingHintAlsoForAPageOpenedMidStart() {
+        model.snapshots=Object.assign({},model.snapshots,{fan_get_state:{supported:true,ownership:{blocked:false},presets:[],
+            telemetry:{active:false,automatic:false},settings:{revision:1,enabled:true,global_curve:[],presets:{}}}});
+        model.received={get_version:fake.clock,fan_get_state:fake.clock};
+        const fan=createTemporaryObject(fanFactory,this,{backend:model});verify(fan!==null);
+        verify(fan.startingSince>=0);compare(fan.status.detail,"No action needed.");
+        fan.tick=fan.startingSince+30;compare(fan.status.detail,"Still starting. Turn Fan Control off and on to retry.");
+    }
     function test_fanAssignmentFailureDoesNotRetargetPresetCurveToGlobal() {
         const globalCurve=[[0,0],[45,1500],[55,2000],[65,2600],[75,3200],[85,3900],[95,4500],[100,4800]];
         const presetCurve=globalCurve.map(p=>[p[0],Math.min(4800,p[1]+200)]);

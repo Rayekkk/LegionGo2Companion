@@ -2,7 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "Fan.js" as Fan
+import "fan.mjs" as Fan
 ColumnLayout {
     id:panel
     UiTheme { id:theme }
@@ -21,20 +21,22 @@ ColumnLayout {
     property bool dirty:false
     readonly property bool editing:dirty
     readonly property bool scopeAvailable:availableScope()
+    readonly property bool hasOwnCurve:scope!=="global" && scopeAvailable && !!settings.presets?.[scope]
     property int speedStep:100
     property string unit:settings.display_unit || "rpm"
     property real tick:backend.now()
     property var readings:fanState.readings || {}
     property bool fresh:moduleStatus.ready && tick>=0 && Fan.readingFresh(readings,backend.age("fan_get_state"))
     property bool editable:moduleStatus.ready && tick>=0 && backend.age("fan_get_state")<5 && backend.connected && !backend.state("get_version").blocked && !!backend.state("get_version").modules?.fan?.ready && !!fanState.supported && !backend.busy
-    readonly property var status:Fan.status(fanState)
+    readonly property bool starting:!!Fan.fanStatus(fanState).starting
+    readonly property var status:Fan.fanStatus(fanState,stuck?Fan.STARTING_STUCK_MS:0)
     // "Starting your curve…" turns into a retry hint once it lasts 30 s.
-    property real startingSince:-1
-    onStatusChanged: { if(!status.starting)startingSince=-1;else if(startingSince<0)startingSince=backend.now(); }
-    readonly property bool stuck:!!status.starting && startingSince>=0 && tick-startingSince>30
+    // Re-evaluated only when `starting` flips, so it also covers a page opened mid-start.
+    readonly property real startingSince:starting?backend.now():-1
+    readonly property bool stuck:starting && startingSince>=0 && tick-startingSince>=Fan.STARTING_STUCK_MS/1000
     property var scopes: {
         let values=[{id:"global",label:"Global curve"}];
-        if(settings.assign_tdp_presets) for(const name of fanState.presets || []) values.push({id:name,label:name.charAt(0).toUpperCase()+name.slice(1)+" TDP"});
+        if(settings.assign_tdp_presets) for(const name of fanState.presets || []) values.push({id:name,label:Fan.curveName(name)+" TDP"});
         return values;
     }
     spacing:16
@@ -99,9 +101,9 @@ ColumnLayout {
             Layout.fillWidth:true; label:"Enable Fan Control"; kind:"toggle"; value:settings.enabled
             // Ownership blocks only turning ON; resuming or stale readings must never block turning OFF.
             // Turning on waits for a saved curve; nothing ever blocks turning off.
-            enabled:panel.editable && (!!settings.enabled || (!fanState.ownership?.blocked && !panel.dirty && !fanState.needs_curve_review))
+            enabled:settings.enabled?backend.connected && !backend.busy:panel.editable && !fanState.ownership?.blocked && !panel.dirty && !fanState.needs_curve_review
             note:!moduleStatus.ready?moduleStatus.message:!settings.enabled && panel.dirty?"Save or discard your curve changes first.":!settings.enabled && fanState.needs_curve_review?"Review and save the curve first.":
-                panel.stuck?"Still starting. Turn Fan Control off and on to retry.":panel.status.note
+                panel.status.detail
             onEdited: function(value) { panel.switchControl(value); }
         }
     }
@@ -124,7 +126,7 @@ ColumnLayout {
                         model:["silent","balanced","aggressive"]
                         delegate:UiButton {
                             required property string modelData
-                            objectName:"template_"+modelData; text:Fan.title(modelData); enabled:panel.editable && !!fanState.templates?.[modelData]
+                            objectName:"template_"+modelData; text:Fan.curveName(modelData); enabled:panel.editable && !!fanState.templates?.[modelData]
                             onClicked: { panel.draft=panel.clone(fanState.templates[modelData]); panel.dirty=true; }
                         }
                     }
@@ -148,16 +150,19 @@ ColumnLayout {
         Label { textFormat:Text.PlainText; visible:panel.dirty && !panel.scopeAvailable; text:"TDP curve assignments changed. Your draft is preserved. Discard it to return to the global curve."; color:theme.warning; wrapMode:Text.WordWrap; Layout.fillWidth:true }
         Flow {
             Layout.fillWidth:true; spacing:10
-            UiButton { text:"Save curve"; tone:"primary"; enabled:panel.editable && panel.scopeAvailable && panel.dirty && Number(settings.revision)===panel.revision; onClicked:panel.save() }
+            // An unchanged curve can still be saved to confirm a review or to give an inheriting preset its own curve.
+            UiButton { objectName:"fanSave"; text:panel.scope==="global"?"Save global curve":"Assign curve to "+Fan.curveName(panel.scope); tone:"primary"
+                enabled:panel.editable && panel.scopeAvailable && Number(settings.revision)===panel.revision
+                    && (panel.dirty || !!fanState.needs_curve_review || panel.scope!=="global" && !settings.presets?.[panel.scope]); onClicked:panel.save() }
             UiButton { text:"Discard changes"; enabled:panel.dirty && !backend.busy; onClicked: { panel.dirty=false; panel.load(); } }
-            UiButton { text:"Use global curve for "+Fan.title(panel.scope); visible:panel.scope!=="global" && panel.scopeAvailable; enabled:panel.editable; onClicked:backend.mutate("fan_save_curve",[panel.scope,null,Number(settings.revision)]) }
+            UiButton { objectName:"fanUseGlobal"; text:"Use global curve for "+Fan.curveName(panel.scope); visible:panel.hasOwnCurve; enabled:panel.editable && !panel.dirty; onClicked:backend.mutate("fan_save_curve",[panel.scope,null,Number(settings.revision)]) }
             Label { textFormat:Text.PlainText; visible:panel.dirty; text:"Unsaved changes"; color:theme.warning; height:theme.target; verticalAlignment:Text.AlignVCenter; font.pixelSize:theme.fontSmall }
         }
         Label { textFormat:Text.PlainText; text:"0 stops the fan. Running range: "+panel.speed(limits.min_rpm || 1500)+" to "+panel.speed(limits.max_rpm || 4800)+"."; color:theme.muted; font.pixelSize:theme.fontSmall; wrapMode:Text.WordWrap; Layout.fillWidth:true }
     }
     UiCard {
         Layout.fillWidth:true; title:"Settings"; icon:"settings"
-        UiField { Layout.fillWidth:true; label:"Assign curves to TDP presets"; kind:"toggle"; value:settings.assign_tdp_presets; enabled:panel.editable && !panel.dirty
+        UiField { Layout.fillWidth:true; label:"Assign curves to TDP presets"; kind:"toggle"; value:settings.assign_tdp_presets; enabled:panel.editable && !panel.dirty && !fanState.needs_curve_review
             note:"Each Companion TDP preset can have its own curve (not Steam's Performance setting). Others use the global curve."
             onEdited:function(value) { backend.mutate("fan_save_assignment_mode",[value,Number(settings.revision)]); } }
     }

@@ -2,7 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Shapes
-import "Fan.js" as Fan
+import "fan.mjs" as Fan
 FocusScope {
     id:graph
     UiTheme { id:theme }
@@ -24,28 +24,17 @@ FocusScope {
     Accessible.role:Accessible.Chart
     Accessible.name:"Fan curve. Activate to edit. Left and right change temperature. Up and down change speed. Q and E select points. The 100 °C point changes speed only. Escape ends editing."
     function displaySpeed(rpm) { return Fan.speedText(rpm,unit,maximum); }
+    readonly property var limits:({min_rpm:minimumRunning,max_rpm:maximum,step:1})
     function pointX(t) { return plot.x+plot.width*Math.max(0,Math.min(100,t))/100; }
     function pointY(r) { return plot.y+plot.height*(1-Math.max(0,Math.min(maximum,r))/maximum); }
     function editPoint(index, temp, speed) {
         if (!writable || index<0 || index>=curve.length) return;
-        const points=curve.map(p=>[p[0],p[1]]);
-        // The 100 °C point keeps its temperature and can never stop.
-        const last=index===curve.length-1;
-        const loT=last?points[index][0]:index?points[index-1][0]+1:0, hiT=last?points[index][0]:points[index+1][0]-1;
-        const loR=Math.max(index?points[index-1][1]:0,last?minimumRunning:0), hiR=last?maximum:points[index+1][1];
-        temp=Math.max(loT,Math.min(hiT,Math.round(temp)));
-        speed=Math.max(loR,Math.min(hiR,Math.round(speed)));
-        if (speed>0 && speed<minimumRunning) speed=speed>=minimumRunning/2?minimumRunning:0;
-        speed=Math.max(loR,Math.min(hiR,speed));
-        if (last && speed===points[index][1]) return;
-        points[index]=[temp,speed]; edited(points);
+        const points=Fan.editPoint(Fan.editPoint(curve,index,0,temp,limits),index,1,speed,limits);
+        if (points[index][0]!==curve[index][0] || points[index][1]!==curve[index][1]) edited(points);
     }
     function nudge(dx,dy) {
         if (!curve[selected]) return;
-        let speed=curve[selected][1]+dy*speedStep;
-        if (dy>0 && curve[selected][1]===0) speed=minimumRunning;
-        if (dy<0 && speed<minimumRunning) speed=0;
-        editPoint(selected,curve[selected][0]+dx,speed);
+        editPoint(selected,curve[selected][0]+dx,Fan.nudgeSpeed(curve[selected][1],dy*speedStep,minimumRunning));
     }
     Keys.onPressed: function(event) {
         if (!editing && (event.key===Qt.Key_Return || event.key===Qt.Key_Enter || event.key===Qt.Key_Space)) {
