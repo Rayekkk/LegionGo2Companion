@@ -13,7 +13,7 @@ import {
 import { FC, ReactNode, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
-import { activeLimits } from "../desktop/native/tdp.mjs";
+import { overviewSummary } from "../desktop/native/tdp.mjs";
 import { FanPage, getFanState, fanSummary, type FanState } from "./fan";
 import {
   VibrationPage,
@@ -404,12 +404,7 @@ const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBac
   </PanelSection>;
 };
 
-const tdpSummary = (settings?: TdpSettings) => {
-  if (!settings) return "Power limits and CPU settings";
-  if (settings.enabled === false) return "Off · Lenovo defaults";
-  const now = activeLimits(settings);
-  return now ? `${now.label} · ${now.spl} W` : "Custom";
-};
+const tdpSummary = (settings?: TdpSettings) => settings ? overviewSummary(settings) : "Power limits and CPU settings";
 
 const VIBE_LEVELS = ["Off", "Low", "Medium", "High"];
 const VIBE_MODES = ["FPS", "Racing", "Standard", "SPG", "RPG"];

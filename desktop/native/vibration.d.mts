@@ -5,4 +5,5 @@ export const LEVELS_SHORT: string[];
 export const FALLBACK_MODES: string[];
 export function modeLabel(raw: string): string;
 export function modeShort(raw: string): string;
+export function driverNotice(status: { found?: boolean } | null | undefined): [string, string] | null;
 export function touchpadStrengthEditable(settings?: { touchpadEnabled?: boolean } | null): boolean;

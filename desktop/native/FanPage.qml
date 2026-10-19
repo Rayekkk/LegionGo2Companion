@@ -119,7 +119,7 @@ ColumnLayout {
             }
             ColumnLayout {
                 Layout.fillWidth:true; Layout.minimumWidth:0; spacing:6
-                Label { textFormat:Text.PlainText; text:"Start from:"; color:theme.muted; font.pixelSize:theme.fontSmall }
+                Label { textFormat:Text.PlainText; text:"Starting curve"; color:theme.muted; font.pixelSize:theme.fontSmall }
                 Flow {
                     objectName:"fanTemplate"; Layout.fillWidth:true; spacing:8
                     Repeater {
@@ -132,7 +132,7 @@ ColumnLayout {
                     }
                 }
             }
-            UiButton { text:"Expand editor"; Layout.alignment:Qt.AlignRight|Qt.AlignBottom; Layout.columnSpan:curveToolbar.columns===2?2:1; onClicked:fullscreen.showFullScreen(); enabled:moduleStatus.ready && panel.draft.length===8 }
+            UiButton { text:"Full screen curve editor"; Layout.alignment:Qt.AlignRight|Qt.AlignBottom; Layout.columnSpan:curveToolbar.columns===2?2:1; onClicked:fullscreen.showFullScreen(); enabled:moduleStatus.ready && panel.draft.length===8 }
         }
         CurveGraph {
             id:graph; Layout.fillWidth:true; Layout.preferredHeight:330
@@ -143,15 +143,15 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth:true; spacing:16
-            Label { textFormat:Text.PlainText; text:"Speed shown as"; color:theme.muted }
-            UiOptions { objectName:"fanUnits"; Layout.fillWidth:true; choices:[{id:"rpm",label:"RPM"},{id:"percent",label:"Percent"}]; value:panel.unit; enabled:panel.editable; onSelected:function(value){panel.changeUnit(value);} Accessible.name:"Fan speed units" }
+            Label { textFormat:Text.PlainText; text:"Speed unit"; color:theme.muted }
+            UiOptions { objectName:"fanUnits"; Layout.fillWidth:true; choices:[{id:"rpm",label:"RPM"},{id:"percent",label:"Percent"}]; value:panel.unit; enabled:panel.editable; onSelected:function(value){panel.changeUnit(value);} Accessible.name:"Speed unit" }
         }
         Label { textFormat:Text.PlainText; visible:panel.dirty && Number(settings.revision)!==panel.revision; text:"Settings changed in Decky or another window. Your draft is preserved; reload before saving."; color:theme.warning; wrapMode:Text.WordWrap; Layout.fillWidth:true }
         Label { textFormat:Text.PlainText; visible:panel.dirty && !panel.scopeAvailable; text:"TDP curve assignments changed. Your draft is preserved. Discard it to return to the global curve."; color:theme.warning; wrapMode:Text.WordWrap; Layout.fillWidth:true }
         Flow {
             Layout.fillWidth:true; spacing:10
             // An unchanged curve can still be saved to confirm a review or to give an inheriting preset its own curve.
-            UiButton { objectName:"fanSave"; text:panel.scope==="global"?"Save global curve":"Assign curve to "+Fan.curveName(panel.scope); tone:"primary"
+            UiButton { objectName:"fanSave"; text:Fan.saveLabel(panel.scope); tone:"primary"
                 enabled:panel.editable && panel.scopeAvailable && Number(settings.revision)===panel.revision
                     && (panel.dirty || !!fanState.needs_curve_review || panel.scope!=="global" && !settings.presets?.[panel.scope]); onClicked:panel.save() }
             UiButton { text:"Discard changes"; enabled:panel.dirty && !backend.busy; onClicked: { panel.dirty=false; panel.load(); } }
@@ -182,7 +182,7 @@ ColumnLayout {
                 Layout.fillWidth:true
                 Label { textFormat:Text.PlainText; text:"Fan curve editor"; color:theme.text; font.pixelSize:24; font.weight:Font.DemiBold; Layout.fillWidth:true; Layout.minimumWidth:0; wrapMode:Text.WordWrap }
                 UiComboBox { model:panel.scopes; textRole:"label"; valueRole:"id"; currentIndex:panel.scopes.findIndex(s=>s.id===panel.scope); onActivated:panel.switchScope(currentValue) }
-                UiButton { text:"Close"; onClicked:fullscreen.close() }
+                UiButton { text:"Back to Fan Control"; onClicked:fullscreen.close() }
             }
             CurveGraph {
                 id:editorGraph
@@ -206,7 +206,7 @@ ColumnLayout {
                 UiButton { objectName:"editorFaster"; text:"+ speed"; enabled:panel.editable; onClicked:editorGraph.nudge(0,1) }
                 Item { width:12; height:1 }
                 Row { spacing:8 // the step label wraps together with its choice
-                Label { textFormat:Text.PlainText; text:"Step:"; color:theme.muted; height:theme.target; verticalAlignment:Text.AlignVCenter }
+                Label { textFormat:Text.PlainText; text:"Speed edit step"; color:theme.muted; height:theme.target; verticalAlignment:Text.AlignVCenter }
                 UiComboBox {
                     objectName:"editorStep"; Accessible.name:"Speed edit step"
                     width:150
@@ -219,8 +219,8 @@ ColumnLayout {
             RowLayout { Layout.fillWidth:true; spacing:10
                 Label { textFormat:Text.PlainText; visible:panel.dirty; text:"Unsaved changes"; color:theme.warning; font.pixelSize:theme.fontSmall; Layout.fillWidth:true }
                 Item { visible:!panel.dirty; Layout.fillWidth:true }
-                UiButton { objectName:"editorDiscard"; text:"Discard"; enabled:panel.dirty && !backend.busy; onClicked: { panel.dirty=false; panel.load(); } }
-                UiButton { objectName:"editorSave"; text:"Save curve"; tone:"primary"; enabled:panel.editable && panel.scopeAvailable && panel.dirty && Number(settings.revision)===panel.revision; onClicked:panel.save() }
+                UiButton { objectName:"editorDiscard"; text:"Discard changes"; enabled:panel.dirty && !backend.busy; onClicked: { panel.dirty=false; panel.load(); } }
+                UiButton { objectName:"editorSave"; text:Fan.saveLabel(panel.scope); tone:"primary"; enabled:panel.editable && panel.scopeAvailable && panel.dirty && Number(settings.revision)===panel.revision; onClicked:panel.save() }
             }
         }
     }

@@ -68,7 +68,7 @@ ColumnLayout {
             padding:20
             Layout.fillWidth:true; Layout.fillHeight:true; Layout.preferredWidth:2; Layout.minimumWidth:0
             title:"Performance & cooling"; icon:"tdp"
-            trailing:UiBadge { objectName:"overviewPreset"; text:fresh("get_settings",12)?Tdp.activeLimits(overview.power)?.label ?? "Custom":overview.available("tdp") }
+            trailing:UiBadge { objectName:"overviewPreset"; text:fresh("get_settings",12)?Tdp.overviewSummary(overview.power):overview.available("tdp") }
             RowLayout { Layout.fillWidth:true; spacing:18; Layout.topMargin:10
                 UiMetric { objectName:"overviewTemperature"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU temperature"; value:overview.fanFresh?Number(overview.fan.readings.apu_temperature).toFixed(1)+" °C":"—"; note:"Hotter of CPU and GPU" }
                 UiMetric { objectName:"overviewPower"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU power"; value:overview.performanceFresh && overview.powerInfo.values?.package_draw!==undefined?Number(overview.powerInfo.values.package_draw).toFixed(1)+" W":"—" }

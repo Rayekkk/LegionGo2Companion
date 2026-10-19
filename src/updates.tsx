@@ -4,19 +4,8 @@
 import { callable } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
+import { type UpdateCheck, updateStatus } from "../desktop/native/updates.mjs";
 import { errorText, infoRow } from "./shared";
-
-interface UpdateCheck {
-  success: boolean;
-  current_version: string;
-  latest_version?: string;
-  update_available: boolean;
-  download_available: boolean;
-  size?: number;
-  checked_at?: number;
-  no_release?: boolean;
-  error?: string;
-}
 
 interface UpdateDownload {
   success: boolean;
@@ -56,20 +45,6 @@ export function stopUpdates() {
   generation++;
   active = false;
   publish({ busy: null });
-}
-
-function statusText(check: UpdateCheck | undefined, currentVersion: string): [string, string] {
-  if (!check) return ["GitHub releases", `Installed version: ${currentVersion}. Check for updates when you need them.`];
-  if (check.no_release) return ["No public release yet", `Installed version: ${currentVersion}. A download will appear after a release is published on GitHub.`];
-  if (check.update_available) {
-    if (!check.download_available) return ["New release found", `Version ${check.latest_version} has no downloadable plugin ZIP yet. Check again later.`];
-    const size = check.size && check.size > 0 ? ` (${(check.size / 1048576).toFixed(1)} MB)` : "";
-    return ["Update available", `Version ${check.latest_version}${size}. Download the release ZIP from GitHub.`];
-  }
-  if (check.latest_version && check.latest_version !== currentVersion) {
-    return ["No newer release", `Installed: ${currentVersion}. Latest public release: ${check.latest_version}.`];
-  }
-  return ["Up to date", `Version ${currentVersion} is the latest public release.`];
 }
 
 export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }) => {
@@ -114,7 +89,7 @@ export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }
   };
 
   const installed = view.check?.current_version || currentVersion;
-  const [label, description] = statusText(view.check, installed);
+  const [label, description] = updateStatus(view.check, installed);
   const canDownload = view.check?.update_available && view.check.download_available && view.check.latest_version;
   return <PanelSection title="Updates">
     {infoRow(label, description)}

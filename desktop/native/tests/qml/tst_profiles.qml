@@ -52,6 +52,26 @@ TestCase {
         compare(fake.calls[0].method,"apply_tdp");compare(fake.calls[0].args[0],18000);
         compare(fake.calls[0].args[3],"");compare(fake.calls[0].args[5],"42");
     }
+    // As in Decky: placeholders never show as limits, About names the check result, and a missing driver is said.
+    function test_panelRulesSharedWithDecky() {
+        fake.data=Object.assign({},fake.data,{get_settings:{enabled:true}});
+        panel=createTemporaryObject(factory,this);
+        verify(allFields("tdp").some(item=>item.kind==="paragraph" && item.get()==="Loading power limits…"));
+        compare(field("tdp","Preset").visible(),false);
+        compare(field("tdp","Sustained power").visible(),false);
+        fake.data=Object.assign({},fake.data,{get_settings:{spl:15000,sppt:20000,fppt:25000,enabled:true}});
+        panel.loadPower();
+        compare(field("tdp","Preset").visible(),true);
+        verify(!allFields("tdp").some(item=>item.kind==="paragraph" && item.get()==="Loading power limits…"));
+        fake.data=Object.assign({},fake.data,{get_version:{version:"2.2.1",modules:{}},updates_check:{success:true,current_version:"2.2.1",no_release:true,update_available:false,download_available:false}});
+        compare(field("about","Updates").get(),"No public release yet");
+        fake.data=Object.assign({},fake.data,{updates_check:{}});
+        compare(field("about","Updates").get(),"GitHub releases");
+        fake.data=Object.assign({},fake.data,{vibe_get_driver_status:{found:false}});
+        verify(allFields("vibration").some(item=>item.get()==="Controller driver not found. Needs SteamOS 3.8 or newer."));
+        fake.data=Object.assign({},fake.data,{vibe_get_driver_status:{found:true}});
+        verify(!allFields("vibration").some(item=>item.get()==="Controller driver not found. Needs SteamOS 3.8 or newer."));
+    }
     function test_modulesExposeTheExistingCleanupAndStartupRetryActions() {
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{
             fan:{enabled:false,ready:false,pending:true,error:"Restoration is pending."},

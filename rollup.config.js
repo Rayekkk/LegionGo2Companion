@@ -2,7 +2,7 @@
 // Adapted from @decky/rollup 1.0.2, Copyright (c) 2024 Steam Deck Homebrew.
 // See LICENSE.DECKY-ROLLUP. Keep Decky's globals without the old glob-based
 // deletion plugin and its unpatched braces dependency.
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import commonjs from "@rollup/plugin-commonjs";
@@ -24,7 +24,11 @@ export default {
   context: "window",
   external: ["react", "react-dom", "@decky/ui"],
   plugins: [
-    { name: "clean-output", buildStart() { rmSync(output, { recursive: true, force: true }); } },
+    // dist/desktop holds the separately built native app; clean only rollup's own output.
+    { name: "clean-output", buildStart() {
+      for (const name of existsSync(output) ? readdirSync(output) : [])
+        if (name !== "desktop") rmSync(resolve(output, name), { recursive: true, force: true });
+    } },
     typescript(), json(), commonjs(), nodeResolve({ browser: true }),
     externalGlobals({
       react: "SP_REACT", "react/jsx-runtime": "SP_JSX", "react-dom": "SP_REACTDOM",

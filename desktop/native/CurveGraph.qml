@@ -111,8 +111,8 @@ FocusScope {
     Label { textFormat:Text.PlainText;
         anchors { left:parent.left; right:parent.right; bottom:parent.bottom; margins:12 }
         horizontalAlignment:Text.AlignHCenter; color:graph.editing?theme.text:theme.muted; font.pixelSize:14
-        text:graph.curve.length ? "Point " +(graph.selected+1)+": "+graph.curve[graph.selected][0]+" °C · "+graph.displaySpeed(graph.curve[graph.selected][1])+
-             (graph.selected===graph.curve.length-1?" · speed only":"") : "Waiting for fan settings"
+        text:graph.curve.length ? Fan.pointText(graph.selected,graph.curve.length,graph.curve[graph.selected][0],graph.displaySpeed(graph.curve[graph.selected][1]))
+             : "Waiting for fan settings"
         wrapMode:Text.WordWrap
     }
 }

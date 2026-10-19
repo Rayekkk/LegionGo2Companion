@@ -91,10 +91,13 @@ TestCase {
         compare(findChild(view,"overviewPowerLimit").value,"SPL 20 · SPPT 25 · FPPT 30 W");
         compare(findChild(view,"overviewPreset").text,"Custom","Unknown limits");
         fake.data=Object.assign({},fake.data,{get_settings:{spl:35000,sppt:37000,fppt:45000,active_preset:"max"}});
-        compare(findChild(view,"overviewPreset").text,"Maximum");
+        compare(findChild(view,"overviewPreset").text,"Maximum · 35 W");
         // A game's limits are named by their values, not by Global's saved preset (as in Decky).
         fake.data=Object.assign({},fake.data,{get_settings:{spl:35000,sppt:37000,fppt:45000,active_spl:16000,active_sppt:25000,active_fppt:30000,active_preset:"max"}});
-        compare(findChild(view,"overviewPreset").text,"Balanced");
+        compare(findChild(view,"overviewPreset").text,"Balanced · 16 W");
+        // As in Decky: TDP control off means Lenovo's limits run, whatever preset is saved.
+        fake.data=Object.assign({},fake.data,{get_settings:{enabled:false,spl:35000,sppt:37000,fppt:45000,active_preset:"max"}});
+        compare(findChild(view,"overviewPreset").text,"Off · Lenovo defaults");
         fake.data=Object.assign({},fake.data,{vibe_get_settings:{settings:{level:2,mode:0}},vibe_get_capabilities:{intensity:["off","low","medium","high"],mode:["fps","racing"]}});
         compare(findChild(view,"overviewVibration").value,"Medium · FPS");
     }

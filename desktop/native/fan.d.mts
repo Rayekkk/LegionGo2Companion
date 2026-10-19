@@ -4,6 +4,8 @@ type Curve = [number, number][];
 type Limits = { min_rpm: number; last_min_rpm: number; max_rpm: number; step: number };
 export const STARTING_STUCK_MS: number;
 export function curveName(name: string): string;
+export function saveLabel(scope: string): string;
+export function pointText(index: number, count: number, temperature: number, speed: string): string;
 export function readingFresh(readings: { valid?: boolean; age_seconds?: number } | undefined, transportAge: number): boolean;
 export function speedText(rpm: number | undefined, unit: string | undefined, maxRpm: number | undefined): string;
 export function fanStatus(state: object | undefined, startingFor?: number): { headline: string; detail: string; starting?: boolean };

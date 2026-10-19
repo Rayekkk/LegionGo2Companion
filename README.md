@@ -756,8 +756,8 @@ ZIP. It links SteamOS's system Qt (6.9 or newer) instead of bundling Qt, and cal
 Python backend as the Decky panel over an authenticated loopback connection. See the
 [Desktop app notes](docs/DESKTOP_UI.md) for its architecture, lifecycle, build and tests.
 
-Requires Node.js 24 and a ZIP tool (`zip` on Linux or 7-Zip on Windows). Backend tests require
-Python 3.10+. The native Desktop build additionally requires CMake, Ninja, a C++17 compiler and
+Requires Node.js 24, Git and `tar` (the packager writes the ZIP itself). Backend tests
+require Python 3.10+. The native Desktop build additionally requires CMake, Ninja, a C++17 compiler and
 a Qt 6.9 SDK.
 
 ```bash
@@ -768,11 +768,12 @@ npm test               # Python backend tests
 npm run build          # compile and validate the frontend
 python scripts/build-native.py --qt /path/to/Qt/6.9.1/gcc_64 --build /tmp/companion-native --test --bundle dist/desktop
 npm run test:desktop   # native API/source contract; Qt tests run in the command above
-npm run package        # create LegionGo2Companion-<version>.zip
+npm run package        # create LegionGo2Companion-<version>.zip and its .sha256
 ```
 
 **Build before packaging:** package uses the existing frontend build and the native app in
-`dist/desktop` from the command above. Install the result through Decky; a source checkout with
+`dist/desktop` from the command above (`npm run build` keeps `dist/desktop`). Tracked files come
+from the committed `HEAD`, so the same commit and build give a byte-identical ZIP. Install the result through Decky; a source checkout with
 `node_modules` is not an installation package.
 
 GitHub Actions runs the backend tests on Linux/Python 3.10 and 3.14 and Windows/Python 3.13,

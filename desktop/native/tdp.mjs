@@ -98,6 +98,13 @@ export function activeLimits(settings, table = PRESETS) {
     label: PRESET_LABELS[resolvedPreset(w, sw, fw, global ? settings.active_preset : undefined, table)] };
 }
 
+/** The TDP summary on the overview (Decky's All Controls row and the Desktop badge). */
+export function overviewSummary(settings, table = PRESETS) {
+  if (settings?.enabled === false) return "Off · Lenovo defaults";
+  const now = activeLimits(settings, table);
+  return now ? `${now.label} · ${now.spl} W` : "Custom";
+}
+
 /** The note under the selected preset. */
 export const presetNote = (key, table) => key === "custom" || !table[key] ? "Set your own limits below."
   : `${PRESET_LABELS[key]} · ${table[key].spl} W (boost ${table[key].sppt}/${table[key].fppt} W)`;
