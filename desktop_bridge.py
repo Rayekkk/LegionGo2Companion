@@ -20,6 +20,10 @@ READ_SECONDS = 5
 RPC_SECONDS = 150
 
 
+def _reject_constant(name):
+    raise ValueError(f'Non-finite number {name}')
+
+
 class DesktopBridge:
     def __init__(self, plugin, methods, context=None, overrides=None, read_logs=None):
         self.plugin = plugin
@@ -144,7 +148,9 @@ class DesktopBridge:
             return
         if headers.get('content-type') != 'application/json' or not length:
             raise ValueError('Content type')
-        data = json.loads(await asyncio.wait_for(reader.readexactly(length), READ_SECONDS))
+        # NaN/Infinity are not JSON and never come from the panels; refuse them before any backend sees one.
+        data = json.loads(await asyncio.wait_for(reader.readexactly(length), READ_SECONDS),
+                          parse_constant=_reject_constant)
         if not isinstance(data, dict) or set(data) != {'method', 'args'}:
             raise ValueError('RPC shape')
         if len(self.operations) >= MAX_CLIENTS:

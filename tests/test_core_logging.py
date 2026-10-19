@@ -369,6 +369,18 @@ class LogRotationTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.logs.iterdir()),
                          ['00.log'] + [f'{i:02}.log' for i in range(3, 13)] + ['notes.txt'])
 
+    def test_a_log_that_disappears_during_the_scan_is_skipped_quietly(self):
+        self.make_logs(self.logs, 13)
+        real_stat = os.stat
+        def vanishing(name, *args, **kwargs):
+            if name == '05.log':
+                raise FileNotFoundError(name)
+            return real_stat(name, *args, **kwargs)
+        with patch.object(main.os, 'stat', side_effect=vanishing), patch.object(main.diagnostics, 'event') as event:
+            self.rotate(self.logs)
+        event.assert_not_called()
+        self.assertFalse((self.logs / '01.log').exists())   # the rest of the pass still ran
+
     def test_a_symlinked_log_directory_or_log_entry_is_never_followed(self):
         outside = self.root / 'outside'
         outside.mkdir()

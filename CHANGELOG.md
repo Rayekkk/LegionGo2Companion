@@ -4,10 +4,11 @@ Not released yet.
 
 ### Fixed
 
-- **Controller firmware:** Install refuses a controller that is detached from the console or below 30% battery, and checks it again with a fresh reading right before that controller is written; if it stops there, the message says which controllers were already updated. Check waits while another firmware updater is running.
+- **Controller firmware:** Install refuses a controller that is detached from the console or below 30% battery, and checks it again with a fresh reading right before that controller is written; if it stops there, the message says which controllers were already updated. Check refuses to start while another firmware updater is running.
 - Wi-Fi never writes a line break or other saved text into `/etc/iwd/main.conf` from saved settings.
 - **Wi-Fi with the iwd backend:** when NetworkManager refuses to reconnect a network (seen with a WPA3 profile on a mixed WPA2/WPA3 network), Companion asks iwd to rejoin it. A 5/6 GHz switch, "Reconnect to 5/6 GHz" or a rollback no longer leaves Wi-Fi disconnected and the band policy stuck in recovery.
 - **Display:** when another program keeps switching the panel's HDR mode back a moment after Companion sets it, Companion now stands off for a minute as intended instead of switching back and forth indefinitely.
+- **Wi-Fi:** changing the band policy while `/etc/iwd/main.conf` has duplicate `[Rank]` sections or keys is refused up front, instead of leaving the band policy stuck in recovery.
 - Removing old plugin logs never follows a link out of the log folder.
 - Companion logs a warning when a Decky update stops its unload workaround from applying.
 - **TDP:** a first CPU Boost or EPP change that was interrupted part-way (Companion stopped, or the system could not confirm the old value afterwards) is now still put back when TDP is turned off or Companion is removed.

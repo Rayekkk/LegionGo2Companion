@@ -8,10 +8,24 @@ Python backend.
 
 The existing Python backend is the single authority for hardware, module
 lifecycle, persisted settings, game profiles, fan curves and ownership. Decky
-hosts this backend. Both the unchanged Decky menu and the C++17 / Qt Quick/QML
+hosts this backend. Both the Decky menu and the C++17 / Qt Quick/QML
 Desktop application call its guarded RPCs. Desktop does not create another
 hardware settings database, EC controller or enforcement loop. It requires
 running Decky. Local tray/window preferences only control presentation.
+
+## Shared rules
+
+What the two panels derive from backend state (which actions are offered, status
+headlines and labels, the TDP slider coupling, Fan curve editing) is written once
+in plain ES modules, `desktop/native/<module>.mjs`, with `.d.mts` type files for
+TypeScript. The Decky pages import them from `src/*.tsx` and rollup bundles them;
+the QML pages import the same files (`import "tdp.mjs" as Tdp`), which
+`desktop/native/CMakeLists.txt` lists among the QML module files; the frontend
+tests load the real files. The backend still enforces every limit; these modules
+only decide what the panels show and offer. Keep them free of DOM and Qt types,
+and remember that Qt list values are not JavaScript arrays.
+
+## Pages
 
 The sidebar has Overview, TDP, Fan Control, Controllers, Lighting, Battery,
 Display, Wi-Fi, Modules and About. Overview shows battery, performance/cooling,

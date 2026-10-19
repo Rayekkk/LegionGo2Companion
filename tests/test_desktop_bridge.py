@@ -96,6 +96,13 @@ class DesktopBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'HTTP/1.1 403', await self.request(extras='Transfer-Encoding: chunked\r\n'))
         self.assertIn(b'HTTP/1.1 413', await self.request(body=b'x' * (MAX_BODY + 1)))
 
+    async def test_non_finite_numbers_never_reach_the_backend(self):
+        for constant in (b'NaN', b'Infinity', b'-Infinity'):
+            with self.subTest(constant=constant):
+                body = b'{"method": "change", "args": [' + constant + b']}'
+                self.assertIn(b'HTTP/1.1 400', await self.request(body=body))
+        self.assertEqual(self.plugin.calls, [])
+
     async def test_context_is_read_only(self):
         result = await self.request('desktop_context')
         self.assertIn(b'"app_id": "123"', result)

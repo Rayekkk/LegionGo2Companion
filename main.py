@@ -161,7 +161,10 @@ def _rotate_logs(keep: int = 10) -> None:
             files = []
             for name in os.listdir(fd):
                 if name.endswith(".log"):
-                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    try:
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:  # Decky may prune or create logs meanwhile.
+                        continue
                     if stat.S_ISREG(info.st_mode):
                         files.append((info.st_mtime, name))
             if len(files) <= keep:
