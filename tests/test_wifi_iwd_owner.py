@@ -184,6 +184,11 @@ class BandEnforcementTests(unittest.TestCase):
             result = self.plugin._verify_band_policy(wifi.BAND_POLICY_HIGH_ONLY, UUID, timeout=0.01)
         self.assertTrue(result["success"], result)
 
+    def test_reconnect_wait_returns_the_first_link_on_any_band(self):
+        with patch.object(self.plugin, "_get_link_frequency", side_effect=[None, 2412]), \
+             patch.object(wifi.time, "sleep"):
+            self.assertEqual(self.plugin._wait_for_profile_frequency(UUID), 2412)
+
     def test_ambiguity_blocks_an_iwd_restart_without_touching_recovery(self):
         with patch.object(self.plugin, "_get_iwd_profile_conflict", return_value="Ambiguous profiles"), \
              patch.object(self.plugin, "_schedule_band_policy_rollback") as schedule, \

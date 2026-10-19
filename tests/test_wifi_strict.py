@@ -3,7 +3,9 @@
 import asyncio
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -187,7 +189,7 @@ class StrictWifiTests(unittest.TestCase):
         original_isfile = wifi.os.path.isfile
 
         def isfile(path):
-            if path in ("/usr/bin/systemd-run", "/usr/bin/python3"):
+            if path in ("/usr/bin/systemd-run", wifi.PYTHON):
                 return True
             return original_isfile(path)
 
@@ -266,6 +268,39 @@ class StrictWifiTests(unittest.TestCase):
         self.assertIn("changed outside Companion was put back", result["message"])
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
         self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
+
+    def test_policy_reapplies_over_a_restored_baseline_but_not_over_an_outside_value(self):
+        for mode in (wifi.BAND_POLICY_HIGH_ONLY, wifi.BAND_POLICY_STRICT_HIGH):
+            with self.subTest(mode=mode):
+                self.iwd.unlink()   # an OS rollback put the pre-plugin baseline back
+                result = self.change(mode)
+                self.assertTrue(result["success"], result)
+                self.assertTrue(self.iwd.exists())
+        self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")   # someone else's value
+        for mode in (wifi.BAND_POLICY_HIGH_ONLY, wifi.BAND_POLICY_STRICT_HIGH):
+            with self.subTest(mode=mode):
+                result = self.change(mode)
+                self.assertEqual(result["error"], "ownership_conflict", result)
+                self.assertIn("outside Legion Go 2 Companion", result["message"])
+                self.assertIn("=0.5", self.iwd.read_text(encoding="utf-8"))
+
+    def test_six_ghz_reconnect_needs_automatic_wpa(self):
+        with patch.object(self.plugin, "_nmcli_modify") as modify:
+            result = self.plugin._rescan_and_reconnect_sync("six")
+        self.assertEqual(result["error"], "preference_disabled", result)
+        modify.assert_not_called()
+
+    def test_watchdog_command_runs_this_file_under_the_system_python(self):
+        plugin, journal = wifi.Plugin(), {"rollback_delay_seconds": 60}
+        with patch.object(plugin, "_save_band_policy_journal"), \
+             patch.object(plugin, "_run_cmd", return_value={"success": True}) as run:
+            plugin._schedule_band_policy_rollback(journal)
+        python = sys.executable if os.name == "nt" else "/usr/bin/python3"   # the timer runs only on Linux
+        self.assertEqual(run.call_args.args[0], [
+            "/usr/bin/systemd-run", "--quiet", "--collect", f"--unit={journal['rollback_unit']}",
+            "--on-active=60s", "--timer-property=AccuracySec=1s", python,
+            os.path.join(wifi.DECKY_PLUGIN_DIR, "wifi_backend.py"), "--rollback-band-policy",
+            wifi.BAND_POLICY_JOURNAL_FILE])
 
     def test_automatic_refuses_duplicate_keys_left_outside_without_locking_wifi(self):
         journal = self.journal_dir / "band-policy-transaction.json"
@@ -517,7 +552,7 @@ class BandPolicyCapabilityReasonTests(unittest.TestCase):
             ({"profile": {"channel": "0"}}, ("iwd_nm", "", "", "")),
             ({"snapshot": {"unsafe_symlink": True, "ambiguous": True}}, ("symlink",) * 4),
             ({"snapshot": {"ambiguous": True}}, ("ambiguous",) * 4),
-            ({"files": {"/usr/bin/python3": False}}, ("watchdog",) * 4),
+            ({"files": {wifi.PYTHON: False}}, ("watchdog",) * 4),
             ({"backend": "wpa_supplicant", "nm6": False, "freqs": ([5320], [])}, ("nm", "need_iwd", "need_iwd", "need_iwd")),
             ({"backend": "wpa_supplicant", "freqs": ([5320], []), "errors": {"six": "E6"}}, ("no6", "need_iwd", "need_iwd", "need_iwd")),
             ({"backend": "wpa_supplicant", "errors": {"six": "E6"}, "profile": {"band": "a"}}, ("E6", "need_iwd", "need_iwd", "need_iwd")),

@@ -368,6 +368,18 @@ class SixOnlySupportAndReleaseTests(unittest.TestCase):
         self.assertEqual(result['error'], 'ownership_conflict')
         self.assertEqual(wifi._load_settings()['band_policy'], wifi.BAND_POLICY_SIX_ONLY)
 
+    def test_off_still_refuses_incomplete_ownership_data(self):
+        self.six_only_state()
+        state = json.loads(self.settings.read_text(encoding='utf-8'))
+        state['band_policy_state']['mode'] = wifi.BAND_POLICY_HIGH_ONLY
+        self.settings.write_text(json.dumps(state), encoding='utf-8')
+        with patch.object(self.plugin, '_get_current_backend', return_value='wpa_supplicant'), \
+             patch.object(self.plugin, '_nmcli_modify') as modify:
+            result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertEqual((result['error'], result['message']),
+                         ('ownership_conflict', 'Band policy ownership data is incomplete.'))
+        modify.assert_not_called()
+
     def test_status_checks_flag_a_band_restored_to_the_original_but_transitions_accept_it(self):
         # The NM band is back at the recorded original.
         self.stack.enter_context(patch.object(self.plugin, '_nmcli_get', return_value=('bg', {'success': True})))

@@ -12,7 +12,7 @@ import time
 import asyncio
 from diagnostics import configure_worker, event as diagnostic_event, transition as diagnostic_transition
 import module_runtime
-from system_process import system_env
+from system_process import PYTHON, system_env
 import subprocess
 import re
 import sys
@@ -80,6 +80,10 @@ BAND_POLICIES = {
     BAND_POLICY_HIGH_ONLY,
     BAND_POLICY_STRICT_HIGH,
 }
+# Ownership errors for a value someone else changed: unlike an unreadable or
+# incomplete state, Automatic may still put the recorded original back over them.
+NM_BAND_CHANGED_OUTSIDE = "The profile band was changed outside Legion Go 2 Companion."
+IWD_BAND_CHANGED_OUTSIDE = "The iwd band setting was changed outside Legion Go 2 Companion."
 # Long enough for iwd restart (15s), NetworkManager activation (25s), and
 # verification (24s), with margin for slower handheld boots.
 BAND_POLICY_ROLLBACK_SECONDS = 180
@@ -1101,6 +1105,17 @@ class Plugin:
                               "signal_dbm": self._signal(row["SIGNAL"])})
         return found
 
+    @staticmethod
+    def _record_scan(result: dict, sources: list[str], source: str, found: list[dict] | None, add) -> bool:
+        """Merge one scan's records into `result` via `add`; False when the scan itself failed."""
+        if found is None:
+            return False
+        result["scan_ok"] = True
+        if source not in sources:
+            sources.append(source)
+        add(found)
+        return True
+
     def _scan_high_band_candidates_for_active_ssid(
         self,
         iface: str | None,
@@ -1120,9 +1135,7 @@ class Plugin:
             "ssid": "",
             "candidates": [],
         }
-        if not iface or not uuid:
-            return result
-        ssid = self._get_profile_ssid(uuid)
+        ssid = self._get_profile_ssid(uuid) if iface and uuid else None
         if ssid is None:
             return result
         result["ssid"] = ssid
@@ -1142,12 +1155,7 @@ class Plugin:
 
         def add_iw_scan(frequencies: list[int], source: str) -> bool:
             found = self._iw_directed_bss(iface, ssid, frequencies, timeout=10)
-            if found is None:
-                return False
-            result["scan_ok"] = True
-            sources.append(source)
-            add_candidates(found)
-            return True
+            return self._record_scan(result, sources, source, found, add_candidates)
 
         broad_ok = add_iw_scan([], "iw-directed")
         if not candidates:
@@ -1163,10 +1171,7 @@ class Plugin:
         if not candidates:
             found = self._nmcli_wifi_bss(iface, ssid, "BSSID,SSID,FREQ,SIGNAL",
                                          rescan=not broad_ok, timeout=5 if broad_ok else 10)
-            if found is not None:
-                result["scan_ok"] = True
-                sources.append("nmcli")
-                add_candidates(found)
+            self._record_scan(result, sources, "nmcli", found, add_candidates)
 
         result["candidates"] = sorted(
             candidates.values(),
@@ -1196,9 +1201,7 @@ class Plugin:
             "scan_source": "",
             "fresh_high_band": False,
         }
-        if not iface or not uuid:
-            return bands
-        ssid = self._get_profile_ssid(uuid)
+        ssid = self._get_profile_ssid(uuid) if iface and uuid else None
         if ssid is None:
             return bands
 
@@ -1222,7 +1225,7 @@ class Plugin:
 
         sources = []
 
-        def add_frequencies(found: list[dict], *, fresh: bool):
+        def add_frequencies(found: list[dict], fresh: bool = True):
             for item in found:
                 freq = item["frequency"]
                 if freq is None:
@@ -1242,13 +1245,7 @@ class Plugin:
         # a BSSID or changing the saved connection profile.
         def add_direct_scan(frequencies: list[int], source: str) -> bool:
             found = self._iw_directed_bss(iface, ssid, frequencies, timeout=15)
-            if found is None:
-                return False
-            bands["scan_ok"] = True
-            if source not in sources:
-                sources.append(source)
-            add_frequencies(found, fresh=True)
-            return True
+            return self._record_scan(bands, sources, source, found, add_frequencies)
 
         direct_scan_ok = False
         if rescan:
@@ -1282,10 +1279,7 @@ class Plugin:
         nmcli_rescan = bool(rescan and not direct_scan_ok)
         found = self._nmcli_wifi_bss(iface, ssid, "FREQ,SSID,SIGNAL",
                                      rescan=nmcli_rescan, timeout=12 if nmcli_rescan else 4)
-        if found is not None:
-            bands["scan_ok"] = True
-            sources.append("nmcli")
-            add_frequencies(found, fresh=nmcli_rescan)
+        self._record_scan(bands, sources, "nmcli", found, lambda found: add_frequencies(found, nmcli_rescan))
 
         fresh_high_band = bands["five_ghz"] > 0 or bands["six_ghz"] > 0
         if bands["scan_ok"] and fresh_high_band:
@@ -1318,55 +1312,34 @@ class Plugin:
         uuid = self._get_active_connection_uuid(iface) if iface else None
         backend = self._get_current_backend() or ""
         target_supported = self._target_supported(iface)
-
         nm_supports_6ghz = self._nm_supports_six_ghz_only()
-
-        iwd_version_result = self._run_cmd(
-            ["/usr/lib/iwd/iwd", "--version"], timeout=3
-        )
+        iwd_version_result = self._run_cmd(["/usr/lib/iwd/iwd", "--version"], timeout=3)
         iwd_active = self._service_active("iwd")
-        iwd_available = iwd_version_result.get("success", False) or os.path.isfile(
-            "/usr/lib/systemd/system/iwd.service"
-        )
-
+        iwd_available = (iwd_version_result.get("success", False)
+                         or os.path.isfile("/usr/lib/systemd/system/iwd.service"))
         five_ghz, six_ghz = self._get_enabled_high_band_frequencies()
-
         visible = self._get_visible_bands_for_active_ssid(
-            iface,
-            uuid,
-            rescan and target_supported,
-            five_ghz_frequencies=five_ghz,
-            six_ghz_frequencies=six_ghz,
-            need_five=not six_only,
-        )
+            iface, uuid, rescan and target_supported, five_ghz_frequencies=five_ghz,
+            six_ghz_frequencies=six_ghz, need_five=not six_only)
         six_visible = visible["six_ghz"] > 0
         high_visible = visible["five_ghz"] > 0 or six_visible
-
-        band = ""
-        channel = ""
-        bssid = ""
-        if uuid:
-            band, _ = self._nmcli_get(uuid, "802-11-wireless.band")
-            channel, _ = self._nmcli_get(uuid, "802-11-wireless.channel")
-            bssid, _ = self._nmcli_get(uuid, "802-11-wireless.bssid")
+        band, channel, bssid = (self._nmcli_get(uuid, f"802-11-wireless.{field}")[0] if uuid else ""
+                                for field in ("band", "channel", "bssid"))
 
         settings = _load_settings()
         current_policy = settings.get("band_policy", BAND_POLICY_OFF)
-        policy_state = settings.get("band_policy_state") or {}
-        applied_state = policy_state.get("applied") or {}
+        applied_state = (settings.get("band_policy_state") or {}).get("applied") or {}
         iwd_snapshot = self._get_iwd_rank_modifier_snapshot()
         five_modifier_error = self._iwd_band_modifier_error(iwd_snapshot, "five")
         six_modifier_error = self._iwd_band_modifier_error(iwd_snapshot, "six")
         external_band_while_off = current_policy == BAND_POLICY_OFF and bool(band)
         external_iwd_while_off = current_policy == BAND_POLICY_OFF and iwd_snapshot.get("modifier_present")
-        external_band_during_high = current_policy in IWD_BAND_POLICIES and bool(band)
         external_iwd_during_six = (
             current_policy == BAND_POLICY_SIX_ONLY
             and not self._iwd_snapshot_matches(iwd_snapshot, self._applied_iwd(applied_state))
         )
-        watchdog_available = os.path.isfile("/usr/bin/systemd-run") and os.path.isfile(
-            "/usr/bin/python3"
-        )
+        external_band = "The active profile already has an external band setting."
+        external_iwd = "An external iwd band policy is already configured."
 
         common_reason = _first_reason(
             (not iface or not uuid, "Connect to WiFi first."),
@@ -1379,7 +1352,8 @@ class Plugin:
             (iwd_snapshot.get("unsafe_symlink"), "Refusing a symlinked /etc/iwd/main.conf."),
             (iwd_snapshot.get("ambiguous"),
              "The iwd config contains duplicate [Rank] sections or band keys."),
-            (not watchdog_available, "The automatic rollback watchdog is unavailable."),
+            (not (os.path.isfile("/usr/bin/systemd-run") and os.path.isfile(PYTHON)),
+             "The automatic rollback watchdog is unavailable."),
         )
 
         reason_six = common_reason or _first_reason(
@@ -1392,37 +1366,28 @@ class Plugin:
             (not nm_supports_6ghz, "NetworkManager 1.58 or newer is required for 6 GHz only."),
             (not six_ghz, "No usable 6 GHz channels are exposed by the radio and regdomain."),
             (six_modifier_error, six_modifier_error),
-            (external_band_while_off or external_band_during_high,
-             "The active profile already has an external band setting."),
-            (external_iwd_while_off, "An external iwd band policy is already configured."),
+            (band and current_policy in (BAND_POLICY_OFF, *IWD_BAND_POLICIES), external_band),
+            (external_iwd_while_off, external_iwd),
             (not six_visible, "No 6 GHz BSS for the active SSID is currently visible."),
         )
 
-        reason_high = common_reason or _first_reason(
+        reason_high_hard = common_reason or _first_reason(
             (backend != "iwd", "The 5/6 GHz policy requires the iwd WiFi backend."),
             (not iwd_available, "iwd is not installed."),
             (not iwd_active, "The iwd service is not active."),
             (not (five_ghz or six_ghz), "No usable 5 or 6 GHz channels are exposed by the radio."),
             (five_modifier_error, five_modifier_error),
             (six_modifier_error, six_modifier_error),
-            (external_band_while_off, "The active profile already has an external band setting."),
-            (external_iwd_while_off or external_iwd_during_six,
-             "An external iwd band policy is already configured."),
-        )
-        if not reason_high and uuid:
-            reason_high = self._get_iwd_profile_conflict(uuid, allow_disabled_duplicates=True)
-        reason_high_hard = reason_high
-        if not reason_high and not high_visible:
-            reason_high = "No 5 or 6 GHz BSS for the active SSID is currently visible."
-
+            (external_band_while_off, external_band),
+            (external_iwd_while_off or external_iwd_during_six, external_iwd),
+        ) or (uuid and self._get_iwd_profile_conflict(uuid, allow_disabled_duplicates=True)) or ""
+        reason_high = reason_high_hard or (
+            "" if high_visible else "No 5 or 6 GHz BSS for the active SSID is currently visible.")
         # The preference may tolerate a short scan cache because 2.4 GHz
         # remains a fallback. The strict policy must use a fresh observation;
         # a cached BSS could be out of range by the time 2.4 GHz is disabled.
-        reason_strict_high = reason_high
-        if not reason_strict_high and not visible["fresh_high_band"]:
-            reason_strict_high = (
-                "No fresh 5 or 6 GHz scan result for the active SSID was verified."
-            )
+        reason_strict_high = reason_high or (
+            "" if visible["fresh_high_band"] else "No fresh 5 or 6 GHz scan result for the active SSID was verified.")
 
         return {
             "success": True,
@@ -1543,7 +1508,7 @@ class Plugin:
                 f"--unit={unit}",
                 f"--on-active={rollback_seconds}s",
                 "--timer-property=AccuracySec=1s",
-                "/usr/bin/python3",
+                PYTHON,
                 main_path,
                 "--rollback-band-policy",
                 BAND_POLICY_JOURNAL_FILE,
@@ -1907,17 +1872,17 @@ class Plugin:
         return last_result
 
     def _wait_for_profile_frequency(
-        self, uuid: str, timeout: float = 8.0
+        self, uuid: str, timeout: float = 8.0, accepted: tuple = (-math.inf, math.inf), step: float = 0.25
     ) -> int | None:
+        """The profile's link frequency once it lies in `accepted`, else the last one read before timeout."""
         deadline = time.monotonic() + timeout
         last_frequency = None
         while time.monotonic() < deadline:
             if self._profile_is_active(uuid):
-                iface = self._get_wifi_interface()
-                last_frequency = self._get_link_frequency(iface)
-                if last_frequency is not None:
+                last_frequency = self._get_link_frequency()
+                if last_frequency is not None and accepted[0] <= last_frequency < accepted[1]:
                     return last_frequency
-            time.sleep(0.25)
+            time.sleep(max(0, min(step, deadline - time.monotonic())))
         return last_frequency
 
     def _rescan_and_reconnect_sync(self, target_band: str = "high") -> dict:
@@ -1939,6 +1904,9 @@ class Plugin:
                 or mode == BAND_POLICY_OFF and backend == "wpa_supplicant"):
             return _refusal("preference_disabled",
                             "Use the iwd preference or Automatic WiFi with wpa_supplicant before reconnecting.")
+        if target_band == "six" and backend != "wpa_supplicant":
+            return _refusal("preference_disabled",
+                            "Use Automatic WiFi with wpa_supplicant before reconnecting to 6 GHz.")
         ownership_error = self._band_policy_ownership_error(settings)
         if ownership_error:
             return _refusal("ownership_conflict", ownership_error, recovery_state_preserved=True)
@@ -2422,7 +2390,7 @@ class Plugin:
             if not restored and not result.get("success"):
                 return "The managed WiFi profile cannot be read."
             if not restored and current_band != str(applied.get("nm_band") or ""):
-                return "The profile band was changed outside Legion Go 2 Companion."
+                return NM_BAND_CHANGED_OUTSIDE
         if state.get("owns_iwd"):
             current_iwd = self._get_iwd_rank_modifier_snapshot()
             if not self._iwd_snapshot_matches(current_iwd, self._applied_iwd(applied)):
@@ -2434,7 +2402,7 @@ class Plugin:
                             and type(original.get("modifier_present")) is bool
                             and self._iwd_snapshot_matches(current_iwd, original))
                 if not restored:
-                    return "The iwd band setting was changed outside Legion Go 2 Companion."
+                    return IWD_BAND_CHANGED_OUTSIDE
         return ""
 
     def _band_policy_transition_error(self, settings: dict, target: str) -> str:
@@ -2456,24 +2424,19 @@ class Plugin:
     ) -> dict:
         # HIGH_ONLY is a ranking preference, not a band lock: a 2.4 GHz link is
         # valid when no usable higher-band BSS is available (iwd's config is
-        # verified separately).
+        # verified separately). An unknown mode accepts no frequency.
         accepted = {
             BAND_POLICY_SIX_ONLY: (5925, 7125),
             BAND_POLICY_STRICT_HIGH: (4900, 7125),
             BAND_POLICY_HIGH_ONLY: (-math.inf, math.inf),
             BAND_POLICY_OFF: (-math.inf, math.inf),
-        }.get(mode)
-        deadline = time.monotonic() + timeout
-        last_frequency = None
-        while time.monotonic() < deadline:
-            if self._profile_is_active(uuid):
-                last_frequency = self._get_link_frequency()
-                if accepted and last_frequency is not None and accepted[0] <= last_frequency < accepted[1]:
-                    return {"success": True, "frequency": last_frequency}
-            time.sleep(max(0, min(1, deadline - time.monotonic())))
+        }.get(mode, (0, 0))
+        frequency = self._wait_for_profile_frequency(uuid, timeout, accepted, step=1)
+        if frequency is not None and accepted[0] <= frequency < accepted[1]:
+            return {"success": True, "frequency": frequency}
         return {
             "success": False,
-            "frequency": last_frequency,
+            "frequency": frequency,
             "message": "WiFi did not reconnect on the requested band before timeout.",
         }
 
@@ -2926,7 +2889,8 @@ class Plugin:
             # Automatic means the original WiFi behaviour, so the recorded original
             # goes back even over a value changed outside Companion. An unreadable
             # or incomplete state still refuses: the original cannot be trusted then.
-            if mode != BAND_POLICY_OFF or "changed outside" not in ownership_error:
+            if mode != BAND_POLICY_OFF or ownership_error not in (NM_BAND_CHANGED_OUTSIDE,
+                                                                  IWD_BAND_CHANGED_OUTSIDE):
                 return refuse("ownership_conflict", ownership_error)
             replaced_outside = True
             diagnostic_event("wifi", "band_policy_outside_change_replaced")
