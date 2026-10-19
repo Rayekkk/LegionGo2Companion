@@ -1062,66 +1062,62 @@ class Plugin:
     async def get_status(self) -> dict[str, Any]:
         return await _offload(_status)
 
+    async def _locked_change(self, change: Callable[[], tuple[bool, str]]) -> dict[str, Any]:
+        def _locked() -> tuple[bool, str]:
+            with _apply_lock:
+                if not _recover_pending():
+                    return False, "Automatic recovery must finish first."
+                return change()
+
+        success, error = await _offload(_locked)
+        return {"success": success, "error": error, "status": await self.get_status()}
+
     async def set_control_enabled(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
             return {"success": False, "error": "enabled must be a boolean"}
 
         def _change() -> tuple[bool, str]:
-            with _apply_lock:
-                if not _recover_pending():
-                    return False, "Automatic recovery must finish first."
-                state = _load_state()
-                if state["control_enabled"] == enabled:
-                    return True, ""
-                path, reason = _rgb_capability()
-                before = _read_rgb_snapshot(path) if path else None
-                if path is None or before is None:
-                    return False, reason or "The joystick-ring state could not be read."
-                candidate = copy.deepcopy(state)
-                if enabled:
-                    if not candidate["configured"]:
-                        _seed_from_snapshot(candidate, before)
-                    candidate["original_rgb"] = before
-                    candidate["control_enabled"] = True
-                    operation = lambda: _apply_rgb_target(candidate, force=True)
-                else:
-                    original = candidate.get("original_rgb")
-                    if original is None:
-                        return False, "The original joystick-ring state is unavailable."
-                    candidate["control_enabled"] = False
-                    candidate["original_rgb"] = None
-                    operation = lambda: _apply_rgb_snapshot(path, original, force=True)
-                return _transaction(
-                    state, candidate, before_rgb=before, apply=operation
-                )
+            state = _load_state()
+            if state["control_enabled"] == enabled:
+                return True, ""
+            path, reason = _rgb_capability()
+            before = _read_rgb_snapshot(path) if path else None
+            if path is None or before is None:
+                return False, reason or "The joystick-ring state could not be read."
+            candidate = copy.deepcopy(state)
+            if enabled:
+                if not candidate["configured"]:
+                    _seed_from_snapshot(candidate, before)
+                candidate["original_rgb"] = before
+                candidate["control_enabled"] = True
+                operation = lambda: _apply_rgb_target(candidate, force=True)
+            else:
+                original = candidate.get("original_rgb")
+                if original is None:
+                    return False, "The original joystick-ring state is unavailable."
+                candidate["control_enabled"] = False
+                candidate["original_rgb"] = None
+                operation = lambda: _apply_rgb_snapshot(path, original, force=True)
+            return _transaction(state, candidate, before_rgb=before, apply=operation)
 
-        success, error = await _offload(_change)
-        return {"success": success, "error": error, "status": await self.get_status()}
+        return await self._locked_change(_change)
 
     async def _set_rgb_field(self, **fields: Any) -> dict[str, Any]:
         def _change() -> tuple[bool, str]:
-            with _apply_lock:
-                if not _recover_pending():
-                    return False, "Automatic recovery must finish first."
-                state = _load_state()
-                if not state["control_enabled"]:
-                    return False, "Enable RGB control first."
-                path, reason = _rgb_capability()
-                before = _read_rgb_snapshot(path) if path else None
-                if path is None or before is None:
-                    return False, reason or "The joystick-ring state could not be read."
-                candidate = copy.deepcopy(state)
-                candidate.update(fields)
-                candidate = _sanitize_state(candidate, include_pending=False)
-                return _transaction(
-                    state,
-                    candidate,
-                    before_rgb=before,
-                    apply=lambda: _apply_rgb_target(candidate),
-                )
+            state = _load_state()
+            if not state["control_enabled"]:
+                return False, "Enable RGB control first."
+            path, reason = _rgb_capability()
+            before = _read_rgb_snapshot(path) if path else None
+            if path is None or before is None:
+                return False, reason or "The joystick-ring state could not be read."
+            candidate = copy.deepcopy(state)
+            candidate.update(fields)
+            candidate = _sanitize_state(candidate, include_pending=False)
+            return _transaction(state, candidate, before_rgb=before,
+                                apply=lambda: _apply_rgb_target(candidate))
 
-        success, error = await _offload(_change)
-        return {"success": success, "error": error, "status": await self.get_status()}
+        return await self._locked_change(_change)
 
     async def set_rings_enabled(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
@@ -1155,76 +1151,64 @@ class Plugin:
             return {"success": False, "error": "enabled must be a boolean"}
 
         def _change() -> tuple[bool, str]:
-            with _apply_lock:
-                if not _recover_pending():
-                    return False, "Automatic recovery must finish first."
-                supported, reason = _power_capability()
-                before = _read_power_led() if supported else None
-                if before is None:
-                    return False, reason or "The power-button state could not be read."
-                state = _load_state()
-                candidate = copy.deepcopy(state)
-                if not candidate["power_led_managed"]:
-                    candidate["power_led_original_enabled"] = before
-                candidate["power_led_managed"] = True
-                candidate["power_led_enabled"] = enabled
-                return _transaction(
-                    state,
-                    candidate,
-                    before_power=before,
-                    apply=lambda: _write_power_led(enabled),
-                )
+            supported, reason = _power_capability()
+            before = _read_power_led() if supported else None
+            if before is None:
+                return False, reason or "The power-button state could not be read."
+            state = _load_state()
+            candidate = copy.deepcopy(state)
+            if not candidate["power_led_managed"]:
+                candidate["power_led_original_enabled"] = before
+            candidate["power_led_managed"] = True
+            candidate["power_led_enabled"] = enabled
+            return _transaction(state, candidate, before_power=before,
+                                apply=lambda: _write_power_led(enabled))
 
-        success, error = await _offload(_change)
-        return {"success": success, "error": error, "status": await self.get_status()}
+        return await self._locked_change(_change)
 
     async def restore_original(self) -> dict[str, Any]:
         def _restore() -> tuple[bool, str]:
-            with _apply_lock:
-                if not _recover_pending():
-                    return False, "Automatic recovery must finish first."
-                state = _load_state()
-                before_rgb = None
-                before_power = None
-                operations: list[Callable[[], bool]] = []
-                candidate = copy.deepcopy(state)
-                if state["control_enabled"]:
-                    path, reason = _rgb_capability()
-                    before_rgb = _read_rgb_snapshot(path) if path else None
-                    original = state.get("original_rgb")
-                    if path is None or before_rgb is None or original is None:
-                        return False, reason or "The joystick-ring state could not be restored."
-                    operations.append(
-                        lambda path=path, original=original: _apply_rgb_snapshot(
-                            path, original, force=True
-                        )
+            state = _load_state()
+            before_rgb = None
+            before_power = None
+            operations: list[Callable[[], bool]] = []
+            candidate = copy.deepcopy(state)
+            if state["control_enabled"]:
+                path, reason = _rgb_capability()
+                before_rgb = _read_rgb_snapshot(path) if path else None
+                original = state.get("original_rgb")
+                if path is None or before_rgb is None or original is None:
+                    return False, reason or "The joystick-ring state could not be restored."
+                operations.append(
+                    lambda path=path, original=original: _apply_rgb_snapshot(
+                        path, original, force=True
                     )
-                    candidate["control_enabled"] = False
-                    candidate["original_rgb"] = None
-                if state["power_led_managed"]:
-                    before_power = _read_power_led()
-                    original_power = state.get("power_led_original_enabled")
-                    if before_power is None or original_power is None:
-                        return False, "The power-button state could not be restored."
-                    operations.append(
-                        lambda original_power=original_power: _write_power_led(original_power)
-                    )
-                    candidate["power_led_managed"] = False
-                    candidate["power_led_original_enabled"] = None
-                    candidate["power_led_enabled"] = original_power
-                if not operations:
-                    return True, ""
-                # A list, not a generator: every restore runs even after one fails.
-                return _transaction(
-                    state,
-                    candidate,
-                    before_rgb=before_rgb,
-                    before_power=before_power,
-                    apply=lambda: all([operation() for operation in operations]),
                 )
+                candidate["control_enabled"] = False
+                candidate["original_rgb"] = None
+            if state["power_led_managed"]:
+                before_power = _read_power_led()
+                original_power = state.get("power_led_original_enabled")
+                if before_power is None or original_power is None:
+                    return False, "The power-button state could not be restored."
+                operations.append(
+                    lambda original_power=original_power: _write_power_led(original_power)
+                )
+                candidate["power_led_managed"] = False
+                candidate["power_led_original_enabled"] = None
+                candidate["power_led_enabled"] = original_power
+            if not operations:
+                return True, ""
+            # A list, not a generator: every restore runs even after one fails.
+            return _transaction(
+                state,
+                candidate,
+                before_rgb=before_rgb,
+                before_power=before_power,
+                apply=lambda: all([operation() for operation in operations]),
+            )
 
-        success, error = await _offload(_restore)
-        return {"success": success, "error": error, "status": await self.get_status()}
+        return await self._locked_change(_restore)
 
     @module_runtime.controller_operation('rgb')
     async def reapply(self) -> dict[str, Any]:
