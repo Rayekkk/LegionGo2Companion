@@ -61,7 +61,7 @@ No GPL implementation was copied, adapted or transliterated into Companion.
 The user separately authorized installation of the unmodified official Rodpad
 plugin on their device; that installation is not a Companion dependency.
 Armada Control was inspected only as a UX reference, from its public repository
-and an authorized read-only copy from Odin. This editor is an independent design
+and an authorized read-only copy. This editor is an independent design
 and implementation; no Armada implementation was copied or executed here.
 The 4E/4F two-level index protocol and C6C0/C6C2/C6C8 registers were independently
 checked against Lenovo RRCN16WW EC 01.16 and bounded physical trials on 83N0 / 8ASP2.

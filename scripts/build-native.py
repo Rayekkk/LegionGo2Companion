@@ -82,5 +82,11 @@ if args.bundle:
     target.chmod(0o755)
     manifest = {'schema': 2, 'platform': 'linux-x86_64', 'executable': 'legiongo2companion',
                 'files': {'legiongo2companion': {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}}}
+    try:  # Provenance only; omitted when git is unavailable.
+        git = lambda *a: subprocess.check_output(['git', '-C', str(root), *a], text=True, stderr=subprocess.DEVNULL).strip()
+        manifest['source_commit'] = git('rev-parse', 'HEAD')
+        manifest['source_dirty'] = bool(git('status', '--porcelain', '--', 'desktop/native'))
+    except (OSError, subprocess.CalledProcessError):
+        pass
     (args.bundle / 'native-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     print(f'Bundled {target} ({len(data)} bytes); it links the system Qt at runtime.')
