@@ -176,6 +176,11 @@ def _save_settings(data: dict):
     _get_settings_manager().replace(data)
 
 
+def _refusal(error: str, message: str, **extra) -> dict:
+    """The reply to a request refused before anything was changed."""
+    return {"success": False, "error": error, "message": message, **extra}
+
+
 class Plugin:
     """Root plugin instance. Decky exposes every async method here as a
     callable from the frontend. Synchronous helpers prefixed with `_` are
@@ -1913,68 +1918,41 @@ class Plugin:
     def _rescan_and_reconnect_sync(self, target_band: str = "high") -> dict:
         """Temporarily select one freshly seen 5/6 GHz BSS, then unpin it."""
         if target_band not in ("high", "six"):
-            return {"success": False, "error": "invalid_target_band",
-                    "message": "Choose 5/6 GHz or 6 GHz for this connection attempt."}
+            return _refusal("invalid_target_band", "Choose 5/6 GHz or 6 GHz for this connection attempt.")
         # Like set_band_policy: finish a journal left behind (e.g. 'rolled_back'
         # by the watchdog) before refusing; the band-policy file lock is held.
         if self._load_band_policy_journal() and (
                 not self._recover_band_policy_journal().get("success")
                 or self._load_band_policy_journal()):
-            return {
-                "success": False,
-                "error": "network_recovery_required",
-                "message": "A previous network operation still needs recovery.",
-                "recovery_state_preserved": True,
-            }
+            return _refusal("network_recovery_required", "A previous network operation still needs recovery.",
+                            recovery_state_preserved=True)
 
         settings = _load_settings()
         backend = self._get_current_backend()
         mode = settings.get("band_policy", BAND_POLICY_OFF)
         if not (mode == BAND_POLICY_HIGH_ONLY and backend == "iwd"
                 or mode == BAND_POLICY_OFF and backend == "wpa_supplicant"):
-            return {
-                "success": False,
-                "error": "preference_disabled",
-                "message": "Use the iwd preference or Automatic WiFi with wpa_supplicant before reconnecting.",
-            }
+            return _refusal("preference_disabled",
+                            "Use the iwd preference or Automatic WiFi with wpa_supplicant before reconnecting.")
         ownership_error = self._band_policy_ownership_error(settings)
         if ownership_error:
-            return {
-                "success": False,
-                "error": "ownership_conflict",
-                "message": ownership_error,
-                "recovery_state_preserved": True,
-            }
+            return _refusal("ownership_conflict", ownership_error, recovery_state_preserved=True)
 
         _, device_family, _ = self._detect_device_family()
         driver = self._detect_wifi_driver()
         if device_family != "legion_go_2" or driver != "mt7921e":
-            return {
-                "success": False,
-                "error": "unsupported_device",
-                "message": (
-                    "Manual high-band reconnect is enabled only on a "
-                    "Legion Go 2 with the MediaTek MT7922 driver."
-                ),
-            }
+            return _refusal("unsupported_device", "Manual high-band reconnect is enabled only on a "
+                                                  "Legion Go 2 with the MediaTek MT7922 driver.")
         backend_service = self._run_cmd(
             ["/usr/bin/systemctl", "is-active", backend], timeout=3
         )
         if backend_service.get("stdout", "").strip() != "active":
-            return {
-                "success": False,
-                "error": "backend_inactive",
-                "message": "The selected WiFi backend is not active.",
-            }
+            return _refusal("backend_inactive", "The selected WiFi backend is not active.")
 
         iface = self._get_wifi_interface()
         uuid = self._get_active_connection_uuid(iface, require_connected=True) if iface else None
         if not iface or not uuid:
-            return {
-                "success": False,
-                "error": "no_wifi",
-                "message": "Connect to WiFi first, then retry.",
-            }
+            return _refusal("no_wifi", "Connect to WiFi first, then retry.")
         frequency_before = self._get_link_frequency(iface)
         minimum_frequency = 5925 if target_band == "six" else 4900
         if frequency_before is not None and minimum_frequency <= frequency_before < 7125:
@@ -1989,32 +1967,22 @@ class Plugin:
 
         conflict = self._get_iwd_profile_conflict(uuid) if backend == "iwd" else ""
         if conflict:
-            return {"success": False, "error": "ambiguous_iwd_profiles", "message": conflict}
+            return _refusal("ambiguous_iwd_profiles", conflict)
 
         bssid_before, bssid_result = self._nmcli_get(
             uuid, "802-11-wireless.bssid"
         )
         if not bssid_result.get("success"):
-            return {
-                "success": False,
-                "error": "profile_read_failed",
-                "message": "The saved WiFi profile could not be read.",
-                "detail": bssid_result.get("stderr", ""),
-            }
+            return _refusal("profile_read_failed", "The saved WiFi profile could not be read.",
+                            detail=bssid_result.get("stderr", ""))
         if bssid_before:
-            return {
-                "success": False,
-                "error": "external_bssid_configuration",
-                "message": (
-                    "The WiFi profile already has a fixed BSSID. Companion did "
-                    "not replace that setting."
-                ),
-            }
+            return _refusal("external_bssid_configuration", "The WiFi profile already has a fixed BSSID. "
+                                                            "Companion did not replace that setting.")
 
         band_before, band_result = self._nmcli_get(uuid, "802-11-wireless.band")
         if not band_result.get("success") or band_before:
-            return {"success": False, "error": "external_band_configuration",
-                    "message": "Clear the saved profile band restriction before a one-time reconnect."}
+            return _refusal("external_band_configuration",
+                            "Clear the saved profile band restriction before a one-time reconnect.")
 
         five_frequencies, six_frequencies = (
             self._get_enabled_high_band_frequencies()
@@ -2027,13 +1995,8 @@ class Plugin:
             minimum_frequency=minimum_frequency,
         )
         if not scan.get("scan_ok"):
-            return {
-                "success": False,
-                "error": "scan_failed",
-                "message": "The WiFi scan did not complete; the connection was not changed.",
-                "reconnected": False,
-                "frequency_before": frequency_before,
-            }
+            return _refusal("scan_failed", "The WiFi scan did not complete; the connection was not changed.",
+                            reconnected=False, frequency_before=frequency_before)
         candidates = [candidate for candidate in scan.get("candidates", [])
                       if minimum_frequency <= int(candidate.get("frequency") or 0) < 7125]
         if not candidates:
@@ -2046,14 +2009,13 @@ class Plugin:
                 "message": "No access point on the requested band was found for this network.",
             }
         if self._get_active_connection_uuid(iface, require_connected=True) != uuid:
-            return {"success": False, "error": "connection_changed",
-                    "message": "The active WiFi connection changed while scanning."}
+            return _refusal("connection_changed", "The active WiFi connection changed while scanning.")
         for field, expected in (("802-11-wireless.bssid", bssid_before),
                                 ("802-11-wireless.band", band_before)):
             value, observed = self._nmcli_get(uuid, field)
             if not observed.get("success") or value != expected:
-                return {"success": False, "error": "profile_changed",
-                        "message": "The WiFi profile changed while scanning; its settings were preserved."}
+                return _refusal("profile_changed",
+                                "The WiFi profile changed while scanning; its settings were preserved.")
         selected = candidates[0]
         selected_bssid = self._normalize_bssid(selected.get("bssid"))
         selected_frequency = int(selected.get("frequency") or 0)
@@ -2093,12 +2055,8 @@ class Plugin:
         watchdog = self._schedule_band_policy_rollback(journal)
         if not watchdog.get("success"):
             self._remove_band_policy_journal()
-            return {
-                "success": False,
-                "error": "rollback_watchdog_failed",
-                "message": "Automatic rollback could not be armed; no changes were made.",
-                "detail": watchdog.get("stderr", ""),
-            }
+            return _refusal("rollback_watchdog_failed", "Automatic rollback could not be armed; no changes were made.",
+                            detail=watchdog.get("stderr", ""))
 
         try:
             journal["phase"] = "applying"
@@ -2223,12 +2181,8 @@ class Plugin:
                     cancelled_cleanup=self._release_band_policy_file_lock
                 )
             except Exception as exc:
-                return {
-                    "success": False,
-                    "error": "band_policy_lock_failed",
-                    "message": "The network-operation lock is unavailable.",
-                    "detail": str(exc),
-                }
+                return _refusal("band_policy_lock_failed", "The network-operation lock is unavailable.",
+                                detail=str(exc))
             try:
                 async with self._get_network_mutation_lock():
                     if target_band == "high":
@@ -2977,13 +2931,8 @@ class Plugin:
             except Exception as e:
                 diagnostic_event('wifi', 'band_policy_failed', level='error', stage='lock', code=type(e).__name__)
                 await self._restart_high_band_monitor()
-                return {
-                    "success": False,
-                    "error": "band_policy_lock_failed",
-                    "message": "The cross-process rollback lock is unavailable.",
-                    "detail": str(e),
-                    "rolled_back": False,
-                }
+                return _refusal("band_policy_lock_failed", "The cross-process rollback lock is unavailable.",
+                                detail=str(e), rolled_back=False)
             try:
                 async with self._get_network_mutation_lock():
                     return await self._worker_complete(
@@ -3011,75 +2960,49 @@ class Plugin:
         restores only values that still equal the values written by us.
         """
         if not isinstance(mode, str) or mode not in BAND_POLICIES:
-            return {
-                "success": False,
-                "error": "invalid_band_policy",
-                "message": (
-                    "Band policy must be off, six_ghz_only, "
-                    "five_six_no_24, or five_six_only."
-                ),
-                "band_policy": BAND_POLICY_OFF,
-                "rolled_back": False,
-            }
+            return _refusal("invalid_band_policy", "Band policy must be off, six_ghz_only, "
+                                                   "five_six_no_24, or five_six_only.",
+                            band_policy=BAND_POLICY_OFF, rolled_back=False)
         if type(allow_unverified_scan) is not bool or (
             allow_unverified_scan and mode != BAND_POLICY_STRICT_HIGH
         ):
-            return {
-                "success": False,
-                "error": "invalid_scan_override",
-                "message": "Unverified scan attempts apply only to Only 5/6 GHz.",
-                "band_policy": BAND_POLICY_OFF,
-                "rolled_back": False,
-            }
+            return _refusal("invalid_scan_override", "Unverified scan attempts apply only to Only 5/6 GHz.",
+                            band_policy=BAND_POLICY_OFF, rolled_back=False)
 
         backend = self._get_current_backend()
         if backend not in ("iwd", "wpa_supplicant"):
-            return {"success": False, "error": "unsupported_backend",
-                    "message": "The active WiFi backend could not be verified; no changes were made."}
+            return _refusal("unsupported_backend",
+                            "The active WiFi backend could not be verified; no changes were made.")
         existing_journal = self._load_band_policy_journal()
         if existing_journal:
             recovery = self._recover_band_policy_journal()
             if not recovery.get("success") or self._load_band_policy_journal():
                 remaining = self._load_band_policy_journal() or existing_journal
-                return {
-                    "success": False,
-                    "error": "band_policy_recovery_required",
-                    "message": (
-                        "A previous band-policy rollback needs manual "
-                        "recovery; no new network changes were made."
-                    ),
-                    "band_policy": _load_settings().get(
-                        "band_policy", BAND_POLICY_OFF
-                    ),
-                    "rolled_back": False,
-                    "rollback_conflicts": remaining.get(
-                        "rollback_conflicts", recovery.get("conflicts", [])
-                    ),
-                    "recovery_state_preserved": True,
-                }
+                return _refusal(
+                    "band_policy_recovery_required",
+                    "A previous band-policy rollback needs manual recovery; no new network changes were made.",
+                    band_policy=_load_settings().get("band_policy", BAND_POLICY_OFF),
+                    rolled_back=False,
+                    rollback_conflicts=remaining.get("rollback_conflicts", recovery.get("conflicts", [])),
+                    recovery_state_preserved=True)
         backend = self._get_current_backend()
         if backend not in ("iwd", "wpa_supplicant"):
-            return {"success": False, "error": "unsupported_backend",
-                    "message": "The WiFi backend changed during recovery; retry after it is ready."}
+            return _refusal("unsupported_backend",
+                            "The WiFi backend changed during recovery; retry after it is ready.")
         settings = _load_settings()
         current_mode = settings.get("band_policy", BAND_POLICY_OFF)
+
+        def refuse(error: str, message: str, **extra) -> dict:
+            return _refusal(error, message, band_policy=current_mode, rolled_back=False, **extra)
+
         if mode in IWD_BAND_POLICIES and backend != "iwd":
-            return {"success": False, "error": "unsupported_backend",
-                    "message": "High-band preference requires the iwd WiFi backend.",
-                    "band_policy": current_mode, "rolled_back": False}
+            return refuse("unsupported_backend", "High-band preference requires the iwd WiFi backend.")
         if mode == BAND_POLICY_SIX_ONLY and backend != "wpa_supplicant":
-            return {"success": False, "error": "preflight_failed",
-                    "message": "6 GHz only requires the native WPA WiFi backend.",
-                    "band_policy": current_mode, "rolled_back": False}
+            return refuse("preflight_failed", "6 GHz only requires the native WPA WiFi backend.")
 
         if current_mode not in BAND_POLICIES:
-            return {
-                "success": False,
-                "error": "invalid_saved_band_policy",
-                "message": "Saved band policy is not recognized; no network changes were made.",
-                "band_policy": current_mode,
-                "rolled_back": False,
-            }
+            return refuse("invalid_saved_band_policy",
+                          "Saved band policy is not recognized; no network changes were made.")
 
         preference_needs_upgrade = (
             current_mode == BAND_POLICY_HIGH_ONLY
@@ -3099,13 +3022,7 @@ class Plugin:
         if current_mode == mode and not preference_needs_upgrade and not preference_needs_reapply:
             ownership_error = self._band_policy_ownership_error(settings)
             if ownership_error:
-                return {
-                    "success": False,
-                    "error": "ownership_conflict",
-                    "message": ownership_error,
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("ownership_conflict", ownership_error)
             return {
                 "success": True,
                 "band_policy": current_mode,
@@ -3116,79 +3033,35 @@ class Plugin:
 
         ownership_error = transition_ownership_error
         if ownership_error:
-            return {
-                "success": False,
-                "error": "ownership_conflict",
-                "message": ownership_error,
-                "band_policy": current_mode,
-                "rolled_back": False,
-            }
+            return refuse("ownership_conflict", ownership_error)
 
         transition_error = self._band_policy_transition_error(settings, mode)
         if transition_error:
-            return {
-                "success": False,
-                "error": "transition_conflict",
-                "message": transition_error,
-                "band_policy": current_mode,
-                "rolled_back": False,
-            }
+            return refuse("transition_conflict", transition_error)
 
         if mode == BAND_POLICY_SIX_ONLY:
             if not await asyncio.to_thread(self._nm_supports_six_ghz_only):
-                return {
-                    "success": False,
-                    "error": "preflight_failed",
-                    "message": "NetworkManager 1.58 or newer is required for 6 GHz only.",
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("preflight_failed", "NetworkManager 1.58 or newer is required for 6 GHz only.")
             capabilities = await asyncio.to_thread(
                 self._get_band_policy_capabilities_sync, True, True
             )
             if not capabilities.get("six_ghz_only_available"):
-                return {
-                    "success": False,
-                    "error": "preflight_failed",
-                    "message": capabilities.get("reason_six_ghz_only")
-                    or "Band policy preflight failed.",
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                    "capabilities": capabilities,
-                }
+                return refuse("preflight_failed",
+                              capabilities.get("reason_six_ghz_only") or "Band policy preflight failed.",
+                              capabilities=capabilities)
         elif mode in IWD_BAND_POLICIES:
             _, device_family, _ = self._detect_device_family()
             driver = self._detect_wifi_driver()
             if device_family != "legion_go_2" or driver != "mt7921e":
-                return {
-                    "success": False,
-                    "error": "unsupported_device",
-                    "message": (
-                        "High-band preference is enabled only on a "
-                        "Legion Go 2 with the MediaTek MT7922 driver."
-                    ),
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("unsupported_device", "High-band preference is enabled only on a "
+                                                    "Legion Go 2 with the MediaTek MT7922 driver.")
             if self._get_current_backend() != "iwd":
-                return {
-                    "success": False,
-                    "error": "unsupported_backend",
-                    "message": "High-band preference requires the iwd WiFi backend.",
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("unsupported_backend", "High-band preference requires the iwd WiFi backend.")
             iwd_service = self._run_cmd(
                 ["/usr/bin/systemctl", "is-active", "iwd"], timeout=3
             )
             if iwd_service.get("stdout", "").strip() != "active":
-                return {
-                    "success": False,
-                    "error": "iwd_inactive",
-                    "message": "The iwd service is not active.",
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("iwd_inactive", "The iwd service is not active.")
             if mode == BAND_POLICY_STRICT_HIGH:
                 # DFS/6 GHz BSS entries can be omitted from a scan even
                 # when iwd can connect. A confirmed user attempt may skip
@@ -3207,15 +3080,9 @@ class Plugin:
                     else "reason_five_six_only"
                 )
                 if not capabilities.get(available_key):
-                    return {
-                        "success": False,
-                        "error": "preflight_failed",
-                        "message": capabilities.get(reason_key)
-                        or "No usable 5/6 GHz access point was verified.",
-                        "band_policy": current_mode,
-                        "rolled_back": False,
-                        "capabilities": capabilities,
-                    }
+                    return refuse("preflight_failed",
+                                  capabilities.get(reason_key) or "No usable 5/6 GHz access point was verified.",
+                                  capabilities=capabilities)
 
         active_uuid = self._get_active_connection_uuid()
         state = settings.get("band_policy_state") or {}
@@ -3232,16 +3099,8 @@ class Plugin:
             if current_mode == BAND_POLICY_SIX_ONLY:
                 managed_uuid = str(state.get("connection_uuid") or "")
                 if managed_uuid and managed_uuid != active_uuid:
-                    return {
-                        "success": False,
-                        "error": "managed_profile_not_active",
-                        "message": (
-                            "Disable 6 GHz only on its managed profile before "
-                            "activating another policy."
-                        ),
-                        "band_policy": current_mode,
-                        "rolled_back": False,
-                    }
+                    return refuse("managed_profile_not_active", "Disable 6 GHz only on its managed profile "
+                                                                "before activating another policy.")
         elif current_mode == BAND_POLICY_SIX_ONLY:
             profile_uuid = str(state.get("connection_uuid") or "")
         elif current_mode in IWD_BAND_POLICIES:
@@ -3260,13 +3119,7 @@ class Plugin:
                     "reconnected": False,
                     "rolled_back": False,
                 }
-            return {
-                "success": False,
-                "error": "no_wifi",
-                "message": "No managed WiFi profile was found.",
-                "band_policy": current_mode,
-                "rolled_back": False,
-            }
+            return refuse("no_wifi", "No managed WiFi profile was found.")
 
         if profileless_iwd_transition:
             # No NetworkManager field is owned or changed in this path.
@@ -3282,27 +3135,15 @@ class Plugin:
                 band_before = str((state.get("original") or {}).get("nm_band") or "")
                 band_result = {"success": True}
             if not band_result.get("success"):
-                return {
-                    "success": False,
-                    "error": "profile_read_failed",
-                    "message": "The WiFi profile could not be read.",
-                    "detail": band_result.get("stderr", ""),
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("profile_read_failed", "The WiFi profile could not be read.",
+                              detail=band_result.get("stderr", ""))
 
         iwd_before = self._get_iwd_rank_modifier_snapshot()
         if mode in IWD_BAND_POLICIES:
             modifier_error = (self._iwd_band_modifier_error(iwd_before, "five")
                               or self._iwd_band_modifier_error(iwd_before, "six"))
             if modifier_error:
-                return {
-                    "success": False,
-                    "error": "preflight_failed",
-                    "message": modifier_error,
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("preflight_failed", modifier_error)
         profile_was_active = bool(profile_uuid and profile_uuid == active_uuid)
 
         # First calculate the neutral/original values after removing the
@@ -3331,16 +3172,8 @@ class Plugin:
             }
 
         if mode in (BAND_POLICY_SIX_ONLY, *IWD_BAND_POLICIES) and neutral_band:
-            return {
-                "success": False,
-                "error": "external_band_configuration",
-                "message": (
-                    "The active profile has a band setting not owned by this "
-                    "plugin. Clear it before enabling the high-band preference."
-                ),
-                "band_policy": current_mode,
-                "rolled_back": False,
-            }
+            return refuse("external_band_configuration", "The active profile has a band setting not owned by "
+                                                         "this plugin. Clear it before enabling the high-band preference.")
 
         # OFF only removes the plugin's own modifier and must never be blocked
         # (uninstall/withdrawal); the reconnect below re-checks the profiles
@@ -3349,13 +3182,7 @@ class Plugin:
                 and not self._iwd_snapshot_matches(iwd_before, final_iwd)):
             profile_conflict = self._get_iwd_profile_conflict(active_uuid, allow_disabled_duplicates=True)
             if profile_conflict:
-                return {
-                    "success": False,
-                    "error": "ambiguous_iwd_profiles",
-                    "message": profile_conflict,
-                    "band_policy": current_mode,
-                    "rolled_back": False,
-                }
+                return refuse("ambiguous_iwd_profiles", profile_conflict)
 
         settings_before = self._band_settings_fields(settings)
         operation_id = f"{os.getpid()}-{int(time.time() * 1000)}"
@@ -3382,14 +3209,8 @@ class Plugin:
         watchdog = self._schedule_band_policy_rollback(journal)
         if not watchdog.get("success"):
             self._remove_band_policy_journal()
-            return {
-                "success": False,
-                "error": "rollback_watchdog_failed",
-                "message": "Automatic rollback could not be armed; no changes were made.",
-                "detail": watchdog.get("stderr", ""),
-                "band_policy": current_mode,
-                "rolled_back": False,
-            }
+            return refuse("rollback_watchdog_failed", "Automatic rollback could not be armed; no changes were made.",
+                          detail=watchdog.get("stderr", ""))
 
         try:
             journal["phase"] = "applying"
@@ -3578,14 +3399,9 @@ class Plugin:
         except Exception as e:
             diagnostic_event('wifi', 'band_policy_failed', level='error', stage='apply', code=type(e).__name__)
             rollback = self._roll_back_failed_transaction(journal, str(e))
-            return {
-                "success": False,
-                "error": "band_policy_apply_failed",
-                "message": str(e),
-                "band_policy": current_mode,
-                "rolled_back": rollback.get("rolled_back", False),
-                "rollback_conflicts": rollback.get("conflicts", []),
-            }
+            return _refusal("band_policy_apply_failed", str(e), band_policy=current_mode,
+                            rolled_back=rollback.get("rolled_back", False),
+                            rollback_conflicts=rollback.get("conflicts", []))
 
     async def set_band_preference(self, enabled: bool, band: str = "a") -> dict:
         """Prefer 5/6 GHz while retaining 2.4 GHz as a fallback."""
