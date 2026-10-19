@@ -1569,6 +1569,16 @@ class Plugin:
         )
         return result
 
+    def _arm_band_transaction(self, journal: dict, **refusal_extra) -> dict | None:
+        """Save the journal and arm its rollback timer; without a timer, drop it and return the refusal."""
+        self._save_band_policy_journal(journal)
+        watchdog = self._schedule_band_policy_rollback(journal)
+        if watchdog.get("success"):
+            return None
+        self._remove_band_policy_journal()
+        return _refusal("rollback_watchdog_failed", "Automatic rollback could not be armed; no changes were made.",
+                        **refusal_extra, detail=watchdog.get("stderr", ""))
+
     def _cancel_band_policy_rollback(self, journal: dict):
         unit = str(journal.get("rollback_unit") or "")
         if not unit:
@@ -1986,7 +1996,14 @@ class Plugin:
             if not observed.get("success") or value != expected:
                 return _refusal("profile_changed",
                                 "The WiFi profile changed while scanning; its settings were preserved.")
-        selected = candidates[0]
+        return self._reconnect_with_temporary_bssid(
+            settings=settings, mode=mode, iface=iface, uuid=uuid, frequency_before=frequency_before,
+            minimum_frequency=minimum_frequency, bssid_before=bssid_before, selected=candidates[0])
+
+    def _reconnect_with_temporary_bssid(self, *, settings: dict, mode: str, iface: str, uuid: str,
+                                        frequency_before, minimum_frequency: int, bssid_before: str,
+                                        selected: dict) -> dict:
+        """Pin the profile to the checked BSS until its link is verified, then clear the pin; a failure rolls back."""
         selected_bssid = self._normalize_bssid(selected.get("bssid"))
         selected_frequency = int(selected.get("frequency") or 0)
         settings_before = self._band_settings_fields(settings)
@@ -2021,12 +2038,9 @@ class Plugin:
                 }
             },
         }
-        self._save_band_policy_journal(journal)
-        watchdog = self._schedule_band_policy_rollback(journal)
-        if not watchdog.get("success"):
-            self._remove_band_policy_journal()
-            return _refusal("rollback_watchdog_failed", "Automatic rollback could not be armed; no changes were made.",
-                            detail=watchdog.get("stderr", ""))
+        refusal = self._arm_band_transaction(journal)
+        if refusal:
+            return refusal
 
         try:
             modified = self._nmcli_modify(
@@ -3090,8 +3104,33 @@ class Plugin:
                               or self._iwd_band_modifier_error(iwd_before, "six"))
             if modifier_error:
                 return refuse("preflight_failed", modifier_error)
-        profile_was_active = bool(profile_uuid and profile_uuid == active_uuid)
 
+        neutral_band, neutral_iwd, final_band, final_iwd = self._band_policy_targets(
+            current_mode, mode, state, band_before, iwd_before)
+
+        if mode in (BAND_POLICY_SIX_ONLY, *IWD_BAND_POLICIES) and neutral_band:
+            return refuse("external_band_configuration", "The active profile has a band setting not owned by "
+                                                         "this plugin. Clear it before enabling the high-band preference.")
+
+        # OFF only removes the plugin's own modifier and must never be blocked
+        # (uninstall/withdrawal); the reconnect below re-checks the profiles
+        # and a refused reconnect leaves NM autoconnect, like the profileless path.
+        if (mode != BAND_POLICY_OFF and backend == "iwd" and active_uuid
+                and not self._iwd_snapshot_matches(iwd_before, final_iwd)):
+            profile_conflict = self._get_iwd_profile_conflict(active_uuid, allow_disabled_duplicates=True)
+            if profile_conflict:
+                return refuse("ambiguous_iwd_profiles", profile_conflict)
+
+        return self._apply_band_policy_transaction(
+            mode=mode, current_mode=current_mode, backend=backend, settings=settings, active_uuid=active_uuid,
+            profile_uuid=profile_uuid, band_before=band_before, iwd_before=iwd_before,
+            neutral_band=neutral_band, neutral_iwd=neutral_iwd, final_band=final_band, final_iwd=final_iwd,
+            inactive_iwd_cleanup=inactive_iwd_cleanup, replaced_outside=replaced_outside)
+
+    @staticmethod
+    def _band_policy_targets(current_mode: str, mode: str, state: dict, band_before: str,
+                             iwd_before: dict) -> tuple[str, dict, str, dict]:
+        """Return (neutral band, neutral iwd, final band, final iwd) for a transition."""
         # First calculate the neutral/original values after removing the
         # currently owned policy.  This is what makes transitions mutually
         # exclusive rather than stacking two independent toggles.
@@ -3116,20 +3155,15 @@ class Plugin:
                     else BAND_PREFERENCE_2_4_MODIFIER
                 ),
             }
+        return neutral_band, neutral_iwd, final_band, final_iwd
 
-        if mode in (BAND_POLICY_SIX_ONLY, *IWD_BAND_POLICIES) and neutral_band:
-            return refuse("external_band_configuration", "The active profile has a band setting not owned by "
-                                                         "this plugin. Clear it before enabling the high-band preference.")
-
-        # OFF only removes the plugin's own modifier and must never be blocked
-        # (uninstall/withdrawal); the reconnect below re-checks the profiles
-        # and a refused reconnect leaves NM autoconnect, like the profileless path.
-        if (mode != BAND_POLICY_OFF and backend == "iwd" and active_uuid
-                and not self._iwd_snapshot_matches(iwd_before, final_iwd)):
-            profile_conflict = self._get_iwd_profile_conflict(active_uuid, allow_disabled_duplicates=True)
-            if profile_conflict:
-                return refuse("ambiguous_iwd_profiles", profile_conflict)
-
+    def _apply_band_policy_transaction(
+        self, *, mode: str, current_mode: str, backend: str, settings: dict, active_uuid,
+        profile_uuid: str, band_before: str, iwd_before: dict, neutral_band: str, neutral_iwd: dict,
+        final_band: str, final_iwd: dict, inactive_iwd_cleanup: bool, replaced_outside: bool,
+    ) -> dict:
+        """Journal, apply and verify a transition that passed every check; a failure rolls back."""
+        profile_was_active = bool(profile_uuid and profile_uuid == active_uuid)
         settings_before = self._band_settings_fields(settings)
         operation_id = f"{os.getpid()}-{int(time.time() * 1000)}"
         journal = {
@@ -3151,12 +3185,9 @@ class Plugin:
             "iwd_before": iwd_before,
             "mutations": {},
         }
-        self._save_band_policy_journal(journal)
-        watchdog = self._schedule_band_policy_rollback(journal)
-        if not watchdog.get("success"):
-            self._remove_band_policy_journal()
-            return refuse("rollback_watchdog_failed", "Automatic rollback could not be armed; no changes were made.",
-                          detail=watchdog.get("stderr", ""))
+        refusal = self._arm_band_transaction(journal, band_policy=current_mode, rolled_back=False)
+        if refusal:
+            return refusal
 
         try:
             iwd_changed = False
