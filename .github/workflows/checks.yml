@@ -42,6 +42,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0  # release tags: the legacy updater check reads 2.1.0 and 2.2.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -81,6 +82,8 @@ jobs:
       - run: npm run package -- --check
       - run: npm run package
       - run: python scripts/verify-package.py
+      - name: Updaters shipped in 2.1.0 and 2.2.0 accept the ZIP
+        run: python scripts/check-legacy-updaters.py LegionGo2Companion-*.zip
       - name: Upload verified experimental plugin ZIP
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

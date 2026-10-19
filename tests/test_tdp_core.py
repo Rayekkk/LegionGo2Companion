@@ -6,6 +6,7 @@ download; only time-like inputs (foreground game, charger, suspend clock) are
 injected directly.
 """
 import asyncio
+import copy
 from contextlib import ExitStack
 import hashlib
 import io
@@ -23,6 +24,10 @@ from safe_settings import AtomicSettingsManager
 import module_control
 
 REAL_RUNNING_APPID = tdp._get_running_appid
+# The module's runtime state as imported (before any test ran): plain values, no locks or functions.
+PRISTINE_STATE = {name: copy.copy(value) for name, value in vars(tdp).items()
+                  if name.startswith('_') and not name.startswith('__')
+                  and isinstance(value, (bool, int, float, str, tuple, dict, type(None)))}
 HELPER = b'\x7fELF fake ryzenadj'
 LIMIT_FLAGS = {'--stapm-limit': 'spl', '--slow-limit': 'sppt', '--fast-limit': 'fppt'}
 INFO = """| STAPM LIMIT | {spl:.3f} | stapm-limit |
@@ -103,18 +108,10 @@ class TdpCoreTests(unittest.TestCase):
             'PLATFORM_PROFILE_GLOB': str(self.root / 'platform-profile/*/profile'),
             'RAPL_GLOB': str(self.root / 'powercap/intel-rapl-*'),  # ':' is not valid on Windows
             'CPU_SYS_ROOT': str(self.cpu), 'BIN_DIR': str(self.bin.parent), 'BIN_PATH': str(self.bin),
-            '_ryzenadj_available': False,
-            '_current_game_id': '', '_current_ac_online': False, '_last_cpu_power_check': 0.0,
-            '_last_suspend_offset': 0.0, '_transition_key': None, '_transition_failures': 0,
-            '_transition_retry_at': 0.0, '_ac_target': (), '_ac_generation': 0, '_ac_changed_at': float('-inf'),
-            '_last_source': '', '_applied_mw': (), '_applied_at': 0.0,
-            '_drift_target': (), '_drift_settled': (), '_drift_attempts': 0,
-            '_drift_context': (False, ()), '_wmi_verified_at': None, '_wmi_live_limits': (),
-            '_limits_cache': {}, '_limits_cache_ts': 0.0, '_panel_active': False,
-            '_info_cache': {}, '_info_cache_ts': 0.0,
-            '_rapl_dir': None, '_rapl_probed_at': 0.0, '_rapl_last': (),
         }.items():
             self.stack.enter_context(patch.object(tdp, name, value))
+        for name, value in PRISTINE_STATE.items():  # every test starts from a fresh import's state
+            self.stack.enter_context(patch.object(tdp, name, copy.copy(value)))
         for name, callback in {
             '_get_running_appid': lambda: self.app, '_get_ac_online': lambda: self.ac,
             '_suspend_offset': lambda: 0.0, '_write_profile': write_profile,

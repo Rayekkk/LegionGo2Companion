@@ -46,7 +46,6 @@ class DriftBudgetTests(unittest.TestCase):
 
     def test_confirmed_live_recovery_resets_budget_for_a_later_independent_drift(self):
         self.passes();self.override=False;self.passes(1)
-        self.assertEqual(tdp._drift_attempts,0)
         self.override=True;self.passes()
         self.assertEqual(self.apply.call_count,2*tdp.DRIFT_MAX_ATTEMPTS)
 
@@ -54,7 +53,8 @@ class DriftBudgetTests(unittest.TestCase):
         self.override=None;self.profile_lost=True;self.passes()
         self.assertEqual(self.apply.call_count,tdp.DRIFT_MAX_ATTEMPTS)
         self.profile_lost=False;self.passes(1)
-        self.assertEqual(tdp._drift_attempts,0)
+        self.profile_lost=True;self.passes()  # recovery restored the full budget for a later loss
+        self.assertEqual(self.apply.call_count,2*tdp.DRIFT_MAX_ATTEMPTS)
 
     def test_ryzenadj_settled_limits_and_later_real_reset_still_recover(self):
         tdp._last_source='ryzenadj';self.override=False
