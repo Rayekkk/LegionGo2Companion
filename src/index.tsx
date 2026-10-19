@@ -30,11 +30,11 @@ import { ControllerPage, getControllerStatus, controllerSummary, type Controller
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
-import { cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, startRetryShown } from "../desktop/native/modules.mjs";
+import { cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
-type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; error?: string; note?: string}>>;
+type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
 // Key order is the menu and Manage Modules order.
 const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
@@ -547,6 +547,11 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     };
   }, [activeSection, enabledModules, visible, onScreen]);
 
+  // A module still starting keeps its place, without controls, until its start has finished.
+  const startingRow = (module: ModuleKey) => {
+    const text = moduleStartingText(modules[module]);
+    return text ? infoRow(moduleLabels[module], text) : null;
+  };
   const summary = (module: ModuleKey, description: string) => ({
     description: overviewDescription(overview, module, description), statusNote: overviewNote(overview, module),
   });
@@ -554,19 +559,20 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
   if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
       {Object.values(modules).some(state => state?.maintenance) && infoRow("Controller controls paused", "Firmware maintenance is in progress. Saved controller settings have not been changed.")}
-      {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}
-      {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}
-      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}
-      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}
-      {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title={moduleLabels.remap} {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}
+      {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}{startingRow("tdp")}
+      {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}{startingRow("fan")}
+      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}{startingRow("vibration")}
+      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}{startingRow("rgb")}
+      {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title={moduleLabels.remap} {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}{startingRow("remap")}
+      {startingRow("controller")}
       <SectionLink section="controller" restoreFocus={focusSection === "controller"}
         title={moduleEnabled(modules, "controller") ? moduleLabels.controller : "Controller firmware"}
         {...(moduleEnabled(modules, "controller") ? summary("controller", controllerSummary(overview.controller))
           : { description: "Controller update status and Lenovo firmware updates" })}
         onClick={() => openSection("controller")} />
-      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title={moduleLabels.battery} {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}
-      {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title={moduleLabels.display} {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}
-      {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title={moduleLabels.wifi} {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}
+      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title={moduleLabels.battery} {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}{startingRow("battery")}
+      {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title={moduleLabels.display} {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}{startingRow("display")}
+      {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title={moduleLabels.wifi} {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}{startingRow("wifi")}
     </PanelSection>
     <PanelSection title="Plugin">
       <SectionLink section="modules" restoreFocus={focusSection === "modules"} title="Manage Modules" description="Enable, disable and hide individual hardware modules" onClick={() => openSection("modules")} />

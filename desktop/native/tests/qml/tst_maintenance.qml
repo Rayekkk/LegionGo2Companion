@@ -30,6 +30,15 @@ TestCase {
         fake.elapsed=9;compare(status.state,"stale");verify(!status.ready);
         fake.connected=false;compare(status.state,"offline");verify(!status.ready);
     }
+    function test_aSlowStartIsNeutralAndOffWaitsForIt() {
+        fake.data={blocked:false,modules:{controller:{enabled:true,ready:false,starting:true,error:""}}};
+        let status=createTemporaryObject(factory,this);compare(status.state,"starting");compare(status.label,"Starting");verify(!status.ready);
+        compare(status.message,"Still starting. Its controls appear when it has finished.");
+        fake.data={blocked:false,modules:{controller:{enabled:false,ready:false,starting:true,error:""}}};
+        compare(status.state,"starting");compare(status.message,"Turns off when it has finished starting.");
+        fake.data={blocked:false,modules:{controller:{enabled:true,ready:false,starting:true,maintenance:true}}};
+        compare(status.state,"maintenance");
+    }
     function test_moduleOffIsStillSeparateFromMaintenance() {
         fake.data={blocked:false,modules:{controller:{enabled:false,ready:true}}};
         let status=createTemporaryObject(factory,this);compare(status.state,"disabled");verify(!status.ready);

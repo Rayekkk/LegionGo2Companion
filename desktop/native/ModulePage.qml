@@ -618,7 +618,7 @@ RowLayout {
                     Accessible.name:"Color preview"
                     Repeater { model:2;Rectangle { width:26;height:26;radius:13;color:"transparent";border.width:4;border.color:panel.rgbUsesColor()?Qt.hsva(section.preview("Hue",0)/360,section.preview("Saturation",100)/100,section.preview("Brightness",100)/100,1):theme.accentText } }
                 },
-                UiBadge { visible:section.gated && !moduleStatus.ready;text:moduleStatus.label;tone:["disabled","offline","loading"].includes(moduleStatus.state)?"neutral":"amber" }
+                UiBadge { visible:section.gated && !moduleStatus.ready;text:moduleStatus.label;tone:["disabled","offline","loading","starting"].includes(moduleStatus.state)?"neutral":"amber" }
             ]
             Rectangle {
                 visible:section.modelData.owner==="firmware"; Layout.fillWidth:true

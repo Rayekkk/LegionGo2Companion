@@ -305,6 +305,23 @@ run(async () => {
       assert.equal(findSection(h.render(), 'TDP').props.description, 'Custom · 28 W');
     });
   }
+  for (const [state, text] of [[{ enabled: true, ready: false, starting: true, error: '' }, 'Still starting. Its controls appear when it has finished.'],
+    [{ enabled: false, ready: false, starting: true, error: '' }, 'Turns off when it has finished starting.']]) {
+    await testOverview(`a module still starting ${JSON.stringify(state)} keeps a row without controls`, async h => {
+      const starting = { ...structuredClone(modules), tdp: state };
+      h.callbacks.companion_guard({ ...overviewValues.get_version, modules: starting });
+      const tree = h.render({ modules: starting });
+      assert.equal(findSection(tree, 'TDP'), undefined, 'no link to controls that are not ready');
+      const row = find(tree, 'TDP');
+      assert.equal(row?.props.description, text);
+      assert.equal(row.props.onActivate, undefined, 'the row has no action');
+      answerOverview(h); await settle(); h.fire();
+      assert.equal(h.calls.filter(c => c.name === 'get_settings').length, 1, 'a starting module is not polled');
+      h.callbacks.companion_guard({ ...overviewValues.get_version, modules });
+      const started = h.render({ modules });
+      assert.ok(findSection(started, 'TDP'), 'its section returns when the start has finished');
+    });
+  }
   await testOverview('entering a module invalidates old overview values without blocking fresh reads on return', async h => {
     findSection(h.render(), 'TDP').props.onClick(); h.render();
     h.respond('get_settings', overviewValues.get_settings); await settle();

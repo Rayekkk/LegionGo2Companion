@@ -7,6 +7,7 @@ import "tdp.mjs" as Tdp
 import "battery.mjs" as Battery
 import "vibration.mjs" as Vibe
 import "controller.mjs" as Gyro
+import "modules.mjs" as Modules
 ColumnLayout {
     id:overview
     objectName:"deviceOverview"
@@ -42,7 +43,7 @@ ColumnLayout {
     }
     readonly property var gyroLabels:Gyro.SOURCE_LABELS
     readonly property var bandLabels:({off:"Automatic",five_six_no_24:"Prefer 5/6 GHz",five_six_only:"Only 5/6 GHz",six_ghz_only:"Only 6 GHz"})
-    function available(name) { return !backend.connected?"Offline":modules[name]?.pending?"Restoring":modules[name]?.enabled===false?"Off":modules[name]?.error?"Needs attention":modules[name]?.ready?"On":"Unavailable"; }
+    function available(name) { return !backend.connected?"Offline":Modules.moduleStartingText(modules[name])?"Starting":modules[name]?.pending?"Restoring":modules[name]?.enabled===false?"Off":modules[name]?.error?"Needs attention":modules[name]?.ready?"On":"Unavailable"; }
     Timer { interval:500; repeat:true; running:overview.backend && overview.backend.windowActive; onTriggered:overview.tick=overview.backend.now() }
     GridLayout {
         id:summaryGrid
@@ -104,7 +105,7 @@ ColumnLayout {
             padding:20
             Layout.fillWidth:true; Layout.fillHeight:true; Layout.preferredWidth:1; Layout.minimumWidth:0
             title:"Controllers"; icon:"controller"
-            trailing:UiBadge { visible:!modules.controller?.ready; text:"Gyro: "+overview.available("controller"); tone:"amber" }
+            trailing:UiBadge { visible:!modules.controller?.ready; text:"Gyro: "+overview.available("controller"); tone:Modules.moduleStartingText(modules.controller)?"neutral":"amber" }
             Label { textFormat:Text.PlainText; visible:overview.controllerFresh && !overview.controller.available; text:"Controller unavailable"; color:theme.warning; font.pixelSize:14; Layout.fillWidth:true }
             UiReadout { Layout.fillWidth:true; label:"Left / right battery"; value:fresh("battery_get_controller_levels",12)?[overview.batteryPercent(overview.controllerBattery.left),overview.batteryPercent(overview.controllerBattery.right)].join(" / "):"—" }
             UiReadout { objectName:"overviewVibration"; Layout.fillWidth:true; label:"Vibration"; value:fresh("vibe_get_settings",12)?overview.vibrationLevel():overview.available("vibration") }

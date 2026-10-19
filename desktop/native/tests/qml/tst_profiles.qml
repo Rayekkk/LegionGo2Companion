@@ -104,6 +104,16 @@ TestCase {
         verify(lighting.available());lighting.set(false);compare(fake.calls[0].args.join(),"rgb,false");
         compare(field("modules","Battery").note(),"Charge limit of about 80%.");
     }
+    function test_moduleSwitchTurnsOffASlowStart() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{rgb:{enabled:true,ready:false,starting:true,error:""}}}});
+        const lighting=field("modules","Lighting");
+        verify(lighting.get());verify(lighting.available());compare(lighting.note(),"Still starting. Its controls appear when it has finished.");
+        verify(!field("modules","Retry Lighting start").visible());
+        lighting.set(false);compare(fake.calls[0].args.join(),"rgb,false");
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{rgb:{enabled:false,ready:false,starting:true,error:""}}}});
+        fake.mutationDone("modules_set_enabled",fake.data.get_version.modules,true);
+        verify(!lighting.get());verify(lighting.available());compare(lighting.note(),"Turns off when it has finished starting.");
+    }
     function test_inactiveGlobalSaveExplainsThatTheGameProfileStillApplies() {
         panel.editPower("spl",18);
         fake.mutationDone("apply_tdp",{success:true,saved_only:true,applied:false,

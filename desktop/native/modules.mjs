@@ -21,6 +21,13 @@ export const MODULE_DESCRIPTIONS = {
 export const moduleChecked = entry => entry?.enabled === true;
 /** Restoration and firmware maintenance finish first; cleanup has its own retry. */
 export const moduleLocked = entry => !!entry?.pending || !!entry?.maintenance;
-export const moduleNote = (name, entry) => entry?.error || entry?.note || MODULE_DESCRIPTIONS[name] || "";
-export const cleanupRetryShown = entry => !!entry?.pending && !entry.maintenance;
+/** A start still running past its time limit: the module waits in place of its controls, and Off is
+ *  saved at once but applies when the start has finished. Restoration and maintenance read first. */
+const MODULE_STARTING_TEXT = "Still starting. Its controls appear when it has finished.";
+const MODULE_OFF_AFTER_START_TEXT = "Turns off when it has finished starting.";
+// Turned off during a slow start, the module is also pending until the backend withdraws it.
+export const moduleStartingText = entry => !entry?.starting || entry.maintenance ? ""
+  : entry.enabled === false ? MODULE_OFF_AFTER_START_TEXT : MODULE_STARTING_TEXT;
+export const moduleNote = (name, entry) => moduleStartingText(entry) || entry?.error || entry?.note || MODULE_DESCRIPTIONS[name] || "";
+export const cleanupRetryShown = entry => !!entry?.pending && !entry.maintenance && !entry.starting;
 export const startRetryShown = entry => entry?.enabled === true && entry.ready === false && !entry.pending && !entry.maintenance && !entry.starting;
