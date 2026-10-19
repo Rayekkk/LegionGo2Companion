@@ -672,7 +672,7 @@ class WifiLockCancellationTests(unittest.TestCase):
         plugin = wifi.Plugin()
         started, finish, ended = threading.Event(), threading.Event(), threading.Event()
         released_while_running = []
-        def worker():
+        def worker(*_):
             started.set()
             finish.wait(timeout=5)
             ended.set()

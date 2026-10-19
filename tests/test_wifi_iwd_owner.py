@@ -27,7 +27,7 @@ class ProfileSelectionTests(unittest.TestCase):
                 return {"success": succeeds, "stderr": "Requested SAE profile unavailable"}
             return {"success": True, "stdout": "100 (connected)\n"}
 
-        def active(uuid):
+        def active(uuid, *_):
             self.assertEqual(uuid, UUID)
             return activated[0]
 

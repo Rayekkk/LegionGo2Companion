@@ -306,7 +306,7 @@ class ReconnectPacingTests(unittest.TestCase):
         with patch.object(plugin, '_get_current_backend', return_value='wpa_supplicant'), \
              patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
              patch.object(plugin, '_run_cmd', side_effect=command), \
-             patch.object(plugin, '_profile_is_active', side_effect=lambda _uuid: clock[0] >= 23), \
+             patch.object(plugin, '_profile_is_active', side_effect=lambda *_: clock[0] >= 23), \
              patch.object(plugin, '_get_link_frequency', return_value=6295), \
              patch.object(wifi.time, 'monotonic', side_effect=lambda: clock[0]), \
              patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
@@ -329,7 +329,7 @@ class ReconnectPacingTests(unittest.TestCase):
         with patch.object(plugin, '_get_current_backend', return_value='wpa_supplicant'), \
              patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
              patch.object(plugin, '_run_cmd', side_effect=command), \
-             patch.object(plugin, '_profile_is_active', side_effect=lambda _uuid: clock[0] >= 25), \
+             patch.object(plugin, '_profile_is_active', side_effect=lambda *_: clock[0] >= 25), \
              patch.object(plugin, '_get_link_frequency', return_value=6295), \
              patch.object(wifi.time, 'monotonic', side_effect=lambda: clock[0]), \
              patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
@@ -350,14 +350,14 @@ class ReconnectPacingTests(unittest.TestCase):
                 return {"success": False, "stderr": "No AP yet"}
             return {"success": True, "stdout": "30 (disconnected)\n"}
 
-        def is_active(_uuid):
+        def is_active(*_):
             checks.append(clock[0])
             return clock[0] >= 13.0
 
         def sleep(seconds):
             clock[0] += seconds
 
-        def frequency():
+        def frequency(*_):
             radio_checks.append(clock[0])
             return 5320
 
@@ -400,7 +400,7 @@ class ReconnectPacingTests(unittest.TestCase):
         with patch.object(plugin, "_run_cmd", side_effect=run_cmd), \
              patch.object(plugin, "_get_link_frequency", return_value=5320), \
              patch.object(plugin, "_profile_is_active",
-                          side_effect=lambda _uuid: clock[0] >= 4.0), \
+                          side_effect=lambda *_: clock[0] >= 4.0), \
              patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(wifi.time, "sleep", side_effect=sleep):
             result = plugin._reconnect_profile(UUID, cycle=False)
