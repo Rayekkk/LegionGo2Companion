@@ -1,6 +1,6 @@
 # 2.2.1
 
-Not released yet.
+Released 2026-10-20.
 
 The Decky panel and the Desktop app now share one set of rules and texts for every module, so they always agree. Most of this update is internal cleanup with no change in what Companion does; the visible changes are listed below.
 
