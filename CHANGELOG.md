@@ -15,6 +15,7 @@ The Decky panel and the Desktop app now share one set of rules and texts for eve
 - **Controller firmware:** Install refuses a controller that is detached from the console or below 30% battery, and checks it again with a fresh reading right before that controller is written; if it stops there, the message says which controllers were already updated. Check refuses to start while another firmware updater is running.
 - **Manage Modules:** a module that failed to start can now be turned off from the Decky panel too; its switch reads On with the error and **Retry … start**, and a module that is turned off no longer shows its old startup error.
 - **Desktop app:** a change that gets no answer in time now says to check the current value before trying again, since it may already have been applied.
+- **Vibration:** if the controller does not accept a change, the setting goes back to the value the controller really has, instead of showing the new one.
 - Removing old plugin logs never follows a link out of the log folder, and Companion logs a warning when a Decky update stops its unload workaround from applying.
 
 ### Changed

@@ -244,6 +244,33 @@ class VibrationProfileTests(FakeDevice):
         self.assertEqual(result['settings'], self.persisted()['111']['settings'])
         self.assertEqual((result['app_id'], result['profile_id'], result['overwrite']), ('111', '111', True))
 
+    async def test_rejected_edit_goes_back_to_the_value_the_controller_has(self):
+        # Game 222's own profile, then the global one; a stuck other attribute fails the
+        # whole apply even though the edited one was written.
+        for game, profile, rejected in (('222', '222', 'right_handle/rumble_mode'), ('', '0', 'rumble_intensity')):
+            with self.subTest(game=game, rejected=rejected):
+                self.running = game
+                self.assertTrue((await self.plugin.set_intensity(1))['success'])
+                if rejected != 'rumble_intensity':
+                    (self.device / rejected).write_text('racing', encoding='ascii')
+                self.ignored = {rejected}
+                result = await self.plugin.set_intensity(3)
+                self.assertFalse(result['success'])
+                self.assertEqual(result['settings']['level'], 1)
+                self.assertEqual((await self.plugin.get_settings())['settings']['level'], 1)
+                self.assertEqual(self.persisted()[profile]['settings']['level'], 1)
+                self.assertEqual(self.intensity(), 'low')
+                if game:
+                    self.assertEqual(self.persisted()['0']['settings']['level'], 2)
+                self.ignored = set()
+
+    async def test_edit_without_a_controller_is_kept_for_when_it_appears(self):
+        with patch.object(vibe, '_get_device_path', return_value=None):
+            result = await self.plugin.set_intensity(3)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['settings']['level'], 3)
+        self.assertEqual(self.persisted()['0']['settings']['level'], 3)
+
     async def test_profile_toggle_reports_committed_scope_when_hardware_apply_fails(self):
         self.running = '111'
         self.ignored.add('rumble_intensity')

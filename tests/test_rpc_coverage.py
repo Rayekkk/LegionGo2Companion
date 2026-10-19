@@ -294,11 +294,12 @@ class VibrationRpcTests(unittest.TestCase):
             self.assertIn('Active profile changed', result['error'])
         self.assertEqual((self.hardware(), self.profile()), before)
 
-    def test_failed_hardware_write_is_reported_but_the_choice_is_kept(self):
+    def test_failed_hardware_write_is_reported_and_the_choice_goes_back(self):
+        before = self.profile()['mode']
         with patch.object(vibe, '_write_attr', return_value=False):
             result = run(self.plugin.set_rumble_mode(4))
         self.assertFalse(result['success'])
-        self.assertEqual(self.profile()['mode'], 4)  # saved intent survives for the next apply
+        self.assertEqual(self.profile()['mode'], before)  # both UIs show what the controller has
         self.assertEqual(self.hardware(), FIRMWARE_DEFAULTS)
 
     def test_reapply_forces_the_saved_profile_back_after_the_controller_reset(self):

@@ -894,7 +894,15 @@ class Plugin:
                     or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
                 return {"success": False, "error": "Active profile changed; reload and try again", **payload}
             values = _update_active(field, value, profiles=profiles, profile_id=payload["profile_id"])
-            return {"success": _apply_settings(values), **payload, "settings": values}
+            if _apply_settings(values):
+                return {"success": True, **payload, "settings": values}
+            if _get_device_path() is None:
+                # No controller yet: keep the choice; hotplug applies it, as before.
+                return {"success": False, **payload, "settings": values}
+            # Rejected: save and re-write the previous value so both UIs show what the controller has.
+            values = _update_active(field, payload["settings"][field], profile_id=payload["profile_id"])
+            _apply_settings(values)
+            return {"success": False, **payload, "settings": values}
         return await _offload(_do)
 
     async def set_intensity(self, level: int, expected_app_id=None, expected_profile_id=None) -> dict:
