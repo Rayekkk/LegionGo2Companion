@@ -12,5 +12,8 @@ const MODE_SHORT = { racing: "Race", standard: "Std" };
 export const modeLabel = raw => MODE_NAMES[raw] ?? String(raw).charAt(0).toUpperCase() + String(raw).slice(1);
 export const modeShort = raw => MODE_SHORT[raw] ?? modeLabel(raw).slice(0, 5);
 
+/** [title, detail] while vibe_get_driver_status does not report the hid-lenovo-go driver; null once found. */
+export const driverNotice = status => status?.found === true ? null : ["Controller driver not found", "Needs SteamOS 3.8 or newer."];
+
 /** Touchpad strength only applies while touchpad vibration is on. */
 export const touchpadStrengthEditable = settings => settings?.touchpadEnabled === true;

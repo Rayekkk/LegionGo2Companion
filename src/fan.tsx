@@ -5,7 +5,7 @@ import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, Game
   DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 import { errorText, infoRow } from "./shared";
-import { curveName as title, editPoint, fanStatus, nudgeSpeed, speedText } from "../desktop/native/fan.mjs";
+import { curveName as title, editPoint, fanStatus, nudgeSpeed, pointText, saveLabel, speedText } from "../desktop/native/fan.mjs";
 
 export type Curve = [number, number][];
 export interface FanState {
@@ -148,7 +148,7 @@ export const CurveGraph: FC<{curve: Curve; selected: number; status: FanState; d
       {fresh && <g data-fan-live-marker="true" style={{pointerEvents:"none"}}><circle cx={x(Math.min(100,Math.max(0,status.readings!.apu_temperature!)))}
         cy={y(Math.min(status.limits.max_rpm,Math.max(0,status.readings!.rpm!)))} r="6" fill="#f5c96b" stroke="#111" strokeWidth="2" />
         <text x={left} y={fullscreen ? 24 : 18} fill="#f5c96b" fontSize={font}>{`Live tach · ${fanReadingLabel(status)}`}</text></g>}
-      <text x={left} y={fullscreen ? 299 : 240} fill="currentColor" fontSize={font}>{`Point ${selected+1}/8 · ${curve[selected][0]}°C · ${speedLabel(curve[selected][1],status)}${selected===7 ? " · speed only" : ""}`}</text>
+      <text x={left} y={fullscreen ? 299 : 240} fill="currentColor" fontSize={font}>{pointText(selected,curve.length,curve[selected][0],speedLabel(curve[selected][1],status))}</text>
     </svg>
   </Focusable>;
 };
@@ -359,7 +359,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     </DialogBody>
     <DialogFooter style={{display:"flex",gap:12,margin:0,padding:0,flexShrink:0}}>
       <Focusable flow-children="row" data-fan-footer="true" style={{display:"flex",gap:12,width:"100%"}}>
-      <DialogButton style={{flex:1}} disabled={saveDisabled} onClick={save}>{scope==="global" ? "Save global curve" : `Assign curve to ${title(scope)}`}</DialogButton>
+      <DialogButton style={{flex:1}} disabled={saveDisabled} onClick={save}>{saveLabel(scope)}</DialogButton>
       <DialogButton style={{flex:1}} disabled={busy || !dirty} onClick={discard}>Discard changes</DialogButton>
       <DialogButton style={{flex:1}} onClick={onClose}>Back to Fan Control</DialogButton>
       </Focusable>
@@ -387,7 +387,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
         onChange={option=>setRpmStep(unit === "percent" ? Math.round(option.data*limits.max_rpm/100) : option.data)} /></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={openFull}>Full screen curve editor</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={saveDisabled} onClick={save} description={failure("save")}>
-        {scope === "global" ? "Save global curve" : `Assign curve to ${title(scope)}`}</ButtonItem></PanelSectionRow>
+        {saveLabel(scope)}</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy || !dirty} onClick={discard}>Discard changes</ButtonItem></PanelSectionRow>
       {scope !== "global" && status.settings.presets[scope] && <PanelSectionRow><ButtonItem layout="below" disabled={busy || dirty}
         onClick={useGlobal}>Use global curve for {title(scope)}</ButtonItem></PanelSectionRow>}

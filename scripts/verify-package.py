@@ -51,6 +51,9 @@ with zipfile.ZipFile(archive) as payload:
             source = root / Path(*relative.parts)
         assert source.is_file() and payload.read(member) == source.read_bytes(), f'Stale/unexpected file: {path}'
         files += 1
+digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+checksum = archive.with_name(archive.name + '.sha256')
+assert checksum.read_text(encoding='utf-8') == f'{digest}  {archive.name}\n', 'Stale/missing checksum file'
 print(json.dumps({'archive': str(archive), 'manifest_version': manifest['version'],
-                  'files': files, 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+                  'files': files, 'sha256': digest,
                   'status': 'PASS'}, indent=2))

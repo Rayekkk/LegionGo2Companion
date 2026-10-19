@@ -47,6 +47,7 @@ export function resolvedPreset(spl: number, sppt: number, fppt: number, stored: 
 export function exceedsCaps(spl: number, sppt: number, fppt: number, caps: Caps): boolean;
 export function activeLimits(settings: SettingsLimits | null | undefined, table?: PresetTable):
   { spl: number; sppt: number; fppt: number; global: boolean; label: string } | null;
+export function overviewSummary(settings: (SettingsLimits & { enabled?: boolean }) | null | undefined, table?: PresetTable): string;
 export function presetNote(key: PresetKey, table: PresetTable): string;
 
 export function powerSummary(enabled: boolean, owner: string, label: string, now: Caps, draw: number | null | undefined,

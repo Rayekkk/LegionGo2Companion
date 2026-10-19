@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -11,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { crc32, deflateRawSync } from "node:zlib";
 
@@ -228,6 +229,7 @@ function packagePlugin() {
   if (dirty) fail(`the package is built from HEAD; commit or discard these changes first:\n${dirty}`);
   mkdirSync(dirname(zipPath), {recursive: true});
   rmSync(zipPath, { force: true });
+  rmSync(`${zipPath}.sha256`, { force: true });
   const root = mkdtempSync(join(tmpdir(), "legiongo2companion-package-"));
   try {
     stagePayload(join(root, "stage", PLUGIN_DIR_NAME), root);
@@ -235,6 +237,9 @@ function packagePlugin() {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+  // sha256sum format, so `sha256sum -c` verifies the downloaded ZIP.
+  const digest = createHash("sha256").update(readFileSync(zipPath)).digest("hex");
+  writeFileSync(`${zipPath}.sha256`, `${digest}  ${basename(zipPath)}\n`);
   console.log(`packaged manifest v${version} from ${git(["rev-parse", "--short", "HEAD"]).trim()} -> ${zipPath}`);
 }
 

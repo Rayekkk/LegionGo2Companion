@@ -20,7 +20,7 @@ import {
 } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
-import { FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
+import { driverNotice, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -608,12 +608,13 @@ const LGoVibeControl = () => {
   }
 
   const driverFound = driver?.found ?? false;
+  const missingDriver = driverNotice(driver);
   const gameRunning = appId !== DEFAULT_APP;
 
   return (
     <div style={styles.container}>
       <PanelSection title="Vibration">
-        {!driverFound && infoRow("Controller driver not found", "Needs SteamOS 3.8 or newer.")}
+        {missingDriver && infoRow(missingDriver[0], missingDriver[1])}
         <PanelSectionRow>
           <ToggleField
             label="Per-game profile"

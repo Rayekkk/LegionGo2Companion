@@ -7,6 +7,7 @@ import "wifi.mjs" as Wifi
 import "battery.mjs" as Battery
 import "rgb.mjs" as Rgb
 import "vibration.mjs" as Vibe
+import "updates.mjs" as Updates
 import "remap.mjs" as Remap
 import "controller.mjs" as Gyro
 import "firmware.mjs" as Firmware
@@ -24,6 +25,8 @@ RowLayout {
     // The Custom draft as in Decky: watts, boosts as headroom above SPL (see tdp.mjs).
     property var powerDraft:({spl:15,spptOff:5,fpptOff:10})
     property bool powerDirty:false
+    // Until the first get_settings the draft holds placeholders, so the editor shows a loading line instead.
+    property bool powerLoaded:false
     readonly property bool editing:powerDirty
     property string powerNotice:""
     property string draftGame:""
@@ -134,7 +137,7 @@ RowLayout {
     function gameProfileFresh() { return !!app() && backend.gameProfileApp===app() && backend.age("get_game_profile")<8; }
     function acOnline() { return s("get_power_source").ac===true; }
     function loadPower() {
-        if(!backend || powerDirty || !profileReady()) return;
+        if(!backend || powerDirty || !profileReady() || s("get_settings").spl==null) return;
         let source=s("get_settings");
         if(tdpScope!=="global" && s("get_game_profile").exists)
             source=tdpScope==="ac"?s("get_game_profile").ac_profile || source:s("get_game_profile").profile || source;
@@ -147,6 +150,7 @@ RowLayout {
             Tdp.fromAbsolute(w,sw,fw);
         if(s("get_game_profile").exists)acSeparate=!!s("get_game_profile").ac_separate;
         draftGame=app();
+        powerLoaded=true;
     }
     // What the running game uses: its saved profile decides; without one (or without a TDP provider to save
     // it), the local choice stands.
@@ -367,16 +371,17 @@ RowLayout {
                      note:()=>Tdp.scopeNote(gameUse(),gameTitle(app()))}),
                 choices("Edit settings for",()=>tdpScope==="ac"?"charger":"battery",chooseEditTarget,()=>[{id:"battery",label:"Battery"},{id:"charger",label:"Charger"}],
                     {kind:"options",scope:true,visible:()=>!!app() && s("get_settings").enabled===true && gameUse()==="charger",available:gameProfileFresh,note:editTargetNote}),
-                choices("Preset",()=>powerPreset,choosePreset,powerOptions,{kind:"options",available:()=>!!s("get_caps").tdp_available && !!s("get_settings").enabled,
+                notice("",()=>powerLoaded?"":"Loading power limits…"),
+                choices("Preset",()=>powerPreset,choosePreset,powerOptions,{kind:"options",visible:()=>powerLoaded,available:()=>!!s("get_caps").tdp_available && !!s("get_settings").enabled,
                     note:()=>Tdp.presetNote(powerPreset,presetTable())}),
-                number("Sustained power",()=>powerDraft.spl,v=>editPower("spl",v),tdpMin,()=>customCaps().spl,{kind:"range",suffix:" W",visible:()=>powerPreset==="custom",
+                number("Sustained power",()=>powerDraft.spl,v=>editPower("spl",v),tdpMin,()=>customCaps().spl,{kind:"range",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom",
                     note:()=>tdpAdvanced()?"":"Boost follows automatically."}),
-                number("Slow boost",()=>powerDraft.spptOff,v=>editPower("sppt",v),0,()=>boostRoom().sppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerPreset==="custom" && tdpAdvanced(),
+                number("Slow boost",()=>powerDraft.spptOff,v=>editPower("sppt",v),0,()=>boostRoom().sppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom" && tdpAdvanced(),
                     available:()=>boostRoom().sppt>0,note:()=>boostNote(powerDraft.spptOff,boostRoom().sppt)}),
-                number("Fast boost",()=>powerDraft.fpptOff,v=>editPower("fppt",v),0,()=>boostRoom().fppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerPreset==="custom" && tdpAdvanced(),
+                number("Fast boost",()=>powerDraft.fpptOff,v=>editPower("fppt",v),0,()=>boostRoom().fppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom" && tdpAdvanced(),
                     available:()=>boostRoom().fppt>0,note:()=>boostNote(powerDraft.fpptOff,boostRoom().fppt)}),
                 field("","buttons",()=>powerDirty?"Unsaved changes":"",id=>{ if(id==="apply")applyPower(); else { powerDirty=false; customPicked=powerPreset==="custom"; loadPower(); } },
-                    {name:"Custom limits",visible:()=>powerPreset==="custom",available:()=>profileReady() && !!s("get_caps").tdp_available && !!s("get_settings").enabled,
+                    {name:"Custom limits",visible:()=>powerLoaded && powerPreset==="custom",available:()=>profileReady() && !!s("get_caps").tdp_available && !!s("get_settings").enabled,
                      choices:()=>[{id:"apply",label:applyLabel(),tone:"primary",enabled:powerDirty},{id:"discard",label:"Discard",enabled:powerDirty}]}),
                 text("Limits now",()=>Tdp.limitsText(s("get_tdp_info"))),
                 text("Set by",()=>Tdp.sourceText(s("get_tdp_info"))),
@@ -405,6 +410,8 @@ RowLayout {
             ]}],
             vibration:[{title:"Vibration",barTitle:"Troubleshooting",fields:[
                 notice("",()=>s("vibe_is_ready").error || ""),
+                // As in Decky, once the driver status has been read.
+                notice("",()=>{const missing=backend.age("vibe_get_driver_status")<Infinity && Vibe.driverNotice(s("vibe_get_driver_status"));return missing?missing[0]+". "+missing[1]:"";}),
                 switcher("Per-game profile",()=>s("vibe_get_settings").overwrite,"vibe_set_profile_overwrite",v=>[app(),v,""],{available:()=>vibeReady() && !!app(),
                     note:()=>!app()?"Start a game to give it its own settings.":s("vibe_get_settings").overwrite?"This game has its own settings.":"This game uses the global settings."}),
                 choices("Vibration strength",()=>s("vibe_get_settings").settings?.level,v=>change("vibe_set_intensity",vibeArgs(v)),vibeLevels,{kind:"options",available:vibeReady}),
@@ -528,7 +535,7 @@ RowLayout {
                 notice("",()=>s("get_version").modules?.display?.note?"Takes effect when you return to Gaming Mode.":"")])}],
             about:[{title:"Companion",fields:[
                 text("Version",()=>s("get_version").version || "—"),
-                text("Latest version",()=>s("updates_check").latest_version || "Not checked"),
+                text("Updates",()=>updateStatus()[0],{note:()=>updateStatus()[1]}),
                 action("Check for updates","updates_check"),
                 field("Download update","button",()=>"Download "+(s("updates_check").latest_version || ""),()=>change("updates_download",[s("updates_check").latest_version]),{visible:()=>!!s("updates_check").update_available && !!s("updates_check").download_available && !!s("updates_check").latest_version}),
                 text("Downloaded to",()=>s("updates_download").path || "—",{visible:()=>!!s("updates_download").path}),
@@ -536,6 +543,8 @@ RowLayout {
             ]}]
         };
     }
+    // As in Decky: the last successful check, named by its result.
+    function updateStatus() { const check=s("updates_check");return Updates.updateStatus(check,check.current_version || s("get_version").version || "—"); }
     function display() { return s("display_get_state"); }
     function nativeDisplay() { const state=s("display_get_state");return state.native_support_detected===true || state.native_cleanup_pending===true; }
     function confirmedNativeDisplay() { const state=s("display_get_state");return state.native_support_detected===true && String(state.native_support_reason || "").indexOf("Gamescope includes the native Legion Go 2 display profile.")===0; }

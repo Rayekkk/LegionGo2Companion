@@ -5,6 +5,13 @@ export const STARTING_STUCK_MS = 30000;
 
 export const curveName = name => name === "max" ? "Maximum" : String(name).charAt(0).toUpperCase() + String(name).slice(1);
 
+/** The save button: the global curve, or the curve of the chosen TDP preset. */
+export const saveLabel = scope => scope === "global" ? "Save global curve" : `Assign curve to ${curveName(scope)}`;
+
+/** The selected point under the graph; the last point (100°C) only changes speed. */
+export const pointText = (index, count, temperature, speed) =>
+  `Point ${index + 1}/${count} · ${temperature}°C · ${speed}${index === count - 1 ? " · speed only" : ""}`;
+
 // Desktop polling: a delayed sample is not current on arrival, so its own age plus the transport age must stay short.
 export const readingFresh = (readings, transportAge) =>
   !!readings && !!readings.valid && Number(readings.age_seconds || 0) + transportAge < 2.5;
