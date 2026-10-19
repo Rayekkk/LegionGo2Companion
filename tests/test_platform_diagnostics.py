@@ -196,7 +196,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
             result = case.plugin._rescan_and_reconnect_sync('six')
         self.assertFalse(result['success']); self.assertTrue(result['rolled_back'])
         self.assertEqual([row['context']['phase'] for row in self.events('wifi', 'transaction')],
-                         ['pending', 'applying', 'rolling_back', 'rolled_back'])
+                         ['pending', 'rolling_back', 'rolled_back'])
         self.assertEqual(self.events('wifi', 'manual_reconnect_failed')[0]['context']['stage'], 'apply')
         self.assertNotIn('fixture-private', json.dumps(self.records))
         self.assertNotIn('FORGED_LOG_LINE', json.dumps(self.records))

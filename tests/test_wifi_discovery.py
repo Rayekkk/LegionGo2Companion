@@ -610,7 +610,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
         with patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
              patch.object(plugin, "_release_band_policy_file_lock"), \
-             patch.object(plugin, "_set_band_policy_impl", new=AsyncMock(return_value={"success": True})), \
+             patch.object(plugin, "_set_band_policy_impl", return_value={"success": True}), \
              patch.object(wifi, "_load_settings", return_value=SETTINGS), \
              patch.object(plugin, "_high_band_monitor", side_effect=monitor):
             self.assertTrue((await plugin.set_band_policy(wifi.BAND_POLICY_HIGH_ONLY))["success"])
@@ -627,7 +627,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             stop.wait(5)
             finished.set()
             return {"success": False}
-        async def transaction(*_args, **_kwargs):
+        def transaction(*_args, **_kwargs):
             self.assertTrue(finished.is_set())
             return {"success": True}
         with patch.object(wifi, "_load_settings", return_value=SETTINGS) as settings, \
@@ -655,7 +655,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(plugin, "_get_high_band_link", side_effect=observed), \
              patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
              patch.object(plugin, "_release_band_policy_file_lock"), \
-             patch.object(plugin, "_set_band_policy_impl", new=AsyncMock(return_value={"success": True})):
+             patch.object(plugin, "_set_band_policy_impl", return_value={"success": True}):
             plugin._high_band_monitor_ready = True
             plugin._start_high_band_monitor(SETTINGS)
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))

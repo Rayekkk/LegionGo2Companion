@@ -159,7 +159,7 @@ class WifiResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         entered, release = threading.Event(), threading.Event()
         runs = []
 
-        async def transaction(mode, **kwargs):
+        def transaction(mode, **kwargs):
             runs.append(mode)
             entered.set()
             if not release.wait(3):

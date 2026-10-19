@@ -72,8 +72,7 @@ class StrictWifiTests(unittest.TestCase):
             self.plugin, "_reconnect_profile", return_value={"success": True}))
 
     def change(self, mode, allow_unverified_scan=False):
-        return asyncio.run(self.plugin._set_band_policy_impl(
-            mode, allow_unverified_scan=allow_unverified_scan))
+        return self.plugin._set_band_policy_impl(mode, allow_unverified_scan=allow_unverified_scan)
 
     def test_preference_to_strict_writes_iwd_once_and_preserves_baseline(self):
         original_write = self.plugin._set_iwd_rank_modifier
@@ -121,7 +120,7 @@ class StrictWifiTests(unittest.TestCase):
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
 
     def test_failed_strict_connection_rolls_back_preference_and_iwd_file(self):
-        with patch.object(self.plugin, "_verify_band_policy", new_callable=AsyncMock,
+        with patch.object(self.plugin, "_verify_band_policy",
                           return_value={"success": False, "message": "Stayed on 2.4 GHz"}):
             result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
         self.assertFalse(result["success"])
@@ -176,7 +175,7 @@ class StrictWifiTests(unittest.TestCase):
     def test_confirmed_attempt_rolls_back_if_actual_link_is_not_high_band(self):
         with patch.object(self.plugin, "_get_band_policy_capabilities_sync",
                           return_value={"five_six_only_try_available": True}), \
-             patch.object(self.plugin, "_verify_band_policy", new_callable=AsyncMock,
+             patch.object(self.plugin, "_verify_band_policy",
                           return_value={"success": False,
                                         "message": "No 5/6 GHz connection"}):
             result = self.change(wifi.BAND_POLICY_STRICT_HIGH,
@@ -254,11 +253,9 @@ class StrictWifiTests(unittest.TestCase):
 
     def test_strict_verification_rejects_2_4_and_accepts_5_ghz(self):
         with patch.object(self.plugin, "_get_link_frequency", return_value=2437):
-            rejected = asyncio.run(self.plugin._verify_band_policy(
-                wifi.BAND_POLICY_STRICT_HIGH, UUID, timeout=1))
+            rejected = self.plugin._verify_band_policy(wifi.BAND_POLICY_STRICT_HIGH, UUID, timeout=1)
         self.assertFalse(rejected["success"])
-        accepted = asyncio.run(self.plugin._verify_band_policy(
-            wifi.BAND_POLICY_STRICT_HIGH, UUID, timeout=1))
+        accepted = self.plugin._verify_band_policy(wifi.BAND_POLICY_STRICT_HIGH, UUID, timeout=1)
         self.assertTrue(accepted["success"])
         self.assertEqual(accepted["frequency"], 5320)
 

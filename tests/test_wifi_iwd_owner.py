@@ -162,21 +162,19 @@ class BandEnforcementTests(unittest.TestCase):
         for mode in (wifi.BAND_POLICY_OFF, wifi.BAND_POLICY_HIGH_ONLY):
             with self.subTest(mode=mode), \
                  patch.object(self.plugin, "_get_link_frequency", return_value=None):
-                result = asyncio.run(self.plugin._verify_band_policy(mode, UUID, timeout=0.01))
+                result = self.plugin._verify_band_policy(mode, UUID, timeout=0.01)
             self.assertFalse(result["success"], result)
 
     def test_verification_never_sleeps_past_its_deadline(self):
         sleeps = []
-        async def sleep(seconds):
-            sleeps.append(seconds)
-        with patch.object(self.plugin, "_get_link_frequency", return_value=None),              patch.object(wifi.asyncio, "sleep", new=sleep):
-            asyncio.run(self.plugin._verify_band_policy(wifi.BAND_POLICY_OFF, UUID, timeout=0.01))
+        with patch.object(self.plugin, "_get_link_frequency", return_value=None), \
+             patch.object(wifi.time, "sleep", side_effect=sleeps.append):
+            self.plugin._verify_band_policy(wifi.BAND_POLICY_OFF, UUID, timeout=0.01)
         self.assertTrue(sleeps and max(sleeps) < 0.5, sleeps)  # not the full 1 s step
 
     def test_preference_allows_a_connected_2_4_ghz_fallback(self):
         with patch.object(self.plugin, "_get_link_frequency", return_value=2412):
-            result = asyncio.run(self.plugin._verify_band_policy(
-                wifi.BAND_POLICY_HIGH_ONLY, UUID, timeout=0.01))
+            result = self.plugin._verify_band_policy(wifi.BAND_POLICY_HIGH_ONLY, UUID, timeout=0.01)
         self.assertTrue(result["success"], result)
 
     def test_ambiguity_blocks_an_iwd_restart_without_touching_recovery(self):

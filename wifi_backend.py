@@ -104,6 +104,8 @@ BAND_POLICY_JOURNAL_FILE = os.path.join(
     BAND_POLICY_STATE_DIR, "band-policy-transaction.json"
 )
 BAND_POLICY_LOCK_FILE = os.path.join(BAND_POLICY_RUNTIME_DIR, "band-policy.lock")
+# "applying" is no longer written; journals from 2.2.0 may still hold it and
+# recovery treats it exactly like "pending".
 JOURNAL_PHASES = frozenset(("pending", "applying", "verified", "committed",
                             "rolling_back", "rolled_back", "rollback_failed"))
 DECKY_PLUGIN_DIR = getattr(decky, "DECKY_PLUGIN_DIR", os.path.dirname(__file__))
@@ -215,16 +217,9 @@ class Plugin:
 
     # ---- Band policy helpers -------------------------------------------------
 
-    def _get_network_mutation_lock(self) -> asyncio.Lock:
-        """Serialize profile, iwd, and their shared settings ownership state."""
-        lock = getattr(self, "_network_mutation_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._network_mutation_lock = lock
-        return lock
-
     def _get_band_policy_file_gate(self) -> asyncio.Lock:
-        """Allow only one local caller to wait for the cross-process flock."""
+        """Allow only one local caller to wait for the cross-process flock; it
+        also serializes this process's profile, iwd and ownership changes."""
         lock = getattr(self, "_band_policy_file_gate", None)
         if lock is None:
             lock = asyncio.Lock()
@@ -483,8 +478,6 @@ class Plugin:
             return {**fallback, "success": False, "error": "rollback_watchdog_failed"}
         outcome = {**fallback, "_reselection_from_episode": link["episode"]}
         try:
-            journal["phase"] = "applying"
-            self._save_band_policy_journal(journal)
             if self._get_current_backend() != "iwd":
                 raise RuntimeError("The native WiFi backend changed before automatic reconnection")
             # Finish restoring connectivity even if unloading starts after down.
@@ -582,27 +575,26 @@ class Plugin:
                             await asyncio.sleep(HIGH_BAND_MONITOR_SECONDS)
                             continue
                         try:
-                            async with self._get_network_mutation_lock():
-                                self._high_band_discovery_pending = True
-                                try:
-                                    result = await self._worker_complete(self._discover_high_bands, link, stop)
-                                    own_reselection = result.pop("_reselection_from_episode", None)
-                                    if own_reselection is not None:
-                                        reconnects += 1
-                                    if (result.get("reselected") and result.get("success")
-                                            and link["frequency"] < 4900
-                                            and 4900 <= result.get("frequency", 0) < 5925):
-                                        # Early boot scans can miss high bands. After
-                                        # reaching 5 GHz, allow one more discovery
-                                        # for 6 GHz without a third reconnect.
-                                        probe_limit = 3
-                                    diagnostic_event('wifi', 'automatic_discovery',
-                                                     level='info' if result.get('success') else 'warning',
-                                                     outcome='ready' if result.get('success') else 'failed',
-                                                     restored=result.get('rolled_back'),
-                                                     reason=result.get('error', ''), stage='completed')
-                                finally:
-                                    self._high_band_discovery_pending = False
+                            self._high_band_discovery_pending = True
+                            try:
+                                result = await self._worker_complete(self._discover_high_bands, link, stop)
+                                own_reselection = result.pop("_reselection_from_episode", None)
+                                if own_reselection is not None:
+                                    reconnects += 1
+                                if (result.get("reselected") and result.get("success")
+                                        and link["frequency"] < 4900
+                                        and 4900 <= result.get("frequency", 0) < 5925):
+                                    # Early boot scans can miss high bands. After
+                                    # reaching 5 GHz, allow one more discovery
+                                    # for 6 GHz without a third reconnect.
+                                    probe_limit = 3
+                                diagnostic_event('wifi', 'automatic_discovery',
+                                                 level='info' if result.get('success') else 'warning',
+                                                 outcome='ready' if result.get('success') else 'failed',
+                                                 restored=result.get('rolled_back'),
+                                                 reason=result.get('error', ''), stage='completed')
+                            finally:
+                                self._high_band_discovery_pending = False
                         finally:
                             self._release_band_policy_file_lock(handle)
                     attempts += 1
@@ -2059,8 +2051,6 @@ class Plugin:
                             detail=watchdog.get("stderr", ""))
 
         try:
-            journal["phase"] = "applying"
-            self._save_band_policy_journal(journal)
             modified = self._nmcli_modify(
                 uuid, "802-11-wireless.bssid", selected_bssid, timeout=8
             )
@@ -2184,10 +2174,9 @@ class Plugin:
                 return _refusal("band_policy_lock_failed", "The network-operation lock is unavailable.",
                                 detail=str(exc))
             try:
-                async with self._get_network_mutation_lock():
-                    if target_band == "high":
-                        return await self._worker_complete(self._rescan_and_reconnect_sync)
-                    return await self._worker_complete(self._rescan_and_reconnect_sync, target_band)
+                if target_band == "high":
+                    return await self._worker_complete(self._rescan_and_reconnect_sync)
+                return await self._worker_complete(self._rescan_and_reconnect_sync, target_band)
             except Exception as exc:
                 diagnostic_event('wifi', 'manual_reconnect_failed', level='error', stage='admission', code=type(exc).__name__)
                 return self._unexpected_response(exc)
@@ -2530,12 +2519,12 @@ class Plugin:
                 )
         return ""
 
-    async def _verify_band_policy(
+    def _verify_band_policy(
         self, mode: str, uuid: str, timeout: int = 24
     ) -> dict:
-        deadline = asyncio.get_running_loop().time() + timeout
+        deadline = time.monotonic() + timeout
         last_frequency = None
-        while asyncio.get_running_loop().time() < deadline:
+        while time.monotonic() < deadline:
             if self._profile_is_active(uuid):
                 last_frequency = self._get_link_frequency()
                 if mode == BAND_POLICY_SIX_ONLY and last_frequency is not None:
@@ -2552,7 +2541,7 @@ class Plugin:
                         return {"success": True, "frequency": last_frequency}
                 elif mode == BAND_POLICY_OFF and last_frequency is not None:
                     return {"success": True, "frequency": last_frequency}
-            await asyncio.sleep(max(0, min(1, deadline - asyncio.get_running_loop().time())))
+            time.sleep(max(0, min(1, deadline - time.monotonic())))
         return {
             "success": False,
             "frequency": last_frequency,
@@ -2934,15 +2923,8 @@ class Plugin:
                 return _refusal("band_policy_lock_failed", "The cross-process rollback lock is unavailable.",
                                 detail=str(e), rolled_back=False)
             try:
-                async with self._get_network_mutation_lock():
-                    return await self._worker_complete(
-                        lambda: asyncio.run(
-                            self._set_band_policy_impl(
-                                mode,
-                                allow_unverified_scan=allow_unverified_scan,
-                            )
-                        )
-                    )
+                return await self._worker_complete(
+                    lambda: self._set_band_policy_impl(mode, allow_unverified_scan=allow_unverified_scan))
             finally:
                 # LOCK_UN and close are local, non-blocking operations. Doing
                 # this directly also guarantees progress if executor threads
@@ -2950,14 +2932,15 @@ class Plugin:
                 self._release_band_policy_file_lock(file_lock)
                 await self._restart_high_band_monitor()
 
-    async def _set_band_policy_impl(
+    def _set_band_policy_impl(
         self, mode: str, allow_unverified_scan: bool = False,
     ) -> dict:
         """Atomically select one Go 2 band policy, or restore the prior state.
 
-        Every mutating operation is protected by both a process-local lock and
-        a systemd rollback timer.  The timer reads the on-disk journal and
-        restores only values that still equal the values written by us.
+        Runs in a worker thread. Every mutating operation is protected by both
+        a process-local lock and a systemd rollback timer.  The timer reads the
+        on-disk journal and restores only values that still equal the values
+        written by us.
         """
         if not isinstance(mode, str) or mode not in BAND_POLICIES:
             return _refusal("invalid_band_policy", "Band policy must be off, six_ghz_only, "
@@ -3040,11 +3023,9 @@ class Plugin:
             return refuse("transition_conflict", transition_error)
 
         if mode == BAND_POLICY_SIX_ONLY:
-            if not await asyncio.to_thread(self._nm_supports_six_ghz_only):
+            if not self._nm_supports_six_ghz_only():
                 return refuse("preflight_failed", "NetworkManager 1.58 or newer is required for 6 GHz only.")
-            capabilities = await asyncio.to_thread(
-                self._get_band_policy_capabilities_sync, True, True
-            )
+            capabilities = self._get_band_policy_capabilities_sync(True, True)
             if not capabilities.get("six_ghz_only_available"):
                 return refuse("preflight_failed",
                               capabilities.get("reason_six_ghz_only") or "Band policy preflight failed.",
@@ -3067,10 +3048,7 @@ class Plugin:
                 # when iwd can connect. A confirmed user attempt may skip
                 # that unreliable observation, but never the hardware,
                 # backend, ownership, watchdog, or live-link checks.
-                capabilities = await asyncio.to_thread(
-                    self._get_band_policy_capabilities_sync,
-                    not allow_unverified_scan,
-                )
+                capabilities = self._get_band_policy_capabilities_sync(not allow_unverified_scan)
                 available_key = (
                     "five_six_only_try_available" if allow_unverified_scan
                     else "five_six_only_available"
@@ -3213,8 +3191,6 @@ class Plugin:
                           detail=watchdog.get("stderr", ""))
 
         try:
-            journal["phase"] = "applying"
-            self._save_band_policy_journal(journal)
             iwd_changed = False
             nm_changed = False
 
@@ -3327,17 +3303,13 @@ class Plugin:
                     "frequency": self._get_link_frequency(),
                 }
             elif mode != BAND_POLICY_OFF:
-                verification = await self._verify_band_policy(
-                    mode, profile_uuid
-                )
+                verification = self._verify_band_policy(mode, profile_uuid)
                 if not verification.get("success"):
                     raise RuntimeError(
                         verification.get("message") or "Band verification failed"
                     )
             elif reconnect_uuid and not not_reconnected:
-                verification = await self._verify_band_policy(
-                    BAND_POLICY_OFF, reconnect_uuid
-                )
+                verification = self._verify_band_policy(BAND_POLICY_OFF, reconnect_uuid)
                 if not verification.get("success"):
                     not_reconnected = verification.get("message") or "WiFi reconnect failed"
                     verification = {"success": True, "frequency": self._get_link_frequency()}
