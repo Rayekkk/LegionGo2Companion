@@ -3034,6 +3034,13 @@ class Plugin:
         neutral_band, neutral_iwd, final_band, final_iwd = self._band_policy_targets(
             current_mode, mode, state, band_before, iwd_before)
 
+        # A duplicated [Rank]/key (or an unsafe file) can be neither written nor
+        # verified, so a transaction armed on it could only end in rollback_failed.
+        if iwd_before.get("ambiguous") and (mode in IWD_BAND_POLICIES or current_mode in IWD_BAND_POLICIES):
+            return refuse("preflight_failed",
+                          "/etc/iwd/main.conf has duplicate [Rank] sections or BandModifier keys, or is not a "
+                          "regular file. Fix it, then try again; no network changes were made.")
+
         if mode in (BAND_POLICY_SIX_ONLY, *IWD_BAND_POLICIES) and neutral_band:
             return refuse("external_band_configuration", "The active profile has a band setting not owned by "
                                                          "this plugin. Clear it before enabling the high-band preference.")

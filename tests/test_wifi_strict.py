@@ -267,6 +267,33 @@ class StrictWifiTests(unittest.TestCase):
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
         self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
 
+    def test_automatic_refuses_duplicate_keys_left_outside_without_locking_wifi(self):
+        journal = self.journal_dir / "band-policy-transaction.json"
+        self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\nBandModifier2_4GHz=0.6\n", encoding="utf-8")
+        before = self.iwd.read_bytes()
+        result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertEqual(result["error"], "preflight_failed", result)
+        self.assertIn("duplicate", result["message"])
+        self.assertEqual(self.iwd.read_bytes(), before)
+        self.assertFalse(journal.exists(), "refused before any transaction was armed")
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
+        self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")   # the user fixes the file
+        result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertTrue(result["success"], result)
+        self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
+        self.assertFalse(journal.exists())
+
+    def test_prefer_refuses_two_rank_sections_before_any_change(self):
+        state = dict(wifi.DEFAULT_SETTINGS, band_policy=wifi.BAND_POLICY_OFF, band_policy_state={})
+        self.settings.write_text(json.dumps(state), encoding="utf-8")
+        self.iwd.write_text("[Rank]\nBandModifier5GHz=1.0\n[Rank]\nBandModifier6GHz=1.0\n", encoding="utf-8")
+        before = self.iwd.read_bytes()
+        result = self.change(wifi.BAND_POLICY_HIGH_ONLY)
+        self.assertEqual(result["error"], "preflight_failed", result)
+        self.assertEqual(self.iwd.read_bytes(), before)
+        self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
+
     def test_status_reports_strict_drift_even_when_wifi_disconnected(self):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
         self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")
