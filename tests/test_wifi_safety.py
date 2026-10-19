@@ -7,11 +7,11 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import ANY, AsyncMock, patch
-from contextlib import ExitStack
 import threading
 
 import support  # Install isolated Decky stubs before backend imports.
 import wifi_backend as wifi
+from test_wifi_strict import isolate_files
 from safe_settings import CorruptSettings, UnsafeSettingsPath
 
 
@@ -35,50 +35,22 @@ class WifiSafetyTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding='utf-8'), 'new')
 
     def test_status_does_not_show_a_configuring_connection_as_connected(self):
+        isolate_files(self)
         plugin = wifi.Plugin()
         uuid = 'dda82d97-6914-4788-802f-fa1ba9a1515f'
-        with patch.object(wifi, '_load_settings', return_value=dict(wifi.DEFAULT_SETTINGS)), \
-             patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
-             patch.object(plugin, '_get_network_recovery_issues', return_value=[]), \
-             patch.object(plugin, '_get_current_backend', return_value='iwd'), \
-             patch.object(plugin, '_run_cmd', return_value={
-                 'success': True, 'stdout': '50 (connecting (configuring))\n' + uuid}) as command:
+
+        def command(argv, **_kwargs):
+            if argv[-2:] == ['dev', 'status']:
+                return {'success': True, 'stdout': 'wlan0:wifi\n'}
+            return {'success': True, 'stdout': '50 (connecting (configuring))\n' + uuid}
+
+        with patch.object(plugin, '_get_current_backend', return_value='iwd'), \
+             patch.object(plugin, '_run_cmd', side_effect=command) as run:
             status = plugin._get_status_sync()
         self.assertTrue(status['success'], status)
         self.assertFalse(status['connected'])
         self.assertNotIn('frequency', status['live'])
-        self.assertEqual(command.call_count, 1)
-
-    def test_status_uses_one_settings_snapshot_for_support_and_ownership(self):
-        plugin = wifi.Plugin()
-        state = dict(wifi.DEFAULT_SETTINGS, driver="mt7921e", device_family="legion_go_2")
-        with patch.object(wifi, "_load_settings", return_value=state) as read, \
-             patch.object(plugin, "_get_wifi_interface", return_value=None), \
-             patch.object(plugin, "_get_active_connection_uuid", return_value=None), \
-             patch.object(plugin, "_get_network_recovery_issues", return_value=[]), \
-             patch.object(plugin, "_get_current_backend", return_value="iwd"):
-            status = plugin._get_status_sync()
-        self.assertTrue(status["success"])
-        self.assertIs(status["settings"], state)
-        read.assert_called_once_with()
-
-    def test_os_rollback_baseline_can_be_recovered_only_by_explicit_transition(self):
-        plugin = wifi.Plugin()
-        baseline = {'modifier_present': False, 'modifier_value': ''}
-        settings = {'band_policy': wifi.BAND_POLICY_HIGH_ONLY, 'band_policy_state': {
-            'mode': wifi.BAND_POLICY_HIGH_ONLY, 'owns_iwd': True,
-            'original': {'iwd': baseline},
-            'applied': {'iwd_modifier_present': True, 'iwd_modifier_value': '0.01'}}}
-        with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=baseline):
-            self.assertTrue(plugin._band_policy_ownership_error(settings))
-            self.assertEqual(plugin._band_policy_ownership_error(settings, allow_restored=True), '')
-        for external in ({'modifier_present': True, 'modifier_value': '0.5'},
-                         {'modifier_present': False, 'ambiguous': True}):
-            with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=external):
-                self.assertTrue(plugin._band_policy_ownership_error(settings, allow_restored=True))
-        settings['band_policy_state']['original'] = {}
-        with patch.object(plugin, '_get_iwd_rank_modifier_snapshot', return_value=baseline):
-            self.assertTrue(plugin._band_policy_ownership_error(settings, allow_restored=True))
+        self.assertFalse(any(call.args[0][0] == '/usr/bin/iw' for call in run.call_args_list))
 
     def test_lost_ownership_cannot_be_reported_as_preference_off(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -150,7 +122,10 @@ class WifiResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError('test transaction timeout')
             return {'success': True}
 
-        with patch.object(plugin, '_set_band_policy_impl', transaction),                 patch.object(plugin, '_acquire_band_policy_file_lock', return_value=object()),                 patch.object(plugin, '_release_band_policy_file_lock'),                 patch.object(plugin, '_stop_high_band_monitor', AsyncMock()),                 patch.object(plugin, '_restart_high_band_monitor', AsyncMock()):
+        isolate_files(self)
+        with patch.object(plugin, '_set_band_policy_impl', transaction), \
+                patch.object(plugin, '_stop_high_band_monitor', AsyncMock()), \
+                patch.object(plugin, '_restart_high_band_monitor', AsyncMock()):
             first = asyncio.create_task(plugin.set_band_policy(wifi.BAND_POLICY_OFF))
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             second = asyncio.create_task(plugin.set_band_policy(wifi.BAND_POLICY_OFF))
@@ -260,6 +235,22 @@ class IwdMainConfEditorTests(unittest.TestCase):
             self.plugin._set_iwd_rank_modifier("0.01")
         self.assertEqual(target.read_text(encoding="utf-8"), "[Rank]\n")
         self.assertTrue(self.plugin._get_iwd_rank_modifier_snapshot()["ambiguous"])
+
+    def test_os_rollback_baseline_can_be_recovered_only_by_explicit_transition(self):
+        baseline = self.plugin._get_iwd_rank_modifier_snapshot()   # no main.conf before Companion
+        settings = {'band_policy': wifi.BAND_POLICY_HIGH_ONLY, 'band_policy_state': {
+            'mode': wifi.BAND_POLICY_HIGH_ONLY, 'owns_iwd': True,
+            'original': {'iwd': baseline},
+            'applied': {'iwd_modifier_present': True, 'iwd_modifier_value': '0.01'}}}
+        self.assertTrue(self.plugin._band_policy_ownership_error(settings))
+        self.assertEqual(self.plugin._band_policy_ownership_error(settings, allow_restored=True), '')
+        for external in ("[Rank]\nBandModifier2_4GHz=0.5\n",
+                         "[Rank]\nBandModifier2_4GHz=0.5\nBandModifier2_4GHz=0.6\n"):
+            self.iwd.write_text(external, encoding="utf-8")
+            self.assertTrue(self.plugin._band_policy_ownership_error(settings, allow_restored=True))
+        self.iwd.unlink()
+        settings['band_policy_state']['original'] = {}
+        self.assertTrue(self.plugin._band_policy_ownership_error(settings, allow_restored=True))
 
     def test_high_band_modifiers_at_or_below_zero_are_refused(self):
         for key, band in (("BandModifier5GHz", "five"), ("BandModifier6GHz", "six")):

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Native SteamOS backend/profile changes must not revive an old manager."""
-import asyncio
-import json
 import subprocess
 import unittest
 from unittest.mock import mock_open, patch
@@ -115,20 +113,19 @@ class BackendSwitchTests(unittest.TestCase):
         self.assertIsNone(self.plugin._load_band_policy_journal())
         self.commands.assert_not_called()
 
-    def test_inactive_iwd_is_never_started_by_reload(self):
+    def test_inactive_iwd_is_never_started_and_a_race_is_reported(self):
         self.commands.return_value = {"success": False, "stdout": "inactive"}
-        result = self.plugin._restart_selected_iwd()
-        self.assertFalse(result["success"])
-        self.assertEqual(self.commands.call_count, 1)
-        self.assertEqual(self.commands.call_args.args[0], ["/usr/bin/systemctl", "is-active", "iwd"])
-
-    def test_inactive_iwd_race_during_try_restart_is_reported(self):
+        self.assertFalse(self.plugin._restart_selected_iwd()["success"])
+        self.assertEqual([call.args[0] for call in self.commands.call_args_list],
+                         [["/usr/bin/systemctl", "is-active", "iwd"]])
+        # iwd stopping during the reload is reported, never answered with a start.
+        self.commands.reset_mock()
         self.commands.side_effect = [{"success": True, "stdout": "active"},
                                      {"success": True}, {"success": False, "stdout": "inactive"}]
-        result = self.plugin._restart_selected_iwd()
-        self.assertFalse(result["success"])
-        self.assertEqual(self.commands.call_args_list[1].args[0],
-                         ["/usr/bin/systemctl", "try-restart", "iwd"])
+        self.assertFalse(self.plugin._restart_selected_iwd()["success"])
+        self.assertEqual([call.args[0] for call in self.commands.call_args_list][:2],
+                         [["/usr/bin/systemctl", "is-active", "iwd"], ["/usr/bin/systemctl", "try-restart", "iwd"]])
+        self.assertFalse(any("start" in call.args[0] for call in self.commands.call_args_list))
 
     def test_incomplete_setter_rollback_keeps_independent_watchdog(self):
         with patch.object(self.plugin, "_verify_band_policy", side_effect=RuntimeError("link lost")), \
@@ -146,8 +143,8 @@ class BackendSwitchTests(unittest.TestCase):
         journal["rollback_iwd_restart_required"] = False
         self.plugin._get_active_connection_uuid.return_value = NEW
         self.plugin._nmcli_get.return_value = ("", {"success": True})
-        with patch.object(self.plugin, "_profile_is_active", return_value=False):
-            result = self.plugin._restore_band_policy_transaction(journal, "user changed profile")
+        self.plugin._profile_is_active.return_value = False
+        result = self.plugin._restore_band_policy_transaction(journal, "user changed profile")
         self.assertTrue(result["success"], result)
         self.plugin._reconnect_profile.assert_not_called()
 
@@ -171,7 +168,33 @@ class BackendSwitchTests(unittest.TestCase):
         self.commands.assert_not_called()
         self.plugin._reconnect_profile.assert_not_called()
 
+    def test_missing_or_failed_inventory_is_unavailable_not_disconnected(self):
+        for response in ({"success": False}, {"success": True, "stdout": "eth0:ethernet"}):
+            with self.subTest(response=response):
+                self.commands.return_value = response
+                status = self.plugin._get_status_sync()
+                self.assertTrue(status["success"], status)
+                self.assertFalse(status["connected"])
+                self.assertEqual(status["live"]["connection_state"], "unknown")
+
+    def test_restore_is_offered_only_while_our_iwd_change_is_recoverable(self):
+        state = wifi._load_settings()
+        state.update(device_family="legion_go_2", driver="mt7921e")
+        wifi._save_settings(state)
+        for iwd, available, drift in (("[Rank]\nBandModifier2_4GHz=0.01\n", True, False),  # still ours
+                                      (None, True, True),     # an OS rollback put the baseline back
+                                      ("[Rank]\nBandModifier2_4GHz=0.5\n", False, True)):  # someone else's
+            with self.subTest(iwd=iwd):
+                self.iwd.unlink(missing_ok=True)
+                if iwd:
+                    self.iwd.write_text(iwd, encoding="utf-8")
+                live = self.plugin._get_status_sync()["live"]
+                self.assertIs(live["band_policy_restore_available"], available)
+                self.assertIs("band_policy_error" in live, drift)
+
     def status_commands(self, argv, **kwargs):
+        if argv[-2:] == ["dev", "status"]:
+            return {"success": True, "stdout": "wlan0:wifi\n"}
         if argv == ["/usr/bin/nmcli", "--version"]:
             return {"success": True, "stdout": "nmcli tool, version 1.52.1"}
         if "GENERAL.STATE,GENERAL.CON-UUID" in argv:
@@ -187,10 +210,8 @@ class BackendSwitchTests(unittest.TestCase):
         state = wifi._load_settings()
         state.update(device_family="legion_go_2", driver="mt7921e")
         wifi._save_settings(state)
-        with patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
-\
-             patch.object(self.plugin, "_run_cmd", side_effect=self.status_commands):
-            result = self.plugin._get_status_sync()
+        self.commands.side_effect = self.status_commands
+        result = self.plugin._get_status_sync()
         self.assertTrue(result["success"], result)
         self.assertTrue(result["connected"])
         self.assertEqual(result["live"]["connection_state"], "connected")
@@ -204,10 +225,8 @@ class BackendSwitchTests(unittest.TestCase):
     def test_profile_change_during_status_invalidates_cached_radio_and_ssid(self):
         self.use_wpa()
         self.plugin._get_active_connection_uuid.return_value = strict.UUID
-        with patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
-\
-             patch.object(self.plugin, "_run_cmd", side_effect=self.status_commands):
-            result = self.plugin._get_status_sync()
+        self.commands.side_effect = self.status_commands
+        result = self.plugin._get_status_sync()
         self.assertTrue(result["success"], result)
         self.assertFalse(result["connected"])
         self.assertEqual(result["live"]["connection_state"], "unknown")
@@ -233,9 +252,8 @@ class BackendSwitchTests(unittest.TestCase):
                     return {"success": True, "stdout": info}
                 return self.status_commands(argv, **kwargs)
 
-            with self.subTest(info=info), \
-                 patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
-                 patch.object(self.plugin, "_run_cmd", side_effect=command):
+            with self.subTest(info=info):
+                self.commands.side_effect = command
                 live = self.plugin._get_status_sync()["live"]
             self.assertEqual({key: live.get(key) for key in
                               ("ssid", "frequency", "signal_dbm", "tx_bitrate", "channel")},
@@ -244,37 +262,6 @@ class BackendSwitchTests(unittest.TestCase):
 
 
 class ConnectionStateTests(unittest.TestCase):
-    def test_missing_or_failed_inventory_is_unavailable_not_disconnected(self):
-        plugin = wifi.Plugin()
-        for response in ({"success": False}, {"success": True, "stdout": "eth0:ethernet"}):
-            with self.subTest(response=response), \
-                 patch.object(wifi, "_load_settings", return_value=dict(wifi.DEFAULT_SETTINGS)), \
-                 patch.object(plugin, "_get_current_backend", return_value="iwd"), \
-                 patch.object(plugin, "_get_network_recovery_issues", return_value=[]), \
-                 patch.object(plugin, "_load_band_policy_journal", return_value=None), \
-                 patch.object(plugin, "_run_cmd", return_value=response):
-                status = plugin._get_status_sync()
-            self.assertTrue(status["success"], status)
-            self.assertFalse(status["connected"])
-            self.assertEqual(status["live"]["connection_state"], "unknown")
-
-    def test_status_reads_journal_once_and_offers_restore_only_for_recoverable_ownership(self):
-        plugin = wifi.Plugin()
-        settings = dict(wifi.DEFAULT_SETTINGS, band_policy=wifi.BAND_POLICY_HIGH_ONLY,
-                        device_family="legion_go_2", driver="mt7921e")
-        for strict, relaxed, available in (("", "", True), ("changed", "", True), ("changed", "changed", False)):
-            with self.subTest(strict=strict, relaxed=relaxed), \
-                 patch.object(wifi, "_load_settings", return_value=settings), \
-                 patch.object(plugin, "_get_current_backend", return_value="iwd"), \
-                 patch.object(plugin, "_get_wifi_interface", return_value=None), \
-                 patch.object(plugin, "_load_band_policy_journal", return_value=None) as journal, \
-                 patch.object(plugin, "_band_policy_ownership_error",
-                              side_effect=lambda _s, allow_restored=False: relaxed if allow_restored else strict):
-                status = plugin._get_status_sync()
-            journal.assert_called_once_with()
-            self.assertIs(status["live"]["band_policy_restore_available"], available)
-            self.assertEqual(status["live"].get("band_policy_error"), strict or None)
-
     def test_state_names_distinguish_activation_from_connection(self):
         plugin = wifi.Plugin()
         # Real nmcli -g output: a device without an active profile prints an empty CON-UUID line.

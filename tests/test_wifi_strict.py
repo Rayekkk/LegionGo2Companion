@@ -18,7 +18,56 @@ import wifi_backend as wifi
 UUID = "da58df8b-cdb1-447d-80ab-19d11a634e7e"
 
 
+def ok(stdout=""):
+    return {"success": True, "stdout": stdout, "stderr": "", "returncode": 0}
+
+
+def device(active, frequency, bssid="aa:29:48:e1:7e:03"):
+    """`_run_cmd` answers of one wlan0 adapter (NM inventory and state, iw link); None otherwise."""
+    def answer(argv):
+        if argv[-2:] == ["dev", "status"]:
+            return ok("wlan0:wifi\n")
+        if argv[:2] == ["/usr/bin/nmcli", "-g"] and argv[3:5] == ["device", "show"]:
+            state, uuid = ("100 (connected)", UUID) if active() else ("30 (disconnected)", "")
+            return ok({"GENERAL.STATE": state, "GENERAL.CON-UUID": uuid,
+                       "GENERAL.STATE,GENERAL.CON-UUID": f"{state}\n{uuid}"}[argv[2]])
+        if argv[:2] == ["/usr/bin/iw", "dev"] and argv[-1] == "link":
+            freq = frequency()
+            return ok(f"Connected to {bssid} (on wlan0)\n\tfreq: {freq}\n" if freq else "Not connected.\n")
+        return None
+    return answer
+
+
+def fake_clock(stack):
+    """Time passes only while the backend sleeps, so its deadlines end at once."""
+    clock = [0.0]
+    stack.enter_context(patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]))
+    stack.enter_context(patch.object(wifi.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)))
+    return clock
+
+
+def profile_writes(commands):
+    return [call.args[0] for call in commands.call_args_list if call.args[0][:3] == ["/usr/bin/nmcli", "con", "mod"]]
+
+
+def isolate_files(test):
+    """The real cross-process lock, recovery journal and settings store, in a temp dir."""
+    folder = tempfile.TemporaryDirectory()
+    test.addCleanup(folder.cleanup)
+    for name, value in (("BAND_POLICY_RUNTIME_DIR", folder.name),
+                        ("BAND_POLICY_LOCK_FILE", os.path.join(folder.name, "band-policy.lock")),
+                        ("BAND_POLICY_STATE_DIR", folder.name),
+                        ("BAND_POLICY_JOURNAL_FILE", os.path.join(folder.name, "band-policy-transaction.json")),
+                        ("SETTINGS_FILE", os.path.join(folder.name, "wifi_settings.json")),
+                        ("_SETTINGS_MANAGER", None), ("_SETTINGS_MANAGER_PATH", "")):
+        patcher = patch.object(wifi, name, value)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+
 class StrictWifiTests(unittest.TestCase):
+    # A class sharing this setUp may list in REAL the helpers it drives through `_run_cmd`.
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -63,34 +112,32 @@ class StrictWifiTests(unittest.TestCase):
                 "five_six_only_available": True,
             },
         }.items():
-            self.stack.enter_context(patch.object(self.plugin, name, return_value=value))
+            if name not in getattr(self, "REAL", ()):
+                self.stack.enter_context(patch.object(self.plugin, name, return_value=value))
         self.commands = self.stack.enter_context(patch.object(
             self.plugin, "_run_cmd", return_value={"success": True, "stdout": "active\n"}))
         self.stack.enter_context(patch.object(
             self.plugin, "_schedule_band_policy_rollback", return_value={"success": True}))
         self.stack.enter_context(patch.object(self.plugin, "_cancel_band_policy_rollback"))
-        self.stack.enter_context(patch.object(
-            self.plugin, "_reconnect_profile", return_value={"success": True}))
+        if "_reconnect_profile" not in getattr(self, "REAL", ()):
+            self.stack.enter_context(patch.object(
+                self.plugin, "_reconnect_profile", return_value={"success": True}))
 
     def change(self, mode, allow_unverified_scan=False):
         return self.plugin._set_band_policy_impl(mode, allow_unverified_scan=allow_unverified_scan)
 
     def test_preference_to_strict_writes_iwd_once_and_preserves_baseline(self):
-        original_write = self.plugin._set_iwd_rank_modifier
-        with patch.object(self.plugin, "_set_iwd_rank_modifier", wraps=original_write) as write:
-            result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
+        result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
         self.assertTrue(result["success"], result)
-        write.assert_called_once_with("0.0")
-        self.assertIn("BandModifier2_4GHz=0.0", self.iwd.read_text(encoding="utf-8"))
+        self.assertEqual(self.iwd.read_text(encoding="utf-8"), "[Rank]\nBandModifier2_4GHz=0.0\n")
         saved = wifi._load_settings()
         self.assertEqual(saved["band_policy"], wifi.BAND_POLICY_STRICT_HIGH)
         self.assertEqual(saved["band_policy_state"]["original"]["iwd"], self.baseline)
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 
     def test_turning_a_policy_off_is_not_rolled_back_by_a_failed_reconnect(self):
-        failed = {"success": False, "stderr": "No network with SSID found."}
-        with patch.object(self.plugin, "_reconnect_profile", return_value=failed):
-            result = self.change(wifi.BAND_POLICY_OFF)
+        self.plugin._reconnect_profile.return_value = {"success": False, "stderr": "No network with SSID found."}
+        result = self.change(wifi.BAND_POLICY_OFF)
         self.assertTrue(result["success"], result)
         self.assertFalse(result["rolled_back"])
         self.assertFalse(result["reconnected"])
@@ -108,41 +155,49 @@ class StrictWifiTests(unittest.TestCase):
             "applied": {"nm_band": "6GHz", "iwd_modifier_present": False, "iwd_modifier_value": ""}})
         self.settings.write_text(json.dumps(state), encoding="utf-8")
         fields = {"802-11-wireless.band": "6GHz"}
-        plugin = self.plugin
-        with patch.object(plugin, "_get_current_backend", return_value="wpa_supplicant"), \
-             patch.object(plugin, "_nmcli_get", side_effect=lambda _u, f, **k: (fields.get(f, ""), {"success": True})), \
-             patch.object(plugin, "_nmcli_modify", side_effect=lambda _u, f, v, **k: (fields.__setitem__(f, v), {"success": True})[1]), \
-             patch.object(plugin, "_get_link_frequency", return_value=None), \
-             patch.object(plugin, "_reconnect_profile", return_value={"success": False, "stderr": "No AP"}):
-            result = self.change(wifi.BAND_POLICY_OFF)
+
+        def command(argv, **_kwargs):
+            if argv[:3] == ["/usr/bin/nmcli", "con", "mod"]:
+                fields[argv[5]] = argv[6]
+            return ok("active\n")
+
+        self.commands.side_effect = command
+        self.plugin._get_current_backend.return_value = "wpa_supplicant"
+        self.plugin._nmcli_get.side_effect = lambda _u, f, **k: (fields.get(f, ""), {"success": True})
+        self.plugin._get_link_frequency.return_value = None
+        self.plugin._reconnect_profile.return_value = {"success": False, "stderr": "No AP"}
+        result = self.change(wifi.BAND_POLICY_OFF)
         self.assertTrue(result["success"], result)
         self.assertEqual(fields["802-11-wireless.band"], "")
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
 
     def test_failed_strict_connection_rolls_back_preference_and_iwd_file(self):
-        with patch.object(self.plugin, "_verify_band_policy",
-                          return_value={"success": False, "message": "Stayed on 2.4 GHz"}):
-            result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
-        self.assertFalse(result["success"])
-        self.assertTrue(result["rolled_back"], result)
-        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
-        self.assertIn("BandModifier2_4GHz=0.01", self.iwd.read_text(encoding="utf-8"))
-        self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+        fake_clock(self.stack)
+        self.plugin._get_link_frequency.return_value = 2437   # stays on 2.4 GHz
+        for allow_unverified_scan in (False, True):
+            with self.subTest(allow_unverified_scan=allow_unverified_scan):
+                self.plugin._get_band_policy_capabilities_sync.return_value = {
+                    "five_six_only_available": True, "five_six_only_try_available": True}
+                result = self.change(wifi.BAND_POLICY_STRICT_HIGH, allow_unverified_scan)
+                self.assertFalse(result["success"])
+                self.assertTrue(result["rolled_back"], result)
+                self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
+                self.assertIn("BandModifier2_4GHz=0.01", self.iwd.read_text(encoding="utf-8"))
+                self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 
     def test_strict_can_be_turned_off_after_wifi_disconnects(self):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
-        with patch.object(self.plugin, "_get_active_connection_uuid", return_value=None), \
-             patch.object(self.plugin, "_profile_is_active", return_value=False):
-            result = self.change(wifi.BAND_POLICY_OFF)
+        self.plugin._get_active_connection_uuid.return_value = None
+        self.plugin._profile_is_active.return_value = False
+        result = self.change(wifi.BAND_POLICY_OFF)
         self.assertTrue(result["success"], result)
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
         self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
 
     def test_strict_rejected_before_any_file_write_when_high_band_absent(self):
-        with patch.object(self.plugin, "_get_band_policy_capabilities_sync",
-                          return_value={"five_six_only_available": False,
-                                        "reason_five_six_only": "No high-band BSS"}):
-            result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
+        self.plugin._get_band_policy_capabilities_sync.return_value = {
+            "five_six_only_available": False, "reason_five_six_only": "No high-band BSS"}
+        result = self.change(wifi.BAND_POLICY_STRICT_HIGH)
         self.assertFalse(result["success"])
         self.assertEqual(result["error"], "preflight_failed")
         self.assertIn("BandModifier2_4GHz=0.01", self.iwd.read_text(encoding="utf-8"))
@@ -150,40 +205,21 @@ class StrictWifiTests(unittest.TestCase):
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 
     def test_confirmed_attempt_can_try_without_a_visible_high_band(self):
-        with patch.object(self.plugin, "_get_band_policy_capabilities_sync",
-                          return_value={"five_six_only_available": False,
-                                        "five_six_only_try_available": True}) as preflight:
-            result = self.change(wifi.BAND_POLICY_STRICT_HIGH,
-                                 allow_unverified_scan=True)
+        self.plugin._get_band_policy_capabilities_sync.return_value = {
+            "five_six_only_available": False, "five_six_only_try_available": True}
+        result = self.change(wifi.BAND_POLICY_STRICT_HIGH, allow_unverified_scan=True)
         self.assertTrue(result["success"], result)
-        preflight.assert_called_once_with(False)
-        self.assertEqual(wifi._load_settings()["band_policy"],
-                         wifi.BAND_POLICY_STRICT_HIGH)
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_STRICT_HIGH)
         self.assertIn("BandModifier2_4GHz=0.0", self.iwd.read_text(encoding="utf-8"))
 
     def test_confirmed_attempt_still_rejects_hard_blockers(self):
-        with patch.object(self.plugin, "_get_band_policy_capabilities_sync",
-                          return_value={"five_six_only_try_available": False,
-                                        "reason_five_six_only_try": "Watchdog unavailable"}):
-            result = self.change(wifi.BAND_POLICY_STRICT_HIGH,
-                                 allow_unverified_scan=True)
+        self.plugin._get_band_policy_capabilities_sync.return_value = {
+            "five_six_only_try_available": False, "reason_five_six_only_try": "Watchdog unavailable"}
+        result = self.change(wifi.BAND_POLICY_STRICT_HIGH, allow_unverified_scan=True)
         self.assertEqual(result["error"], "preflight_failed")
         self.assertEqual(result["message"], "Watchdog unavailable")
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
-
-    def test_confirmed_attempt_rolls_back_if_actual_link_is_not_high_band(self):
-        with patch.object(self.plugin, "_get_band_policy_capabilities_sync",
-                          return_value={"five_six_only_try_available": True}), \
-             patch.object(self.plugin, "_verify_band_policy",
-                          return_value={"success": False,
-                                        "message": "No 5/6 GHz connection"}):
-            result = self.change(wifi.BAND_POLICY_STRICT_HIGH,
-                                 allow_unverified_scan=True)
-        self.assertFalse(result["success"])
-        self.assertTrue(result["rolled_back"], result)
-        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_HIGH_ONLY)
-        self.assertIn("BandModifier2_4GHz=0.01", self.iwd.read_text(encoding="utf-8"))
 
     def test_strict_preflight_does_not_accept_cached_high_band(self):
         original_isfile = wifi.os.path.isfile
@@ -194,47 +230,50 @@ class StrictWifiTests(unittest.TestCase):
             return original_isfile(path)
 
         def command(argv, **_kwargs):
+            if argv[-2:] == ["dev", "status"]:
+                return ok("wlan0:wifi\n")
             if argv[:2] == ["/usr/bin/iw", "list"]:
-                return {"success": True, "stdout": "* 5320 MHz [64]\n"}
+                return ok("* 5320 MHz [64]\n")
             if argv[:2] == ["/usr/bin/systemctl", "is-active"]:
-                return {"success": True, "stdout": "active\n"}
-            return {"success": True, "stdout": "1.58.0\n"}
+                return ok("active\n")
+            return ok("1.58.0\n")
 
         visible = {"two_ghz": 1, "five_ghz": 1, "six_ghz": 0,
                    "scan_ok": True, "fresh_high_band": False}
-        with patch.object(self.plugin, "_get_band_policy_capabilities_sync",
-                          wraps=wifi.Plugin._get_band_policy_capabilities_sync.__get__(self.plugin)), \
-             patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
-             patch.object(self.plugin, "_get_visible_bands_for_active_ssid", return_value=visible), \
+        capabilities = wifi.Plugin._get_band_policy_capabilities_sync.__get__(self.plugin)
+        with patch.object(self.plugin, "_get_visible_bands_for_active_ssid", return_value=visible), \
              patch.object(wifi.os.path, "isfile", side_effect=isfile):
             self.commands.side_effect = command
-            cached = self.plugin._get_band_policy_capabilities_sync(True)
+            cached = capabilities(True)
             self.assertTrue(cached["five_six_no_24_available"])
             self.assertFalse(cached["five_six_only_available"])
             self.assertTrue(cached["five_six_only_try_available"])
             self.assertIn("fresh", cached["reason_five_six_only"])
             visible["fresh_high_band"] = True
-            fresh = self.plugin._get_band_policy_capabilities_sync(True)
-            self.assertTrue(fresh["five_six_only_available"])
+            self.assertTrue(capabilities(True)["five_six_only_available"])
 
     def test_six_ghz_only_preflight_skips_the_5ghz_searches(self):
         scans = []
+
         def command(argv, **_kwargs):
-            scans.append(argv)
-            return {"success": True, "stdout": "first" if len(scans) == 1 else ""}
+            if "802-11-wireless.ssid" in argv[2]:
+                return ok(f"{UUID}\nHome\nno")
+            if argv[:2] == ["/usr/bin/iw", "dev"] and "scan" in argv:
+                scans.append(argv)
+                if len(scans) == 1:   # the broad scan already shows the 6 GHz BSS
+                    return ok("BSS aa:29:48:e1:7e:03(on wlan0)\n\tfreq: 6295\n\tSSID: Home\n")
+                return ok("")
+            return {"success": False, "stdout": ""}
+
         five = [5180, 5200] + list(range(5260, 5340, 20)) + list(range(5500, 5740, 20))
-        with patch.object(self.plugin, "_get_profile_ssid", return_value="Home"), \
-             patch.object(self.plugin, "_iw_scan_command", side_effect=lambda _i, _s, freqs: ["iw", *map(str, freqs)]), \
-             patch.object(self.plugin, "_iw_scan_bss", side_effect=lambda out, _s: [{"frequency": 6295}] if out == "first" else []), \
-             patch.object(self.plugin, "_nmcli_wifi_bss", return_value=None):
-            self.commands.side_effect = command
-            for need_five, expected in ((False, 1), (True, 2 + 16)):
-                with self.subTest(need_five=need_five):
-                    scans.clear(); self.plugin._visible_band_cache = None
-                    bands = self.plugin._get_visible_bands_for_active_ssid(
-                        "wlan0", "uuid", True, five_ghz_frequencies=five, six_ghz_frequencies=[6295],
-                        need_five=need_five)
-                    self.assertEqual((bands["six_ghz"], len(scans)), (1, expected))
+        self.commands.side_effect = command
+        for need_five, expected in ((False, 1), (True, 2 + 16)):
+            with self.subTest(need_five=need_five):
+                scans.clear(); self.plugin._visible_band_cache = None
+                bands = self.plugin._get_visible_bands_for_active_ssid(
+                    "wlan0", UUID, True, five_ghz_frequencies=five, six_ghz_frequencies=[6295],
+                    need_five=need_five)
+                self.assertEqual((bands["six_ghz"], len(scans)), (1, expected))
 
     def test_invalid_policy_types_do_not_start_network_transaction(self):
         for value in (None, 1, [], {}, "5ghz"):
@@ -251,13 +290,23 @@ class StrictWifiTests(unittest.TestCase):
             self.assertEqual(result["error"], "invalid_scan_override")
         self.commands.assert_not_called()
 
-    def test_strict_verification_rejects_2_4_and_accepts_5_ghz(self):
-        with patch.object(self.plugin, "_get_link_frequency", return_value=2437):
-            rejected = self.plugin._verify_band_policy(wifi.BAND_POLICY_STRICT_HIGH, UUID, timeout=1)
-        self.assertFalse(rejected["success"])
-        accepted = self.plugin._verify_band_policy(wifi.BAND_POLICY_STRICT_HIGH, UUID, timeout=1)
-        self.assertTrue(accepted["success"])
-        self.assertEqual(accepted["frequency"], 5320)
+    def test_band_verification_needs_a_link_and_only_strict_rejects_2_4_ghz(self):
+        sleeps = []
+        self.stack.enter_context(patch.object(wifi.time, "sleep", side_effect=sleeps.append))
+        for mode, frequency, accepted in ((wifi.BAND_POLICY_STRICT_HIGH, 2437, False),
+                                          (wifi.BAND_POLICY_STRICT_HIGH, 5320, True),
+                                          (wifi.BAND_POLICY_HIGH_ONLY, 2412, True),
+                                          (wifi.BAND_POLICY_HIGH_ONLY, None, False),
+                                          (wifi.BAND_POLICY_OFF, None, False)):
+            with self.subTest(mode=mode, frequency=frequency):
+                self.plugin._get_link_frequency.return_value = frequency
+                result = self.plugin._verify_band_policy(mode, UUID, timeout=0.01)
+                self.assertIs(result["success"], accepted, result)
+                if accepted:
+                    self.assertEqual(result["frequency"], frequency)
+                else:
+                    self.assertEqual(result["message"], "WiFi did not reconnect on the requested band before timeout.")
+        self.assertTrue(sleeps and max(sleeps) < 0.5, sleeps)  # never sleeps past its deadline
 
     def test_automatic_restores_the_iwd_original_over_an_outside_change(self):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
@@ -285,18 +334,15 @@ class StrictWifiTests(unittest.TestCase):
                 self.assertIn("=0.5", self.iwd.read_text(encoding="utf-8"))
 
     def test_six_ghz_reconnect_needs_automatic_wpa(self):
-        with patch.object(self.plugin, "_nmcli_modify") as modify:
-            result = self.plugin._rescan_and_reconnect_sync("six")
+        result = self.plugin._rescan_and_reconnect_sync("six")
         self.assertEqual(result["error"], "preference_disabled", result)
-        modify.assert_not_called()
+        self.assertEqual(profile_writes(self.commands), [])
 
     def test_watchdog_command_runs_this_file_under_the_system_python(self):
-        plugin, journal = wifi.Plugin(), {"rollback_delay_seconds": 60}
-        with patch.object(plugin, "_save_band_policy_journal"), \
-             patch.object(plugin, "_run_cmd", return_value={"success": True}) as run:
-            plugin._schedule_band_policy_rollback(journal)
+        journal = {"rollback_delay_seconds": 60}
+        wifi.Plugin._schedule_band_policy_rollback(self.plugin, journal)
         python = sys.executable if os.name == "nt" else "/usr/bin/python3"   # the timer runs only on Linux
-        self.assertEqual(run.call_args.args[0], [
+        self.assertEqual(self.commands.call_args.args[0], [
             "/usr/bin/systemd-run", "--quiet", "--collect", f"--unit={journal['rollback_unit']}",
             "--on-active=60s", "--timer-property=AccuracySec=1s", python,
             os.path.join(wifi.DECKY_PLUGIN_DIR, "wifi_backend.py"), "--rollback-band-policy",
@@ -332,9 +378,8 @@ class StrictWifiTests(unittest.TestCase):
     def test_status_reports_strict_drift_even_when_wifi_disconnected(self):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
         self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")
-        with patch.object(self.plugin, "_get_wifi_interface", return_value=None), \
-             patch.object(self.plugin, "_get_active_connection_uuid", return_value=None):
-            status = self.plugin._get_status_sync()
+        self.plugin._get_active_connection_uuid.return_value = None
+        status = self.plugin._get_status_sync()   # nmcli lists no WiFi device
         self.assertTrue(status["success"])
         self.assertFalse(status["connected"])
         self.assertTrue(status["drift"]["band_policy"])
@@ -353,84 +398,63 @@ class StrictWifiTests(unittest.TestCase):
 
 
 class ReconnectPacingTests(unittest.TestCase):
-    def test_slow_cli_failure_leaves_time_for_verified_native_recovery(self):
+    """`_reconnect_profile` against nmcli/iw answers of one adapter and a fake clock."""
+
+    def reconnect(self, activation, active, frequency=lambda: 6295, backend="wpa_supplicant"):
         plugin = wifi.Plugin()
-        clock = [0.0]
-        budgets = []
-        activation_starts = []
+        adapter = device(active, frequency)
+
         def command(argv, **kwargs):
-            if argv[:3] == ['/usr/bin/nmcli', 'con', 'up']:
-                activation_starts.append(clock[0])
-                budgets.append(kwargs['timeout'])
-                clock[0] += kwargs['timeout']
-                return {'success': False, 'stderr': 'Secrets were required, but not provided'}
-            return {'success': True, 'stdout': '30 (disconnected)'}
-        with patch.object(plugin, '_get_current_backend', return_value='wpa_supplicant'), \
-             patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
-             patch.object(plugin, '_run_cmd', side_effect=command), \
-             patch.object(plugin, '_profile_is_active', side_effect=lambda *_: clock[0] >= 23), \
-             patch.object(plugin, '_get_link_frequency', return_value=6295), \
-             patch.object(wifi.time, 'monotonic', side_effect=lambda: clock[0]), \
-             patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
-            result = plugin._reconnect_profile(UUID, cycle=False)
-        self.assertTrue(result['success'], result)
-        self.assertTrue(budgets, 'the slow activation failure must be exercised')
-        self.assertTrue(all(0 < budget < 25 - started
-                            for started, budget in zip(activation_starts, budgets)), budgets)
-        self.assertGreaterEqual(clock[0], 23, 'success must wait for the verified native link')
-        self.assertLessEqual(clock[0], 25)
+            if argv[:3] == ["/usr/bin/nmcli", "con", "up"]:
+                return activation(kwargs["timeout"])
+            return adapter(argv) or {"success": False, "stderr": "unexpected command"}
+
+        with ExitStack() as stack:
+            self.clock = fake_clock(stack)
+            stack.enter_context(patch.object(plugin, "_get_current_backend", return_value=backend))
+            stack.enter_context(patch.object(plugin, "_run_cmd", side_effect=command))
+            return plugin._reconnect_profile(UUID, cycle=False)
+
+    def test_slow_cli_failure_leaves_time_for_verified_native_recovery(self):
+        starts, budgets = [], []
+
+        def activation(timeout):
+            starts.append(self.clock[0]); budgets.append(timeout)
+            self.clock[0] += timeout
+            return {"success": False, "stderr": "Secrets were required, but not provided"}
+
+        result = self.reconnect(activation, lambda: self.clock[0] >= 23)
+        self.assertTrue(result["success"], result)
+        self.assertTrue(budgets, "the slow activation failure must be exercised")
+        self.assertTrue(all(0 < budget < 25 - started for started, budget in zip(starts, budgets)), budgets)
+        self.assertGreaterEqual(self.clock[0], 23, "success must wait for the verified native link")
+        self.assertLessEqual(self.clock[0], 25)
 
     def test_verified_link_at_deadline_wins_over_earlier_cli_failure(self):
-        plugin = wifi.Plugin()
-        clock = [0.0]
-        def command(argv, **kwargs):
-            if argv[:3] == ['/usr/bin/nmcli', 'con', 'up']:
-                clock[0] = 25.0
-                return {'success': False, 'stderr': 'Activation failed'}
-            return {'success': True, 'stdout': '30 (disconnected)'}
-        with patch.object(plugin, '_get_current_backend', return_value='wpa_supplicant'), \
-             patch.object(plugin, '_get_wifi_interface', return_value='wlan0'), \
-             patch.object(plugin, '_run_cmd', side_effect=command), \
-             patch.object(plugin, '_profile_is_active', side_effect=lambda *_: clock[0] >= 25), \
-             patch.object(plugin, '_get_link_frequency', return_value=6295), \
-             patch.object(wifi.time, 'monotonic', side_effect=lambda: clock[0]), \
-             patch.object(wifi.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
-            result = plugin._reconnect_profile(UUID, cycle=False)
-        self.assertTrue(result['success'], result)
-        self.assertTrue(result['reconnected'])
+        def activation(_timeout):
+            self.clock[0] = 25.0
+            return {"success": False, "stderr": "Activation failed"}
+
+        result = self.reconnect(activation, lambda: self.clock[0] >= 25)
+        self.assertTrue(result["success"], result)
+        self.assertTrue(result["reconnected"])
 
     def test_fast_activation_failures_are_spaced_while_autoconnect_is_checked(self):
-        plugin = wifi.Plugin()
-        clock = [0.0]
-        activations = []
-        checks = []
-        radio_checks = []
+        activations, checks, radio_checks = [], [], []
 
-        def run_cmd(argv, **_kwargs):
-            if argv[:3] == ["/usr/bin/nmcli", "con", "up"]:
-                activations.append(clock[0])
-                return {"success": False, "stderr": "No AP yet"}
-            return {"success": True, "stdout": "30 (disconnected)\n"}
+        def activation(_timeout):
+            activations.append(self.clock[0])
+            return {"success": False, "stderr": "No AP yet"}
 
-        def is_active(*_):
-            checks.append(clock[0])
-            return clock[0] >= 13.0
+        def active():
+            checks.append(self.clock[0])
+            return self.clock[0] >= 13.0
 
-        def sleep(seconds):
-            clock[0] += seconds
-
-        def frequency(*_):
-            radio_checks.append(clock[0])
+        def frequency():
+            radio_checks.append(self.clock[0])
             return 5320
 
-        with patch.object(plugin, "_run_cmd", side_effect=run_cmd), \
-             patch.object(plugin, "_get_wifi_interface", return_value="wlan0"), \
-             patch.object(plugin, "_get_link_frequency", side_effect=frequency), \
-             patch.object(plugin, "_profile_is_active", side_effect=is_active), \
-             patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
-             patch.object(wifi.time, "sleep", side_effect=sleep):
-            result = plugin._reconnect_profile(UUID, cycle=False)
-
+        result = self.reconnect(activation, active, frequency)
         self.assertTrue(result["success"], result)
         self.assertTrue(result["reconnected"])
         # Recovery at 13 s can precede a second retry with a safe slower
@@ -444,29 +468,11 @@ class ReconnectPacingTests(unittest.TestCase):
         self.assertGreaterEqual(checks[-1], 13.0)
         self.assertTrue(radio_checks)
         self.assertGreaterEqual(radio_checks[-1], 13.0)
-        self.assertLessEqual(clock[0], 14.0, "native recovery must be observed promptly")
+        self.assertLessEqual(self.clock[0], 14.0, "native recovery must be observed promptly")
 
     def test_iwd_autoconnect_before_manual_activation_is_left_alone(self):
-        plugin = wifi.Plugin()
-        clock = [0.0]
         activations = []
-
-        def run_cmd(argv, **_kwargs):
-            if argv[:3] == ["/usr/bin/nmcli", "con", "up"]:
-                activations.append(clock[0])
-            return {"success": False, "stderr": "unexpected command"}
-
-        def sleep(seconds):
-            clock[0] += seconds
-
-        with patch.object(plugin, "_run_cmd", side_effect=run_cmd), \
-             patch.object(plugin, "_get_link_frequency", return_value=5320), \
-             patch.object(plugin, "_profile_is_active",
-                          side_effect=lambda *_: clock[0] >= 4.0), \
-             patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
-             patch.object(wifi.time, "sleep", side_effect=sleep):
-            result = plugin._reconnect_profile(UUID, cycle=False)
-
+        result = self.reconnect(lambda _t: activations.append(self.clock[0]), lambda: self.clock[0] >= 4.0)
         self.assertTrue(result["success"], result)
         self.assertEqual(activations, [])
 

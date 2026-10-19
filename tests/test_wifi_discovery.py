@@ -20,6 +20,10 @@ SETTINGS = {"device_family": "legion_go_2", "driver": "mt7921e",
             "band_policy_state": {"mode": wifi.BAND_POLICY_HIGH_ONLY, "owns_iwd": True}}
 
 
+def save_settings(**changes):
+    wifi._save_settings(dict(wifi.DEFAULT_SETTINGS, **dict(SETTINGS, **changes)))
+
+
 def link(freq=2412, path=5):
     return {"iface": "wlan0", "uuid": UUID, "frequency": freq, "ssid": "NETIASPOT-V3fY",
             "episode": ("wlan0", 42, UUID, f"/org/freedesktop/NetworkManager/ActiveConnection/{path}")}
@@ -40,7 +44,8 @@ class NativeScanTests(unittest.TestCase):
         for name, value in {"_get_current_backend": "iwd", "_band_policy_ownership_error": "",
                             "_get_network_recovery_issues": []}.items():
             self.stack.enter_context(patch.object(self.plugin, name, return_value=value))
-        self.stack.enter_context(patch.object(wifi, "_load_settings", return_value=SETTINGS))
+        strict_tests.isolate_files(self)
+        save_settings()
         self.stack.enter_context(patch.object(wifi.time, "monotonic", side_effect=lambda: self.clock[0]))
         self.stack.enter_context(patch.object(self.stop, "wait", side_effect=self.wait))
         self.stack.enter_context(patch.object(self.plugin, "_get_high_band_link", side_effect=lambda *_args: self.links.pop(0)))
@@ -87,22 +92,17 @@ class NativeScanTests(unittest.TestCase):
         self.assertEqual(self.plugin._discover_high_bands(link(), self.stop)["error"], "station_unavailable")
         self.assertFalse(any(args[-1] == "Scan" for args in self.commands))
 
-    def test_connection_change_before_scan_aborts(self):
+    def test_connection_change_before_or_after_scan_is_not_success(self):
         self.links[1] = link(path=6)
         self.assertEqual(self.plugin._discover_high_bands(link(), self.stop)["error"], "connection_changed")
         self.assertFalse(any(args[-1] == "Scan" for args in self.commands))
-
-    def test_changed_connection_after_scan_is_not_reported_as_success(self):
-        self.links[-1] = link(6295, path=6)
+        self.links = [link(), link(), link(6295, path=6)]
         self.assertEqual(self.plugin._discover_high_bands(link(), self.stop)["error"], "connection_changed")
 
-    def test_existing_scan_is_joined_only_with_scanning_true(self):
+    def test_busy_station_is_joined_only_while_it_is_scanning(self):
         self.scan_ok = False
         self.assertTrue(self.plugin._discover_high_bands(link(), self.stop)["success"])
-
-    def test_busy_station_without_a_scan_is_not_success(self):
-        self.scan_ok = False
-        self.scanning = ["b false"]
+        self.links, self.scanning = [link(), link(), link(6295)], ["b false"]
         self.assertEqual(self.plugin._discover_high_bands(link(), self.stop)["error"], "scan_failed")
 
     def test_never_finishing_scan_has_a_deadline(self):
@@ -123,8 +123,8 @@ class NativeScanTests(unittest.TestCase):
         self.assertEqual(self.commands, [])
 
     def test_external_ownership_change_prevents_scan(self):
-        with patch.object(self.plugin, "_band_policy_ownership_error", return_value="Changed externally"):
-            self.assertEqual(self.plugin._discover_high_bands(link(), self.stop)["error"], "discovery_unavailable")
+        self.plugin._band_policy_ownership_error.return_value = "Changed externally"
+        self.assertEqual(self.plugin._discover_high_bands(link(), self.stop)["error"], "discovery_unavailable")
         self.assertEqual(self.commands, [])
 
 
@@ -157,7 +157,7 @@ class ReselectionTests(unittest.TestCase):
         strict_tests.StrictWifiTests.setUp(self)
         settings = wifi._load_settings()
         settings.update(device_family="legion_go_2", driver="mt7921e")
-        self.stack.enter_context(patch.object(wifi, "_load_settings", return_value=settings))
+        wifi._save_settings(settings)
         self.commands.return_value = {"success": True, "stdout": "NETIASPOT-V3fY"}
         self.scan = self.stack.enter_context(patch.object(self.plugin, "_run_discovery_scan", return_value={
             "success": True, "stdout": "BSS aa:29:48:e1:7e:03(on wlan0)\n freq: 6295.0\n SSID: NETIASPOT-V3fY\n"}))
@@ -166,14 +166,13 @@ class ReselectionTests(unittest.TestCase):
         self.reconnect = self.plugin._reconnect_profile
 
     def test_verified_high_bss_uses_same_uuid_without_profile_writes(self):
-        with patch.object(self.plugin, "_nmcli_modify") as modify:
-            result = self.plugin._reselect_discovered_high_band(link(), threading.Event())
-            self.assertTrue(result["reselected"], result)
-            self.assertEqual(result["frequency"], 6295)
-            self.assertEqual(result["_reselection_from_episode"], link()["episode"])
-            self.reconnect.assert_called_once_with(UUID, cycle=True, activation_timeout=5, bound_iface="wlan0")
-            modify.assert_not_called()
-            self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+        result = self.plugin._reselect_discovered_high_band(link(), threading.Event())
+        self.assertTrue(result["reselected"], result)
+        self.assertEqual(result["frequency"], 6295)
+        self.assertEqual(result["_reselection_from_episode"], link()["episode"])
+        self.reconnect.assert_called_once_with(UUID, cycle=True, activation_timeout=5, bound_iface="wlan0")
+        self.assertEqual(strict_tests.profile_writes(self.commands), [])
+        self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 
     def test_only_24_or_another_ssid_never_disconnects(self):
         self.scan.return_value["stdout"] = "BSS aa:bb:cc:dd:ee:ff\n freq: 6295\n SSID: Another AP\n"
@@ -192,15 +191,15 @@ class ReselectionTests(unittest.TestCase):
         self.assertEqual(result["error"], "rollback_watchdog_failed")
         self.reconnect.assert_not_called()
 
-    def test_profile_band_or_cached_mirror_conflict_prevents_reselection(self):
-        with patch.object(self.plugin, "_get_iwd_profile_conflict", return_value="Ambiguous"):
-            self.assertFalse(self.plugin._reselect_discovered_high_band(link(), threading.Event())["reselected"])
-        self.reconnect.assert_not_called()
-
-    def test_explicit_profile_bssid_prevents_reselection(self):
-        with patch.object(self.plugin, "_nmcli_get", return_value=("aa:bb:cc:dd:ee:ff", {"success": True})):
-            self.assertFalse(self.plugin._reselect_discovered_high_band(link(), threading.Event())["reselected"])
-        self.reconnect.assert_not_called()
+    def test_ambiguous_iwd_mirror_or_pinned_bssid_prevents_reselection(self):
+        for mock, value in ((self.plugin._get_iwd_profile_conflict, "Ambiguous"),
+                            (self.plugin._nmcli_get, ("aa:bb:cc:dd:ee:ff", {"success": True}))):
+            with self.subTest(value=value):
+                self.current.side_effect = [link(), link(6295, path=6)]
+                before, mock.return_value = mock.return_value, value
+                self.assertFalse(self.plugin._reselect_discovered_high_band(link(), threading.Event())["reselected"])
+                mock.return_value = before
+                self.reconnect.assert_not_called()
 
     def test_user_reactivation_during_directed_scan_is_not_overridden(self):
         self.current.side_effect = None
@@ -243,11 +242,13 @@ class ReselectionTests(unittest.TestCase):
         journal = {"schema": 1, "operation_id": "discovery-test", "phase": "rollback_failed",
                    "operation": "automatic_high_band_reconnect", "settings_before": {"band_policy": "off"},
                    "mutations": {}, "rollback_reconnect_required": True,
-                   "rollback_reconnect_uuid": UUID, "profile_before": {"uuid": UUID}}
+                   "rollback_reconnect_uuid": strict_tests.UUID, "profile_before": {"uuid": strict_tests.UUID}}
         self.plugin._save_band_policy_journal(journal)
-        with patch.object(self.plugin, "_restore_band_policy_transaction", return_value={"success": True}) as restore:
-            self.assertTrue(self.plugin._recover_band_policy_journal()["success"])
-            restore.assert_called_once()
+        self.plugin._profile_is_active.return_value = False
+        self.assertTrue(self.plugin._recover_band_policy_journal()["success"])
+        self.reconnect.assert_called_once()
+        self.assertEqual(self.reconnect.call_args.args[0], strict_tests.UUID)
+        self.assertIsNone(self.plugin._load_band_policy_journal())
 
     def test_cancelled_directed_scan_does_not_start_a_transaction(self):
         stop = threading.Event()
@@ -261,8 +262,8 @@ class ReselectionTests(unittest.TestCase):
     def test_changed_user_network_is_preserved_during_recovery(self):
         self.reconnect.return_value = {"success": False}
         self.current.side_effect = [link(), None]
-        with patch.object(self.plugin, "_get_active_connection_uuid", return_value="a-different-user-profile"):
-            result = self.plugin._reselect_discovered_high_band(link(), threading.Event())
+        self.plugin._get_active_connection_uuid.return_value = "a-different-user-profile"
+        result = self.plugin._reselect_discovered_high_band(link(), threading.Event())
         self.assertTrue(result["rolled_back"])
         self.assertEqual(self.reconnect.call_count, 1)
 
@@ -274,9 +275,9 @@ class ReselectionTests(unittest.TestCase):
             if str(path) == "/sys/class/net/wlan0/ifindex":
                 return io.StringIO("42")
             return original_open(path, *args, **kwargs)
-        with patch.object(self.plugin, "_get_active_connection_uuid", return_value=None), \
-             patch.object(self.plugin, "_profile_is_active", return_value=False), \
-             patch.object(self.plugin, "_boot_id", return_value="test-boot"), \
+        self.plugin._get_active_connection_uuid.return_value = None
+        self.plugin._profile_is_active.return_value = False
+        with patch.object(self.plugin, "_boot_id", return_value="test-boot"), \
              patch.object(wifi.os.path, "realpath", return_value="/drivers/mt7921e"), \
              patch("builtins.open", side_effect=opened):
             self.assertTrue(self.plugin._reselect_discovered_high_band(link(), threading.Event())["rolled_back"])
@@ -294,38 +295,45 @@ class ReselectionTests(unittest.TestCase):
 
 
 class IndependentWatchdogTests(unittest.TestCase):
+    """The systemd timer's CLI against the real restore, journal and iwd file."""
     setUp = strict_tests.StrictWifiTests.setUp
 
-    def journal(self):
-        return {"schema": 1, "phase": "rollback_failed",
-                "operation": "automatic_high_band_reconnect", "mutations": {},
-                "settings_file": str(self.settings), "settings_before": {"band_policy": "off"},
-                "rollback_reconnect_required": True, "rollback_reconnect_uuid": UUID,
-                "profile_before": {"uuid": UUID}}
+    def journal(self, policy=False):
+        journal = {"schema": 1, "phase": "rollback_failed",
+                   "operation": "automatic_high_band_reconnect", "mutations": {},
+                   "settings_file": str(self.settings), "settings_before": {"band_policy": "off"},
+                   "rollback_reconnect_required": True, "rollback_reconnect_uuid": strict_tests.UUID,
+                   "profile_before": {"uuid": strict_tests.UUID}}
+        if policy:   # a band change whose iwd write must be undone
+            journal.update(operation="band_policy", active_uuid_before=strict_tests.UUID,
+                           iwd_before=self.plugin._get_iwd_rank_modifier_snapshot(),
+                           settings_before=self.plugin._band_settings_fields(wifi._load_settings()),
+                           mutations={"iwd": {"planned": True, "expected_present": False, "expected_value": ""}},
+                           rollback_iwd_restart_required=True)
+            self.iwd.unlink()
+        return journal
 
-    def run_cli(self, journal, success=True):
+    def run_cli(self, journal):
         self.plugin._save_band_policy_journal(journal)
         path = str(self.journal_dir / "band-policy-transaction.json")
-        with patch.object(wifi, "BAND_POLICY_LOCK_FILE", str(self.runtime_dir / "band-policy.lock")), \
-             patch.object(wifi, "Plugin", return_value=self.plugin), \
-             patch.object(self.plugin, "_restore_band_policy_transaction",
-                          return_value={"success": success}) as restore:
-            result = wifi._run_band_policy_rollback_cli(path)
-        return result, restore, path
+        with patch.object(wifi, "Plugin", return_value=self.plugin):
+            return wifi._run_band_policy_rollback_cli(path)
 
     def test_watchdog_retries_failed_connection_only_and_policy_rollbacks(self):
-        for mutations in ({}, {"iwd": {"planned": True}}):
-            with self.subTest(mutations=mutations):
-                journal = self.journal()
-                journal["mutations"] = mutations
-                result, restore, path = self.run_cli(journal)
-                self.assertEqual(result, 0)
-                restore.assert_called_once_with(journal, "automatic watchdog timeout", journal_path=path)
+        self.plugin._profile_is_active.return_value = False   # the link was lost
+        for policy in (False, True):
+            with self.subTest(policy=policy):
+                self.plugin._reconnect_profile.reset_mock()
+                self.assertEqual(self.run_cli(self.journal(policy)), 0)
+                self.assertEqual(self.plugin._reconnect_profile.call_args.args[0], strict_tests.UUID)
+                self.assertNotEqual((self.plugin._load_band_policy_journal() or {}).get("phase"), "rollback_failed")
+        self.assertIn("BandModifier2_4GHz=0.01", self.iwd.read_text(encoding="utf-8"))
 
     def test_watchdog_keeps_failed_recovery_for_later_startup(self):
-        result, restore, _path = self.run_cli(self.journal(), success=False)
-        self.assertEqual(result, 1)
-        restore.assert_called_once()
+        self.plugin._reconnect_profile.return_value = {"success": False}
+        self.plugin._profile_is_active.return_value = False
+        self.assertEqual(self.run_cli(self.journal()), 1)
+        self.plugin._reconnect_profile.assert_called()
         self.assertEqual(self.plugin._load_band_policy_journal()["phase"], "rollback_failed")
 
     def test_unrecognized_failed_journal_never_triggers_a_reconnect(self):
@@ -333,16 +341,15 @@ class IndependentWatchdogTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 journal = self.journal()
                 journal["profile_before"] = profile
-                result, restore, _path = self.run_cli(journal)
-                self.assertEqual(result, 1)
-                restore.assert_not_called()
+                self.assertEqual(self.run_cli(journal), 1)
+                self.plugin._reconnect_profile.assert_not_called()
 
     def test_a_committed_policy_is_preserved_when_timer_races_commit(self):
         journal = self.journal()
         journal["phase"] = "committed"
-        result, restore, _path = self.run_cli(journal)
-        self.assertEqual(result, 0)
-        restore.assert_not_called()
+        self.assertEqual(self.run_cli(journal), 0)
+        self.plugin._reconnect_profile.assert_not_called()
+        self.assertEqual(self.plugin._load_band_policy_journal()["phase"], "committed")
 
     def test_removed_journal_is_a_completed_timer_race(self):
         with patch.object(wifi, "Plugin") as constructor:
@@ -381,6 +388,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         backend = patch.object(wifi.Plugin, "_get_current_backend", return_value="iwd")
         backend.start()
         self.addCleanup(backend.stop)
+        strict_tests.isolate_files(self)
+        save_settings()
 
     async def test_native_wpa_pauses_radio_work_and_native_iwd_return_resumes_it(self):
         plugin = wifi.Plugin()
@@ -394,12 +403,9 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 backend.return_value = "iwd"
             else:
                 stop.set()
-        with patch.object(wifi, "_load_settings", return_value=SETTINGS), \
-             patch.object(plugin, "_get_current_backend", return_value="wpa_supplicant") as backend, \
+        with patch.object(plugin, "_get_current_backend", return_value="wpa_supplicant") as backend, \
              patch.object(plugin, "_get_high_band_link", return_value=link()) as radio, \
              patch.object(plugin, "_discover_high_bands", return_value={"success": True, "frequency": 2412}) as scan, \
-             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
              patch.object(wifi.asyncio, "sleep", side_effect=sleep):
             await plugin._high_band_monitor(stop)
         self.assertEqual(radio.call_count, 1)
@@ -430,7 +436,9 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 return io.StringIO("3\n")
             if path.endswith("/operstate"):
                 return io.StringIO("up\n" if up() else "down\n")
-            raise OSError(path)
+            if path.startswith("/sys/"):
+                raise OSError(path)
+            return builtins.open(path, *_args, **_kwargs)   # the band-policy lock file
 
         async def worker(fn, *args, **_kwargs):
             return fn(*args)
@@ -443,16 +451,13 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             stop.set()
             return {"success": True, "frequency": 2412}
 
-        with patch.object(wifi, "_load_settings", return_value=SETTINGS), \
-             patch.object(wifi, "open", side_effect=sysfs, create=True), \
+        with patch.object(wifi, "open", side_effect=sysfs, create=True), \
              patch.object(wifi.os.path, "realpath", return_value="/sys/bus/pci/drivers/mt7921e"), \
              patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(wifi.asyncio, "sleep", side_effect=sleep), \
              patch.object(plugin, "_worker_complete", side_effect=worker), \
              patch.object(plugin, "_run_cmd", side_effect=command), \
              patch.object(plugin, "_suspend_offset", return_value=0.0), \
-             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
              patch.object(plugin, "_discover_high_bands", side_effect=discover):
             await plugin._high_band_monitor(stop)
         offline = [t for t in spawns if t < carrier_at]
@@ -475,13 +480,10 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             index[0] += 1
             if index[0] >= len(observations):
                 stop.set()
-        with patch.object(wifi, "_load_settings", return_value=SETTINGS), \
-             patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
+        with patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(wifi.asyncio, "sleep", side_effect=sleep), \
              patch.object(plugin, "_worker_complete", side_effect=worker), \
              patch.object(plugin, "_get_high_band_link", side_effect=observations), \
-             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
              patch.object(plugin, "_suspend_offset", side_effect=offsets or [0.0] * (len(observations) + 1)), \
              patch.object(plugin, "_discover_high_bands", side_effect=results or (
                  lambda *_args: {"success": True, "frequency": 2412})) as scan:
@@ -569,11 +571,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             stop.wait(5)
             finished.set()
             return {"success": False}
-        with patch.object(wifi, "_load_settings", return_value=SETTINGS), \
-             patch.object(plugin, "_get_high_band_link", return_value=link()), \
+        with patch.object(plugin, "_get_high_band_link", return_value=link()), \
              patch.object(plugin, "_discover_high_bands", side_effect=scan), \
-             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
              patch.object(wifi.os, "remove"):
             plugin._high_band_monitor_ready = True
             plugin._start_high_band_monitor(SETTINGS)
@@ -586,14 +585,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_main_starts_discovery_without_frontend_call(self):
         plugin = wifi.Plugin()
         with ExitStack() as stack:
-            for name, value in {"_acquire_band_policy_file_lock": object(),
-                                "_release_band_policy_file_lock": None,
-                                "_recover_band_policy_journal": {"success": True},
-                                "_get_wifi_interface": None}.items():
-                stack.enter_context(patch.object(plugin, name, return_value=value))
+            stack.enter_context(patch.object(plugin, "_get_wifi_interface", return_value=None))
             stack.enter_context(patch.object(plugin, "get_device_info", new=AsyncMock(return_value=SETTINGS)))
-            stack.enter_context(patch.object(wifi, "_load_settings", return_value=dict(SETTINGS)))
-            stack.enter_context(patch.object(wifi, "_save_settings"))
             start = stack.enter_context(patch.object(plugin, "_start_high_band_monitor"))
             self.assertTrue((await plugin._main())["success"])
             start.assert_called_once()
@@ -608,9 +601,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             loops.append(asyncio.get_running_loop())
             entered.set()
             await asyncio.Event().wait()
-        with patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
-             patch.object(plugin, "_set_band_policy_impl", return_value={"success": True}), \
+        with patch.object(plugin, "_set_band_policy_impl", return_value={"success": True}), \
              patch.object(wifi, "_load_settings", return_value=SETTINGS), \
              patch.object(plugin, "_high_band_monitor", side_effect=monitor):
             self.assertTrue((await plugin.set_band_policy(wifi.BAND_POLICY_HIGH_ONLY))["success"])
@@ -630,16 +621,13 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         def transaction(*_args, **_kwargs):
             self.assertTrue(finished.is_set())
             return {"success": True}
-        with patch.object(wifi, "_load_settings", return_value=SETTINGS) as settings, \
-             patch.object(plugin, "_get_high_band_link", return_value=link()), \
+        with patch.object(plugin, "_get_high_band_link", return_value=link()), \
              patch.object(plugin, "_discover_high_bands", side_effect=scan), \
-             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
              patch.object(plugin, "_set_band_policy_impl", side_effect=transaction):
             plugin._high_band_monitor_ready = True
             plugin._start_high_band_monitor(SETTINGS)
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-            settings.return_value = dict(SETTINGS, band_policy="off")
+            save_settings(band_policy="off")
             self.assertTrue((await asyncio.wait_for(plugin.set_band_policy("off"), 1))["success"])
             self.assertIsNone(plugin._high_band_monitor_task)
 
@@ -651,15 +639,12 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         def observed(*_args):
             entered.set()
             return link()
-        with patch.object(wifi, "_load_settings", return_value=SETTINGS) as settings, \
-             patch.object(plugin, "_get_high_band_link", side_effect=observed), \
-             patch.object(plugin, "_acquire_band_policy_file_lock", return_value=object()), \
-             patch.object(plugin, "_release_band_policy_file_lock"), \
+        with patch.object(plugin, "_get_high_band_link", side_effect=observed), \
              patch.object(plugin, "_set_band_policy_impl", return_value={"success": True}):
             plugin._high_band_monitor_ready = True
             plugin._start_high_band_monitor(SETTINGS)
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
-            settings.return_value = dict(SETTINGS, band_policy="off")
+            save_settings(band_policy="off")
             off = asyncio.create_task(plugin.set_band_policy("off"))
             await asyncio.sleep(0.05)
             self.assertIsNone(plugin._high_band_monitor_task)
