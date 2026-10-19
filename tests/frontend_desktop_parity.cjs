@@ -37,4 +37,28 @@ run(async () => {
     }
   }
   console.log(`Desktop TDP slider model matches Decky on ${cases} slider moves.`);
+
+  // desktop/native/Fan.js copies the Fan Control status of src/fan.tsx (UX spec 3.2).
+  const fanStatus = mount('fan.tsx', { append: 'exports.__status = fanStatus;' }).exports.__status;
+  const fanSource = fs.readFileSync(path.join(__dirname, '..', 'desktop/native/Fan.js'), 'utf8').replace(/^\.pragma library$/m, '');
+  const desktopStatus = vm.runInNewContext(`${fanSource}\nstatus`);
+  let states = 0;
+  const choices = [[true, false], [true, false], ['', 'EC read failed.'], [undefined, 'on', 'off', 'auto', 'manual'],
+    [false, true], ['global', 'performance'], [undefined, true, false], [false, true]];
+  const combos = choices.reduce((all, options) => all.flatMap(prefix => options.map(option => [...prefix, option])), [[]]);
+  for (const [supported, enabled, error, telemetryKind, blocked, activeCurve, readingAutomatic, assignments] of combos) {
+    const telemetry = telemetryKind === undefined ? undefined : { active: telemetryKind === 'on' || telemetryKind === 'manual',
+      automatic: telemetryKind === 'auto' || telemetryKind === 'off' };
+    const state = { supported, error, telemetry, active_curve: activeCurve,
+      settings: { enabled, assign_tdp_presets: assignments },
+      ownership: { blocked, state: blocked ? 'other' : 'companion', reason: blocked ? 'fancontrol holds /dev/port.' : '' },
+      readings: readingAutomatic === undefined ? { valid: false } : { valid: true, automatic: readingAutomatic } };
+    const decky = fanStatus(state, 0), desktop = desktopStatus(state);
+    assert.equal(desktop.headline, decky.headline, JSON.stringify(state));
+    // Deliberate differences: Decky shows the backend's reason on an unsupported console,
+    // and the Desktop app adds the 30 s "still starting" hint itself (`starting`).
+    if (supported) assert.equal(desktop.note || '', decky.detail || '', JSON.stringify(state));
+    states++;
+  }
+  console.log(`Desktop Fan Control status matches Decky in ${states} backend states.`);
 });
