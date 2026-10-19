@@ -29,7 +29,7 @@ import hashlib
 import math
 import os
 import posixpath
-from system_process import PYTHON, system_env as _system_env
+from system_process import PYTHON, run, system_env as _system_env
 import select
 import signal
 import stat
@@ -440,8 +440,8 @@ def _is_root() -> bool:
 
 
 def _run_xprop(args, display, timeout, check=False, text=True):
-    return subprocess.run(_xprop_command(args), capture_output=True, text=text, timeout=timeout,
-                          env=_xprop_env(display), check=check, **_xprop_user(display))
+    return run(_xprop_command(args), timeout, env=_xprop_env(display), stdin=None, check=check,
+               capture_output=True, text=text, **_xprop_user(display))
 
 
 def _xprop_user(display=None) -> dict:
@@ -1009,10 +1009,9 @@ def _run_script_io(operation: str, path: str, data: bytes = b"") -> int:
     if os.path.dirname(path) != SCRIPT_DIR:
         return 1
     try:
-        result = subprocess.run(
-            [PYTHON, "-I", SCRIPT_IO, operation, base, os.path.basename(path)],
-            input=data, capture_output=True, timeout=10, env=_system_env(), cwd="/",
-            user=uid, group=gid, extra_groups=[])
+        result = run([PYTHON, "-I", SCRIPT_IO, operation, base, os.path.basename(path)], 10,
+                     env=_system_env(), stdin=None, input=data, capture_output=True, cwd="/",
+                     user=uid, group=gid, extra_groups=[])
     except (OSError, subprocess.SubprocessError) as exc:
         diagnostic_event('display', 'script_io_failed', level='error', error=exc,
                          operation=operation, repeat=60)
@@ -1168,8 +1167,7 @@ def _restart_session() -> tuple:
             failures.append(f"{name} not found")
             continue
         try:
-            r = subprocess.run(session_command(argv), capture_output=True, text=True,
-                               timeout=20, env=env)
+            r = run(session_command(argv), 20, env=env, stdin=None, capture_output=True, text=True)
         except (OSError, subprocess.SubprocessError) as e:
             diagnostic_event('display', 'session_restart_attempt_failed', level='error',
                              error=e, operation=name, repeat=60)

@@ -38,6 +38,18 @@ class SystemProcessTests(unittest.TestCase):
                                          'XDG_RUNTIME_DIR': '/run/user/1000', 'LC_ALL': 'C'})
             self.assertEqual(dict(os.environ), env)
 
+    def test_run_closes_stdin_returns_failures_and_kills_at_the_timeout(self):
+        import sys
+        import time
+        from system_process import run
+        code = 'import os, sys; sys.stdout.write(sys.stdin.read() + os.environ["LC_ALL"]); sys.exit(3)'
+        result = run([sys.executable, '-c', code], 30, capture_output=True, text=True)
+        self.assertEqual((result.returncode, result.stdout), (3, 'C'))
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run([sys.executable, '-c', 'import time; time.sleep(60)'], .5)
+        self.assertLess(time.monotonic() - started, 30, 'the child was killed, not waited for')
+
     @unittest.skipUnless(os.name == 'posix', 'SteamOS interpreter')
     def test_helpers_run_on_the_system_python_without_windows_flags(self):
         import system_process

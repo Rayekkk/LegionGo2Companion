@@ -12,7 +12,7 @@ import time
 import asyncio
 from diagnostics import configure_worker, event as diagnostic_event, transition as diagnostic_transition
 import module_runtime
-from system_process import PYTHON, system_env
+from system_process import PYTHON, run, system_env
 import subprocess
 import re
 import sys
@@ -237,10 +237,7 @@ class Plugin:
         busctl, systemctl and curl.
         """
         try:
-            env = system_env(LC_ALL="C")
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, env=env
-            )
+            result = run(cmd, timeout, stdin=None, capture_output=True, text=True)
             return {
                 "success": result.returncode == 0,
                 "stdout": result.stdout if preserve_stdout else result.stdout.strip(),

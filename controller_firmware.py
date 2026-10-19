@@ -159,7 +159,7 @@ def _openssl_executable():
 
 
 def _verify_signature(original):
-    from system_process import NO_WINDOW
+    from system_process import NO_WINDOW, run
     key_der = base64.b64decode(b''.join(PUBLIC_KEY.splitlines()[1:-1]), validate=True)
     if hashlib.sha256(key_der).hexdigest() != KEY_SHA256:
         raise FirmwareError('The trusted firmware key is invalid.')
@@ -171,12 +171,11 @@ def _verify_signature(original):
         payload.write_bytes(original[:-SIGNATURE_BYTES])
         signature.write_bytes(original[-SIGNATURE_BYTES:])
         try:
-            result = subprocess.run([_openssl_executable(), 'dgst', '-sha256', '-verify', str(key),
+            result = run([_openssl_executable(), 'dgst', '-sha256', '-verify', str(key),
                 '-signature', str(signature), '-sigopt', 'rsa_padding_mode:pss',
                 '-sigopt', 'rsa_pss_saltlen:32', '-sigopt', 'rsa_mgf1_md:sha256', str(payload)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=10, check=False, env={'PATH': os.defpath, 'OPENSSL_CONF': os.devnull},
-                **NO_WINDOW)
+                10, env={'PATH': os.defpath, 'OPENSSL_CONF': os.devnull},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise FirmwareError('Signature verification could not complete.') from exc
         if result.returncode != 0:
@@ -397,8 +396,8 @@ def build_container(images):
 
 
 def _run_tool(argv, timeout, **streams):
-    from system_process import system_env
-    return subprocess.run(argv, stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=system_env(), **streams)
+    from system_process import run, system_env
+    return run(argv, timeout, env=system_env(), **streams)  # fwupd keeps the parent's locale
 
 
 def fwupd_devices():

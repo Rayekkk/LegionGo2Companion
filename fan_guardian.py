@@ -31,6 +31,7 @@ CHANGED = 'This BIOS/EC version changed how the fan is controlled; Fan Control s
 
 
 def atomic(path, value):
+    """Runtime state in /run (tmpfs), written every sample: no fsync on the EC control path."""
     fd, tmp = tempfile.mkstemp(prefix='.write-', dir=path.parent)
     try:
         with os.fdopen(fd, 'w') as f:
@@ -105,11 +106,13 @@ def validated_firmware():
 
 
 def remember_firmware(pair):
+    from safe_settings import UnsafeSettingsPath, _atomic_write_bytes  # Only on a new BIOS/EC pair.
     try:
         firmware_dir(create=True)
-        atomic(pathlib.Path(FIRMWARE_FILE),
-               dict(validated=sorted(map(list, validated_firmware() - VALIDATED_FIRMWARE | {pair}))))
-    except OSError as exc:
+        # Durable (fsynced) like settings: a power cut must not leave an empty file that repeats the self-test.
+        _atomic_write_bytes(str(FIRMWARE_FILE), json.dumps(
+            dict(validated=sorted(map(list, validated_firmware() - VALIDATED_FIRMWARE | {pair})))).encode())
+    except (OSError, UnsafeSettingsPath) as exc:
         diagnostic_event('fan', 'firmware_record_failed', level='warning', error=exc)
 
 

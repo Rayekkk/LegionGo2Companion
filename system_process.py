@@ -20,6 +20,13 @@ def system_env(**extra) -> dict:
     return env
 
 
+def run(argv, timeout, *, env=None, stdin=subprocess.DEVNULL, check=False, **kwargs):
+    """The one way to run a short external program: subprocess.run, which kills the child and
+    re-raises TimeoutExpired at `timeout`. Default env: system libraries with LC_ALL=C."""
+    return subprocess.run(argv, stdin=stdin, timeout=timeout, check=check,
+                          env=system_env(LC_ALL="C") if env is None else env, **kwargs)
+
+
 def run_helper(args, cancelled, seconds: float, stopped: Exception):
     """(returncode, stdout) of `python -I args`, raising `stopped` on cancel or the wall deadline."""
     deadline = time.monotonic() + seconds

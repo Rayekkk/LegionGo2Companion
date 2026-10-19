@@ -20,7 +20,7 @@ from typing import Any
 
 import decky
 from diagnostics import event, transition
-from system_process import system_env
+from system_process import run
 import module_runtime
 
 from safe_settings import SettingsManager
@@ -510,9 +510,8 @@ def _restore_current_if_owned() -> bool:
 
 def _system_stopping() -> bool:
     try:
-        result = subprocess.run(["/usr/bin/systemctl", "is-system-running"], env=system_env(LC_ALL="C"),
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                text=True, timeout=2.0, check=False)
+        result = run(["/usr/bin/systemctl", "is-system-running"], 2.0,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.stdout.strip() == "stopping"
@@ -602,18 +601,8 @@ def _inputplumber_version() -> str:
             return _version_cache[0]
         value = ""
         try:
-            result = subprocess.run(
-                [INPUTPLUMBER, "--version"],
-                env=system_env(LC_ALL="C"),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=3.0,
-                check=False,
-            )
+            result = run([INPUTPLUMBER, "--version"], 3.0, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
             if result.returncode == 0:
                 value = result.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):

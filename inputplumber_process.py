@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Any
 
-from system_process import system_env
+from system_process import run
 
 
 BUSCTL = "/usr/bin/busctl"
@@ -33,18 +33,8 @@ def run_busctl(args: list[str], *, timeout: float = 5.0) -> str:
     if not os.path.isfile(BUSCTL):
         raise InputPlumberError("InputPlumber control interface is unavailable.")
     try:
-        result = subprocess.run(
-            [BUSCTL, *args],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-            env=system_env(LC_ALL="C"),
-        )
+        result = run([BUSCTL, *args], timeout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                     text=True, encoding="utf-8", errors="replace")
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise InputPlumberError(f"InputPlumber did not respond: {exc}") from exc
     if result.returncode != 0:
