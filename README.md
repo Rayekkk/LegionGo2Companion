@@ -741,7 +741,7 @@ assignments remain dormant until explicitly enabled. Saving uses a revision chec
 editor cannot overwrite newer settings.
 
 See [SOURCE.md](SOURCE.md#fan-control-hardware-facts-and-independent-implementation) for
-protocol provenance, migration details and the limits of the hardware evidence.
+protocol provenance and the limits of the hardware evidence.
 
 </details>
 

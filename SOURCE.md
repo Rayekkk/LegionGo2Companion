@@ -202,7 +202,7 @@ The twelve-second startup/underperformance bound, lease, independent backup,
 100°C maximum and automatic release remain in place; absent or insufficient
 tach releases control rather than applying repeated hidden kicks.
 
-## Experimental Desktop frontend
+## Desktop frontend
 
 `desktop/native/` contains the independent C++17 / Qt Quick / QML application.
 It presents the same nine modules through the existing guarded Python RPCs.
@@ -236,8 +236,10 @@ release whitelist.
 
 Installation delegates to fwupd's `legion-hid` plugin (`fwupdtool install-blob`),
 the engine SteamOS ships for this controller. Companion only wraps the verified
-images in fwupd's 24-byte container header. Installation is disabled in this
-build until a supervised hardware test passes.
+images in fwupd's 24-byte container header. Installation is enabled after
+supervised hardware reinstalls (see the qualification table in
+[docs/CONTROLLER_FIRMWARE.md](docs/CONTROLLER_FIRMWARE.md)); `INSTALL_ENABLED` is
+its kill switch.
 
 Primary vendor artifacts: Lenovo LegionSpace 26.07.10.01 and original S3
 controller images. JLFS/SFC format reference:

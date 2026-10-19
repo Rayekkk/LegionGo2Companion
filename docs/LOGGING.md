@@ -5,7 +5,7 @@
 In the native Desktop app open **About → View logs**; the page collects events when it
 opens, and **Refresh logs** collects them again. The backend's event file is root-only, so
 the app reads it through the backend (`desktop_get_logs`). The page combines
-the shared backend, Desktop app and available Fan, Wi-Fi and firmware worker
+the shared backend, Desktop app and available Fan and Wi-Fi worker
 events. It does not change hardware settings or require modules to be enabled.
 
 The list opens on **Problems** (warnings and errors, including critical ones); switch to
@@ -76,7 +76,7 @@ Independent worker records can be collected over a relevant interval, for exampl
 ```sh
 sudo journalctl --since "30 minutes ago" -o short-iso \
   -t legiongo2companion-fan -t legiongo2companion-wifi \
-  -t legiongo2companion-firmware -t legiongo2companion-backend
+  -t legiongo2companion-backend
 ```
 
 The journal may be volatile on some installations. File rotation and journal
