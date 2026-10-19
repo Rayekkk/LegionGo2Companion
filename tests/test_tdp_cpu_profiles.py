@@ -225,7 +225,7 @@ class CpuProfileTests(unittest.TestCase):
                     self.assertEqual(self.payload()['settings']['epp'], 'default')
                     self.assert_hardware(False, readback)
                     self.hardware(False, 'performance')
-                    self.assertEqual(tdp._reapply_saved_cpu_power_controls_locked(
+                    self.assertEqual(tdp._best_effort_reapply_saved_cpu_power_locked(
                         self.payload()['settings']), [])
                     self.assert_hardware(False, readback)
                     self.rpc('set_epp', 'performance')
@@ -348,6 +348,16 @@ class CpuProfileTests(unittest.TestCase):
         self.assertIsNone(self.payload()['settings']['epp'])
         self.assert_hardware(False, '77')
 
+    def test_ignored_write_shows_the_real_hardware_and_keeps_the_old_choice(self):
+        self.seed({}, cpu_boost_enabled=False)
+        self.hardware(False, '77')
+        with patch.object(tdp, '_write_cpu_power_text'):  # the driver accepts and ignores the write
+            result = asyncio.run(self.plugin.set_cpu_boost(True))
+        self.assertFalse(result['success'])
+        self.assertIn('readback mismatch; previous state restored', result['error'])
+        self.assertIs(result['cpu_boost']['enabled'], False)
+        self.assertIs(self.payload()['settings']['cpu_boost_enabled'], False)
+
     def test_default_epp_rollback_preserves_external_writer(self):
         self.seed({}, epp='performance')
         self.hardware(False, 'performance')
@@ -379,7 +389,7 @@ class CpuProfileTests(unittest.TestCase):
             path.with_name('energy_performance_available_preferences').write_text(
                 'default performance balance_performance balance_power power')
         self.hardware(False, 'balance_performance')
-        self.assertEqual(tdp._reapply_saved_cpu_power_controls_locked(tdp._load_settings()), [])
+        self.assertEqual(tdp._best_effort_reapply_saved_cpu_power_locked(tdp._load_settings()), [])
         self.assert_hardware(False, 'balance_performance')
         self.assertIn('Saved EPP 77', self.rpc('get_cpu_power_controls')['epp']['compatibility_note'])
         self.app = '111'
@@ -393,7 +403,7 @@ class CpuProfileTests(unittest.TestCase):
         for path in self.epp_paths:
             path.with_name('energy_performance_available_preferences').write_text(
                 'default performance balance_performance balance_power power custom')
-        self.assertEqual(tdp._reapply_saved_cpu_power_controls_locked(tdp._load_settings()), [])
+        self.assertEqual(tdp._best_effort_reapply_saved_cpu_power_locked(tdp._load_settings()), [])
         self.assert_hardware(False, '26')
         self.ac = False
         tdp._check_and_enforce()

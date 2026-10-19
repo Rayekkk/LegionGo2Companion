@@ -1789,21 +1789,10 @@ def _transactional_cpu_power_write(
         rollback = external + failures
         suffix = (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
                   else "; previous state restored")
-        return {
-            "success": False,
-            "error": f"{label} write failed: {exc}{suffix}",
-            "restored": not failures,
-            "originals": originals,
-            "requested": requested,
-            "changed": changed,
-        }
-    return {
-        "success": True,
-        "error": "",
-        "originals": originals,
-        "requested": requested,
-        "changed": changed,
-    }
+        # Only our own value left behind is unrestored; a third party's is not ours to undo.
+        return {"success": False, "error": f"{label} write failed: {exc}{suffix}",
+                "restored": not failures}
+    return {"success": True, "error": ""}
 
 
 def _boost_equivalent(left: str, right: str) -> bool:
@@ -1997,26 +1986,24 @@ def _cpu_scoped_status(app_id: str = "", ac_profile: bool = False, **operation) 
     return result
 
 
-def _reapply_saved_cpu_power_controls_locked(state: dict) -> list[str]:
-    """Best-effort startup/resume restore. Caller holds _mutation_lock."""
-    state = _effective_cpu_state(state)
-    errors: list[str] = []
-    boost = state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
-    if type(boost) is bool:
-        result = _apply_cpu_boost_hardware(boost)
-        if not result["success"]:
-            errors.append(result["error"])
-    epp = state.get(SETTINGS_FIELD_EPP)
-    if isinstance(epp, str):
-        result = _apply_epp_hardware(epp)
-        if not result["success"]:
-            errors.append(result["error"])
-    return errors
-
-
 def _best_effort_reapply_saved_cpu_power_locked(state: dict) -> list[str]:
+    """Startup/resume/drift restore of the effective choice; errors are returned, never raised.
+
+    Caller holds _mutation_lock.
+    """
+    errors: list[str] = []
     try:
-        errors = _reapply_saved_cpu_power_controls_locked(state)
+        state = _effective_cpu_state(state)
+        boost = state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
+        if type(boost) is bool:
+            result = _apply_cpu_boost_hardware(boost)
+            if not result["success"]:
+                errors.append(result["error"])
+        epp = state.get(SETTINGS_FIELD_EPP)
+        if isinstance(epp, str):
+            result = _apply_epp_hardware(epp)
+            if not result["success"]:
+                errors.append(result["error"])
     except Exception as exc:
         errors = [f"CPU power restore failed: {exc}"]
         event('tdp','cpu_power_restore_failed',level='warning',error=exc,stage='saved_cpu_controls',repeat=60)
@@ -2872,14 +2859,8 @@ class Plugin:
                     app_id, target, using_profile = _startup_context_target(s)
                     _current_game_id = "\x00"
                     if not s.get("enabled", True):
-                        try:
-                            cpu_power_errors = (
-                                _reapply_saved_cpu_power_controls_locked(s))
-                            _last_cpu_power_check = time.monotonic()
-                        except Exception as exc:
-                            cpu_power_errors = [
-                                f"CPU power restore failed: {exc}"]
-                            event('tdp','cpu_power_restore_failed',level='warning',error=exc,stage='startup',repeat=60)
+                        cpu_power_errors = _best_effort_reapply_saved_cpu_power_locked(s)
+                        _last_cpu_power_check = time.monotonic()
                         return {"success": True, "skipped": True,
                                 "cpu_power_errors": cpu_power_errors}
                     result = _apply_limits_with_saved_cpu_power(s, *target, reason="startup")

@@ -889,7 +889,7 @@ class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
             for name, value in {'_wmi_caps': {'supported': True}, '_get_ac_online': False,
                     '_suspend_offset': 0, '_load_settings': {'enabled': False},
                     '_startup_context_target': ('', (16000, 25000, 30000), False),
-                    '_reapply_saved_cpu_power_controls_locked': [], '_cancel_ac_settle': None}.items():
+                    '_best_effort_reapply_saved_cpu_power_locked': [], '_cancel_ac_settle': None}.items():
                 stack.enter_context(patch.object(tdp, name, return_value=value))
             stack.enter_context(patch.object(tdp.updater, 'ssl_context'))
             stack.enter_context(patch.object(tdp, '_ensure_ryzenadj', side_effect=ensure))
