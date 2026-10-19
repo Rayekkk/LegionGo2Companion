@@ -59,6 +59,7 @@ IWD_MAIN_CONF = "/etc/iwd/main.conf"
 # Snapshot key prefix and iwd [Rank] key; only the 2.4 GHz key is ever written.
 IWD_RANK_KEYS = (("", "BandModifier2_4GHz"), ("five_", "BandModifier5GHz"),
                  ("six_", "BandModifier6GHz"))
+IWD_SECTION_RE = re.compile(r"^\s*\[([^]]+)]\s*(?:[#;].*)?(?:\r?\n)?$")
 
 BAND_POLICY_OFF = "off"
 BAND_POLICY_SIX_ONLY = "six_ghz_only"
@@ -793,6 +794,15 @@ class Plugin:
         # (AA\:BB\:...), while `iw` and our journal use plain colons.
         return Plugin._nmcli_unescape(str(value or "")).strip().lower()
 
+    @staticmethod
+    def _iwd_rank_sections(lines: list[str]) -> list[tuple[int, int]]:
+        """(header index, end index) of every [Rank] section in `lines` (kept line endings)."""
+        headers = [(index, match.group(1).strip()) for index, line in enumerate(lines)
+                   if (match := IWD_SECTION_RE.match(line))]
+        ends = [index for index, _ in headers[1:]] + [len(lines)]
+        # iwd matches section names case-sensitively.
+        return [(start, end) for (start, name), end in zip(headers, ends) if name == "Rank"]
+
     def _get_iwd_rank_modifier_snapshot(self) -> dict:
         """Read only the [Rank] band keys; other iwd settings may change while a
         policy is active, so the complete file is never stored or restored."""
@@ -806,21 +816,15 @@ class Plugin:
             except (OSError, UnicodeError, ValueError, UnsafeSettingsPath):
                 unsafe = True
 
-        rank_count = 0
         counts = {prefix: 0 for prefix, _ in IWD_RANK_KEYS}
         values = {prefix: "" for prefix, _ in IWD_RANK_KEYS}
-        section_re = re.compile(r"^\s*\[([^]]+)]\s*(?:[#;].*)?$")
         key_res = {prefix: re.compile(rf"^\s*{key}\s*=\s*([^#;]*?)\s*(?:[#;].*)?$")
                    for prefix, key in IWD_RANK_KEYS}
-        in_rank = False
-        for raw_line in text.splitlines():
-            section_match = section_re.match(raw_line)
-            if section_match:
-                in_rank = section_match.group(1).strip() == "Rank"
-                if in_rank:
-                    rank_count += 1
-                continue
-            if in_rank:
+        lines = text.splitlines(keepends=True)
+        ranks = self._iwd_rank_sections(lines)
+        rank_count = len(ranks)
+        for start, end in ranks:
+            for raw_line in lines[start + 1:end]:
                 for prefix, key_re in key_res.items():
                     key_match = key_re.match(raw_line)
                     if key_match:
@@ -887,24 +891,12 @@ class Plugin:
 
         newline = "\r\n" if "\r\n" in original else "\n"
         lines = original.splitlines(keepends=True)
-        section_re = re.compile(r"^\s*\[([^]]+)]\s*(?:[#;].*)?(?:\r?\n)?$")
         key_re = re.compile(r"^(\s*)BandModifier2_4GHz\s*=.*?(\r?\n)?$")
 
-        rank_start = None
-        rank_end = len(lines)
-        key_index = None
-        for index, raw_line in enumerate(lines):
-            section_match = section_re.match(raw_line)
-            if section_match:
-                if rank_start is not None:
-                    rank_end = index
-                    break
-                # iwd matches section names case-sensitively.
-                if section_match.group(1).strip() == "Rank":
-                    rank_start = index
-                continue
-            if rank_start is not None and key_index is None and key_re.match(raw_line):
-                key_index = index
+        ranks = self._iwd_rank_sections(lines)
+        rank_start, rank_end = ranks[0] if ranks else (None, len(lines))
+        key_index = next((index for index in range(rank_start + 1, rank_end)
+                          if key_re.match(lines[index])), None) if ranks else None
 
         if key_index is not None:
             if value is None:
@@ -932,26 +924,12 @@ class Plugin:
                     lines[rank_end - 1] += newline
                 lines.insert(rank_end, f"BandModifier2_4GHz={value}{newline}")
 
-        if value is None and cleanup_created_rank and rank_start is not None:
-            # Remove a section header created by us only if it contains no
-            # non-comment settings.  User comments are retained.
-            rank_end = len(lines)
-            for index in range(rank_start + 1, len(lines)):
-                if section_re.match(lines[index]):
-                    rank_end = index
-                    break
-            meaningful = [
-                line
-                for line in lines[rank_start + 1 : rank_end]
-                if line.strip() and not line.lstrip().startswith(("#", ";"))
-            ]
-            comments = [
-                line
-                for line in lines[rank_start + 1 : rank_end]
-                if line.strip() and line.lstrip().startswith(("#", ";"))
-            ]
-            if not meaningful and not comments:
-                del lines[rank_start:rank_end]
+        # rank_end still bounds the section: a removal above shifted it with the lines.
+        if (value is None and cleanup_created_rank and rank_start is not None
+                and not any(line.strip() for line in lines[rank_start + 1:rank_end])):
+            # Remove a section header created by us only while nothing but
+            # blank lines remains in it; user settings and comments keep it.
+            del lines[rank_start:rank_end]
 
         updated = "".join(lines)
         if updated == original:
