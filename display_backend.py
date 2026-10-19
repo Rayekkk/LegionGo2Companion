@@ -123,6 +123,7 @@ HYBRID_SDR_DEBOUNCE_S = 2.0
 # not stick, stand off rather than strobe the panel against another writer.
 HDR_FIGHT_LIMIT = 4
 HDR_BACKOFF_S = 60.0
+HDR_FIGHT_WINDOW_S = 30.0  # corrections to one target closer than this are one argument
 
 # Panels known to ignore the backlight while in PQ, by EDID manufacturer and
 # product code. Keeping this a list rather than "any internal panel" is the whole
@@ -1444,6 +1445,8 @@ class Plugin:
     _task = None
     _prop_task = None
     _hdr_fights = 0               # corrections in a row that did not stick
+    _hdr_fight_target = None      # target and time of the last correction
+    _hdr_fight_at = 0.0
     _hdr_backoff_until = 0.0
     _hdr_baseline = None          # HDR mode as we first found it, for putting back
     _session_note = ""
@@ -2562,10 +2565,14 @@ class Plugin:
         if Plugin._state.get("active_mode") == MODE_HYBRID and bool(content) != target:
             return False
 
-        Plugin._hdr_fights += 1
+        # A writer that undoes us a pass later lets the panel read as settled in
+        # between, so count repeated corrections to one target, not unsettled passes.
+        same = target == Plugin._hdr_fight_target and now - Plugin._hdr_fight_at < HDR_FIGHT_WINDOW_S
+        Plugin._hdr_fights = Plugin._hdr_fights + 1 if same else 1
+        Plugin._hdr_fight_target, Plugin._hdr_fight_at = target, now
         if Plugin._hdr_fights > HDR_FIGHT_LIMIT:
             Plugin._hdr_backoff_until = now + HDR_BACKOFF_S
-            Plugin._hdr_fights = 0
+            Plugin._hdr_fights, Plugin._hdr_fight_target = 0, None
             decky.logger.warning(
                 f"{LOG} the display mode keeps being changed back - standing "
                 f"off for {HDR_BACKOFF_S:.0f}s rather than blinking the panel")
@@ -2575,8 +2582,7 @@ class Plugin:
 
     @staticmethod
     def _hdr_mode_settled() -> None:
-        """The panel is where we want it, so forget any argument we were having."""
-        Plugin._hdr_fights = 0
+        """The panel is where we want it: end a stand-off. Repeated corrections still count."""
         Plugin._hdr_backoff_until = 0.0
 
     @staticmethod

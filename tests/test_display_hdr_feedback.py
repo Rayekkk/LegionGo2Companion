@@ -155,6 +155,8 @@ class DisplayBaselineTests(unittest.TestCase):
         self.stack.enter_context(patch.object(display.Plugin, '_hybrid_pq_hold_until', 0.0))
         self.stack.enter_context(patch.object(display.Plugin, '_hybrid_sdr_since', None))
         self.stack.enter_context(patch.object(display.Plugin, '_hdr_fights', 0))
+        self.stack.enter_context(patch.object(display.Plugin, '_hdr_fight_target', None))
+        self.stack.enter_context(patch.object(display.Plugin, '_hdr_fight_at', 0.0))
         self.stack.enter_context(patch.object(display.Plugin, '_hdr_backoff_until', 0.0))
         self.stack.enter_context(patch.object(display.Plugin, 'native_display_active', return_value=False))
         self.stack.enter_context(patch.object(display.Plugin, '_session_props', side_effect=lambda names, **kwargs: dict(self.props)))

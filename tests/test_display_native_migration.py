@@ -50,7 +50,7 @@ class NativeDisplayMigrationTests(unittest.TestCase):
                             '_native_probe_after': 0.0, '_native_probe_session': None,
                             '_native_detection': {}, '_edid_recheck_until': 0.0,
                             '_hybrid_pq_hold_until': 0.0, '_hybrid_sdr_since': None,
-                            '_hdr_fights': 0, '_hdr_backoff_until': 0.0,
+                            '_hdr_fights': 0, '_hdr_fight_target': None, '_hdr_fight_at': 0.0, '_hdr_backoff_until': 0.0,
                             '_task': None, '_prop_task': None}.items():
             self.stack.enter_context(patch.object(display.Plugin, name, value))
         self.stack.enter_context(patch.object(display, '_gamescope_start_time', side_effect=lambda: self.session))

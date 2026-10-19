@@ -66,7 +66,7 @@ class HybridTimingTests(unittest.TestCase):
                      panel_mode=display.MODE_HYBRID, setup_done=True, reset_in_progress=False)
         for name, value in {'_state': state, '_hdr_baseline': False, '_hybrid_suspended_external': False,
                             '_hybrid_pq_hold_until': 0.0, '_hybrid_sdr_since': None,
-                            '_hdr_fights': 0, '_hdr_backoff_until': 0.0}.items():
+                            '_hdr_fights': 0, '_hdr_fight_target': None, '_hdr_fight_at': 0.0, '_hdr_backoff_until': 0.0}.items():
             self.stack.enter_context(patch.object(display.Plugin, name, value))
         self.stack.enter_context(patch.object(display.Plugin, 'native_display_active', return_value=False))
         self.stack.enter_context(patch.object(display.Plugin, '_ownership_session_current', return_value=True))
@@ -125,6 +125,25 @@ class HybridTimingTests(unittest.TestCase):
             self.tick(step / 2)
         self.assertEqual(self.writes, [(2.0, 0), (4.5, 0), (7.0, 0), (9.5, 0)])
         self.assertIn('standing off', display.Plugin._state['hybrid_reason'])
+
+    def test_a_writer_that_undoes_us_a_pass_later_still_ends_in_a_stand_off(self):
+        # Our write sticks for one pass, so the panel reads as settled before it is undone.
+        self.props[display.ATOM_HDR_APP] = 1
+        for second in range(40):
+            self.tick(float(second))
+            if self.props[display.ATOM_HDR_ENABLED] == 1 and second % 2 == 0:
+                self.props[display.ATOM_HDR_ENABLED] = 0    # reverted after our pass
+        self.assertEqual(len(self.writes), display.HDR_FIGHT_LIMIT)
+        self.assertIn('standing off', display.Plugin._state['hybrid_reason'])
+
+    def test_corrections_far_apart_or_to_another_target_never_stand_off(self):
+        self.props[display.ATOM_HDR_APP] = 1
+        for n in range(8):                  # one undone switch every 40 s
+            at = n * 40.0
+            self.props[display.ATOM_HDR_ENABLED] = 0
+            self.tick(at)
+            self.assertEqual(self.writes[-1], (at, 1))
+        self.assertNotIn('standing off', display.Plugin._state['hybrid_reason'])
 
 
 class BacklightWatchShutdownTests(unittest.TestCase):
