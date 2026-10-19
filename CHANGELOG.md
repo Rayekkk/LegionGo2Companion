@@ -15,6 +15,10 @@ Not released yet.
 
 ### Changed
 
+- **Fan Control** works and reads the same in the Decky panel and the Desktop app:
+  - Dragging a curve point below the minimum running speed stops the fan only when dragged below half of that minimum; above it, the point snaps to the minimum. Stepping with the D-pad or keys is unchanged.
+  - The Desktop app uses the panel's names and formats ("Maximum", "50.0%", "Save global curve", "Assign curve to …"), can save an unchanged curve to confirm a review or to give a preset its own copy, offers "Use global curve" only for a preset that has its own curve, and always lets you turn Fan Control off while connected.
+  - "Assign curves to TDP presets" waits for unsaved curve changes and for a pending curve review in both.
 - **Wi-Fi:** **Automatic** always means the original Wi-Fi behaviour. If the band setting Companion applied was changed outside Companion, choosing Automatic now puts the recorded original back (and says so) instead of refusing. If a saved policy is not recognized and Companion never changed anything for it, Automatic simply clears it. A profile that cannot be read still refuses, because the original could not be checked.
 - Settings from the old standalone plugins (LeGoTDP, LeGo Vibe Control, LeGo2 Brightness Fix) and from versions before 2.1.0 are no longer imported. Companion still pauses while those plugins are installed.
 - Internal cleanup: duplicated and unused code was removed across the backend and both interfaces, with no change in what Companion does.
