@@ -270,6 +270,91 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         for name in main.MODULE_NAMES[1:]:
             getattr(self.plugin, '_' + name)._main.assert_not_awaited()
 
+    async def start_with_hung_fan(self, outcome):
+        release = asyncio.Event()
+        async def hung():
+            await release.wait()
+            if outcome is not None:
+                raise outcome
+        self.plugin._fan._main.side_effect = hung
+        self.plugin._start_desktop = AsyncMock()
+        self.plugin._publish_modules = AsyncMock()
+        await asyncio.wait_for(self.plugin._main(), 2)
+        return release
+
+    def events(self, event):
+        return [(call.args[:2], call.kwargs) for call in event.call_args_list]
+
+    async def test_hung_start_does_not_hold_back_later_modules_and_is_ready_when_it_finishes(self):
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main.diagnostics, 'event') as event:
+            release = await self.start_with_hung_fan(None)
+            for name in main.MODULE_NAMES:
+                getattr(self.plugin, '_' + name)._main.assert_awaited_once()
+            slow = [kwargs for args, kwargs in self.events(event) if args == ('fan', 'module_start_slow')]
+            self.assertEqual(slow[0]['level'], 'warning')
+            self.assertGreaterEqual(slow[0]['seconds'], 0)
+            summary = next(kwargs for args, kwargs in self.events(event) if args == ('plugin', 'startup_complete'))
+            self.assertEqual((summary['starting'], summary['failed']), ('fan', None))
+            self.assertNotIn('fan', summary['ready'])
+            status = self.plugin._module_status()['fan']
+            self.assertEqual((status['ready'], status['starting'], status['error']), (False, True, 'Still starting…'))
+            with self.assertRaisesRegex(RuntimeError, 'still starting'):
+                await self.plugin.fan_get_state()
+            with self.assertRaisesRegex(RuntimeError, 'still starting'):
+                await self.plugin.modules_set_enabled('fan', True)
+            published = self.plugin._publish_modules.await_count
+            release.set()
+            while self.plugin._publish_modules.await_count == published:
+                await asyncio.sleep(0.01)
+            self.assertTrue(self.plugin._module_status()['fan']['ready'])
+            self.assertNotIn('starting', self.plugin._module_status()['fan'])
+            self.assertIn(('fan', 'module_started_late'), [args for args, _ in self.events(event)])
+
+    async def test_hung_start_that_fails_later_is_recorded_as_not_ready_with_its_error(self):
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main.diagnostics, 'event') as event:
+            release = await self.start_with_hung_fan(RuntimeError('fan probe failed'))
+            release.set()
+            while self.plugin._publish_modules.await_count < 2:
+                await asyncio.sleep(0.01)
+            status = self.plugin._module_status()['fan']
+            self.assertEqual((status['ready'], status['error']), (False, 'fan probe failed'))
+            self.assertIn(('fan', 'module_start_failed'), [args for args, _ in self.events(event)])
+            self.plugin._fan._unload.assert_awaited_once()  # The failed start's cleanup.
+
+    async def test_shutdown_during_hung_start_stays_within_budget(self):
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main, 'STARTING_STOP_WAIT_S', 0.05), \
+                patch.object(main.diagnostics, 'event') as event:
+            release = await self.start_with_hung_fan(None)
+            self.plugin._fan._unload.side_effect = release.wait  # Its unload waits on the hung start too.
+            began = asyncio.get_running_loop().time()
+            await asyncio.wait_for(self.plugin._unload(), 1)
+            self.assertLess(asyncio.get_running_loop().time() - began, 1)
+            self.assertIn((('plugin', 'module_stop_timeout'), {'level': 'warning', 'modules': 'fan'}), self.events(event))
+            for name in main.MODULE_NAMES:
+                getattr(self.plugin, '_' + name)._unload.assert_awaited_once()
+            release.set()
+            await asyncio.sleep(0.05)  # The late start sees the shutdown and does nothing more.
+            self.plugin._fan._unload.assert_awaited_once()
+
+    async def test_shutdown_inside_the_start_time_limit_does_not_wait_for_it(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def hung():
+            entered.set()
+            await release.wait()
+        self.plugin._fan._main.side_effect = hung
+        self.plugin._fan._unload.side_effect = release.wait
+        self.plugin._start_desktop = AsyncMock()
+        self.plugin._publish_modules = AsyncMock()
+        with patch.object(main, 'MODULE_START_LIMIT_S', 30), patch.object(main, 'STARTING_STOP_WAIT_S', 0.05):
+            startup = asyncio.ensure_future(self.plugin._main())
+            await asyncio.wait_for(entered.wait(), 1)
+            began = asyncio.get_running_loop().time()
+            await asyncio.wait_for(self.plugin._unload(), 2)
+            self.assertLess(asyncio.get_running_loop().time() - began, 2)
+            self.plugin._rgb._main.assert_not_awaited()  # modules after the hung one never start
+            release.set()
+            await asyncio.wait_for(startup, 1)
+
     async def test_retry_cannot_start_over_workers_whose_cleanup_failed(self):
         self.plugin._rgb._main.side_effect = RuntimeError('startup failed')
         self.plugin._rgb._unload.side_effect = RuntimeError('worker cleanup failed')

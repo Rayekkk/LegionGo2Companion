@@ -58,6 +58,12 @@ GUARD_FAILURE_LIMIT = 3  # Consecutive failed scans (~15 s of periodic checks) b
 UPDATER_WAIT_S = len(INSTALL_ORDER) * INSTALL_SECONDS  # One fwupd time limit per controller component.
 UPDATER_POLL_S = 2.0
 SHUTDOWN_BUDGET_S = 4.0  # Of Decky's 5 s SIGTERM-to-SIGKILL window; _uninstall needs the rest.
+# All nine modules start in ~1.2 s on the console and the longest bounded command a
+# start may run is ~8 s (nmcli restore): past this a start is hung, so the next module goes.
+MODULE_START_LIMIT_S = 15.0
+# A stop waits this long for a start still running past the limit, then as long again for
+# its unload: both fit SHUTDOWN_BUDGET_S next to the other modules' unload.
+STARTING_STOP_WAIT_S = 1.0
 _ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_active_app'})  # Besides reads.
 # Preconditions the backend checks before changing anything; the reply already tells the user why.
 _REFUSALS = frozenset({'unsupported_backend', 'unsupported_device', 'preflight_failed', 'no_wifi',
@@ -250,6 +256,8 @@ def _guard_component_calls(cls):
                     module_runtime.require_available(resource)
                     if module and not self._module_enabled(module):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
+                    if module and self._still_starting(module):
+                        raise RuntimeError('This module is still starting. Try again in a moment.')
                     if module and self._module_health.get(module, {}).get('ready') is False:
                         raise RuntimeError('This module could not start. Retry it in Manage Modules.')
                     if name in _BACKGROUND_RPCS:
@@ -334,6 +342,8 @@ class Plugin:
             else {'enabled': False, 'error': 'Invalid module settings. Review before enabling.'}
             for name, value in self._module_state.items() if name in MODULE_NAMES}
         self._module_health = {}
+        self._starting = {}  # Module name -> its startup task; never cancelled mid firmware call.
+        self._shutdown_requested = asyncio.Event()  # wakes a startup wait so shutdown is not held for a module's time limit
         self._tdp = tdp_backend.Plugin()
         self._fan = fan_backend.Plugin()
         self._vibration = vibration_backend.Plugin()
@@ -403,6 +413,9 @@ class Plugin:
                        'note': self._module_state.get(name, {}).get('note', '')}
                 for name in MODULE_NAMES}
         for name, entry in result.items():
+            if entry['enabled'] and self._still_starting(name):
+                # In error, not note: a display note offers a Gaming Mode restart.
+                entry.update(ready=False, starting=True, error='Still starting…')
             if entry['enabled'] and module_runtime.is_paused(name):
                 entry.update(ready=False, maintenance=True,
                     note='Controller operations are paused for firmware maintenance.')
@@ -412,6 +425,10 @@ class Plugin:
             if current is not None and not display_backend.Plugin._same_session(display['session'], current):
                 result['display']['note'] = ''
         return result
+
+    def _still_starting(self, name):
+        start = self._starting.get(name)
+        return start is not None and not start.done()
 
     async def _start_module(self, name):
         component = getattr(self, '_' + name)
@@ -450,6 +467,8 @@ class Plugin:
         if name == 'fan' and not enabled:
             # Fan safety takes precedence even if module-choice persistence fails.
             await self._fan.set_enabled(False)
+        if self._still_starting(name):
+            raise RuntimeError('This module is still starting. Try again when it has finished.')
         previous = dict(self._module_state)
         component = getattr(self, '_' + name)
         resume = self._module_state.get(name, {}).get('resume', {})
@@ -514,20 +533,49 @@ class Plugin:
         if stage == '_main':
             # One at a time: the Legion's AML aborts WMI/EC methods run concurrently
             # (AE_AML_NOT_OWNER on ECMT). Unload keeps gather for Decky's 5 s budget.
+            # A start past the time limit is left running, never cancelled mid firmware
+            # call: one hung module must not hold back the rest (Fan comes second).
             results = []
             for name, _ in runnable:
                 if self._closing:
                     break  # Shutdown waits on the guard lock; skip modules not yet started.
+                began = time.monotonic()
+                start = self._starting[name] = asyncio.ensure_future(self._start_module(name))
+                woken = asyncio.ensure_future(self._shutdown_requested.wait())
                 try:
-                    results.append(await self._start_module(name))
-                except Exception as exc:
-                    results.append(exc)
+                    await asyncio.wait({start, woken}, timeout=MODULE_START_LIMIT_S, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    woken.cancel()
+                if start.done():
+                    results.append(start.exception() if not start.cancelled() else None)
+                    continue
+                if self._closing:
+                    break  # Shutdown woke the wait; _stop_modules bounds the start still running.
+                diagnostics.event(name, 'module_start_slow', level='warning', seconds=round(time.monotonic() - began, 1))
+                module_runtime.background_task(self._finish_late_start(name, start, began))
+                results.append(None)
         else:
             results = await asyncio.gather(*(getattr(component, stage)() for _, component in runnable),
                                            return_exceptions=True)
         for (name, _), result in zip(runnable, results):
             if isinstance(result, BaseException):
                 diagnostics.event(name, 'module_stage_failed', level='error', stage=stage, error=result)
+
+    async def _finish_late_start(self, name, start, began):
+        await asyncio.wait({start})
+        # A failure was already recorded in health and logged as module_start_failed.
+        started = not start.cancelled() and start.exception() is None
+        if started:
+            diagnostics.event(name, 'module_started_late', seconds=round(time.monotonic() - began, 1))
+        async with self._guard_lock:
+            if self._closing:
+                return
+            if not self._modules_started:
+                if started:  # Withdrawn by the conflict guard meanwhile: undo what the start began.
+                    await self._stop_component(name)
+                return
+            await self._restore_resumed((name,))
+        await self._publish_modules()
 
     def _guard_message(self):
         if self._guard_error:
@@ -616,10 +664,21 @@ class Plugin:
         self._withdraw_fan_lease()
         async def stop():
             await self._drain_rpc_jobs()
-            await self._run_stage("_unload")
+            starting = [self._starting[name] for name in MODULE_NAMES if self._still_starting(name)]
+            if starting:
+                # Let a start past its time limit finish its firmware call before unloading it.
+                await asyncio.wait(starting, timeout=STARTING_STOP_WAIT_S)
+            hung = tuple(name for name in MODULE_NAMES if self._still_starting(name))
+            names = tuple(name for name in MODULE_NAMES if name not in hung)
+            await (self._run_stage("_unload", names) if hung else self._run_stage("_unload"))
             # Both normal shutdown and conflict withdrawal must finish threads
             # that outlive the cancellation of their async monitor.
-            await asyncio.gather(*(module_runtime.drain(name) for name in MODULE_NAMES))
+            await asyncio.gather(*(module_runtime.drain(name) for name in names))
+            if hung:
+                # Best effort within Decky's budget: a hung start's threads are never waited for.
+                unload = asyncio.ensure_future(self._run_stage("_unload", hung))
+                if not (await asyncio.wait({unload}, timeout=STARTING_STOP_WAIT_S))[0]:
+                    diagnostics.event('plugin', 'module_stop_timeout', level='warning', modules=','.join(hung))
         try:
             await module_runtime.complete(stop())
         finally:
@@ -706,8 +765,10 @@ class Plugin:
                     ready=','.join(name for name in MODULE_NAMES if self._module_enabled(name)
                                    and self._module_health.get(name, {}).get('ready', True)) or None,
                     failed=','.join(name for name in MODULE_NAMES
-                                    if self._module_health.get(name, {}).get('ready') is False
-                                    or self._module_state.get(name, {}).get('pending')) or None)
+                                    if (self._module_health.get(name, {}).get('ready') is False
+                                        and not self._still_starting(name))
+                                    or self._module_state.get(name, {}).get('pending')) or None,
+                    starting=','.join(name for name in MODULE_NAMES if self._still_starting(name)) or None)
         startup.set()
         await self._publish_modules()
         await self._check_guard()
@@ -720,6 +781,9 @@ class Plugin:
         await self._run_stage("_main", names)
         if self._closing:
             return  # Modules skipped by a shutdown never started; nothing to restore into.
+        await self._restore_resumed(names)
+
+    async def _restore_resumed(self, names):
         for name in names:
             entry = self._module_state.get(name, {})
             if (self._module_enabled(name) and self._module_health.get(name, {}).get('ready', True)
@@ -828,6 +892,7 @@ class Plugin:
     async def _unload(self):
         diagnostics.event('plugin', 'shutdown_started', source='backend')
         self._closing = True  # No new admissions; already admitted RPCs drain below.
+        self._shutdown_requested.set()
         self._withdraw_fan_lease()
         # Wake a helper download now; it is an update job, not a drained module RPC.
         helper_cancel = getattr(self._tdp, '_helper_cancel', None)  # Tests stub the component.

@@ -23,4 +23,4 @@ export const moduleChecked = entry => entry?.enabled === true;
 export const moduleLocked = entry => !!entry?.pending || !!entry?.maintenance;
 export const moduleNote = (name, entry) => entry?.error || entry?.note || MODULE_DESCRIPTIONS[name] || "";
 export const cleanupRetryShown = entry => !!entry?.pending && !entry.maintenance;
-export const startRetryShown = entry => entry?.enabled === true && entry.ready === false && !entry.pending && !entry.maintenance;
+export const startRetryShown = entry => entry?.enabled === true && entry.ready === false && !entry.pending && !entry.maintenance && !entry.starting;

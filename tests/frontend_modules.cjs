@@ -58,6 +58,7 @@ run(async () => {
   assert.equal(M.moduleNote('battery', { enabled: false }), 'Charge limit of about 80%.', 'an Off module still says what it does');
   assert.equal(M.moduleNote('battery', { enabled: false, pending: true, error: 'Restore failed' }), 'Restore failed');
   assert.equal(M.startRetryShown({ enabled: true, ready: false, maintenance: true }), false);
+  assert.equal(M.startRetryShown({ enabled: true, ready: false, starting: true }), false, 'no retry while a slow start still runs');
   assert.equal(M.cleanupRetryShown({ enabled: false, pending: true }), true);
   console.log('Modules page verified.');
 });
