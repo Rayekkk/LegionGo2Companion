@@ -645,7 +645,8 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
 // ── Main content ───────────────────────────────────────────────────────────────
 type Scope = "global" | "game" | "game_ac";
 
-export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+/** State, effects and shared operations of the TDP page; the sections below render from them. */
+const useTdpState = (tabShown: boolean) => {
   const [ready,    setReady]    = useState(false);
   const [setupErr, setSetupErr] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
@@ -783,31 +784,8 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
   const customCaps = advancedTdpControl ? caps : simpleCaps(caps, extrasUnlocked && extrasAvailable);
   const active  = editingAc ? acTuning : tuning;
   const setActive = editingAc ? setAcTuning : setTuning;
-  const om      = offsetMax(active.spl, caps);
 
   const clearDraft = () => { dirtyRef.current = false; draftBaseRef.current = null; setDirty(false); };
-  const editActive = (next: Tuning) => {
-    if (!dirtyRef.current) draftBaseRef.current = { ac: editingAc, tuning: active };
-    dirtyRef.current = true;
-    setDirty(true);
-    setActive(next);
-  };
-  const handlers = {
-    onSpl: (v: number) => editActive(withSpl(active, v, customCaps, minW)),
-    onSppt: (v: number) => editActive(withSppt(active, v, customCaps)),
-    onFppt: (v: number) => editActive(withFppt(active, v, customCaps)),
-  };
-  /** Run `proceed` now, or after confirming that the unsaved Custom limits are dropped. */
-  const askDiscard = (proceed: () => void) => {
-    if (!dirtyRef.current) return proceed();
-    confirmAction("Discard unsaved changes?", "Your changes to these limits haven't been applied.", "Discard", () => {
-      const base = draftBaseRef.current;
-      if (base) (base.ac ? setAcTuning : setTuning)(base.tuning);
-      clearDraft();
-      proceed();
-    });
-  };
-
   const done = (body: string) => {
     if (!pageMountedRef.current) return;
     setFailure(null);
@@ -1102,6 +1080,58 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
     return () => { profileRequestRef.current += 1; };
   }, [game?.appId, ready, enabled, tdpAvailable, profileAttempt]);
 
+  const capsNow = { tdpAvailable, extrasAvailable, helperRetryAvailable, tdpError };
+  return { ready, setupErr, initializing, initialize, tuning, setTuning, acTuning, setAcTuning, preset, setPreset,
+    stdCaps, extrasAvailable, tdpAvailable, presets, minW, enabled, setEnabled, game, perGame, setPerGame,
+    profileExists, setProfileExists, acOnline, acSeparate, setAcSeparate, editingAc, setEditingAc, globalProfile,
+    setGlobalProfile, extrasUnlocked, setExtrasUnlocked, advancedTdpControl, setAdvancedTdpControl, savedPreset,
+    setSavedPreset, savedAcPreset, setSavedAcPreset, operationLoading, profilePending, setProfilePending,
+    profileError, setProfileError, setProfileAttempt, loading, cpuBusy, setDirty, dirty, dirtyRef, draftBaseRef,
+    setFailure, details, setDetails, cpuNote, setCpuNote, info, cpuBusyOwnersRef, onCpuBusyChange, beginOperation,
+    operationCurrent, finishOperation, readCaps, adoptCaps, caps, customCaps, active, setActive, clearDraft, done,
+    showError, failureFor, showGameProfile, adoptGlobalSettings, capsNow };
+};
+type TdpState = ReturnType<typeof useTdpState>;
+
+// Sections are plain render functions without hooks, called inline by TdpPage:
+// the page keeps one element tree and one hook order.
+
+const noticeSection = (s: TdpState) => {
+  const { capsNow, extrasUnlocked, profileError, profilePending, setProfilePending, setProfileError,
+    setProfileAttempt } = s;
+  const notice = tdpNotice(capsNow, extrasUnlocked);
+  return (notice || profileError) && <PanelSection>
+    {notice && infoRow(notice[0], notice[1])}
+    {profileError && <>
+      {infoRow("Could not load profile", profileError)}
+      <PanelSectionRow><ButtonItem layout="below" onClick={() => {
+        if (profilePending) return;
+        setProfilePending(true); setProfileError("");
+        setProfileAttempt(attempt => attempt + 1);
+      }}>Retry profile</ButtonItem></PanelSectionRow>
+    </>}
+  </PanelSection>;
+};
+
+const powerSection = (s: TdpState) => {
+  const { beginOperation, operationCurrent, finishOperation, done, showError, failureFor, clearDraft, dirtyRef,
+    draftBaseRef, preset, setPreset, tuning, setTuning, acTuning, setAcTuning, active, setActive,
+    advancedTdpControl, caps, customCaps, minW, presets, editingAc, setEditingAc, perGame, setPerGame, game,
+    acSeparate, setAcSeparate, acOnline, tdpAvailable, enabled, setEnabled, setSavedPreset, savedPreset,
+    setSavedAcPreset, savedAcPreset, globalProfile, setGlobalProfile, adoptGlobalSettings, showGameProfile,
+    setProfileAttempt, profilePending, profileError, info, extrasUnlocked, stdCaps, cpuBusy, loading,
+    cpuBusyOwnersRef } = s;
+  /** Run `proceed` now, or after confirming that the unsaved Custom limits are dropped. */
+  const askDiscard = (proceed: () => void) => {
+    if (!dirtyRef.current) return proceed();
+    confirmAction("Discard unsaved changes?", "Your changes to these limits haven't been applied.", "Discard", () => {
+      const base = draftBaseRef.current;
+      if (base) (base.ac ? setAcTuning : setTuning)(base.tuning);
+      clearDraft();
+      proceed();
+    });
+  };
+
   // ── Preset handler ────────────────────────────────────────────────────────────
   const handlePresetChange = async (key: PresetKey) => {
     const scope = beginOperation();
@@ -1203,6 +1233,187 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
     } finally { finishOperation(op); }
   };
 
+  // ── Enable / disable plugin ───────────────────────────────────────────────────
+  const handleEnabledToggle = async (checked: boolean) => {
+    const op = beginOperation();
+    if (!op) return;
+    try {
+      const result = await setPluginEnabled(checked);
+      if (!operationCurrent(op)) return;
+      if (!result.success) throw new Error(result.stderr || "Could not change TDP control.");
+      setEnabled(checked);
+      done(checked ? "TDP control on." : "TDP control off. Lenovo's limits are back.");
+    } catch (e: unknown) {
+      if (operationCurrent(op)) showError("enabled", e);
+    } finally { finishOperation(op); }
+  };
+
+  // What runs now: the game's charger values on AC when it has them, else its battery or the global values.
+  const running = perGame && acSeparate && acOnline ? acTuning : tuning;
+  const runningStored = !perGame ? globalProfile.preset : acSeparate && acOnline ? savedAcPreset : savedPreset;
+  const now = absolute(running);
+  const nowLabel = PRESET_LABELS[resolvedPreset(now.spl, now.sppt, now.fppt, runningStored, presets)];
+  const enableDescription = failureFor("enabled") ?? (enabled && (profilePending || profileError) ? "Reading profile…"
+    : powerSummary(enabled, perGame && game ? game.name : "Global", nowLabel, now,
+      info?.success ? info.values?.package_draw : null, extrasUnlocked, stdCaps));
+  const presetDescription = failureFor("preset") ?? presetNote(preset, presets);
+  const scopeDescription = !game ? "" : failureFor("scope") ?? scopeNote(scope === "game_ac" ? "charger" : scope, game.name);
+  const sourceDescription = sourceNote(acOnline, editingAc);
+
+  return (
+    <PanelSection title="Power">
+      <PanelSectionRow>
+        <ToggleField
+          label="Enable TDP control"
+          description={enableDescription}
+          checked={enabled}
+          disabled={cpuBusy || loading || !tdpAvailable}
+          onChange={handleEnabledToggle}
+        />
+      </PanelSectionRow>
+      {enabled && game && <PanelSectionRow>
+        <DropdownItem
+          label={`Settings for ${game.name}`}
+          description={scopeDescription}
+          selectedOption={scope}
+          rgOptions={[{ data: "global", label: "Global" }, { data: "game", label: "This game" },
+            { data: "game_ac", label: "This game + charger" }]}
+          disabled={cpuBusy || loading}
+          onChange={option => { if (option.data !== scope && !cpuBusyOwnersRef.current.size) askDiscard(() => void applyScope(option.data)); }}
+        />
+      </PanelSectionRow>}
+      {enabled && game && perGame && acSeparate && <PanelSectionRow>
+        <DropdownItem
+          label="Edit settings for"
+          description={sourceDescription}
+          selectedOption={editingAc ? "charger" : "battery"}
+          rgOptions={[{ data: "battery", label: "Battery" }, { data: "charger", label: "Charger" }]}
+          disabled={cpuBusy || loading}
+          onChange={option => {
+            if ((option.data === "charger") === editingAc || cpuBusyOwnersRef.current.size) return;
+            askDiscard(() => { if (!cpuBusyOwnersRef.current.size) setEditingAc(option.data === "charger"); });
+          }}
+        />
+      </PanelSectionRow>}
+      {enabled && PRESET_ORDER.map(key => (
+        <PanelSectionRow key={key}>
+          <ButtonItem
+            layout="below"
+            description={preset === key ? presetDescription : undefined}
+            disabled={preset === key || loading || !tdpAvailable}
+            onClick={() => void handlePresetChange(key)}
+          >
+            {preset === key ? `> ${PRESET_LABELS[key]}` : PRESET_LABELS[key]}
+          </ButtonItem>
+        </PanelSectionRow>
+      ))}
+    </PanelSection>
+  );
+};
+
+const customLimitsSection = (s: TdpState) => {
+  const { beginOperation, operationCurrent, finishOperation, done, showError, failureFor, clearDraft, dirty,
+    setDirty, dirtyRef, draftBaseRef, active, setActive, caps, customCaps, minW, advancedTdpControl, loading,
+    tdpAvailable, operationLoading, editingAc, perGame, game, acSeparate, setTuning, setAcTuning, setSavedPreset,
+    setSavedAcPreset, setGlobalProfile } = s;
+  const om      = offsetMax(active.spl, caps);
+  const editActive = (next: Tuning) => {
+    if (!dirtyRef.current) draftBaseRef.current = { ac: editingAc, tuning: active };
+    dirtyRef.current = true;
+    setDirty(true);
+    setActive(next);
+  };
+  const handlers = {
+    onSpl: (v: number) => editActive(withSpl(active, v, customCaps, minW)),
+    onSppt: (v: number) => editActive(withSppt(active, v, customCaps)),
+    onFppt: (v: number) => editActive(withFppt(active, v, customCaps)),
+  };
+
+  // ── Apply (Custom mode only) ──────────────────────────────────────────────────
+  const apply = async () => {
+    const op = beginOperation();
+    if (!op) return;
+    const appId = (perGame && game) ? game.appId : "";
+    const target = advancedTdpControl ? active : simpleTuning(active.spl, customCaps, minW);
+    const a = absolute(target);
+    try {
+      if (editingAc && appId) {
+        const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, "custom");
+        if (!operationCurrent(op)) return;
+        if (!r.success) throw new Error(r.stderr || "The limits were not saved.");
+        setAcTuning(target);
+        setSavedAcPreset("custom");
+        clearDraft();
+        done(`Saved for ${game!.name} on charger.`);
+      } else {
+        const r = await applyTdp(
+          toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, "custom",
+          op.appId);
+        if (!operationCurrent(op)) return;
+        if (!r.success) throw new Error(r.stderr || "The limits were not applied.");
+        setTuning(target);
+        if (!appId) setGlobalProfile({ ...a, preset: "custom" });
+        else setSavedPreset("custom");
+        clearDraft();
+        done(appId ? `Saved for ${game!.name}.` : "Custom limits applied.");
+      }
+    } catch (e: unknown) {
+      if (operationCurrent(op)) showError("apply", e);
+    } finally { finishOperation(op); }
+  };
+
+  return (
+    <PanelSection title={`Custom limits${dirty ? " · unsaved" : ""}`}>
+      <PanelSectionRow>
+        <SliderField
+          label={`Sustained power · ${active.spl} W`}
+          value={active.spl} min={minW} max={customCaps.spl} step={1}
+          disabled={loading || !tdpAvailable}
+          onChange={advancedTdpControl ? handlers.onSpl
+            : (value) => editActive(simpleTuning(value, customCaps, minW))}
+          description={advancedTdpControl ? undefined : "Boost follows automatically."}
+        />
+      </PanelSectionRow>
+      {advancedTdpControl && <>
+      <PanelSectionRow>
+        <SliderField
+          label={`Slow boost · +${active.spptOff} W`}
+          value={active.spptOff} min={0} max={om.sppt || 1} step={1}
+          disabled={om.sppt === 0 || loading || !tdpAvailable}
+          onChange={handlers.onSppt}
+          description={boostRoomNote(active.spl, active.spptOff, om.sppt)}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <SliderField
+          label={`Fast boost · +${active.fpptOff} W`}
+          value={active.fpptOff} min={0} max={om.fppt || 1} step={1}
+          disabled={om.fppt === 0 || loading || !tdpAvailable}
+          onChange={handlers.onFppt}
+          description={boostRoomNote(active.spl, active.fpptOff, om.fppt)}
+        />
+      </PanelSectionRow>
+      </>}
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={apply} disabled={loading || !tdpAvailable}
+          description={failureFor("apply") ?? (dirty ? "Unsaved changes" : undefined)}>
+          {operationLoading ? "Applying…"
+            : editingAc && game ? `Apply for ${game.name} on charger`
+            : perGame && game ? `Apply for ${game.name}`
+            : "Apply"}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+};
+
+const moreSection = (s: TdpState) => {
+  const { beginOperation, operationCurrent, finishOperation, done, showError, failureFor, clearDraft, setFailure,
+    readCaps, adoptCaps, capsNow, advancedTdpControl, setAdvancedTdpControl, extrasUnlocked, setExtrasUnlocked,
+    extrasAvailable, caps, stdCaps, minW, presets, tuning, setTuning, acTuning, setAcTuning, setPreset, perGame,
+    setPerGame, setProfileExists, profileExists, setAcSeparate, acSeparate, setEditingAc, game, enabled,
+    savedPreset, setSavedPreset, savedAcPreset, setSavedAcPreset, globalProfile, setGlobalProfile,
+    adoptGlobalSettings, loading, tdpAvailable, operationLoading, details, setDetails, info, cpuNote } = s;
   const deleteProfile = async () => {
     if (!game) return;
     const op = beginOperation();
@@ -1220,21 +1431,6 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
       done(`Profile for ${app.name} deleted.`);
     } catch (e: unknown) {
       if (operationCurrent(op)) showError("delete", e);
-    } finally { finishOperation(op); }
-  };
-
-  // ── Enable / disable plugin ───────────────────────────────────────────────────
-  const handleEnabledToggle = async (checked: boolean) => {
-    const op = beginOperation();
-    if (!op) return;
-    try {
-      const result = await setPluginEnabled(checked);
-      if (!operationCurrent(op)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change TDP control.");
-      setEnabled(checked);
-      done(checked ? "TDP control on." : "TDP control off. Lenovo's limits are back.");
-    } catch (e: unknown) {
-      if (operationCurrent(op)) showError("enabled", e);
     } finally { finishOperation(op); }
   };
 
@@ -1349,39 +1545,6 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
     } finally { finishOperation(op); }
   };
 
-  // ── Apply (Custom mode only) ──────────────────────────────────────────────────
-  const apply = async () => {
-    const op = beginOperation();
-    if (!op) return;
-    const appId = (perGame && game) ? game.appId : "";
-    const target = advancedTdpControl ? active : simpleTuning(active.spl, customCaps, minW);
-    const a = absolute(target);
-    try {
-      if (editingAc && appId) {
-        const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, "custom");
-        if (!operationCurrent(op)) return;
-        if (!r.success) throw new Error(r.stderr || "The limits were not saved.");
-        setAcTuning(target);
-        setSavedAcPreset("custom");
-        clearDraft();
-        done(`Saved for ${game!.name} on charger.`);
-      } else {
-        const r = await applyTdp(
-          toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, "custom",
-          op.appId);
-        if (!operationCurrent(op)) return;
-        if (!r.success) throw new Error(r.stderr || "The limits were not applied.");
-        setTuning(target);
-        if (!appId) setGlobalProfile({ ...a, preset: "custom" });
-        else setSavedPreset("custom");
-        clearDraft();
-        done(appId ? `Saved for ${game!.name}.` : "Custom limits applied.");
-      }
-    } catch (e: unknown) {
-      if (operationCurrent(op)) showError("apply", e);
-    } finally { finishOperation(op); }
-  };
-
   const handleHelperRetry = async () => {
     const op = beginOperation(false, false);
     if (!op) return;
@@ -1396,7 +1559,54 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
     } finally { finishOperation(op); }
   };
 
-  // ── Render ────────────────────────────────────────────────────────────────────
+  return (
+    <PanelSection title="More">
+      <PanelSectionRow>
+        <ToggleField
+          label="Separate boost limits"
+          description={failureFor("advanced") ?? "Set slow and fast boost yourself in Custom."}
+          checked={advancedTdpControl}
+          disabled={loading || !tdpAvailable}
+          onChange={handleAdvancedTdpControlToggle}
+        />
+      </PanelSectionRow>
+      {extrasShown(capsNow) && <PanelSectionRow>
+        <ToggleField
+          label={`Allow up to ${FALLBACK_MAX.fppt} W`}
+          description={failureFor("extras") ?? extrasNote(extrasUnlocked, capsNow, stdCaps)}
+          checked={extrasUnlocked}
+          disabled={loading || !tdpAvailable}
+          onChange={checked => checked ? confirmAction(extrasConfirm(capsNow).title, extrasConfirm(capsNow).text,
+            extrasConfirm(capsNow).ok, () => void handleExtrasUnlockedToggle(true))
+            : void handleExtrasUnlockedToggle(false)}
+        />
+      </PanelSectionRow>}
+      {enabled && game && profileExists && <PanelSectionRow>
+        <ButtonItem layout="below" disabled={loading} description={failureFor("delete")}
+          onClick={() => confirmAction(`Delete profile for ${game.name}?`,
+            `Its power, CPU Boost and energy settings are removed. ${game.name} will use Global settings.`,
+            "Delete", () => void deleteProfile())}>
+          {`Delete profile for ${game.name}`}
+        </ButtonItem>
+      </PanelSectionRow>}
+      {helperRetryShown(capsNow, extrasUnlocked) && <PanelSectionRow>
+        <ButtonItem layout="below" disabled={operationLoading} description={failureFor("helper")}
+          onClick={handleHelperRetry}>Retry helper download</ButtonItem>
+      </PanelSectionRow>}
+      {detailsRows(details, () => setDetails(value => !value), [
+        ["Limits now", limitsText(info)],
+        ["Set by", sourceText(info)],
+        ...(cpuNote ? [["CPU energy", cpuNote] as [string, string]] : []),
+      ])}
+    </PanelSection>
+  );
+};
+
+export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+  const s = useTdpState(tabShown);
+  const { ready, setupErr, initializing, initialize, enabled, preset, profilePending, profileError, game, perGame,
+    acSeparate, editingAc, acOnline, onCpuBusyChange, setCpuNote } = s;
+
   if (!ready && setupErr) return (
     <PanelSection title="TDP status unavailable">
       {infoRow("Error", setupErr)}
@@ -1412,125 +1622,13 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
     </PanelSection>
   );
 
-  // What runs now: the game's charger values on AC when it has them, else its battery or the global values.
-  const running = perGame && acSeparate && acOnline ? acTuning : tuning;
-  const runningStored = !perGame ? globalProfile.preset : acSeparate && acOnline ? savedAcPreset : savedPreset;
-  const now = absolute(running);
-  const nowLabel = PRESET_LABELS[resolvedPreset(now.spl, now.sppt, now.fppt, runningStored, presets)];
-  const enableDescription = failureFor("enabled") ?? (enabled && (profilePending || profileError) ? "Reading profile…"
-    : powerSummary(enabled, perGame && game ? game.name : "Global", nowLabel, now,
-      info?.success ? info.values?.package_draw : null, extrasUnlocked, stdCaps));
-  const presetDescription = failureFor("preset") ?? presetNote(preset, presets);
-  const scopeDescription = !game ? "" : failureFor("scope") ?? scopeNote(scope === "game_ac" ? "charger" : scope, game.name);
-  const sourceDescription = sourceNote(acOnline, editingAc);
-  const capsNow = { tdpAvailable, extrasAvailable, helperRetryAvailable, tdpError };
-  const notice = tdpNotice(capsNow, extrasUnlocked);
-
   return (
     <>
-      {(notice || profileError) && <PanelSection>
-        {notice && infoRow(notice[0], notice[1])}
-        {profileError && <>
-          {infoRow("Could not load profile", profileError)}
-          <PanelSectionRow><ButtonItem layout="below" onClick={() => {
-            if (profilePending) return;
-            setProfilePending(true); setProfileError("");
-            setProfileAttempt(attempt => attempt + 1);
-          }}>Retry profile</ButtonItem></PanelSectionRow>
-        </>}
-      </PanelSection>}
+      {noticeSection(s)}
 
-      <PanelSection title="Power">
-        <PanelSectionRow>
-          <ToggleField
-            label="Enable TDP control"
-            description={enableDescription}
-            checked={enabled}
-            disabled={cpuBusy || loading || !tdpAvailable}
-            onChange={handleEnabledToggle}
-          />
-        </PanelSectionRow>
-        {enabled && game && <PanelSectionRow>
-          <DropdownItem
-            label={`Settings for ${game.name}`}
-            description={scopeDescription}
-            selectedOption={scope}
-            rgOptions={[{ data: "global", label: "Global" }, { data: "game", label: "This game" },
-              { data: "game_ac", label: "This game + charger" }]}
-            disabled={cpuBusy || loading}
-            onChange={option => { if (option.data !== scope && !cpuBusyOwnersRef.current.size) askDiscard(() => void applyScope(option.data)); }}
-          />
-        </PanelSectionRow>}
-        {enabled && game && perGame && acSeparate && <PanelSectionRow>
-          <DropdownItem
-            label="Edit settings for"
-            description={sourceDescription}
-            selectedOption={editingAc ? "charger" : "battery"}
-            rgOptions={[{ data: "battery", label: "Battery" }, { data: "charger", label: "Charger" }]}
-            disabled={cpuBusy || loading}
-            onChange={option => {
-              if ((option.data === "charger") === editingAc || cpuBusyOwnersRef.current.size) return;
-              askDiscard(() => { if (!cpuBusyOwnersRef.current.size) setEditingAc(option.data === "charger"); });
-            }}
-          />
-        </PanelSectionRow>}
-        {enabled && PRESET_ORDER.map(key => (
-          <PanelSectionRow key={key}>
-            <ButtonItem
-              layout="below"
-              description={preset === key ? presetDescription : undefined}
-              disabled={preset === key || loading || !tdpAvailable}
-              onClick={() => void handlePresetChange(key)}
-            >
-              {preset === key ? `> ${PRESET_LABELS[key]}` : PRESET_LABELS[key]}
-            </ButtonItem>
-          </PanelSectionRow>
-        ))}
-      </PanelSection>
+      {powerSection(s)}
 
-      {enabled && preset === "custom" && (
-        <PanelSection title={`Custom limits${dirty ? " · unsaved" : ""}`}>
-          <PanelSectionRow>
-            <SliderField
-              label={`Sustained power · ${active.spl} W`}
-              value={active.spl} min={minW} max={customCaps.spl} step={1}
-              disabled={loading || !tdpAvailable}
-              onChange={advancedTdpControl ? handlers.onSpl
-                : (value) => editActive(simpleTuning(value, customCaps, minW))}
-              description={advancedTdpControl ? undefined : "Boost follows automatically."}
-            />
-          </PanelSectionRow>
-          {advancedTdpControl && <>
-          <PanelSectionRow>
-            <SliderField
-              label={`Slow boost · +${active.spptOff} W`}
-              value={active.spptOff} min={0} max={om.sppt || 1} step={1}
-              disabled={om.sppt === 0 || loading || !tdpAvailable}
-              onChange={handlers.onSppt}
-              description={boostRoomNote(active.spl, active.spptOff, om.sppt)}
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <SliderField
-              label={`Fast boost · +${active.fpptOff} W`}
-              value={active.fpptOff} min={0} max={om.fppt || 1} step={1}
-              disabled={om.fppt === 0 || loading || !tdpAvailable}
-              onChange={handlers.onFppt}
-              description={boostRoomNote(active.spl, active.fpptOff, om.fppt)}
-            />
-          </PanelSectionRow>
-          </>}
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={apply} disabled={loading || !tdpAvailable}
-              description={failureFor("apply") ?? (dirty ? "Unsaved changes" : undefined)}>
-              {operationLoading ? "Applying…"
-                : editingAc && game ? `Apply for ${game.name} on charger`
-                : perGame && game ? `Apply for ${game.name}`
-                : "Apply"}
-            </ButtonItem>
-          </PanelSectionRow>
-        </PanelSection>
-      )}
+      {enabled && preset === "custom" && customLimitsSection(s)}
 
       {!profilePending && !profileError && <CpuPowerControlsSection
         key={`${enabled}:${game?.appId ?? ""}:${perGame}:${acSeparate && editingAc}`}
@@ -1542,45 +1640,7 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         onCompatibilityNote={setCpuNote}
       />}
 
-      <PanelSection title="More">
-        <PanelSectionRow>
-          <ToggleField
-            label="Separate boost limits"
-            description={failureFor("advanced") ?? "Set slow and fast boost yourself in Custom."}
-            checked={advancedTdpControl}
-            disabled={loading || !tdpAvailable}
-            onChange={handleAdvancedTdpControlToggle}
-          />
-        </PanelSectionRow>
-        {extrasShown(capsNow) && <PanelSectionRow>
-          <ToggleField
-            label={`Allow up to ${FALLBACK_MAX.fppt} W`}
-            description={failureFor("extras") ?? extrasNote(extrasUnlocked, capsNow, stdCaps)}
-            checked={extrasUnlocked}
-            disabled={loading || !tdpAvailable}
-            onChange={checked => checked ? confirmAction(extrasConfirm(capsNow).title, extrasConfirm(capsNow).text,
-              extrasConfirm(capsNow).ok, () => void handleExtrasUnlockedToggle(true))
-              : void handleExtrasUnlockedToggle(false)}
-          />
-        </PanelSectionRow>}
-        {enabled && game && profileExists && <PanelSectionRow>
-          <ButtonItem layout="below" disabled={loading} description={failureFor("delete")}
-            onClick={() => confirmAction(`Delete profile for ${game.name}?`,
-              `Its power, CPU Boost and energy settings are removed. ${game.name} will use Global settings.`,
-              "Delete", () => void deleteProfile())}>
-            {`Delete profile for ${game.name}`}
-          </ButtonItem>
-        </PanelSectionRow>}
-        {helperRetryShown(capsNow, extrasUnlocked) && <PanelSectionRow>
-          <ButtonItem layout="below" disabled={operationLoading} description={failureFor("helper")}
-            onClick={handleHelperRetry}>Retry helper download</ButtonItem>
-        </PanelSectionRow>}
-        {detailsRows(details, () => setDetails(value => !value), [
-          ["Limits now", limitsText(info)],
-          ["Set by", sourceText(info)],
-          ...(cpuNote ? [["CPU energy", cpuNote] as [string, string]] : []),
-        ])}
-      </PanelSection>
+      {moreSection(s)}
     </>
   );
 };
