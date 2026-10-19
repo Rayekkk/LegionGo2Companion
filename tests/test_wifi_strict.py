@@ -409,5 +409,115 @@ class ReconnectPacingTests(unittest.TestCase):
         self.assertEqual(activations, [])
 
 
+class BandPolicyCapabilityReasonTests(unittest.TestCase):
+    """Each blocker wins in a fixed order; pins all four reasons the UI shows."""
+    R = {
+        "connect": "Connect to WiFi first.",
+        "target": "Band changes are enabled only on a Legion Go 2 with the "
+                  "MediaTek MT7922 (mt7921e) driver.",
+        "bssid": "Clear the fixed BSSID before changing band policy.",
+        "channel": "Clear the fixed WiFi channel before changing band policy.",
+        "symlink": "Refusing a symlinked /etc/iwd/main.conf.",
+        "ambiguous": "The iwd config contains duplicate [Rank] sections or band keys.",
+        "watchdog": "The automatic rollback watchdog is unavailable.",
+        "iwd_nm": "iwd does not enforce NetworkManager's per-profile band setting. "
+                  "Use the iwd 5/6 GHz policy instead.",
+        "backend": "The WiFi backend cannot enforce a per-profile band setting.",
+        "nm": "NetworkManager 1.58 or newer is required for 6 GHz only.",
+        "no6": "No usable 6 GHz channels are exposed by the radio and regdomain.",
+        "ext_band": "The active profile already has an external band setting.",
+        "ext_iwd": "An external iwd band policy is already configured.",
+        "vis6": "No 6 GHz BSS for the active SSID is currently visible.",
+        "need_iwd": "The 5/6 GHz policy requires the iwd WiFi backend.",
+        "iwd_missing": "iwd is not installed.",
+        "iwd_inactive": "The iwd service is not active.",
+        "no_high": "No usable 5 or 6 GHz channels are exposed by the radio.",
+        "vis_high": "No 5 or 6 GHz BSS for the active SSID is currently visible.",
+        "fresh": "No fresh 5 or 6 GHz scan result for the active SSID was verified.",
+        "E5": "E5", "E6": "E6", "conflict": "conflict", "": "",
+    }
+
+    def reasons(self, backend="iwd", iface="wlan0", uuid=UUID, driver="mt7921e",
+                profile=None, policy=wifi.BAND_POLICY_OFF, snapshot=None, matches=True,
+                errors=None, files=None, iwd_version=True, iwd_state="active", nm6=True,
+                freqs=([5320], [6295]), visible=None, conflict=""):
+        plugin = wifi.Plugin()
+        profile = profile or {}
+        errors = errors or {}
+        visible = dict({"two_ghz": 1, "five_ghz": 1, "six_ghz": 1, "fresh_high_band": True},
+                       **(visible or {}))
+
+        def command(argv, **kwargs):
+            if argv[0] == "/usr/lib/iwd/iwd":
+                return {"success": iwd_version, "stdout": ""}
+            return {"success": True, "stdout": iwd_state + "\n"}
+
+        with patch.object(plugin, "_get_wifi_interface", return_value=iface), \
+             patch.object(plugin, "_get_active_connection_uuid", return_value=uuid), \
+             patch.object(plugin, "_get_current_backend", return_value=backend), \
+             patch.object(plugin, "_detect_device_family", return_value=("", "legion_go_2", "")), \
+             patch.object(plugin, "_detect_wifi_driver", return_value=driver), \
+             patch.object(plugin, "_nm_supports_six_ghz_only", return_value=nm6), \
+             patch.object(plugin, "_run_cmd", side_effect=command), \
+             patch.object(plugin, "_get_enabled_high_band_frequencies", return_value=freqs), \
+             patch.object(plugin, "_get_visible_bands_for_active_ssid", return_value=visible), \
+             patch.object(plugin, "_nmcli_get",
+                          side_effect=lambda _u, key: (profile.get(key.rsplit(".", 1)[1], ""), {})), \
+             patch.object(wifi, "_load_settings", return_value={"band_policy": policy}), \
+             patch.object(plugin, "_get_iwd_rank_modifier_snapshot", return_value=snapshot or {}), \
+             patch.object(plugin, "_iwd_band_modifier_error",
+                          side_effect=lambda _s, band: errors.get(band, "")), \
+             patch.object(plugin, "_iwd_snapshot_matches", return_value=matches), \
+             patch.object(plugin, "_get_iwd_profile_conflict", return_value=conflict), \
+             patch.object(wifi.os.path, "isfile", side_effect=lambda p: (files or {}).get(p, True)):
+            cap = plugin._get_band_policy_capabilities_sync(False)
+        keys = ("six_ghz_only", "five_six_no_24", "five_six_only", "five_six_only_try")
+        for key in keys:
+            self.assertIs(cap[key + "_available"], not cap["reason_" + key])
+        return tuple(cap["reason_" + key] for key in keys)
+
+    def test_reason_order(self):
+        iwd_unit = "/usr/lib/systemd/system/iwd.service"
+        cases = (
+            ({}, ("iwd_nm", "", "", "")),
+            ({"backend": "wpa_supplicant"}, ("", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "other"}, ("backend", "need_iwd", "need_iwd", "need_iwd")),
+            ({"iface": None}, ("connect",) * 4),
+            ({"uuid": None}, ("connect",) * 4),
+            ({"driver": "ath11k", "profile": {"bssid": "x"}}, ("target",) * 4),
+            ({"profile": {"bssid": "x", "channel": "36"}}, ("bssid",) * 4),
+            ({"profile": {"channel": "36"}}, ("channel",) * 4),
+            ({"profile": {"channel": "0"}}, ("iwd_nm", "", "", "")),
+            ({"snapshot": {"unsafe_symlink": True, "ambiguous": True}}, ("symlink",) * 4),
+            ({"snapshot": {"ambiguous": True}}, ("ambiguous",) * 4),
+            ({"files": {"/usr/bin/python3": False}}, ("watchdog",) * 4),
+            ({"backend": "wpa_supplicant", "nm6": False, "freqs": ([5320], [])}, ("nm", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "freqs": ([5320], []), "errors": {"six": "E6"}}, ("no6", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "errors": {"six": "E6"}, "profile": {"band": "a"}}, ("E6", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "profile": {"band": "a"}, "snapshot": {"modifier_present": True}}, ("ext_band", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "policy": wifi.BAND_POLICY_HIGH_ONLY, "profile": {"band": "a"}}, ("ext_band", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "policy": wifi.BAND_POLICY_SIX_ONLY, "profile": {"band": "a"}}, ("", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "snapshot": {"modifier_present": True}, "visible": {"six_ghz": 0}}, ("ext_iwd", "need_iwd", "need_iwd", "need_iwd")),
+            ({"backend": "wpa_supplicant", "visible": {"six_ghz": 0}}, ("vis6", "need_iwd", "need_iwd", "need_iwd")),
+            ({"iwd_version": False, "files": {iwd_unit: False}, "iwd_state": "inactive"}, ("iwd_nm", "iwd_missing", "iwd_missing", "iwd_missing")),
+            ({"iwd_version": False, "iwd_state": "inactive"}, ("iwd_nm", "iwd_inactive", "iwd_inactive", "iwd_inactive")),
+            ({"freqs": ([], []), "errors": {"five": "E5"}}, ("iwd_nm", "no_high", "no_high", "no_high")),
+            ({"errors": {"five": "E5", "six": "E6"}}, ("iwd_nm", "E5", "E5", "E5")),
+            ({"errors": {"six": "E6"}, "profile": {"band": "a"}}, ("iwd_nm", "E6", "E6", "E6")),
+            ({"profile": {"band": "a"}, "snapshot": {"modifier_present": True}}, ("iwd_nm", "ext_band", "ext_band", "ext_band")),
+            ({"policy": wifi.BAND_POLICY_HIGH_ONLY, "profile": {"band": "a"}}, ("iwd_nm", "", "", "")),
+            ({"snapshot": {"modifier_present": True}, "conflict": "conflict"}, ("iwd_nm", "ext_iwd", "ext_iwd", "ext_iwd")),
+            ({"policy": wifi.BAND_POLICY_SIX_ONLY, "matches": False}, ("iwd_nm", "ext_iwd", "ext_iwd", "ext_iwd")),
+            ({"policy": wifi.BAND_POLICY_HIGH_ONLY, "matches": False}, ("iwd_nm", "", "", "")),
+            ({"conflict": "conflict", "visible": {"five_ghz": 0, "six_ghz": 0}}, ("iwd_nm", "conflict", "conflict", "conflict")),
+            ({"visible": {"five_ghz": 0, "six_ghz": 0}}, ("iwd_nm", "vis_high", "vis_high", "")),
+            ({"visible": {"five_ghz": 0}}, ("iwd_nm", "", "", "")),
+            ({"visible": {"fresh_high_band": False}}, ("iwd_nm", "", "fresh", "")),
+        )
+        for kwargs, expected in cases:
+            with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
+                self.assertEqual(self.reasons(**kwargs), tuple(self.R[key] for key in expected))
+
+
 if __name__ == "__main__":
     unittest.main()

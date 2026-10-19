@@ -177,6 +177,45 @@ def _refusal(error: str, message: str, **extra) -> dict:
     return {"success": False, "error": error, "message": message, **extra}
 
 
+def _first_reason(*checks) -> str:
+    """Return the reason of the first ``(blocked, reason)`` pair that is blocked, else ""."""
+    return next((reason for blocked, reason in checks if blocked), "")
+
+
+def _iw_link_fields(link_out: str) -> dict:
+    """Signal, TX bitrate and frequency from ``iw dev <iface> link``."""
+    fields = {}
+    for line in link_out.split("\n"):
+        line = line.strip()
+        if line.startswith("signal:"):
+            fields["signal_dbm"] = line.split(":", 1)[1].strip()
+        elif "tx bitrate:" in line:
+            fields["tx_bitrate"] = line.split("tx bitrate:", 1)[1].strip()
+        elif line.startswith("freq:"):
+            fields["frequency"] = line.split(":", 1)[1].strip()
+    return fields
+
+
+def _iw_channel_label(info_out: str) -> str | None:
+    """``iw dev <iface> info`` channel as "36 (80 MHz)"; the last channel line wins."""
+    label = None
+    for line in info_out.split("\n"):
+        line = line.strip()
+        if not line.startswith("channel"):
+            continue
+        # Raw: "channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz"
+        parts = line.split(",")
+        tokens = parts[0].split()
+        chan_num = tokens[1] if len(tokens) >= 2 else ""
+        width = ""
+        for part in parts:
+            part = part.strip()
+            if part.startswith("width:"):
+                width = part.split(":", 1)[1].strip()
+        label = f"{chan_num} ({width})" if chan_num and width else chan_num or line
+    return label
+
+
 class Plugin:
     """Root plugin instance. Decky exposes every async method here as a
     callable from the frontend. Synchronous helpers prefixed with `_` are
@@ -1259,11 +1298,7 @@ class Plugin:
                 "uuid": uuid,
                 "ssid": ssid,
                 "checked_at": now,
-                "bands": {
-                    "two_ghz": bands["two_ghz"],
-                    "five_ghz": bands["five_ghz"],
-                    "six_ghz": bands["six_ghz"],
-                },
+                "bands": {key: bands[key] for key in ("two_ghz", "five_ghz", "six_ghz")},
             }
         elif allow_recent_cache and isinstance(cached_bands, dict):
             for key in ("two_ghz", "five_ghz", "six_ghz"):
@@ -1304,7 +1339,6 @@ class Plugin:
         )
 
         five_ghz, six_ghz = self._get_enabled_high_band_frequencies()
-        has_5ghz, has_6ghz = bool(five_ghz), bool(six_ghz)
 
         visible = self._get_visible_bands_for_active_ssid(
             iface,
@@ -1333,85 +1367,57 @@ class Plugin:
         five_modifier_error = self._iwd_band_modifier_error(iwd_snapshot, "five")
         six_modifier_error = self._iwd_band_modifier_error(iwd_snapshot, "six")
         external_band_while_off = current_policy == BAND_POLICY_OFF and bool(band)
-        external_iwd_while_off = (
-            current_policy == BAND_POLICY_OFF
-            and iwd_snapshot.get("modifier_present")
-        )
-        external_band_during_high = (
-            current_policy in IWD_BAND_POLICIES
-            and bool(band)
-        )
+        external_iwd_while_off = current_policy == BAND_POLICY_OFF and iwd_snapshot.get("modifier_present")
+        external_band_during_high = current_policy in IWD_BAND_POLICIES and bool(band)
         external_iwd_during_six = (
             current_policy == BAND_POLICY_SIX_ONLY
             and not self._iwd_snapshot_matches(iwd_snapshot, self._applied_iwd(applied_state))
         )
-        fixed_channel = channel not in ("", "0")
-        fixed_bssid = bool(bssid)
         watchdog_available = os.path.isfile("/usr/bin/systemd-run") and os.path.isfile(
             "/usr/bin/python3"
         )
 
-        common_reason = ""
-        if not iface or not uuid:
-            common_reason = "Connect to WiFi first."
-        elif not target_supported:
-            common_reason = (
+        common_reason = _first_reason(
+            (not iface or not uuid, "Connect to WiFi first."),
+            (not target_supported, (
                 "Band changes are enabled only on a Legion Go 2 with the "
                 "MediaTek MT7922 (mt7921e) driver."
-            )
-        elif fixed_bssid:
-            common_reason = "Clear the fixed BSSID before changing band policy."
-        elif fixed_channel:
-            common_reason = "Clear the fixed WiFi channel before changing band policy."
-        elif iwd_snapshot.get("unsafe_symlink"):
-            common_reason = "Refusing a symlinked /etc/iwd/main.conf."
-        elif iwd_snapshot.get("ambiguous"):
-            common_reason = (
-                "The iwd config contains duplicate [Rank] sections or band keys."
-            )
-        elif not watchdog_available:
-            common_reason = "The automatic rollback watchdog is unavailable."
+            )),
+            (bssid, "Clear the fixed BSSID before changing band policy."),
+            (channel not in ("", "0"), "Clear the fixed WiFi channel before changing band policy."),
+            (iwd_snapshot.get("unsafe_symlink"), "Refusing a symlinked /etc/iwd/main.conf."),
+            (iwd_snapshot.get("ambiguous"),
+             "The iwd config contains duplicate [Rank] sections or band keys."),
+            (not watchdog_available, "The automatic rollback watchdog is unavailable."),
+        )
 
-        reason_six = common_reason
-        if not reason_six and backend == "iwd":
-            reason_six = (
+        reason_six = common_reason or _first_reason(
+            (backend == "iwd", (
                 "iwd does not enforce NetworkManager's per-profile band setting. "
                 "Use the iwd 5/6 GHz policy instead."
-            )
-        elif not reason_six and backend != "wpa_supplicant":
-            reason_six = "The WiFi backend cannot enforce a per-profile band setting."
-        elif not reason_six and not nm_supports_6ghz:
-            reason_six = "NetworkManager 1.58 or newer is required for 6 GHz only."
-        elif not reason_six and not has_6ghz:
-            reason_six = "No usable 6 GHz channels are exposed by the radio and regdomain."
-        elif not reason_six and six_modifier_error:
-            reason_six = six_modifier_error
-        elif not reason_six and (external_band_while_off or external_band_during_high):
-            reason_six = "The active profile already has an external band setting."
-        elif not reason_six and external_iwd_while_off:
-            reason_six = "An external iwd band policy is already configured."
-        elif not reason_six and not six_visible:
-            reason_six = "No 6 GHz BSS for the active SSID is currently visible."
+            )),
+            (backend != "wpa_supplicant",
+             "The WiFi backend cannot enforce a per-profile band setting."),
+            (not nm_supports_6ghz, "NetworkManager 1.58 or newer is required for 6 GHz only."),
+            (not six_ghz, "No usable 6 GHz channels are exposed by the radio and regdomain."),
+            (six_modifier_error, six_modifier_error),
+            (external_band_while_off or external_band_during_high,
+             "The active profile already has an external band setting."),
+            (external_iwd_while_off, "An external iwd band policy is already configured."),
+            (not six_visible, "No 6 GHz BSS for the active SSID is currently visible."),
+        )
 
-        reason_high = common_reason
-        if not reason_high and backend != "iwd":
-            reason_high = "The 5/6 GHz policy requires the iwd WiFi backend."
-        elif not reason_high and not iwd_available:
-            reason_high = "iwd is not installed."
-        elif not reason_high and not iwd_active:
-            reason_high = "The iwd service is not active."
-        elif not reason_high and not (has_5ghz or has_6ghz):
-            reason_high = "No usable 5 or 6 GHz channels are exposed by the radio."
-        elif not reason_high and five_modifier_error:
-            reason_high = five_modifier_error
-        elif not reason_high and six_modifier_error:
-            reason_high = six_modifier_error
-        elif not reason_high and external_band_while_off:
-            reason_high = "The active profile already has an external band setting."
-        elif not reason_high and (
-            external_iwd_while_off or external_iwd_during_six
-        ):
-            reason_high = "An external iwd band policy is already configured."
+        reason_high = common_reason or _first_reason(
+            (backend != "iwd", "The 5/6 GHz policy requires the iwd WiFi backend."),
+            (not iwd_available, "iwd is not installed."),
+            (not iwd_active, "The iwd service is not active."),
+            (not (five_ghz or six_ghz), "No usable 5 or 6 GHz channels are exposed by the radio."),
+            (five_modifier_error, five_modifier_error),
+            (six_modifier_error, six_modifier_error),
+            (external_band_while_off, "The active profile already has an external band setting."),
+            (external_iwd_while_off or external_iwd_during_six,
+             "An external iwd band policy is already configured."),
+        )
         if not reason_high and uuid:
             reason_high = self._get_iwd_profile_conflict(uuid, allow_disabled_duplicates=True)
         reason_high_hard = reason_high
@@ -2810,16 +2816,7 @@ class Plugin:
                 decoded_ssid = self._iw_ssid(ssid.group(1))
                 if decoded_ssid is not None:
                     status["live"]["ssid"] = decoded_ssid
-            for line in link_out.split("\n"):
-                line = line.strip()
-                if line.startswith("signal:"):
-                    status["live"]["signal_dbm"] = line.split(":", 1)[1].strip()
-                elif "tx bitrate:" in line:
-                    status["live"]["tx_bitrate"] = line.split("tx bitrate:", 1)[
-                        1
-                    ].strip()
-                elif line.startswith("freq:"):
-                    status["live"]["frequency"] = line.split(":", 1)[1].strip()
+            status["live"].update(_iw_link_fields(link_out))
 
             # NM activation alone can outlive the radio link during a switch.
             # Verify the same activated profile after reading the kernel link.
@@ -2844,31 +2841,12 @@ class Plugin:
                         "Only 5/6 GHz is selected, but the live WiFi link uses 2.4 GHz."
                     ))
 
-            # Channel info - parse to "36 (80 MHz)" format
             info_result = self._run_cmd(
                 ["/usr/bin/iw", "dev", iface, "info"], timeout=T
             )
-            for line in info_result.get("stdout", "").split("\n"):
-                line = line.strip()
-                if line.startswith("channel"):
-                    # Raw: "channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz"
-                    parts = line.split(",")
-                    chan_num = ""
-                    width = ""
-                    if parts:
-                        tokens = parts[0].split()
-                        if len(tokens) >= 2:
-                            chan_num = tokens[1]
-                    for part in parts:
-                        part = part.strip()
-                        if part.startswith("width:"):
-                            width = part.split(":", 1)[1].strip()
-                    if chan_num and width:
-                        status["live"]["channel"] = f"{chan_num} ({width})"
-                    elif chan_num:
-                        status["live"]["channel"] = chan_num
-                    else:
-                        status["live"]["channel"] = line
+            channel = _iw_channel_label(info_result.get("stdout", ""))
+            if channel is not None:
+                status["live"]["channel"] = channel
 
             return status
         except Exception as e:

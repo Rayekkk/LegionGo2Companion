@@ -214,6 +214,34 @@ class BackendSwitchTests(unittest.TestCase):
         self.assertNotIn("ssid", result["live"])
         self.assertNotIn("frequency", result["live"])
 
+    def test_status_link_and_channel_fields(self):
+        self.use_wpa()
+        link = ("Connected to aa:bb:cc:dd:ee:ff (on wlan0)\n\tSSID: Home\n\tfreq: 5180.0\n"
+                "\tsignal: -52 dBm\n\ttx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz\n")
+        for info, channel in (
+            ("channel 1 (2412 MHz), width: 20 MHz", "1 (20 MHz)"),
+            ("\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz\n", "36 (80 MHz)"),
+            ("channel 36 (5180 MHz)", "36"),
+            ("channel", "channel"),
+            ("channel 6, width: 20 MHz\n\tchannel 11, width: 40 MHz, width: 20 MHz", "11 (20 MHz)"),
+            ("type managed\n", None),
+        ):
+            def command(argv, **kwargs):
+                if argv[-1] == "link":
+                    return {"success": True, "stdout": link}
+                if argv[-1] == "info":
+                    return {"success": True, "stdout": info}
+                return self.status_commands(argv, **kwargs)
+
+            with self.subTest(info=info), \
+                 patch.object(self.plugin, "_get_wifi_interface", return_value="wlan0"), \
+                 patch.object(self.plugin, "_run_cmd", side_effect=command):
+                live = self.plugin._get_status_sync()["live"]
+            self.assertEqual({key: live.get(key) for key in
+                              ("ssid", "frequency", "signal_dbm", "tx_bitrate", "channel")},
+                             {"ssid": "Home", "frequency": "5180.0", "signal_dbm": "-52 dBm",
+                              "tx_bitrate": "866.7 MBit/s VHT-MCS 9 80MHz", "channel": channel})
+
 
 class ConnectionStateTests(unittest.TestCase):
     def test_missing_or_failed_inventory_is_unavailable_not_disconnected(self):
