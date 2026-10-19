@@ -181,6 +181,11 @@ npm run package -- --output /absolute/fresh/path/desktop-candidate.zip
 python scripts/verify-package.py /absolute/fresh/path/desktop-candidate.zip
 ```
 
+`npm run package` takes the tracked files from the committed `HEAD` (`git archive`)
+and only the built `dist/` from the checkout; it refuses uncommitted changes to
+packaged files. Names are sorted, every entry carries the commit date and fixed
+modes, so the same commit, `dist/` and Node version give the same SHA-256.
+
 `build-native.py --test` runs the CTest suites `transport`, `logviewer`,
 `native_host` and `native_ui` (QML against a fixture backend);
 `tests/native_capture.py` renders every page against a loopback fake backend.

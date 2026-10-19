@@ -5,19 +5,20 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { crc32, deflateRawSync } from "node:zlib";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(join(repoRoot, "plugin.json"), "utf8"));
 const PLUGIN_DIR_NAME = "LegionGo2Companion";
 const version = manifest.version;
-const buildDir = join(repoRoot, "build");
-const stageDir = join(buildDir, PLUGIN_DIR_NAME);
 const outputIndex = process.argv.indexOf('--output');
 if (outputIndex !== -1 && !process.argv[outputIndex + 1]) throw new Error('--output requires a path');
 const zipPath = outputIndex === -1 ? join(repoRoot, `${PLUGIN_DIR_NAME}-${version}.zip`) : resolve(process.argv[outputIndex + 1]);
@@ -86,6 +87,8 @@ const CONTENTS = [
   "dist",
 ];
 
+const TRACKED = CONTENTS.filter((entry) => entry !== "dist");
+
 function fail(message) {
   console.error(`error: ${message}`);
   process.exit(1);
@@ -109,10 +112,21 @@ function validatePayload() {
   }
 }
 
-function stagePayload(destination) {
+function git(args, options = {}) {
+  return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", ...options });
+}
+
+// Tracked files come from the committed tree (git archive), so the checkout's state cannot leak in;
+// dist/ is the build output and is not tracked.
+function stagePayload(destination, scratch) {
+  const source = join(scratch, "source");
+  mkdirSync(source, { recursive: true });
+  git(["archive", "--format=tar", "-o", join(scratch, "source.tar"), "HEAD", "--",
+    ...TRACKED]);
+  execFileSync("tar", ["-xf", "../source.tar"], { cwd: source, stdio: "inherit" });
   mkdirSync(destination, { recursive: true });
   for (const entry of CONTENTS) {
-    cpSync(join(repoRoot, entry), join(destination, entry), {
+    cpSync(join(entry === "dist" ? repoRoot : source, entry), join(destination, entry), {
       recursive: true,
       filter: (src) => !/(__pycache__|\.pyc$|\.DS_Store|node_modules|[\\/]tests(?:[\\/]|$))/.test(src),
     });
@@ -131,17 +145,77 @@ function stagePayload(destination) {
   });
 }
 
-function sevenZip() {
-  return [
-    "C:\\Program Files\\7-Zip\\7z.exe",
-    "C:\\Program Files (x86)\\7-Zip\\7z.exe",
-  ].find(existsSync);
+function listTree(base, prefix = "") {
+  const entries = [];
+  for (const item of readdirSync(join(base, prefix), { withFileTypes: true })) {
+    const name = prefix ? `${prefix}/${item.name}` : item.name;
+    if (item.isDirectory()) entries.push(`${name}/`, ...listTree(base, name));
+    else if (item.isFile()) entries.push(name);
+    else fail(`unsupported payload entry: ${name}`);
+  }
+  return entries;
+}
+
+// Same tree + same timestamp -> byte-identical ZIP: sorted names, one fixed DOS time (UTC),
+// fixed modes (0644 files, 0755 directories). Deflate output is fixed for a given Node/zlib.
+export function writeZip(base, top, zipPath, epochSeconds) {
+  const when = new Date(epochSeconds * 1000);
+  const dosTime = (when.getUTCHours() << 11) | (when.getUTCMinutes() << 5) | (when.getUTCSeconds() >> 1);
+  const dosDate = ((when.getUTCFullYear() - 1980) << 9) | ((when.getUTCMonth() + 1) << 5) | when.getUTCDate();
+  const names = [`${top}/`, ...listTree(base, top)].sort();
+  if (names.length > 0xffff) fail("too many ZIP entries");
+  const locals = [];
+  const central = [];
+  let offset = 0;
+  for (const name of names) {
+    const isDir = name.endsWith("/");
+    const data = isDir ? Buffer.alloc(0) : readFileSync(join(base, name));
+    const packed = isDir ? data : deflateRawSync(data, { level: 9 });
+    const method = !isDir && packed.length < data.length ? 8 : 0;
+    const body = method ? packed : data;
+    const crc = crc32(data);
+    const nameBytes = Buffer.from(name, "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt16LE(dosTime, 10);
+    local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    const header = Buffer.alloc(46);
+    header.writeUInt32LE(0x02014b50, 0);
+    header.writeUInt16LE((3 << 8) | 20, 4);
+    header.writeUInt16LE(20, 6);
+    header.writeUInt16LE(method, 10);
+    header.writeUInt16LE(dosTime, 12);
+    header.writeUInt16LE(dosDate, 14);
+    header.writeUInt32LE(crc, 16);
+    header.writeUInt32LE(body.length, 20);
+    header.writeUInt32LE(data.length, 24);
+    header.writeUInt16LE(nameBytes.length, 28);
+    header.writeUInt32LE((isDir ? 0o40755 : 0o100644) * 0x10000 + (isDir ? 0x10 : 0), 38);
+    header.writeUInt32LE(offset, 42);
+    locals.push(local, nameBytes, body);
+    central.push(header, nameBytes);
+    offset += local.length + nameBytes.length + body.length;
+  }
+  const directory = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(names.length, 8);
+  end.writeUInt16LE(names.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  writeFileSync(zipPath, Buffer.concat([...locals, directory, end]));
 }
 
 function checkStaging() {
   const root = mkdtempSync(join(tmpdir(), "legiongo2companion-package-check-"));
   try {
-    stagePayload(join(root, PLUGIN_DIR_NAME));
+    stagePayload(join(root, PLUGIN_DIR_NAME), root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -150,33 +224,22 @@ function checkStaging() {
 
 function packagePlugin() {
   if (outputIndex !== -1 && existsSync(zipPath)) fail('experimental output already exists; choose a fresh file');
+  const dirty = git(["status", "--porcelain", "--untracked-files=no", "--", ...TRACKED]).trim();
+  if (dirty) fail(`the package is built from HEAD; commit or discard these changes first:\n${dirty}`);
   mkdirSync(dirname(zipPath), {recursive: true});
-  rmSync(buildDir, { recursive: true, force: true });
   rmSync(zipPath, { force: true });
-  stagePayload(stageDir);
-
-  const sevenZipPath = sevenZip();
+  const root = mkdtempSync(join(tmpdir(), "legiongo2companion-package-"));
   try {
-    if (sevenZipPath) {
-      execFileSync(sevenZipPath, ["a", "-tzip", "-mx=9", zipPath, PLUGIN_DIR_NAME], {
-        cwd: buildDir,
-        stdio: "inherit",
-      });
-    } else {
-      execFileSync("zip", ["-r", "-9", "-q", zipPath, PLUGIN_DIR_NAME], {
-        cwd: buildDir,
-        stdio: "inherit",
-      });
-    }
-  } catch (error) {
-    fail(sevenZipPath
-      ? `7-Zip failed: ${error.message}`
-      : `no zip tool found: ${error.message}`);
+    stagePayload(join(root, "stage", PLUGIN_DIR_NAME), root);
+    writeZip(join(root, "stage"), PLUGIN_DIR_NAME, zipPath, Number(git(["log", "-1", "--format=%ct", "HEAD"]).trim()));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
-  rmSync(buildDir, { recursive: true, force: true });
-  console.log(`packaged manifest v${version} -> ${zipPath}`);
+  console.log(`packaged manifest v${version} from ${git(["rev-parse", "--short", "HEAD"]).trim()} -> ${zipPath}`);
 }
 
-validatePayload();
-if (process.argv.includes("--check")) checkStaging();
-else packagePlugin();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  validatePayload();
+  if (process.argv.includes("--check")) checkStaging();
+  else packagePlugin();
+}
