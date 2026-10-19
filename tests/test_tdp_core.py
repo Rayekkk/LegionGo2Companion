@@ -1,31 +1,33 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """TDP core behaviour on a fake firmware-attributes / platform-profile sysfs.
 
-The hardware boundary is files plus a fake ryzenadj runner; only time-like
-inputs (foreground game, charger, suspend clock) are injected directly.
+The hardware boundary is files plus a fake ryzenadj process and a fake helper
+download; only time-like inputs (foreground game, charger, suspend clock) are
+injected directly.
 """
 import asyncio
 from contextlib import ExitStack
+import hashlib
+import io
 from pathlib import Path
+import shutil
+import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
-import copy
-import threading
 
 import support  # noqa: F401 - installs the fake decky module
 import tdp_backend as tdp
 from safe_settings import AtomicSettingsManager
 import module_control
-import module_runtime
-import tdp_backend
-import tdp_updater
 
 REAL_RUNNING_APPID = tdp._get_running_appid
-
-INFO = """| STAPM LIMIT | 25.000 | stapm-limit |
-| PPT LIMIT FAST | {fast:.3f} | fast-limit |
-| PPT LIMIT SLOW | {slow:.3f} | slow-limit |
+HELPER = b'\x7fELF fake ryzenadj'
+LIMIT_FLAGS = {'--stapm-limit': 'spl', '--slow-limit': 'sppt', '--fast-limit': 'fppt'}
+INFO = """| STAPM LIMIT | {spl:.3f} | stapm-limit |
+| PPT LIMIT FAST | {fppt:.3f} | fast-limit |
+| PPT LIMIT SLOW | {sppt:.3f} | slow-limit |
 """
 
 
@@ -45,36 +47,62 @@ class TdpCoreTests(unittest.TestCase):
         node.mkdir(parents=True)
         self.profile = node / 'profile'
         self.profile.write_text('balanced')
-        (node / 'choices').write_text('low-power balanced performance custom')
+        self.choices = node / 'choices'
+        self.choices.write_text('low-power balanced performance custom')
         self.cpu = self.root / 'cpu'
         self.cpu.mkdir()
+        self.bin = self.root / 'bin/ryzenadj'
+        self.bin.parent.mkdir()
+        self.bin.write_bytes(b'')  # present but not the verified helper
+        self.tmp = self.root / 'tmp'
+        self.tmp.mkdir()
         self.store = AtomicSettingsManager('tdp_settings', str(self.root / 'settings'))
         self.seed()
         self.app, self.ac = '', False
         self.ryzenadj = []
+        self.smu = {}  # limits written through ryzenadj; otherwise it reads the firmware's
         self.profile_writes = []
+        self.profile_sticks = True
+        self.downloads, self.archive = [], None
+        self.download_started, self.download_gate = threading.Event(), None
         real_write_profile = tdp._write_profile
 
         def write_profile(path, value):
             self.profile_writes.append(value)
-            return real_write_profile(path, value)
+            # A firmware that ignores the write still reports success to the writer.
+            return real_write_profile(path, value) if self.profile_sticks else True
 
         test = self
 
         class Ryzenadj:  # the helper process; the real availability gate stays in front
             def __init__(self, argv, **_options):
                 test.ryzenadj.append(argv[1:])
+                for flag, _, value in (arg.partition('=') for arg in argv[1:]):
+                    if flag in LIMIT_FLAGS:
+                        test.smu[LIMIT_FLAGS[flag]] = int(value) / 1000
                 self.returncode = 0
 
             def communicate(self, timeout=None):
                 if test.ryzenadj[-1] == ['--info']:
-                    return INFO.format(slow=test.ppt('sppt'), fast=test.ppt('fppt')).encode(), b''
+                    live = {key: test.smu.get(key, test.ppt(key)) for key in LIMIT_FLAGS.values()}
+                    return INFO.format(**live).encode(), b''
                 return b'', b''
+
+        def download(url, out, **_options):
+            self.downloads.append(url)
+            self.download_started.set()
+            if self.download_gate is not None and not self.download_gate.wait(5):
+                raise TimeoutError('test gate was not released')
+            if self.archive is None:
+                out.write(b'partial archive')
+                raise TimeoutError('offline')
+            out.write(self.archive)
 
         for name, value in {
             'settings': self.store, 'WMI_ROOT': str(self.firmware),
             'PLATFORM_PROFILE_GLOB': str(self.root / 'platform-profile/*/profile'),
-            'CPU_SYS_ROOT': str(self.cpu), 'BIN_PATH': str(self.root / 'ryzenadj'),
+            'RAPL_GLOB': str(self.root / 'powercap/intel-rapl-*'),  # ':' is not valid on Windows
+            'CPU_SYS_ROOT': str(self.cpu), 'BIN_DIR': str(self.bin.parent), 'BIN_PATH': str(self.bin),
             '_ryzenadj_available': False,
             '_current_game_id': '', '_current_ac_online': False, '_last_cpu_power_check': 0.0,
             '_last_suspend_offset': 0.0, '_transition_key': None, '_transition_failures': 0,
@@ -83,6 +111,8 @@ class TdpCoreTests(unittest.TestCase):
             '_drift_target': (), '_drift_settled': (), '_drift_attempts': 0,
             '_drift_context': (False, ()), '_wmi_verified_at': None, '_wmi_live_limits': (),
             '_limits_cache': {}, '_limits_cache_ts': 0.0, '_panel_active': False,
+            '_info_cache': {}, '_info_cache_ts': 0.0,
+            '_rapl_dir': None, '_rapl_probed_at': 0.0, '_rapl_last': (),
         }.items():
             self.stack.enter_context(patch.object(tdp, name, value))
         for name, callback in {
@@ -92,7 +122,9 @@ class TdpCoreTests(unittest.TestCase):
         }.items():
             self.stack.enter_context(patch.object(tdp, name, side_effect=callback))
         self.stack.enter_context(patch.object(tdp.subprocess, 'Popen', Ryzenadj))
-        (self.root / 'ryzenadj').write_bytes(b'')
+        self.stack.enter_context(patch.object(tdp.updater, 'download_to', side_effect=download))
+        self.stack.enter_context(patch.object(tdp.updater, 'ssl_context'))
+        self.stack.enter_context(patch.object(tempfile, 'tempdir', str(self.tmp)))
         self.plugin = tdp.Plugin()
         self.plugin._ready = True
 
@@ -101,6 +133,9 @@ class TdpCoreTests(unittest.TestCase):
                  'spl': 15000, 'sppt': 20000, 'fppt': 25000, **settings}
         self.store.replace({'settings': state, 'game_profiles': profiles or {},
                             'schema_version': 2})
+
+    def saved(self, key='settings'):
+        return AtomicSettingsManager('tdp_settings', str(self.root / 'settings')).getSetting(key)
 
     def ppt(self, key):
         return int((self.firmware / tdp.WMI_ATTRS[key] / 'current_value').read_text())
@@ -115,6 +150,48 @@ class TdpCoreTests(unittest.TestCase):
     def applies(self):
         return [args for args in self.ryzenadj if args != ['--info']]
 
+    def bounces(self):
+        """Firmware applies that had to switch the platform profile (two writes each)."""
+        return len(self.profile_writes) // 2
+
+    def firmware_ignores_writes(self):
+        return patch.object(tdp, '_write_ppt')
+
+    def disk_full(self):
+        return patch('safe_settings._atomic_write_bytes',
+                     side_effect=OSError(28, 'No space left on device'))
+
+    def publish_helper(self, archive_ok=True, binary_ok=True):
+        """Serve a helper archive and pin the digests the backend verifies it against."""
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:gz') as tar:
+            member = tarfile.TarInfo('ryzenadj-linux/ryzenadj')
+            member.size = len(HELPER)
+            tar.addfile(member, io.BytesIO(HELPER))
+        self.archive = buffer.getvalue()
+        wrong = '0' * 64
+        for name, digest in (('RYZENADJ_SHA256', hashlib.sha256(self.archive).hexdigest()
+                              if archive_ok else wrong),
+                             ('RYZENADJ_BINARY_SHA256', hashlib.sha256(HELPER).hexdigest()
+                              if binary_ok else wrong)):
+            self.stack.enter_context(patch.object(tdp, name, digest))
+
+    def start(self):
+        """Run the module's startup; the two background loops are not started."""
+        plugin = tdp.Plugin()
+        self.stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
+        self.stack.enter_context(patch.object(tdp.Plugin, '_setup_error', None))
+
+        async def run():
+            with patch.object(plugin, '_enforce_loop', new=AsyncMock()), \
+                    patch.object(plugin, '_info_loop', new=AsyncMock()):
+                await plugin._main()
+                await asyncio.gather(*plugin._tasks)
+            plugin._tasks = []  # finished, and bound to this event loop
+        asyncio.run(run())
+        self.addCleanup(lambda: asyncio.run(plugin._unload()))
+        return plugin
+
     def rpc(self, method, *args, **kwargs):
         return asyncio.run(getattr(self.plugin, method)(*args, **kwargs))
 
@@ -126,7 +203,6 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.profile_writes, ['low-power', 'custom'])
         self.assertEqual(self.profile.read_text(), 'custom')
         self.assertEqual(self.ppts(), (18, 22, 30))
-        self.assertEqual(tdp._last_source, 'wmi')
         self.assertEqual(self.applies(), [])
 
     def test_firmware_apply_in_custom_writes_in_place_when_it_latches(self):
@@ -150,11 +226,10 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (18, 22, 30))
 
     def test_firmware_readback_mismatch_is_a_failure_naming_the_attribute(self):
-        with patch.object(tdp, '_write_ppt'):
+        with self.firmware_ignores_writes():
             result = tdp._apply_limits(18000, 22000, 30000)
         self.assertFalse(result['success'])
         self.assertIn('ppt_pl1_spl=10 want 18', result['stderr'])
-        self.assertEqual(tdp._last_source, '')
 
     # Clamp and path choice -------------------------------------------------
 
@@ -170,7 +245,6 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(result['success'], result)
         self.assertEqual(self.applies(), [[
             '--stapm-limit=50000', '--slow-limit=50000', '--fast-limit=50000']])
-        self.assertEqual(tdp._last_source, 'ryzenadj')
         self.assertEqual(self.profile_writes, [])
 
     def test_out_of_range_without_verified_helper_writes_nothing(self):
@@ -181,7 +255,7 @@ class TdpCoreTests(unittest.TestCase):
 
     def test_firmware_failure_inside_range_never_falls_back_to_ryzenadj(self):
         tdp._ryzenadj_available = True
-        with patch.object(tdp, '_write_ppt'):
+        with self.firmware_ignores_writes():
             result = tdp._apply_limits(18000, 22000, 30000)
         self.assertFalse(result['success'])
         self.assertEqual(self.applies(), [])
@@ -204,42 +278,153 @@ class TdpCoreTests(unittest.TestCase):
         caps = self.rpc('get_caps')
         self.assertEqual(caps['max'], dict(caps['std'], sppt=50, fppt=50))
 
-    def test_enabling_extras_downloads_the_helper_first(self):
-        with patch.object(tdp, '_ensure_ryzenadj', side_effect=OSError('offline')):
-            result = self.rpc('set_extras_unlocked', True)
+    def test_extras_low_sustained_limit_is_shown_as_set_and_not_reapplied(self):
+        # Legion Go 2 (2026-10-19): ryzenadj 15/40/50 W reads back STAPM 15, slow 40, fast 50.
+        tdp._ryzenadj_available = True
+        self.seed(extras_unlocked=True)
+        self.assertTrue(self.rpc('apply_tdp', 15000, 40000, 50000)['success'])
+        tdp._refresh_info_cache()  # one info-loop tick
+        values = self.rpc('get_tdp_info')['values']
+        self.assertEqual({key: values[key + '_limit'] for key in ('spl', 'sppt', 'fppt')},
+                         {'spl': 15, 'sppt': 40, 'fppt': 50})
+        for _ in range(3):
+            tdp._check_and_enforce()
+        self.assertEqual(len(self.applies()), 1)
+
+    # Helper (RyzenAdj) download -------------------------------------------
+
+    def test_enabling_extras_downloads_and_verifies_the_helper_once(self):
+        self.bin.unlink()
+        result = self.rpc('set_extras_unlocked', True)
         self.assertFalse(result['success'])
         self.assertIn('offline', result['stderr'])
-        self.assertFalse(self.store.getSetting('settings')['extras_unlocked'])
-        with patch.object(tdp, '_ensure_ryzenadj', return_value=True) as ensure:
-            self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
-        ensure.assert_called_once()
-        self.assertTrue(self.store.getSetting('settings')['extras_unlocked'])
+        self.assertFalse(self.saved()['extras_unlocked'])
+        self.publish_helper()
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertEqual(self.bin.read_bytes(), HELPER)
+        self.assertTrue(self.saved()['extras_unlocked'])
         self.assertTrue(self.rpc('get_caps')['extras'])
-        with patch.object(tdp, '_ensure_ryzenadj') as ensure:
-            self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
-            self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
-        ensure.assert_not_called()
+        self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertEqual(len(self.downloads), 2)
+
+    def test_helper_download_that_fails_verification_installs_nothing(self):
+        self.bin.unlink()
+        for case, publish in (('interrupted', None),
+                              ('archive checksum', {'archive_ok': False}),
+                              ('binary checksum', {'binary_ok': False})):
+            with self.subTest(case):
+                if publish is not None:
+                    self.publish_helper(**publish)
+                result = self.rpc('set_extras_unlocked', True)
+                self.assertFalse(result['success'])
+                if publish is not None:
+                    self.assertIn('checksum mismatch', result['stderr'])
+                self.assertEqual(list(self.bin.parent.iterdir()), [])
+                self.assertEqual(list(self.tmp.iterdir()), [])
+                self.assertFalse(self.saved()['extras_unlocked'])
+                self.assertFalse(self.rpc('get_caps')['extras'])
+        self.assertEqual(len(self.downloads), 3)
+        self.assertEqual(self.applies(), [])
+
+    def test_failed_helper_download_is_reported_until_a_verified_retry(self):
+        shutil.rmtree(self.firmware)
+        self.bin.unlink()
+        self.assertFalse(self.rpc('retry_extras')['success'])
+        caps = self.rpc('get_caps')
+        self.assertFalse(caps['tdp_available'])
+        self.assertIn('offline', caps['tdp_error'])
+        self.publish_helper()
+        self.assertTrue(self.rpc('retry_extras')['success'])
+        caps = self.rpc('get_caps')
+        self.assertTrue(caps['tdp_available'])
+        self.assertEqual(caps['tdp_error'], '')
+        self.assertTrue(caps['extras'])
+        self.assertFalse(caps['helper_retry_available'])
+
+    def test_concurrent_retries_share_one_download_then_the_game_gets_its_extras_target(self):
+        self.bin.unlink()
+        self.seed({'123': {'spl': 25000, 'sppt': 40000, 'fppt': 50000}}, extras_unlocked=True)
+        self.app = '123'
+        tdp._check_and_enforce()
+        self.assertEqual(self.ppts(), (25, 37, 45))  # no helper yet: firmware ceilings
+        self.publish_helper()
+        self.download_gate = threading.Event()
+
+        async def scenario():
+            first = asyncio.create_task(self.plugin.retry_extras())
+            await asyncio.to_thread(self.download_started.wait, 5)
+            second = asyncio.create_task(self.plugin.retry_extras())  # waits for the running one
+            await asyncio.sleep(0.05)
+            self.download_gate.set()
+            return [(await task)['success'] for task in (first, second)]
+        self.assertEqual(asyncio.run(scenario()), [True, True])
+        self.assertEqual(len(self.downloads), 1)
+        tdp._check_and_enforce()
+        self.assertEqual(self.applies(), [
+            ['--stapm-limit=25000', '--slow-limit=40000', '--fast-limit=50000']])
 
     def test_extras_taps_during_a_helper_download_apply_in_order(self):
         # Taps queue behind the download instead of failing, and the last one wins:
-        # ON (download), ON again, OFF -> both ONs succeed, Extras ends locked.
-        downloading, finish = threading.Event(), threading.Event()
-        def ensure(cancel=None):
-            downloading.set()
-            return finish.wait(5)
+        # ON (download), ON again, OFF -> all succeed, Extras ends locked.
+        self.bin.unlink()
+        self.publish_helper()
+        self.download_gate = threading.Event()
+
         async def scenario():
             first = asyncio.create_task(self.plugin.set_extras_unlocked(True))
-            await asyncio.to_thread(downloading.wait, 5)
+            await asyncio.to_thread(self.download_started.wait, 5)
             second = asyncio.create_task(self.plugin.set_extras_unlocked(True))
             off = asyncio.create_task(self.plugin.set_extras_unlocked(False))
             await asyncio.sleep(0.05)
             self.assertFalse(off.done(), 'OFF must not commit before the earlier ON')
-            finish.set()
+            self.download_gate.set()
             return [(await task)['success'] for task in (first, second, off)]
-        with patch.object(tdp, '_ensure_ryzenadj', side_effect=ensure) as verified:
-            self.assertEqual(asyncio.run(scenario()), [True, True, True])
-        verified.assert_called_once()
-        self.assertFalse(self.store.getSetting('settings')['extras_unlocked'])
+        self.assertEqual(asyncio.run(scenario()), [True, True, True])
+        self.assertEqual(len(self.downloads), 1)
+        self.assertFalse(self.saved()['extras_unlocked'])
+
+    # Startup and capabilities ----------------------------------------------
+
+    def test_offline_start_never_downloads_and_keeps_saved_extras_intent(self):
+        self.seed({'123': {'spl': 40000, 'sppt': 45000, 'fppt': 50000}},
+                  extras_unlocked=True, spl=40000, sppt=45000, fppt=50000)
+        plugin = self.start()
+        self.assertTrue(asyncio.run(plugin.is_ready())['ready'])
+        self.assertEqual(self.downloads, [])
+        self.assertFalse(asyncio.run(plugin.get_caps())['extras'])
+        self.assertEqual(self.ppts(), (35, 37, 45))  # runs inside the firmware range meanwhile
+        saved = self.saved()
+        self.assertEqual((saved['extras_unlocked'], saved['spl'], saved['fppt']), (True, 40000, 50000))
+        self.assertEqual(self.saved('game_profiles')['123']['spl'], 40000)
+
+    def test_start_without_firmware_or_helper_is_ready_but_reports_tdp_unavailable(self):
+        shutil.rmtree(self.firmware)
+        self.bin.unlink()
+        plugin = self.start()
+        self.assertTrue(asyncio.run(plugin.is_ready())['ready'])
+        caps = asyncio.run(plugin.get_caps())
+        self.assertFalse(caps['tdp_available'])
+        self.assertTrue(caps['helper_retry_available'])
+        self.assertFalse(tdp._apply_limits(16000, 25000, 30000)['success'])
+        self.assertEqual((self.downloads, self.ryzenadj), ([], []))
+
+    def test_caps_tell_missing_firmware_from_missing_helper(self):
+        caps = self.rpc('get_caps')
+        self.assertEqual((caps['tdp_available'], caps['extras'], caps['tdp_error']), (True, False, ''))
+        self.choices.write_text('low-power balanced performance')  # no tunable profile
+        self.assertFalse(self.rpc('get_caps')['tdp_available'])
+        self.choices.write_text('low-power balanced performance custom')
+        shutil.rmtree(self.firmware)
+        caps = self.rpc('get_caps')
+        self.assertFalse(caps['tdp_available'])
+        self.assertTrue(caps['helper_retry_available'])
+        self.assertFalse(caps['extras'])
+        self.assertIn('unavailable', caps['tdp_error'])
+        tdp._ryzenadj_available = True
+        caps = self.rpc('get_caps')
+        self.assertEqual((caps['tdp_available'], caps['extras'], caps['helper_retry_available']),
+                         (True, True, False))
 
     def test_unsupported_model_writes_nothing_and_says_so(self):
         boost = self.cpu / 'cpufreq/boost'
@@ -248,7 +433,6 @@ class TdpCoreTests(unittest.TestCase):
         tdp._ryzenadj_available = True
         self.seed(cpu_boost_enabled=True)
         with patch.object(tdp, '_legion_go_2', return_value=False), \
-                patch.object(tdp, '_ensure_ryzenadj') as ensure, \
                 patch.object(tdp.Plugin, '_ready', False), \
                 patch.object(tdp.Plugin, '_setup_error', None):
             self.assertIn('Legion Go 2', tdp._apply_limits(15000, 20000, 25000)['stderr'])
@@ -264,7 +448,7 @@ class TdpCoreTests(unittest.TestCase):
             self.assertEqual(asyncio.run(plugin.is_ready()),
                              {'ready': False, 'error': tdp.UNSUPPORTED_MODEL})
             self.assertEqual(plugin._tasks, [])
-        ensure.assert_not_called()
+        self.assertEqual(self.downloads, [])
         self.assertEqual((self.profile.read_text(), boost.read_text()), ('balanced', '0'))
         self.assertEqual((self.ppts(), self.ryzenadj), ((10, 10, 10), []))
 
@@ -273,12 +457,36 @@ class TdpCoreTests(unittest.TestCase):
         self.seed({'123': {'spl': 45000, 'sppt': 48000, 'fppt': 50000, 'preset': 'max'}},
                   extras_unlocked=True, spl=40000, sppt=45000, fppt=50000)
         self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
-        saved = self.store.getSetting('settings')
+        saved = self.saved()
         self.assertEqual((saved['spl'], saved['sppt'], saved['fppt']), (35000, 37000, 45000))
-        game = self.store.getSetting('game_profiles')['123']
+        game = self.saved('game_profiles')['123']
         self.assertEqual((game['spl'], game['sppt'], game['fppt'], game['preset']),
                          (35000, 37000, 45000, 'custom'))
         self.assertEqual(self.ppts(), (35, 37, 45))
+
+    # Rollback when a change cannot be saved --------------------------------
+
+    def test_apply_that_cannot_be_saved_puts_the_previous_limits_back(self):
+        self.assertTrue(self.rpc('apply_tdp', 15000, 18000, 25000)['success'])
+        with self.disk_full(), self.assertRaisesRegex(RuntimeError, 'previous target restored'):
+            self.rpc('apply_tdp', 8000, 10000, 15000)
+        self.assertEqual(self.ppts(), (15, 18, 25))
+        self.assertEqual(self.saved()['spl'], 15000)
+
+    def test_profile_changes_that_cannot_be_saved_put_the_game_limits_back(self):
+        self.app, self.ac = '123', True
+        for method, args in (('delete_game_profile', ('123',)),
+                             ('set_game_ac_profile', ('123', 20000, 23000, 30000, True)),
+                             ('set_extras_unlocked', (False,))):
+            with self.subTest(method=method):
+                self.seed({'123': {'spl': 25000, 'sppt': 28000, 'fppt': 35000}}, extras_unlocked=True)
+                tdp._current_game_id = ''
+                tdp._check_and_enforce()
+                self.assertEqual(self.ppts(), (25, 28, 35))
+                with self.disk_full(), self.assertRaisesRegex(RuntimeError, 'previous target restored'):
+                    self.rpc(method, *args)
+                self.assertEqual(self.ppts(), (25, 28, 35))
+                self.assertIn('123', self.saved('game_profiles'))
 
     # Enforce loop ----------------------------------------------------------
 
@@ -287,13 +495,24 @@ class TdpCoreTests(unittest.TestCase):
         self.app = '123'
         tdp._check_and_enforce()
         self.assertEqual(self.ppts(), (22, 26, 32))
-        self.assertEqual(tdp._current_game_id, '123')
         self.app = ''
         tdp._check_and_enforce()
         self.assertEqual(self.ppts(), (15, 20, 25))
-        saved = self.store.getSetting('settings')
+        saved = self.saved()
         self.assertEqual((saved['active_spl'], saved['active_sppt'], saved['active_fppt']),
                          (15000, 20000, 25000))
+
+    def test_failed_game_transition_retries_the_game_target_not_the_stale_global(self):
+        self.seed({'123': {'spl': 25000, 'sppt': 28000, 'fppt': 35000}},
+                  active_spl=15000, active_sppt=20000, active_fppt=25000)
+        self.app = '123'
+        with self.firmware_ignores_writes():  # the device is still waking
+            for _ in range(2):
+                tdp._check_and_enforce()
+                tdp._transition_retry_at = 0.0  # the wake backoff has passed
+        self.assertEqual(self.ppts(), (10, 10, 10))
+        tdp._check_and_enforce()
+        self.assertEqual(self.ppts(), (25, 28, 35))
 
     def test_game_ac_profile_follows_the_charger(self):
         self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000, 'ac_separate': True,
@@ -312,14 +531,14 @@ class TdpCoreTests(unittest.TestCase):
         self.app = '123'
         tdp._check_and_enforce()
         self.ac = True
-        with patch('safe_settings._atomic_write_bytes', side_effect=OSError(28, 'No space left')):
+        with self.disk_full():
             with self.assertRaises(OSError):
                 tdp._check_and_enforce()  # limits written, then the save fails
         tdp._transition_retry_at = 0.0  # the backoff has passed
         events = tdp._check_and_enforce()
         self.assertEqual(events['power_source'], {'ac': True})
         self.assertEqual(self.ppts(), (30, 32, 40))
-        saved = self.store.getSetting('settings')
+        saved = self.saved()
         self.assertEqual((saved['active_spl'], saved['active_sppt'], saved['active_fppt']),
                          (30000, 32000, 40000))
 
@@ -369,30 +588,30 @@ class TdpCoreTests(unittest.TestCase):
         self.profile.write_text('balanced')  # something knocked us off custom
         tdp._check_and_enforce()
         self.assertEqual(self.profile.read_text(), 'custom')
-        with patch.object(tdp, '_write_ppt'):
+        tdp._check_and_enforce()  # the next tick confirms it, refilling the retry budget
+        self.profile_writes.clear()
+        with self.firmware_ignores_writes():
             self.set_ppts(8, 8, 8)
             for _ in range(tdp.DRIFT_MAX_ATTEMPTS + 3):
                 tdp._check_and_enforce()
-        self.assertEqual(tdp._drift_attempts, tdp.DRIFT_MAX_ATTEMPTS)
+        self.assertEqual(self.bounces(), tdp.DRIFT_MAX_ATTEMPTS)
 
     def test_unreachable_target_with_a_persistent_live_mismatch_stays_bounded(self):
-        self.profile.write_text('custom')
-        self.set_ppts(15, 20, 25)
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        tdp._ryzenadj_available = True  # enables the live cross-check
+        self.profile_writes.clear()
         clock = [100.0]
-        with patch.object(tdp, '_ryzenadj_available', True), patch.object(tdp, '_last_source', 'wmi'), \
-                patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]), \
-                patch.object(tdp, '_write_ppt'), \
-                patch.object(tdp, '_apply_limits_with_saved_cpu_power',
-                             wraps=tdp._apply_limits_with_saved_cpu_power) as apply:
+        with patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]), \
+                self.firmware_ignores_writes():
             # 5 s passes; the live cross-check only reads every 30 s (True, None, None, ...).
             for seconds in range(0, 106, 5):
                 clock[0] = 100.0 + seconds
                 tdp._enforce_target((25000, 30000, 35000))
-            self.assertEqual(apply.call_count, tdp.DRIFT_MAX_ATTEMPTS)
+            self.assertEqual(self.bounces(), tdp.DRIFT_MAX_ATTEMPTS)
             self.set_ppts(15, 22, 27)  # the hardware really moved: a fresh budget
             clock[0] += 30
             tdp._enforce_target((25000, 30000, 35000))
-            self.assertEqual(apply.call_count, tdp.DRIFT_MAX_ATTEMPTS + 1)
+            self.assertEqual(self.bounces(), tdp.DRIFT_MAX_ATTEMPTS + 1)
 
     def test_disabled_module_writes_no_limits(self):
         self.seed(enabled=False)
@@ -431,7 +650,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.profile_writes, [])
         self.rpc('set_active_app', '')
         self.assertEqual(self.ppts(), (15, 20, 25))
-        saved = self.store.getSetting('settings')
+        saved = self.saved()
         self.assertEqual((saved['active_spl'], saved['active_sppt'], saved['active_fppt']),
                          (15000, 20000, 25000))
 
@@ -451,35 +670,84 @@ class TdpCoreTests(unittest.TestCase):
         stale = self.rpc('apply_tdp', 30000, 30000, 30000, '123', '', '123')
         self.assertEqual((stale['success'], stale['stderr']), (False, 'foreground game changed'))
         self.assertEqual(self.ppts(), (12, 15, 20))
-        self.assertEqual(self.store.getSetting('game_profiles')['123']['spl'], 22000)
+        self.assertEqual(self.saved('game_profiles')['123']['spl'], 22000)
+
+    # Panel telemetry -------------------------------------------------------
+
+    def test_panel_shows_only_a_fresh_hardware_sample(self):
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        clock = [1000.0]
+        with patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]):
+            tdp._refresh_info_cache()
+            clock[0] += 1
+            fresh = self.rpc('get_tdp_info')
+            self.assertEqual((fresh['values']['spl_limit'], fresh['sample_age_seconds']), (15, 1))
+            clock[0] += 100  # the info loop stopped
+            self.assertEqual(self.rpc('get_tdp_info')['values'], {})
+
+    def test_failed_power_and_limit_reads_leave_no_old_sample(self):
+        rapl = self.root / 'powercap/intel-rapl-0'
+        rapl.mkdir(parents=True)
+        (rapl / 'name').write_text('package-0')
+        energy = rapl / 'energy_uj'
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        clock = [1000.0]
+        with patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]):
+            for joules in (1, 13):  # 12 J in one second
+                energy.write_text(str(joules * 1_000_000))
+                tdp._refresh_info_cache()
+                clock[0] += 1
+            values = self.rpc('get_tdp_info')['values']
+            self.assertEqual((values['package_draw'], values['spl_limit']), (12.0, 15))
+            energy.unlink()
+            for attr in tdp.WMI_ATTRS.values():
+                (self.firmware / attr / 'current_value').unlink()
+            tdp._refresh_info_cache()
+            values = self.rpc('get_tdp_info')['values']
+        self.assertNotIn('package_draw', values)
+        self.assertNotIn('spl_limit', values)
 
     # Release ---------------------------------------------------------------
 
     def test_release_returns_platform_profile_to_balanced(self):
         self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
         self.assertEqual(self.profile.read_text(), 'custom')
-        with tdp._mutation_lock:
-            self.assertTrue(tdp._release_controls_locked()['success'])
+        self.release()
         self.assertEqual(self.profile.read_text(), 'balanced')
         self.assertEqual(self.applies(), [])
 
+    def test_release_uses_balanced_without_the_helper_when_a_ppt_cap_is_missing(self):
+        tdp._ryzenadj_available = True
+        (self.firmware / tdp.WMI_ATTRS['fppt'] / 'max_value').unlink()
+        for operation in ('uninstall', 'module_disable'):
+            with self.subTest(operation=operation):
+                self.profile.write_text('custom')
+                if operation == 'uninstall':
+                    asyncio.run(self.plugin._uninstall())
+                else:
+                    asyncio.run(module_control.withdraw('tdp', self.plugin))
+                self.assertEqual(self.profile.read_text(), 'balanced')
+        self.assertEqual(self.ryzenadj, [])
+
+    def test_release_is_not_a_success_until_balanced_reads_back(self):
+        tdp._ryzenadj_available = True
+        self.profile_sticks = False
+        for case in ('firmware attributes present', 'firmware attributes missing'):
+            with self.subTest(case):
+                self.profile.write_text('custom')
+                with self.assertRaisesRegex(RuntimeError, 'Balanced firmware profile was not confirmed'):
+                    asyncio.run(self.plugin._uninstall())
+                self.assertEqual(self.profile.read_text(), 'custom')
+                shutil.rmtree(self.firmware, ignore_errors=True)
+        self.assertEqual(self.ryzenadj, [])
+
     def test_release_restores_managed_cpu_controls(self):
-        boost = self.cpu / 'cpufreq/boost'
-        boost.parent.mkdir(parents=True)
-        boost.write_text('0')
-        policy = self.cpu / 'cpufreq/policy0'
-        policy.mkdir()
-        (policy / 'energy_performance_preference').write_text('power')
-        (policy / 'energy_performance_available_preferences').write_text(
-            'performance balance_performance balance_power power')
+        boost, epp = self.cpu_controls()
         self.seed(cpu_boost_enabled=False, epp='power')
-        with tdp._mutation_lock:
-            self.assertTrue(tdp._release_controls_locked()['success'])
+        self.release()
         self.assertEqual(self.profile.read_text(), 'balanced')
         self.assertEqual(boost.read_text(), '1')
-        self.assertEqual((policy / 'energy_performance_preference').read_text(),
-                         'balance_performance')
-
+        self.assertEqual(epp.read_text(), 'balance_performance')
 
     # Baseline (what release restores) ---------------------------------------
 
@@ -556,354 +824,6 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
         self.release()
         self.assertEqual(self.profile.read_text(), 'balanced')
-
-
-class TdpRecoveryTests(unittest.TestCase):
-    def test_tdp_failed_game_transition_retries_desired_target(self):
-        old = (15000, 18000, 25000)
-        desired = (25000, 28000, 35000)
-        state = dict(zip(("spl", "sppt", "fppt"), old))
-        state.update(dict(zip(("active_spl", "active_sppt", "active_fppt"), old)))
-        state["enabled"] = True
-        failed = {"success": False, "returncode": -1, "stderr": "device waking"}
-        with patch.object(tdp, "_current_game_id", ""), \
-             patch.object(tdp, "_current_ac_online", False), \
-             patch.object(tdp, "_load_settings", side_effect=lambda: copy.deepcopy(state)), \
-             patch.object(tdp, "_resume_detected", return_value=False), \
-             patch.object(tdp, "_best_effort_reapply_saved_cpu_power_locked"), \
-             patch.object(tdp, "_get_running_appid", return_value="123"), \
-             patch.object(tdp, "_get_ac_online", return_value=False), \
-             patch.object(tdp, "_load_profiles", return_value={"123": dict(zip(("spl", "sppt", "fppt"), desired))}), \
-             patch.object(tdp, "_clamp_for_settings", side_effect=lambda s, *x: x), \
-             patch.object(tdp, "_apply_and_record", return_value=failed) as apply, \
-             patch.object(tdp, "_enforce_target") as enforce:
-            tdp._transition_key = None
-            tdp._check_and_enforce_locked()
-            tdp._transition_retry_at = 0
-            tdp._check_and_enforce_locked()
-            self.assertNotEqual(tdp._current_game_id, "123")
-            self.assertEqual(apply.call_count, 2)
-            self.assertEqual(apply.call_args.args[:3], desired)
-            enforce.assert_not_called()
-
-    def test_tdp_disk_failure_restores_previous_hardware_value(self):
-        state = {"enabled": True, "spl": 15000, "sppt": 18000, "fppt": 25000}
-        hardware = [15000, 18000, 25000]
-        def apply(s, *values, reason=None):
-            hardware[:] = values
-            return {"success": True, "stderr": "", "stdout": "", "returncode": 0}
-        plugin = tdp.Plugin()
-        plugin._ready = True
-        with patch.object(tdp, "_load_settings", side_effect=lambda: copy.deepcopy(state)), \
-             patch.object(tdp, "_get_running_appid", return_value=""), \
-             patch.object(tdp, "_clamp_for_settings", side_effect=lambda s, *x: x), \
-             patch.object(tdp, "_apply_limits_with_saved_cpu_power", side_effect=apply), \
-             patch.object(tdp, "_write_keys", side_effect=OSError("disk full")):
-            with self.assertRaisesRegex(RuntimeError, "disk full.*previous target restored"):
-                asyncio.run(plugin.apply_tdp(8000, 10000, 15000))
-        self.assertEqual(hardware, [15000, 18000, 25000])
-        self.assertEqual(state["spl"], 15000)
-
-    def test_tdp_offline_start_preserves_saved_profiles(self):
-        state = {"enabled": True, "extras_unlocked": True,
-                 "spl": 40000, "sppt": 45000, "fppt": 50000}
-        profiles = {"123": {"spl": 40000, "sppt": 45000, "fppt": 50000}}
-        caps = {k: {"min": 5, "max": v} for k,v in (("spl",35),("sppt",37),("fppt",45))}
-        plugin = tdp.Plugin()
-        async def start():
-            await plugin._main()
-            await asyncio.gather(*plugin._tasks)
-        with patch.object(tdp.updater, "ssl_context"), \
-             patch.object(tdp, "_get_ac_online", return_value=False), \
-             patch.object(tdp, "_wmi_caps", return_value=caps), \
-             patch.object(tdp, "_ryzenadj_available", True), \
-             patch.object(tdp, "_ensure_ryzenadj", side_effect=OSError("network unavailable")), \
-             patch.object(tdp, "_load_settings", return_value=state), \
-             patch.object(tdp, "_load_profiles", return_value=profiles), \
-             patch.object(tdp, "_write_keys") as write, \
-             patch.object(tdp, "_startup_context_target", return_value=("",(35000,37000,45000),False)), \
-             patch.object(tdp, "_apply_limits_with_saved_cpu_power", return_value={"success":True}), \
-             patch.object(tdp, "_save_active"), \
-             patch.object(plugin, "_enforce_loop", new_callable=AsyncMock), \
-             patch.object(plugin, "_info_loop", new_callable=AsyncMock):
-            asyncio.run(start())
-        write.assert_not_called()
-        self.assertTrue(state["extras_unlocked"])
-        self.assertEqual(profiles["123"]["spl"], 40000)
-
-    def test_tdp_profile_mutations_restore_hardware_after_commit_failure(self):
-        before = {"enabled": True, "spl": 15000, "sppt": 18000, "fppt": 25000,
-                  "active_spl": 25000, "active_sppt": 28000, "active_fppt": 35000,
-                  "extras_unlocked": True}
-        profiles = {"123": {"spl": 25000, "sppt": 28000, "fppt": 35000}}
-        for method, args in (("delete_game_profile", ("123",)),
-                             ("set_game_ac_profile", ("123", 20000, 23000, 30000, True)),
-                             ("set_extras_unlocked", (False,))):
-            with self.subTest(method=method):
-                hardware = [25000,28000,35000]
-                def apply(state, *values, reason=None):
-                    hardware[:] = values
-                    return {"success": True}
-                with patch.object(tdp, "_load_settings", side_effect=lambda: copy.deepcopy(before)), \
-                     patch.object(tdp, "_load_profiles", side_effect=lambda: copy.deepcopy(profiles)), \
-                     patch.object(tdp, "_get_running_appid", return_value="123"), \
-                     patch.object(tdp, "_get_ac_online", return_value=True), \
-                     patch.object(tdp, "_clamp_for_settings", side_effect=lambda s,*v: v), \
-                     patch.object(tdp, "_apply_limits_with_saved_cpu_power", side_effect=apply), \
-                     patch.object(tdp, "_write_keys", side_effect=OSError("disk full")):
-                    with self.assertRaisesRegex(RuntimeError, "previous target restored"):
-                        asyncio.run(getattr(tdp.Plugin(), method)(*args))
-                self.assertEqual(hardware, [25000,28000,35000])
-
-
-class PowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncTearDown(self):
-        await module_runtime.drain('tdp')
-
-    async def test_release_uses_balanced_when_a_ppt_capability_is_missing(self):
-        for operation in ('uninstall', 'module_disable'):
-            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as raw:
-                profile = Path(raw, 'platform_profile')
-                profile.write_text('custom')
-                Path(raw, 'choices').write_text('balanced custom')
-                firmware = Path(raw, 'firmware')
-                for key, directory in tdp.WMI_ATTRS.items():
-                    entry = firmware / directory
-                    entry.mkdir(parents=True)
-                    (entry / 'min_value').write_text('5')
-                    if key != 'fppt':
-                        (entry / 'max_value').write_text('35')
-                plugin = tdp.Plugin()
-                with patch.object(tdp, 'PLATFORM_PROFILE_GLOB', str(profile)), \
-                        patch.object(tdp, 'WMI_ROOT', str(firmware)), \
-                        patch.object(tdp, '_ryzenadj_available', False), \
-                        patch.object(tdp, '_load_settings', return_value={'enabled': True}), \
-                        patch.object(tdp, '_load_profiles', return_value={}), \
-                        patch.object(tdp, '_run_ryzenadj') as helper:
-                    self.assertEqual(tdp._wmi_caps(), {})
-                    if operation == 'uninstall':
-                        await plugin._uninstall()
-                    else:
-                        await module_control.withdraw('tdp', plugin)
-                    self.assertEqual(profile.read_text(), 'balanced')
-                    helper.assert_not_called()
-
-    async def test_incomplete_caps_do_not_turn_unconfirmed_release_into_success(self):
-        with tempfile.TemporaryDirectory() as raw:
-            profile = Path(raw, 'platform_profile')
-            profile.write_text('custom')
-            with patch.object(tdp, '_profile_path', return_value=str(profile)), \
-                    patch.object(tdp, '_wmi_caps', return_value={}), \
-                    patch.object(tdp, '_write_profile', return_value=True), \
-                    patch.object(tdp, '_load_settings', return_value={'enabled': True}), \
-                    patch.object(tdp, '_load_profiles', return_value={}), \
-                    patch.object(tdp, '_run_ryzenadj') as helper:
-                with self.assertRaisesRegex(RuntimeError, 'Balanced firmware profile was not confirmed'):
-                    await tdp.Plugin()._uninstall()
-                self.assertEqual(profile.read_text(), 'custom')
-                helper.assert_not_called()
-
-    async def test_caps_distinguish_both_missing_paths_from_firmware_and_helper(self):
-        plugin = tdp.Plugin()
-        firmware = {key: {'min': 5, 'max': 35} for key in tdp.WMI_ATTRS}
-        with patch.object(tdp, '_wmi_caps', return_value={}) as caps, \
-                patch.object(tdp, '_profile_path', return_value='/mock/profile') as profile, \
-                patch.object(tdp, '_ryzenadj_available', False), \
-                patch.object(tdp.os.path, 'isfile', return_value=False):
-            unavailable = await plugin.get_caps()
-            self.assertFalse(unavailable['tdp_available'])
-            self.assertTrue(unavailable['helper_retry_available'])
-            self.assertFalse(unavailable['extras'])
-            self.assertIn('unavailable', unavailable['tdp_error'])
-            caps.return_value = firmware
-            available = await plugin.get_caps()
-            self.assertTrue(available['tdp_available'])
-            self.assertFalse(available['extras'])
-            self.assertEqual(available['tdp_error'], '')
-            profile.return_value = None
-            self.assertFalse((await plugin.get_caps())['tdp_available'])
-        with patch.object(tdp, '_wmi_caps', return_value={}), \
-                patch.object(tdp, '_ryzenadj_available', True), \
-                patch.object(tdp.os.path, 'isfile', return_value=True):
-            helper = await plugin.get_caps()
-            self.assertTrue(helper['tdp_available'])
-            self.assertTrue(helper['extras'])
-            self.assertFalse(helper['helper_retry_available'])
-
-    async def test_failed_download_is_visible_then_verified_retry_updates_caps(self):
-        plugin = tdp.Plugin()
-        with patch.object(tdp, '_wmi_caps', return_value={}), \
-                patch.object(tdp, '_ryzenadj_available', False), \
-                patch.object(tdp, '_current_game_id', ''), \
-                patch.object(tdp, '_transition_key', None), \
-                patch.object(tdp.os.path, 'isfile', return_value=False) as present, \
-                patch.object(tdp, '_ensure_ryzenadj', side_effect=TimeoutError('offline')) as ensure:
-            self.assertFalse((await plugin.retry_extras())['success'])
-            caps = await plugin.get_caps()
-            self.assertFalse(caps['tdp_available'])
-            self.assertIn('offline', caps['tdp_error'])
-            ensure.side_effect = None
-            ensure.return_value = True
-            present.return_value = True
-            self.assertTrue((await plugin.retry_extras())['success'])
-            caps = await plugin.get_caps()
-            self.assertTrue(caps['tdp_available'])
-            self.assertEqual(caps['tdp_error'], '')
-            self.assertTrue(caps['extras'])
-            self.assertFalse(caps['helper_retry_available'])
-
-    async def test_start_without_firmware_or_helper_keeps_cpu_module_ready_but_reports_tdp_unavailable(self):
-        def ensure(cancel=None, download=True):
-            self.assertFalse(download)
-            return False
-        plugin = tdp.Plugin()
-        with ExitStack() as stack:
-            for name, value in {'_wmi_caps': {}, '_profile_path': None,
-                    '_get_ac_online': False, '_get_running_appid': '', '_suspend_offset': 0,
-                    '_load_settings': {'enabled': True, 'spl': 16000, 'sppt': 25000,
-                        'fppt': 30000, 'cpu_boost_enabled': None, 'epp': None},
-                    '_load_profiles': {}, '_cancel_ac_settle': None}.items():
-                stack.enter_context(patch.object(tdp, name, return_value=value))
-            stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
-            stack.enter_context(patch.object(tdp.Plugin, '_setup_error', None))
-            stack.enter_context(patch.object(tdp, '_ryzenadj_available', False))
-            for name, value in {'_current_game_id': '', '_transition_key': None,
-                    '_last_cpu_power_check': 0, '_current_ac_online': False,
-                    '_last_suspend_offset': None}.items():
-                stack.enter_context(patch.object(tdp, name, value))
-            stack.enter_context(patch.object(tdp.updater, 'ssl_context'))
-            stack.enter_context(patch.object(tdp, '_ensure_ryzenadj', side_effect=ensure))
-            stack.enter_context(patch.object(plugin, '_enforce_loop', new=AsyncMock()))
-            stack.enter_context(patch.object(plugin, '_info_loop', new=AsyncMock()))
-            try:
-                await plugin._main()
-                await asyncio.gather(*plugin._tasks)
-                self.assertTrue((await plugin.is_ready())['ready'])
-                caps = await plugin.get_caps()
-                self.assertFalse(caps['tdp_available'])
-                self.assertTrue(caps['helper_retry_available'])
-                self.assertFalse(tdp._apply_limits(16000, 25000, 30000)['success'])
-            finally:
-                await plugin._unload()
-
-
-class TelemetryFreshnessTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tdp_getter_does_not_refresh_the_age_of_a_cached_hardware_sample(self):
-        plugin = tdp_backend.Plugin()
-        plugin._ready = True
-        with patch.object(tdp_backend, '_info_cache', {'package_draw': 12}), \
-                patch.object(tdp_backend, '_info_cache_ts', 10), \
-                patch.object(tdp_backend.time, 'monotonic', return_value=11):
-            fresh = await plugin.get_tdp_info()
-            self.assertEqual(fresh['values']['package_draw'], 12)
-            self.assertEqual(fresh['sample_age_seconds'], 1)
-        with patch.object(tdp_backend, '_info_cache', {'package_draw': 12}), \
-                patch.object(tdp_backend, '_info_cache_ts', 10), \
-                patch.object(tdp_backend.time, 'monotonic', return_value=100):
-            stale = await plugin.get_tdp_info()
-            self.assertEqual(stale['values'], {})
-
-    async def test_failed_power_and_limits_read_cannot_keep_previous_measurements(self):
-        old = {'package_draw': 12, 'spl_limit': 35}
-        with patch.object(tdp_backend, '_info_cache', old), \
-                patch.object(tdp_backend, '_read_limits', return_value={}), \
-                patch.object(tdp_backend, '_rapl_watts', return_value=None):
-            tdp_backend._refresh_info_cache()
-            self.assertNotIn('package_draw', old)
-            self.assertNotIn('spl_limit', old)
-
-
-class HelperDownloadTests(unittest.TestCase):
-    def helper(self):
-        return tdp_updater.Updater(user_agent='test')
-
-    def test_partial_archive_is_removed_without_replacing_existing_helper(self):
-        with tempfile.TemporaryDirectory() as raw:
-            binary = Path(raw, 'ryzenadj')
-            binary.write_bytes(b'previous verified helper')
-            mkstemp = tempfile.mkstemp
-            def temporary(**kwargs):
-                kwargs.setdefault('dir', raw)
-                return mkstemp(**kwargs)
-            def stalled(_url, out, **_kwargs):
-                out.write(b'partial archive')
-                raise TimeoutError('total time limit')
-            with patch.object(tdp, 'BIN_DIR', raw), patch.object(tdp, 'BIN_PATH', str(binary)), \
-                    patch.object(tdp.tempfile, 'mkstemp', side_effect=temporary), \
-                    patch.object(tdp.updater, 'download_to', side_effect=stalled):
-                with self.assertRaises(TimeoutError):
-                    tdp._download_ryzenadj()
-            self.assertEqual(binary.read_bytes(), b'previous verified helper')
-            self.assertEqual([path.name for path in Path(raw).iterdir()], ['ryzenadj'])
-
-    def test_firmware_handoff_requires_balanced_readback(self):
-        with tempfile.TemporaryDirectory() as raw:
-            profile = Path(raw, 'platform_profile')
-            profile.write_text('custom')
-            with patch.object(tdp, '_profile_path', return_value=str(profile)), \
-                    patch.object(tdp, '_wmi_caps', return_value={'supported': True}), \
-                    patch.object(tdp, '_write_profile', return_value=True), \
-                    patch.object(tdp, '_run_ryzenadj') as helper:
-                self.assertFalse(tdp._restore_defaults_locked()['success'])
-            helper.assert_not_called()
-
-
-class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
-    async def test_successful_retry_adopts_verified_helper_without_duplicate_downloads(self):
-        entered, finish = threading.Event(), threading.Event()
-        def ensure(**_kwargs):
-            entered.set()
-            if not finish.wait(2):
-                raise TimeoutError('test did not release download')
-            return True
-        plugin = tdp.Plugin()
-        with patch.object(tdp, '_ryzenadj_available', False), \
-                patch.object(tdp, '_current_game_id', '111'), \
-                patch.object(tdp, '_transition_key', ('111',)), \
-                patch.object(tdp, '_ensure_ryzenadj', side_effect=ensure) as verified:
-            task = asyncio.create_task(plugin.retry_extras())
-            try:
-                for _ in range(100):
-                    if entered.is_set(): break
-                    await asyncio.sleep(.005)
-                self.assertTrue(entered.is_set())
-                again = asyncio.create_task(plugin.retry_extras())  # waits for the running one
-            finally:
-                finish.set()
-                result = await asyncio.wait_for(task, 1)
-            self.assertTrue(result['success'])
-            self.assertTrue((await asyncio.wait_for(again, 1))['success'])
-            verified.assert_called_once()
-            self.assertTrue(tdp._ryzenadj_available)
-            self.assertIsNone(tdp._transition_key)
-
-    async def test_startup_only_verifies_an_existing_helper_and_never_downloads(self):
-        calls = []
-        def ensure(cancel=None, download=True):
-            calls.append(download)
-            return False
-        plugin = tdp.Plugin()
-        with ExitStack() as stack:
-            for name, value in {'_ryzenadj_available': False, '_current_game_id': '', '_transition_key': None}.items():
-                stack.enter_context(patch.object(tdp, name, value))
-            for name, value in {'_wmi_caps': {'supported': True}, '_get_ac_online': False,
-                    '_suspend_offset': 0, '_load_settings': {'enabled': False},
-                    '_startup_context_target': ('', (16000, 25000, 30000), False),
-                    '_best_effort_reapply_saved_cpu_power_locked': [], '_cancel_ac_settle': None}.items():
-                stack.enter_context(patch.object(tdp, name, return_value=value))
-            stack.enter_context(patch.object(tdp.updater, 'ssl_context'))
-            stack.enter_context(patch.object(tdp, '_ensure_ryzenadj', side_effect=ensure))
-            stack.enter_context(patch.object(plugin, '_enforce_loop', new=AsyncMock()))
-            stack.enter_context(patch.object(plugin, '_info_loop', new=AsyncMock()))
-            try:
-                await asyncio.wait_for(plugin._main(), 1)
-                await asyncio.gather(*plugin._tasks)
-                self.assertTrue(tdp.Plugin._ready)
-                self.assertEqual(calls, [False])
-                self.assertFalse(tdp._ryzenadj_available)
-            finally:
-                await plugin._unload()
-                await module_runtime.drain('tdp')
 
 
 if __name__ == '__main__':
