@@ -505,10 +505,7 @@ class Plugin:
             automatic_boot_id=self._boot_id(),
             rollback_reconnect_required=True, rollback_reconnect_uuid=link["uuid"], mutations={},
         )
-        self._save_band_policy_journal(journal)
-        watchdog = self._schedule_band_policy_rollback(journal)
-        if not watchdog.get("success"):
-            self._remove_band_policy_journal()
+        if self._arm_band_transaction(journal):
             return {**fallback, "success": False, "error": "rollback_watchdog_failed"}
         outcome = {**fallback, "_reselection_from_episode": link["episode"]}
         try:
@@ -1499,7 +1496,11 @@ class Plugin:
         journal["rollback_unit"] = unit
         self._save_band_policy_journal(journal)
         main_path = os.path.join(DECKY_PLUGIN_DIR, "wifi_backend.py")
-        rollback_seconds = journal.get("rollback_delay_seconds", BAND_POLICY_ROLLBACK_SECONDS)
+        try:   # the timer value never comes unchecked from a journal
+            rollback_seconds = int(journal.get("rollback_delay_seconds", BAND_POLICY_ROLLBACK_SECONDS))
+        except (TypeError, ValueError, OverflowError):
+            rollback_seconds = BAND_POLICY_ROLLBACK_SECONDS
+        rollback_seconds = min(BAND_POLICY_ROLLBACK_SECONDS, max(30, rollback_seconds))
         result = self._run_cmd(
             [
                 "/usr/bin/systemd-run",
@@ -1559,6 +1560,15 @@ class Plugin:
         observed, observed_result = self._nmcli_get(uuid, key)
         if not observed_result.get("success") or normalize(observed) != normalize(value):
             raise RuntimeError(unverified)
+
+    def _journaled_mutation(self, journal: dict, name: str, write, **planned):
+        """Journal the mutation as planned (unless the journal already does), make it, then journal it applied."""
+        if planned:
+            journal["mutations"][name] = {"planned": True, **planned, "applied": False}
+            self._save_band_policy_journal(journal)
+        write()
+        journal["mutations"][name]["applied"] = True
+        self._save_band_policy_journal(journal)
 
     def _cancel_band_policy_rollback(self, journal: dict):
         unit = str(journal.get("rollback_unit") or "")
@@ -1844,9 +1854,10 @@ class Plugin:
                             and not active() and remaining_activation >= 3.0
                             and not self._nmcli_get(uuid, "802-11-wireless.bssid")[0]):
                         iwd_fallback_used = True
-                        self._iwd_connect_profile(uuid, iface, remaining_activation)
-                        # The loop verifies the profile and its radio link either way.
-                        next_manual_activation = time.monotonic()
+                        # The loop verifies the profile and its radio link either way; after a join,
+                        # give NetworkManager a few seconds to adopt iwd's link before another `con up`.
+                        if self._iwd_connect_profile(uuid, iface, remaining_activation).get("success"):
+                            next_manual_activation = time.monotonic() + 5.0
 
             time.sleep(0.25)
 
@@ -2009,30 +2020,20 @@ class Plugin:
             return refusal
 
         try:
-            self._nmcli_set_verified(
+            self._journaled_mutation(journal, "nm_bssid", lambda: self._nmcli_set_verified(
                 uuid, "802-11-wireless.bssid", selected_bssid,
                 "NetworkManager rejected the temporary access-point selection",
-                "The temporary access-point selection could not be verified", self._normalize_bssid)
-            journal["mutations"]["nm_bssid"]["applied"] = True
-            self._save_band_policy_journal(journal)
+                "The temporary access-point selection could not be verified", self._normalize_bssid))
 
             reconnect = self._reconnect_profile(uuid, True, cycle=True, bound_iface=iface)
             if not reconnect.get("success"):
-                raise RuntimeError(
-                    reconnect.get("stderr")
-                    or "WiFi could not connect to the selected 5/6 GHz access point"
-                )
+                raise RuntimeError(reconnect.get("stderr")
+                                   or "WiFi could not connect to the selected 5/6 GHz access point")
             frequency = self._wait_for_profile_frequency(uuid)
             connected_bssid = self._get_link_bssid(iface)
-            if not (
-                frequency is not None
-                and minimum_frequency <= frequency < 7125
-                and self._profile_is_active(uuid, iface)
-                and connected_bssid == selected_bssid
-            ):
-                raise RuntimeError(
-                    "The selected 5/6 GHz access point did not become the active link"
-                )
+            if not (frequency is not None and minimum_frequency <= frequency < 7125
+                    and self._profile_is_active(uuid, iface) and connected_bssid == selected_bssid):
+                raise RuntimeError("The selected 5/6 GHz access point did not become the active link")
 
             # The BSSID is needed only to make this one choice deterministic.
             # Clear it while the verified link stays up, preserving roaming and
@@ -2071,12 +2072,8 @@ class Plugin:
                 "success": False,
                 "error": "manual_reconnect_failed",
                 "message": str(exc),
-                "detail": (
-                    "The original WiFi profile was restored."
-                    if rollback.get("success")
-                    else "Automatic recovery requires attention: "
-                    + "; ".join(rollback.get("conflicts", []))
-                ),
+                "detail": ("The original WiFi profile was restored." if rollback.get("success") else
+                           "Automatic recovery requires attention: " + "; ".join(rollback.get("conflicts", []))),
                 "rolled_back": rollback.get("rolled_back", False),
                 "rollback_conflicts": rollback.get("conflicts", []),
                 "connection_recovered": self._profile_is_active(uuid),
@@ -2138,17 +2135,19 @@ class Plugin:
             return {"success": False, "stderr": "iwd stopped during reload."}
         return {"success": True}
 
-    def _restore_band_policy_transaction(
-        self,
-        journal: dict,
-        reason: str,
-        journal_path: str | None = None,
-    ) -> dict:
+    def _restore_band_policy_transaction(self, journal: dict, reason: str, journal_path: str | None = None) -> dict:
         """Rollback only mutations whose expected values are still present."""
         path = journal_path or BAND_POLICY_JOURNAL_FILE
-        journal["phase"] = "rolling_back"
-        journal["rollback_reason"] = reason
-        self._save_band_policy_journal(journal, path)
+
+        def record(**fields):
+            journal.update(fields)
+            self._save_band_policy_journal(journal, path)
+
+        def reconnect_flags(reconnect_uuid: str) -> dict:
+            return {"rollback_reconnect_required": True, "rollback_reconnect_uuid": reconnect_uuid,
+                    "rollback_reconnect_completed": False}
+
+        record(phase="rolling_back", rollback_reason=reason)
         conflicts = []
         mutations = journal.get("mutations", {})
         backend = self._get_current_backend()
@@ -2170,19 +2169,13 @@ class Plugin:
                     # Persist the required service work before changing the
                     # file. If power is lost after the file restore, recovery
                     # still knows that iwd must be restarted and reconnected.
-                    journal["rollback_iwd_restart_required"] = backend != "wpa_supplicant"
-                    journal["rollback_iwd_restart_completed"] = False
                     active_uuid = str(journal.get("active_uuid_before") or "")
-                    if active_uuid and backend != "wpa_supplicant":
-                        journal["rollback_reconnect_required"] = True
-                        journal["rollback_reconnect_uuid"] = active_uuid
-                        journal["rollback_reconnect_completed"] = False
-                    self._save_band_policy_journal(journal, path)
+                    record(rollback_iwd_restart_required=backend != "wpa_supplicant",
+                           rollback_iwd_restart_completed=False,
+                           **(reconnect_flags(active_uuid) if active_uuid and backend != "wpa_supplicant" else {}))
                     self._restore_iwd_rank_modifier(before)
-                    restored_iwd = self._get_iwd_rank_modifier_snapshot()
-                    if self._iwd_snapshot_matches(restored_iwd, before):
-                        journal["rollback_iwd_file_restored"] = True
-                        self._save_band_policy_journal(journal, path)
+                    if self._iwd_snapshot_matches(self._get_iwd_rank_modifier_snapshot(), before):
+                        record(rollback_iwd_file_restored=True)
                     else:
                         conflicts.append("iwd restore could not be verified")
                 except Exception as e:
@@ -2194,15 +2187,10 @@ class Plugin:
         profile = journal.get("profile_before", {})
         uuid = str(profile.get("uuid") or "")
         if nm_mutation.get("planned") and uuid:
-            def require_reconnect():
-                if profile.get("was_active"):
-                    journal["rollback_reconnect_required"] = True
-                    journal["rollback_reconnect_uuid"] = uuid
-                    journal["rollback_reconnect_completed"] = False
-                    self._save_band_policy_journal(journal, path)
             self._restore_nm_field(
                 uuid, "802-11-wireless.band", "band", str(nm_mutation.get("expected") or ""),
-                str(profile.get("band") or ""), conflicts, before_restore=require_reconnect)
+                str(profile.get("band") or ""), conflicts,
+                before_restore=lambda: profile.get("was_active") and record(**reconnect_flags(uuid)))
 
         bssid_mutation = mutations.get("nm_bssid", {})
         if bssid_mutation.get("planned") and uuid:
@@ -2221,15 +2209,12 @@ class Plugin:
                 journal["rollback_reconnect_required"] = False
                 journal["rollback_reconnect_skipped_backend"] = backend
             self._save_band_policy_journal(journal, path)
-        if journal.get("rollback_iwd_restart_required") and not journal.get(
-            "rollback_iwd_restart_completed"
-        ):
+        if journal.get("rollback_iwd_restart_required") and not journal.get("rollback_iwd_restart_completed"):
             restart = self._restart_selected_iwd()
             if not restart.get("success"):
                 conflicts.append(f"iwd restart failed: {restart.get('stderr', '')}")
             else:
-                journal["rollback_iwd_restart_completed"] = True
-                self._save_band_policy_journal(journal, path)
+                record(rollback_iwd_restart_completed=True)
 
         reconnect_uuid = str(journal.get("rollback_reconnect_uuid") or "")
         automatic = (journal.get("operation") == "automatic_high_band_reconnect"
@@ -2237,12 +2222,8 @@ class Plugin:
         bound_iface = str(journal.get("automatic_iface") or "") if automatic else ""
         if journal.get("rollback_reconnect_required") and backend not in ("iwd", "wpa_supplicant"):
             conflicts.append("The active WiFi backend could not be verified for recovery")
-        if (
-            journal.get("rollback_reconnect_required")
-            and backend in ("iwd", "wpa_supplicant")
-            and not journal.get("rollback_reconnect_completed")
-            and reconnect_uuid
-        ):
+        if (journal.get("rollback_reconnect_required") and backend in ("iwd", "wpa_supplicant")
+                and not journal.get("rollback_reconnect_completed") and reconnect_uuid):
             current_uuid = self._get_active_connection_uuid(bound_iface or None)
             changed_connection = (current_uuid not in (None, reconnect_uuid)
                                   or recovery_active_uuid not in (None, reconnect_uuid))
@@ -2262,8 +2243,7 @@ class Plugin:
             if changed_connection or (active and frequency is not None):
                 # A connection-only operation has no profile/config writes to
                 # undo. Preserve a different network selected by the user.
-                journal["rollback_reconnect_completed"] = True
-                self._save_band_policy_journal(journal, path)
+                record(rollback_reconnect_completed=True)
             elif device_changed:
                 conflicts.append("The WiFi device changed during automatic reconnection")
             else:
@@ -2272,32 +2252,21 @@ class Plugin:
                                                          bound_iface=bound_iface, activation_timeout=5)
                 else:
                     reconnect = self._reconnect_profile(
-                        reconnect_uuid, True,
-                        cycle=not bool(journal.get("rollback_iwd_restart_required")))
+                        reconnect_uuid, True, cycle=not bool(journal.get("rollback_iwd_restart_required")))
                 if not reconnect.get("success"):
-                    conflicts.append(
-                        f"WiFi reconnect failed: {reconnect.get('stderr', '')}"
-                    )
+                    conflicts.append(f"WiFi reconnect failed: {reconnect.get('stderr', '')}")
                 else:
-                    journal["rollback_reconnect_completed"] = True
-                    self._save_band_policy_journal(journal, path)
+                    record(rollback_reconnect_completed=True)
 
         if not conflicts:
-            settings_path = str(journal.get("settings_file") or SETTINGS_FILE)
-            self._write_band_settings_fields(
-                settings_path, journal.get("settings_before", {})
-            )
+            self._write_band_settings_fields(str(journal.get("settings_file") or SETTINGS_FILE),
+                                             journal.get("settings_before", {}))
             journal["phase"] = "rolled_back"
         else:
             journal["phase"] = "rollback_failed"
             journal["rollback_conflicts"] = conflicts
-        journal["rolled_back_at"] = int(time.time())
-        self._save_band_policy_journal(journal, path)
-        return {
-            "success": not conflicts,
-            "rolled_back": not conflicts,
-            "conflicts": conflicts,
-        }
+        record(rolled_back_at=int(time.time()))
+        return {"success": not conflicts, "rolled_back": not conflicts, "conflicts": conflicts}
 
     def _roll_back_failed_transaction(self, journal: dict, reason: str) -> dict:
         """Undo a failed operation; the journal and watchdog stay unless that succeeded."""
@@ -3081,45 +3050,23 @@ class Plugin:
                 nonlocal band_before, nm_changed
                 if band_before == value:
                     return
-                journal["mutations"]["nm_band"] = {
-                    "planned": True,
-                    "expected": value,
-                    "applied": False,
-                }
-                self._save_band_policy_journal(journal)
-                self._nmcli_set_verified(
-                    profile_uuid, "802-11-wireless.band", value,
-                    "NetworkManager rejected the band setting",
-                    "NetworkManager band verification did not match the request")
-                journal["mutations"]["nm_band"]["applied"] = True
-                self._save_band_policy_journal(journal)
-                band_before = value
-                nm_changed = True
+                self._journaled_mutation(journal, "nm_band", lambda: self._nmcli_set_verified(
+                    profile_uuid, "802-11-wireless.band", value, "NetworkManager rejected the band setting",
+                    "NetworkManager band verification did not match the request"), expected=value)
+                band_before, nm_changed = value, True
 
             def apply_iwd(snapshot: dict):
                 nonlocal iwd_before, iwd_changed
                 if self._iwd_snapshot_matches(iwd_before, snapshot):
                     return
-                expected_present = bool(snapshot.get("modifier_present"))
-                expected_value = str(snapshot.get("modifier_value") or "")
-                journal["mutations"]["iwd"] = {
-                    "planned": True,
-                    "expected_present": expected_present,
-                    "expected_value": expected_value,
-                    "applied": False,
-                }
-                self._save_band_policy_journal(journal)
-                if expected_present:
-                    self._set_iwd_rank_modifier(expected_value)
-                else:
-                    self._restore_iwd_rank_modifier(snapshot)
-                journal["mutations"]["iwd"]["applied"] = True
-                self._save_band_policy_journal(journal)
+                present, value = bool(snapshot.get("modifier_present")), str(snapshot.get("modifier_value") or "")
+                self._journaled_mutation(
+                    journal, "iwd", lambda: (self._set_iwd_rank_modifier(value) if present
+                                             else self._restore_iwd_rank_modifier(snapshot)),
+                    expected_present=present, expected_value=value)
                 iwd_before = self._get_iwd_rank_modifier_snapshot()
                 if not self._iwd_snapshot_matches(iwd_before, snapshot):
-                    raise RuntimeError(
-                        "iwd band-policy verification did not match the request"
-                    )
+                    raise RuntimeError("iwd band-policy verification did not match the request")
                 iwd_changed = True
 
             # An iwd-to-iwd transition must make one journaled file write.
@@ -3141,17 +3088,12 @@ class Plugin:
             if iwd_runtime_changed:
                 restart = self._restart_selected_iwd()
                 if not restart.get("success"):
-                    raise RuntimeError(
-                        restart.get("stderr") or "iwd restart failed"
-                    )
+                    raise RuntimeError(restart.get("stderr") or "iwd restart failed")
 
-            reconnect_uuid = ""
             if self._get_current_backend() != backend:
                 raise RuntimeError("The WiFi backend changed before reconnection.")
-            if iwd_runtime_changed and active_uuid:
-                reconnect_uuid = active_uuid
-            elif nm_changed and profile_was_active:
-                reconnect_uuid = profile_uuid
+            reconnect_uuid = (active_uuid if iwd_runtime_changed and active_uuid
+                              else profile_uuid if nm_changed and profile_was_active else "")
             reconnected = bool(reconnect_uuid)
             # Turning a policy OFF is never rolled back over a failed
             # reconnect: that would put the restriction back.
@@ -3160,28 +3102,17 @@ class Plugin:
                 current_uuid = self._get_active_connection_uuid()
                 if current_uuid not in (None, reconnect_uuid):
                     raise RuntimeError("The active WiFi profile changed; the new connection was preserved.")
-                reconnect = self._reconnect_profile(
-                    reconnect_uuid, True, cycle=not iwd_runtime_changed
-                )
+                reconnect = self._reconnect_profile(reconnect_uuid, True, cycle=not iwd_runtime_changed)
                 if not reconnect.get("success"):
                     if mode != BAND_POLICY_OFF:
-                        raise RuntimeError(
-                            reconnect.get("stderr") or "WiFi reconnect failed"
-                        )
+                        raise RuntimeError(reconnect.get("stderr") or "WiFi reconnect failed")
                     not_reconnected = reconnect.get("stderr") or "WiFi reconnect failed"
 
-            if mode == BAND_POLICY_HIGH_ONLY and not profile_uuid:
-                verification = {
-                    "success": True,
-                    "frequency": self._get_link_frequency(),
-                }
-            elif mode != BAND_POLICY_OFF:
+            if mode != BAND_POLICY_OFF and (mode != BAND_POLICY_HIGH_ONLY or profile_uuid):
                 verification = self._verify_band_policy(mode, profile_uuid)
                 if not verification.get("success"):
-                    raise RuntimeError(
-                        verification.get("message") or "Band verification failed"
-                    )
-            elif reconnect_uuid and not not_reconnected:
+                    raise RuntimeError(verification.get("message") or "Band verification failed")
+            elif mode == BAND_POLICY_OFF and reconnect_uuid and not not_reconnected:
                 verification = self._verify_band_policy(BAND_POLICY_OFF, reconnect_uuid)
                 if not verification.get("success"):
                     not_reconnected = verification.get("message") or "WiFi reconnect failed"
@@ -3192,34 +3123,21 @@ class Plugin:
             if self._get_current_backend() != backend:
                 raise RuntimeError("The WiFi backend changed before verification completed.")
 
-            if mode == BAND_POLICY_OFF:
-                next_state = {}
-            else:
-                next_state = {
-                    "schema": 1,
-                    "mode": mode,
-                    "connection_uuid": profile_uuid,
-                    "original": {
-                        "nm_band": neutral_band,
-                        "iwd": neutral_iwd,
-                    },
-                    "owns_nm_band": mode == BAND_POLICY_SIX_ONLY,
-                    "owns_iwd": mode in IWD_BAND_POLICIES,
-                    "applied": {
-                        "nm_band": final_band,
-                        "iwd_modifier_present": bool(
-                            final_iwd.get("modifier_present")
-                        ),
-                        "iwd_modifier_value": str(
-                            final_iwd.get("modifier_value") or ""
-                        ),
-                    },
-                    "activated_at": int(time.time()),
-                }
-            settings_after = {
-                "band_policy": mode,
-                "band_policy_state": next_state,
+            next_state = {} if mode == BAND_POLICY_OFF else {
+                "schema": 1,
+                "mode": mode,
+                "connection_uuid": profile_uuid,
+                "original": {"nm_band": neutral_band, "iwd": neutral_iwd},
+                "owns_nm_band": mode == BAND_POLICY_SIX_ONLY,
+                "owns_iwd": mode in IWD_BAND_POLICIES,
+                "applied": {
+                    "nm_band": final_band,
+                    "iwd_modifier_present": bool(final_iwd.get("modifier_present")),
+                    "iwd_modifier_value": str(final_iwd.get("modifier_value") or ""),
+                },
+                "activated_at": int(time.time()),
             }
+            settings_after = {"band_policy": mode, "band_policy_state": next_state}
             self._commit_band_transaction(journal, settings_after=settings_after,
                                           verified_frequency=verification.get("frequency"))
             return {

@@ -68,13 +68,16 @@ class IwdNativeFallbackTests(unittest.TestCase):
             objects[self.NETWORK + "x"] = {"net.connman.iwd.Network": dict(network)}
         return json.dumps({"type": "a{oa{sa{sv}}}", "data": [objects]})
 
-    def execute(self, bssid="", **tree):
+    def execute(self, bssid="", adopt_after=0.0, **tree):
         plugin = wifi.Plugin()
-        commands, activated = [], [False]
-        adapter = strict_tests.device(lambda: activated[0], lambda: 5260)
+        commands, times, joined = [], [], [None]
+        clock = [0.0]
+        adopted = lambda: joined[0] is not None and clock[0] >= joined[0] + adopt_after
+        adapter = strict_tests.device(adopted, lambda: 5260)
 
         def command(argv, **kwargs):
             commands.append(argv)
+            times.append(clock[0])
             if argv[:3] == ["/usr/bin/nmcli", "con", "up"]:
                 return {"success": False, "stderr": "Connection activation failed: No reason given"}
             if "GetManagedObjects" in argv:
@@ -84,17 +87,38 @@ class IwdNativeFallbackTests(unittest.TestCase):
             if "connection.uuid,802-11-wireless.ssid,802-11-wireless.hidden" in argv:
                 return {"success": True, "stdout": f"{UUID}\nHome\nno"}
             if argv[-1] == "Connect":
-                activated[0] = True
+                joined[0] = clock[0]
                 return {"success": True, "stdout": ""}
             return adapter(argv) or {"success": True, "stdout": ""}
 
         with ExitStack() as stack:
-            strict_tests.fake_clock(stack)
+            clock = strict_tests.fake_clock(stack)
             stack.enter_context(patch.object(plugin, "_run_cmd", side_effect=command))
             stack.enter_context(patch.object(plugin, "_get_current_backend", return_value="iwd"))
             stack.enter_context(patch.object(plugin, "_get_iwd_profile_conflict", return_value=""))
             result = plugin._reconnect_profile(UUID, cycle=True)
+        self.times = times
         return result, commands
+
+    def nm_activations_after_join(self, commands):
+        join = next(i for i, argv in enumerate(commands) if argv[-1] == "Connect")
+        return [self.times[i] - self.times[join] for i, argv in enumerate(commands)
+                if argv[:3] == ["/usr/bin/nmcli", "con", "up"] and i > join]
+
+    def test_nm_gets_time_to_adopt_the_iwd_join_before_another_activation(self):
+        result, commands = self.execute(adopt_after=3.0)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(self.nm_activations_after_join(commands), [])
+
+    def test_iwd_join_nm_never_adopts_keeps_the_nm_failure(self):
+        result, commands = self.execute(adopt_after=float("inf"))
+        self.assertFalse(result["success"], result)
+        self.assertFalse(result["reconnected"])
+        self.assertEqual(result["stderr"], "Connection activation failed: No reason given")
+        later = self.nm_activations_after_join(commands)
+        self.assertTrue(later, "NetworkManager is tried again after the wait")
+        self.assertGreaterEqual(min(later), 5.0)
+        self.assertEqual(sum(argv[-1] == "Connect" for argv in commands), 1)
 
     def test_refused_nm_activation_falls_back_to_iwd_once(self):
         result, commands = self.execute()

@@ -348,6 +348,13 @@ class StrictWifiTests(unittest.TestCase):
             os.path.join(wifi.DECKY_PLUGIN_DIR, "wifi_backend.py"), "--rollback-band-policy",
             wifi.BAND_POLICY_JOURNAL_FILE])
 
+    def test_watchdog_delay_is_clamped_to_30_180_seconds(self):
+        for delay, expected in ((5, 30), (-1, 30), (600, 180), (90.9, 90), ("75", 75),
+                                ("soon", 180), (None, 180), ([60], 180)):
+            with self.subTest(delay=delay):
+                wifi.Plugin._schedule_band_policy_rollback(self.plugin, {"rollback_delay_seconds": delay})
+                self.assertIn(f"--on-active={expected}s", self.commands.call_args.args[0])
+
     def test_automatic_refuses_duplicate_keys_left_outside_without_locking_wifi(self):
         journal = self.journal_dir / "band-policy-transaction.json"
         self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\nBandModifier2_4GHz=0.6\n", encoding="utf-8")
