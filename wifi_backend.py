@@ -256,6 +256,13 @@ class Plugin:
                     and state.get("mode") == BAND_POLICY_HIGH_ONLY
                     and state.get("owns_iwd") is True)
 
+    def _high_band_discovery_allowed(self, settings: dict) -> bool:
+        """Checked before discovery starts and again just before it reconnects."""
+        return bool(self._high_band_discovery_enabled(settings)
+                    and self._get_current_backend() == "iwd"
+                    and not self._band_policy_ownership_error(settings)
+                    and not self._get_network_recovery_issues())
+
     def _get_high_band_link(self, stop: threading.Event | None = None) -> dict | None:
         """Bind observations to one activated NM connection and kernel device."""
         devices = self._run_cmd([
@@ -309,11 +316,7 @@ class Plugin:
     def _discover_high_bands(self, link: dict, stop: threading.Event) -> dict:
         """Refresh iwd's stale quick-autoconnect cache without forcing a BSSID."""
         started = time.monotonic()
-        settings = _load_settings()
-        if (stop.is_set() or not self._high_band_discovery_enabled(settings)
-                or self._get_current_backend() != "iwd"
-                or self._band_policy_ownership_error(settings)
-                or self._get_network_recovery_issues()):
+        if stop.is_set() or not self._high_band_discovery_allowed(_load_settings()):
             return {"success": False, "error": "discovery_unavailable"}
         current = self._get_high_band_link(stop)
         if not current or current["episode"] != link["episode"]:
@@ -425,7 +428,7 @@ class Plugin:
             return fallback
         # DBus Name preserves significant leading/trailing SSID spaces.
         ssid = link.get("ssid")
-        if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32 or stop.is_set():
+        if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32:
             return fallback
         scan = self._run_discovery_scan(link["iface"], ssid, stop)
         if not scan.get("success") or stop.is_set():
@@ -440,9 +443,7 @@ class Plugin:
         settings = _load_settings()
         current = self._get_high_band_link(stop)
         if (not current or current["episode"] != link["episode"] or stop.is_set()
-                or not self._high_band_discovery_enabled(settings)
-                or self._get_current_backend() != "iwd"
-                or self._band_policy_ownership_error(settings) or self._get_network_recovery_issues()
+                or not self._high_band_discovery_allowed(settings)
                 or self._get_iwd_profile_conflict(link["uuid"])):
             return fallback
         # iwd can roam during the directed scan without changing NM's active
@@ -457,9 +458,7 @@ class Plugin:
             value, result = self._nmcli_get(link["uuid"], field, timeout=1)
             if not result.get("success") or value or stop.is_set():
                 return fallback
-        if stop.is_set():
-            return fallback
-        saved = self._band_settings_fields(settings)
+        saved =self._band_settings_fields(settings)
         journal = {
             "schema": 1, "operation_id": f"discovery-{os.getpid()}-{time.time_ns()}",
             "operation": "automatic_high_band_reconnect", "phase": "pending",
