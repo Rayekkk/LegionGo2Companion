@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Diagnostic outcomes remain truthful, private and quiet on repeated faults."""
+"""Diagnostic events stay truthful, private and quiet on repeated faults.
+
+Each case drives a real situation through the module's RPCs or Decky lifecycle hooks on the
+fakes the module tests already use (sysfs trees, a fake ryzenadj, a fake gamescope, real
+settings stores in a temp dir) and reads the encoded lines the event file would receive.
+"""
 import asyncio
-import builtins
 from collections import OrderedDict
-from contextlib import ExitStack
 import copy
 import errno
 import json
@@ -20,261 +23,476 @@ import battery_backend as battery
 import controller_backend as controller
 import remap_backend as remap
 import rgb_backend as rgb
-import display_backend as display
 import main
 import safe_settings
 import tdp_backend as tdp
-import vibration_backend as vibe
+from safe_settings import AtomicSettingsManager
+import test_display_hybrid
+import test_tdp_core
+import test_vibration_backend
+
+MARKER = 'ConfidentialValue_Z7'
 
 
-async def call_sync(function, *args, **kwargs):
-    return function(*args, **kwargs)
+class Events:
+    """Capture each encoded event line exactly as the event file would receive it."""
 
-
-class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.stack = ExitStack()
-        self.addCleanup(self.stack.close)
+        super().setUp()
         self.records = []
-        self.stack.enter_context(patch.object(diagnostics, '_sink',
-            lambda text, level: self.records.append(json.loads(text))))
-        self.stack.enter_context(patch.object(diagnostics, '_seen', OrderedDict()))
+        for name, value in (('_sink', lambda text, _level: self.records.append(json.loads(text))),
+                            ('_seen', OrderedDict())):  # repeat/transition memory starts empty
+            patcher = patch.object(diagnostics, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def events(self, component, action):
         return [row for row in self.records if row['component'] == component and row['event'] == action]
 
-    async def test_vibration_uninstall_does_not_claim_restore_after_false_readback(self):
-        with patch.object(vibe, '_offload', AsyncMock(side_effect=[False, True])):
-            await vibe.Plugin()._uninstall()
-            await vibe.Plugin()._uninstall()
+    def assertNotLogged(self, text, logger=None):
+        self.assertNotIn(text, json.dumps(self.records))
+        if logger is not None:
+            self.assertNotIn(text, str(logger.mock_calls))
+
+
+class VibrationEventTests(Events, test_vibration_backend.FakeDevice):
+    async def test_uninstall_does_not_claim_a_restore_the_controller_did_not_read_back(self):
+        self.ignored.add('rumble_intensity')  # accepted by the driver, never applied
+        (self.device / 'rumble_intensity').write_text('low', encoding='ascii')
+        await self.plugin._uninstall()
+        self.ignored.clear()
+        await self.plugin._uninstall()
         rows = self.events('vibration', 'restore')
         self.assertEqual([row['context']['restored'] for row in rows], [False, True])
         self.assertEqual([row['level'] for row in rows], ['warning', 'info'])
+        failed, = self.events('vibration', 'attribute_write')
+        self.assertEqual(failed['context']['attribute'], 'rumble_intensity')
 
-    async def test_rgb_uninstall_reports_incomplete_pending_recovery(self):
-        with patch.object(rgb, '_offload', side_effect=call_sync), patch.object(rgb, '_recover_pending', return_value=False):
-            await rgb.Plugin()._uninstall()
+
+SNAPSHOT = {'profile': 3, 'mode': 'custom', 'effect': 'monocolor', 'brightness': 20,
+            'brightness_max': 100, 'rgb': [0, 100, 100], 'rgb_max': [100, 100, 100],
+            'speed': 50, 'enabled': False}
+
+
+class RgbEventTests(Events, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.store = AtomicSettingsManager('rgb_settings', str(self.root / 'settings'))
+        # No joystick-ring interface on the test host, whatever its DMI says.
+        for name, value in (('settings', self.store), ('RGB_LED_PATH', str(self.root / 'no-rings')),
+                            ('REAPPLY_WAIT_S', 0)):
+            patcher = patch.object(rgb, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.plugin = rgb.Plugin()
+
+    def save(self, **state):
+        self.store.replace({'state': {**rgb.DEFAULT_STATE, **state}})
+
+    async def test_uninstall_reports_an_interrupted_change_it_could_not_recover(self):
+        self.save(pending={'previous': dict(rgb.DEFAULT_STATE), 'before_rgb': SNAPSHOT, 'before_power': None})
+        await self.plugin._uninstall()
         row, = self.events('rgb', 'restore')
-        self.assertFalse(row['context']['restored'])
-        self.assertEqual(row['context']['outcome'], 'unconfirmed')
+        self.assertEqual((row['level'], row['context']['restored'], row['context']['outcome']),
+                         ('warning', False, 'unconfirmed'))
+        recovery, = self.events('rgb', 'transaction_recovery')
+        self.assertTrue(recovery['context']['pending'])
 
-    async def test_rgb_write_retains_errno_and_attribute_without_raw_path(self):
-        with patch.object(rgb.os, 'open', side_effect=PermissionError(errno.EACCES, 'private detail', '/home/private/secret-file')):
-            self.assertFalse(rgb._write_attr('/home/private/secret-file', 'brightness', '11', force=True))
+    async def test_missing_rings_are_reported_once_and_the_recovery_is_visible(self):
+        self.save(configured=True, control_enabled=True, original_rgb=SNAPSHOT)
+        self.assertFalse((await self.plugin.reapply())['success'])
+        self.assertFalse((await self.plugin.reapply())['success'])
+        self.save()  # ring control no longer owned
+        self.assertTrue((await self.plugin.reapply())['success'])
+        rows = self.events('rgb', 'reconcile')
+        self.assertEqual([row['context']['status'] for row in rows], ['ring_unavailable', 'confirmed'])
+        self.assertEqual([row['level'] for row in rows], ['warning', 'info'])
+
+    # The attribute writer is the sysfs boundary itself: these drive it on a temp tree.
+    async def test_refused_write_keeps_errno_and_attribute_without_raw_path_or_text(self):
+        secret = '/home/private/secret-file'
+        with patch.object(rgb.os, 'open', side_effect=PermissionError(errno.EACCES, 'private detail', secret)):
+            self.assertFalse(rgb._write_attr(secret, 'brightness', '11', force=True))
         row, = self.events('rgb', 'attribute_write')
         self.assertEqual(row['error']['errno'], errno.EACCES)
         self.assertEqual(row['context']['attribute'], 'brightness')
-        self.assertNotIn('/home/private', json.dumps(self.records))
-        self.assertNotIn('private detail', json.dumps(self.records))
+        self.assertNotLogged('/home/private')
+        self.assertNotLogged('private detail')
 
-    async def test_rgb_short_write_has_an_origin_event(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary)
-            (path / 'brightness').write_text('10\n')
-            with patch.object(rgb.os, 'write', return_value=1):
-                self.assertFalse(rgb._write_attr(str(path), 'brightness', '11', force=True))
+    async def test_short_write_has_its_own_reason(self):
+        (self.root / 'brightness').write_text('10\n')
+        with patch.object(rgb.os, 'write', return_value=1):
+            self.assertFalse(rgb._write_attr(str(self.root), 'brightness', '11', force=True))
         row, = self.events('rgb', 'attribute_write')
-        self.assertEqual(row['context']['reason'], 'short_write')
-        self.assertEqual(row['context']['bytes'], 1)
+        self.assertEqual((row['context']['reason'], row['context']['bytes']), ('short_write', 1))
 
-    async def test_rgb_background_failure_is_coalesced_and_recovery_is_visible(self):
-        state = dict(copy.deepcopy(rgb.DEFAULT_STATE), control_enabled=True)
-        with patch.object(rgb, '_load_state', return_value=state), patch.object(rgb, '_recover_pending', return_value=True), patch.object(rgb, '_rgb_capability', return_value=(None, 'Controller unavailable')):
-            self.assertFalse(rgb._reconcile())
-            self.assertFalse(rgb._reconcile())
-            state['control_enabled'] = False
-            self.assertTrue(rgb._reconcile())
-        rows = self.events('rgb', 'reconcile')
-        self.assertEqual([row['context']['status'] for row in rows], ['ring_unavailable', 'confirmed'])
-
-    async def test_controller_startup_watch_repetition_and_recovery_are_one_state_history(self):
-        plugin = controller.Plugin()
-        with patch.object(controller, '_offload', side_effect=call_sync), patch.object(controller, '_state', return_value={'gyro_source':'left'}), patch.object(plugin, '_select', side_effect=OSError(errno.EIO, 'initial failure')), patch.object(plugin, '_ensure_watch'):
-            await plugin._main()
-        clock = iter((0, 61, 122, 183))
-        async def sleep(_seconds):
-            sleep.calls += 1
-            if sleep.calls > 3:
-                raise asyncio.CancelledError()
-        sleep.calls = 0
-        with patch.object(controller, 'time', types.SimpleNamespace(monotonic=lambda:next(clock))), patch.object(controller, '_suspend_offset', return_value=0), patch.object(controller.asyncio, 'sleep', side_effect=sleep), patch.object(plugin, '_watch_check', AsyncMock(side_effect=[OSError(errno.EIO, 'retry one'), OSError(errno.EIO, 'retry two'), None])):
-            with self.assertRaises(asyncio.CancelledError):
-                await plugin._watch()
-        rows = self.events('controller', 'managed_profile')
-        self.assertEqual([row['context']['status'] for row in rows], ['deferred', 'True'])
-        self.assertEqual([row['level'] for row in rows], ['warning', 'info'])
-
-    async def test_controller_diagnostics_records_endpoints_and_finite_summary_without_token(self):
-        plugin = controller.Plugin()
-        capture = {'active':True, 'reason':'', 'token':'private-diagnostics-token',
-                   'physical':{'reports':0}, 'virtual':{'reports':0}}
-        plugin._worker((None, None), capture, plugin._stop)
-        self.assertEqual(len(self.events('controller', 'diagnostics_stream')), 2)
-        row, = self.events('controller', 'diagnostics_complete')
-        self.assertEqual(row['context']['reason'], 'unavailable')
-        self.assertEqual(row['context']['count'], 0)
-        self.assertNotIn(capture['token'], json.dumps(self.records))
-
-    async def test_remap_repeated_failure_and_later_recovery_stay_bounded(self):
-        state = {'enabled':True}
-        with patch.object(remap, '_load_state', return_value=state), patch.object(remap, '_apply_state', side_effect=[RuntimeError('first'), RuntimeError('second'), RuntimeError('third'), (state, False)]), patch.object(remap._service_watch, 'capture'):
-            self.assertEqual([remap._repair_sync() for _ in range(4)], [False, False, False, True])
-        rows = self.events('remap', 'managed_profile')
-        self.assertEqual([row['context']['status'] for row in rows], ['False', 'True'])
-
-    async def test_backup_failures_identify_each_store_and_recovery_without_values(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            stores = [safe_settings.AtomicSettingsManager(name, temporary) for name in ('battery_settings', 'rgb_settings')]
-            backup_paths = {store.backup_path for store in stores}
-            write = safe_settings._atomic_write_bytes
-            def storage(path, payload):
-                if path in backup_paths:
-                    raise OSError(errno.ENOSPC, 'private backup failure')
-                return write(path, payload)
-            with patch.object(safe_settings, '_atomic_write_bytes', side_effect=storage):
-                for store in stores:
-                    store.replace({'private_setting':'private-payload-marker'})
-                    store.replace({'private_setting':'private-payload-marker'})
-            stores[0].replace({'private_setting':'private-payload-marker'})
-        rows = self.events('settings', 'backup_refresh')
-        self.assertEqual([(row['context']['store'], row['context']['status']) for row in rows],
-                         [('battery_settings','False'), ('rgb_settings','False'), ('battery_settings','True')])
-        self.assertNotIn('private-payload-marker', json.dumps(self.records))
-
-    async def test_primary_commit_failure_is_identified_without_changing_rollback(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = safe_settings.AtomicSettingsManager('controller_settings', temporary)
-            store.replace({'enabled':False})
-            with patch.object(safe_settings, '_atomic_write_bytes', side_effect=OSError(errno.ENOSPC, 'full')):
-                with self.assertRaises(OSError):
-                    store.replace({'enabled':True})
-            self.assertFalse(store.getSetting('enabled'))
-        row, = self.events('settings', 'primary_commit_failed')
-        self.assertEqual(row['context']['store'], 'controller_settings')
-        self.assertEqual(row['error']['errno'], errno.ENOSPC)
-
-    async def test_tdp_write_failures_keep_independent_attribute_origins(self):
-        with patch.object(tdp, '_wmi_path', return_value='/offline-fixture'), patch('builtins.open', side_effect=PermissionError(errno.EACCES, 'denied')):
-            tdp._write_ppt(15, 18, 25)
-            self.assertFalse(tdp._write_profile('/offline-fixture', 'custom'))
-        rows = self.events('tdp', 'attribute_write')
-        self.assertEqual(len(rows), 4)
-        self.assertEqual({row['context']['attribute'] for row in rows}, set(tdp.WMI_ATTRS.values()) | {'platform_profile'})
-        self.assertEqual({row['level'] for row in rows}, {'warning'})
-
-    async def test_tdp_refused_in_place_write_is_not_a_warning(self):
-        with patch.object(tdp, '_wmi_path', return_value='/offline-fixture'), patch('builtins.open', side_effect=PermissionError(errno.EACCES, 'denied')):
-            tdp._write_ppt(15, 18, 25, retried=True)
-        rows = self.events('tdp', 'attribute_write')
-        self.assertEqual({row['level'] for row in rows}, {'info'})
-
-    async def test_power_led_access_failure_has_checked_stage_without_hardware_access(self):
-        with patch.object(rgb, '_power_capability', return_value=(True, '')), patch.object(rgb, '_with_power_lock', side_effect=TimeoutError('checked lock busy')):
-            self.assertIsNone(rgb._read_power_led())
-            self.assertFalse(rgb._write_power_led(True))
+    @unittest.skipUnless(os.name == 'posix', 'real flock on the power-button LED lock')
+    async def test_busy_power_led_lock_names_the_read_and_the_write_stage(self):
+        import fcntl
+        (self.root / 'DSDT').write_bytes(support.power_led_dsdt())
+        (self.root / 'mem').write_bytes(bytes(4096))
+        lock = self.root / 'power.lock'
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another holder keeps the LED busy
+        identity = {'product_family': rgb.EXPECTED_FAMILY, 'product_name': rgb.EXPECTED_PRODUCT,
+                    'board_name': rgb.EXPECTED_BOARD, 'bios_version': 'RRCN16WW'}
+        self.save(power_led_managed=True, power_led_enabled=False, power_led_original_enabled=True)
+        with patch.object(rgb, '_read_identity', return_value=identity), \
+                patch.object(rgb, '_power_capability_cache', None), \
+                patch.object(rgb, 'DSDT_PATH', str(self.root / 'DSDT')), \
+                patch.object(rgb, 'DEV_MEM_PATH', str(self.root / 'mem')), \
+                patch.object(rgb, 'POWER_LOCK_PATH', str(lock)):
+            self.assertIsNone((await self.plugin.get_status())['power_led']['current'])
+            await self.plugin._uninstall()
         rows = self.events('rgb', 'power_led_access')
         self.assertEqual([row['context']['stage'] for row in rows], ['read', 'write'])
         self.assertTrue(all(row['error']['type'] == 'TimeoutError' for row in rows))
+        self.assertFalse(self.events('rgb', 'restore')[0]['context']['restored'])
 
-    async def test_tdp_hardware_rollback_exception_is_not_discarded(self):
-        state = {'enabled':True, 'spl':15000, 'sppt':18000, 'fppt':25000}
-        with patch.object(tdp, '_load_settings', return_value=state), patch.object(tdp, '_effective_cpu_state', side_effect=copy.deepcopy), patch.object(tdp, '_read_cpu_baseline', return_value=None), patch.object(tdp, '_apply_limits_with_saved_cpu_power', side_effect=OSError(errno.EIO, 'rollback failed')):
-            with tdp._tdp_user_transaction() as restore_failed:
-                result = restore_failed({'success':False, 'stderr':'apply failed'})
+
+PHYSICAL = {'path': '/dev/hidraw1', 'identity': '/sys/devices/usb/1-1:1.2',
+            'sysfs': '/sys/devices/usb/1-1:1.2/0003:17EF:61EB.0002', 'pid': '61eb', 'devnum': '241:1'}
+NO_IMU = {'left': False, 'right': False}
+OWNED = {'gyro_source': 'left', 'ownership': {
+    'identity': PHYSICAL['identity'], 'pending': False, 'baseline': [], 'applied': [], 'previous': [],
+    'imu_baseline': NO_IMU, 'imu_applied': NO_IMU, 'imu_previous': NO_IMU}}
+
+
+class ControllerEventTests(Events, unittest.IsolatedAsyncioTestCase):
+    """HID enumeration is the stubbed boundary; DMI, settings and the descriptor open are real or files."""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.dmi = self.root / 'dmi'
+        self.dmi.mkdir()
+        self.store = AtomicSettingsManager('controller_settings', str(self.root / 'settings'))
+        self.inventory = (None, None)
+
+        def inventory():
+            if isinstance(self.inventory, BaseException):
+                raise self.inventory
+            return self.inventory
+        for name, value in (('settings', self.store), ('DMI_ROOT', self.dmi),
+                            ('_hid_inventory', inventory)):
+            patcher = patch.object(controller, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.plugin = controller.Plugin()
+
+    def legion_go_2(self):
+        (self.dmi / 'sys_vendor').write_text('LENOVO\n')
+        (self.dmi / 'product_name').write_text('83N0\n')
+
+    async def test_startup_failure_retries_and_recovery_are_one_state_history(self):
+        self.store.replace({'state': OWNED})
+        clock, ticks = [0.0], []
+
+        async def tick(_seconds):
+            ticks.append(clock[0])
+            clock[0] += 61
+            if len(ticks) == 2:
+                self.store.replace({'state': {'gyro_source': 'system'}})  # ownership released
+            if len(ticks) > 2:
+                raise asyncio.CancelledError()
+        with patch.object(controller, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch.object(controller.asyncio, 'sleep', side_effect=tick):
+            await self.plugin._main()  # controller absent: deferred, the watch keeps retrying
+            with self.assertRaises(asyncio.CancelledError):
+                await self.plugin._watch_task
+        rows = self.events('controller', 'managed_profile')
+        self.assertEqual([row['context']['status'] for row in rows], ['deferred', 'True'])
+        self.assertEqual([row['level'] for row in rows], ['warning', 'info'])
+        await self.plugin._unload()
+
+    async def test_motion_test_records_endpoints_and_a_finite_summary_without_its_token(self):
+        self.inventory = (PHYSICAL, None)  # identity not verifiable: DMI is not a Go 2
+        token = (await self.plugin.start_diagnostics())['token']
+        await self.plugin.stop_diagnostics(token)
+        streams = self.events('controller', 'diagnostics_stream')
+        self.assertEqual({row['context'].get('stage') or row['context']['reason'] for row in streams},
+                         {'open', 'endpoint_unavailable'})
+        row, = self.events('controller', 'diagnostics_complete')
+        self.assertEqual((row['context']['reason'], row['context']['count']), ('unavailable', 0))
+        self.assertNotLogged(token)
+
+    @unittest.skipUnless(os.name == 'posix', 'hidraw open flags exist only on POSIX')
+    async def test_battery_read_fault_is_private_and_an_absent_controller_stays_quiet(self):
+        self.legion_go_2()
+        self.inventory = (PHYSICAL, None)
+        real_open, opened = os.open, []
+
+        def device_open(path, *args, **kwargs):
+            if str(path).startswith('/dev/hidraw'):
+                opened.append(path)
+                raise PermissionError(errno.EACCES, MARKER)
+            return real_open(path, *args, **kwargs)
+        with patch.object(controller.os, 'open', side_effect=device_open):
+            result = await self.plugin.get_battery_levels()
+            self.assertEqual(await self.plugin.get_battery_levels(), result)  # cached, not reopened
+            self.inventory = (None, None)
+            self.assertFalse((await controller.Plugin().get_battery_levels())['available'])
+        self.assertEqual(opened, ['/dev/hidraw1'])
+        self.assertFalse(result['available'])
+        self.assertIn(MARKER, result['reason'])  # the panel still explains the fault
+        row, = self.events('controller', 'battery_read_failed')
+        self.assertEqual(row['error']['errno'], errno.EACCES)
+        self.assertTrue(row['error']['frames'])
+        self.assertNotLogged(MARKER)
+
+    async def test_lifecycle_restore_fault_is_pending_without_raw_dependency_text(self):
+        self.store.replace({'state': OWNED})
+        self.inventory = OSError(errno.EIO, MARKER)
+        logger = Mock()
+        with patch.object(controller.decky, 'logger', logger):
+            await self.plugin._uninstall()
+        rows = self.events('controller', 'restore_failed')
+        self.assertEqual([row['context']['stage'] for row in rows], ['unload', 'uninstall'])
+        self.assertTrue(all(row['context']['pending'] and row['error']['errno'] == errno.EIO for row in rows))
+        self.assertNotLogged(MARKER, logger)
+
+
+BASELINE_PROFILE = 'version: 1\nkind: DeviceProfile\nname: Default\nmapping: []\n'
+
+
+class RemapEventTests(Events, unittest.IsolatedAsyncioTestCase):
+    """InputPlumber is out of reach: remapping refuses this host as not a Legion Go 2."""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.store = AtomicSettingsManager('remap_settings', folder.name)
+        self.store.replace({'state': {**remap.DEFAULT_STATE, 'enabled': True, 'baseline_profile': BASELINE_PROFILE}})
+        for target, name, value in ((remap, 'settings', self.store),
+                                    (remap.module_runtime, 'is_legion_go_2', lambda *_: False)):
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def test_repeated_startup_failure_and_later_recovery_stay_bounded(self):
+        plugin = remap.Plugin()
+        self.addAsyncCleanup(plugin._unload)
+        await plugin._main()
+        await plugin._main()
+        self.store.replace({'state': dict(remap.DEFAULT_STATE)})  # remapping turned off
+        await plugin._main()
+        rows = self.events('remap', 'managed_profile')
+        self.assertEqual([row['context']['status'] for row in rows], ['False', 'True'])
+        self.assertEqual(rows[0]['error']['type'], remap.RemapError.__name__)
+
+    async def test_uninstall_restore_fault_stays_pending(self):
+        logger = Mock()
+        with patch.object(remap.decky, 'logger', logger):
+            await remap.Plugin()._uninstall()
+        row, = self.events('remap', 'restore_failed')
+        self.assertEqual({key: row['context'][key] for key in ('stage', 'pending', 'restored')},
+                         {'stage': 'uninstall', 'pending': True, 'restored': False})
+        self.assertEqual(row['error']['type'], remap.RemapError.__name__)
+
+
+class SettingsEventTests(Events, unittest.TestCase):
+    """A directory where a settings file belongs is a real, refused write on every host."""
+
+    def test_backup_failures_identify_each_store_and_recovery_without_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            stores = [AtomicSettingsManager(name, temporary) for name in ('battery_settings', 'rgb_settings')]
+            for store in stores:
+                os.mkdir(store.backup_path)
+                store.replace({'private_setting': 'private-payload-marker'})
+                store.replace({'private_setting': 'private-payload-marker'})
+            os.rmdir(stores[0].backup_path)
+            stores[0].replace({'private_setting': 'private-payload-marker'})
+        rows = self.events('settings', 'backup_refresh')
+        self.assertEqual([(row['context']['store'], row['context']['status']) for row in rows],
+                         [('battery_settings', 'False'), ('rgb_settings', 'False'), ('battery_settings', 'True')])
+        self.assertNotLogged('private-payload-marker')
+
+    def test_primary_commit_failure_is_identified_without_changing_rollback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = AtomicSettingsManager('controller_settings', temporary)
+            store.replace({'enabled': False})
+            os.replace(store.path, store.path + '.moved')
+            os.mkdir(store.path)
+            with self.assertRaises(Exception):
+                store.replace({'enabled': True})
+            self.assertFalse(store.getSetting('enabled'))
+        row, = self.events('settings', 'primary_commit_failed')
+        self.assertEqual((row['level'], row['context']['store']), ('error', 'controller_settings'))
+        self.assertIn('type', row['error'])
+
+
+class TdpEventTests(Events, unittest.TestCase):
+    """test_tdp_core's fake firmware-attributes tree, platform profile, ryzenadj and helper download."""
+
+    fixture = test_tdp_core.TdpCoreTests
+    seed, saved, rpc, publish_helper = fixture.seed, fixture.saved, fixture.rpc, fixture.publish_helper
+
+    def setUp(self):
+        self.fixture.setUp(self)
+        super().setUp()
+
+    def refuse(self, path):
+        """The firmware refuses this attribute: open() for writing fails."""
+        path.unlink()
+        path.mkdir()
+
+    def enforce(self, passes):
+        """Run the enforce loop for `passes` passes; a charger resettle ladder just waits."""
+        done = []
+
+        async def tick(seconds):
+            if seconds != 5:
+                await asyncio.Event().wait()
+            if len(done) == passes:
+                raise asyncio.CancelledError()
+            done.append(seconds)
+        with patch.object(tdp.asyncio, 'sleep', side_effect=tick), self.assertRaises(asyncio.CancelledError):
+            asyncio.run(self.plugin._enforce_loop())
+
+    def unlock_extras(self):
+        self.bin.unlink()
+        self.publish_helper()
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+
+    def test_refused_firmware_writes_name_each_attribute_and_in_place_refusals_stay_info(self):
+        self.profile.write_text('custom')
+        for attr in tdp.WMI_ATTRS.values():
+            self.refuse(self.firmware / attr / 'current_value')
+        self.assertFalse(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
+        self.refuse(self.profile)
+        self.assertFalse(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
+        rows = {(row['context']['attribute'], row['level'], row['context']['outcome'])
+                for row in self.events('tdp', 'attribute_write')}
+        expected = {(attr, 'info', 'retried') for attr in tdp.WMI_ATTRS.values()}  # in place: the bounce writes again
+        expected |= {(attr, 'warning', 'failed') for attr in tdp.WMI_ATTRS.values()}
+        self.assertEqual(rows, expected | {('platform_profile', 'warning', 'failed')})
+        self.assertEqual(self.events('tdp', 'limits_applied'), [])
+
+    def test_rollback_exception_is_reported_not_discarded(self):
+        self.unlock_extras()
+        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])  # beyond firmware: ryzenadj
+        with patch.object(tdp.subprocess, 'Popen', side_effect=OSError(errno.EIO, 'exec failed')):
+            try:
+                result = self.rpc('apply_tdp', 45000, 46000, 50000)
+            except RuntimeError as exc:
+                result = {'success': False, 'stderr': str(exc)}
+        self.assertFalse(result['success'])
         self.assertIn('rollback failed', result['stderr'])
         row, = self.events('tdp', 'rollback')
-        self.assertEqual(row['error']['errno'], errno.EIO)
-        self.assertFalse(row['context']['restored'])
+        self.assertEqual((row['level'], row['error']['errno'], row['context']['restored']), ('error', errno.EIO, False))
 
-    async def test_background_helper_returned_failure_and_retry_have_finite_outcomes(self):
-        plugin = tdp.Plugin()
-        with patch.object(tdp, '_offload', side_effect=call_sync), patch.object(tdp, '_ensure_ryzenadj', side_effect=[TimeoutError('private helper URL/token'), True]), patch.object(tdp, '_ryzenadj_available', False), patch.object(tdp, '_current_game_id', ''), patch.object(tdp, '_transition_key', None):
-            self.assertFalse((await plugin.retry_extras())['success'])
-            self.assertTrue((await plugin.retry_extras())['success'])
+    def test_helper_download_failure_and_verified_retry_have_finite_outcomes(self):
+        self.bin.unlink()
+        self.assertFalse(self.rpc('retry_extras')['success'])  # download offline
+        self.publish_helper()
+        self.assertTrue(self.rpc('retry_extras')['success'])
         rows = self.events('tdp', 'helper_ready')
         self.assertEqual([row['context']['status'] for row in rows], ['False', 'True'])
-        self.assertEqual(rows[0]['error']['type'], 'TimeoutError')
-        self.assertNotIn('private helper', json.dumps(self.records))
+        self.assertEqual(rows[0]['level'], 'warning')
+        self.assertNotLogged('offline')
 
-    async def test_controller_and_remap_lifecycle_faults_do_not_log_raw_dependency_text(self):
-        marker='ConfidentialValue_Z7'
-        logger=Mock();plugin=controller.Plugin()
-        with patch.object(controller.decky,'logger',logger),patch.object(plugin,'_stop_capture'), \
-                patch.object(plugin._service_watch,'clear'),patch.object(controller,'_offload',AsyncMock(side_effect=OSError(errno.EIO,marker))):
-            await plugin._unload()
-        with patch.object(remap.decky,'logger',logger),patch.object(remap._service_watch,'clear'), \
-                patch.object(remap.module_runtime,'offload',AsyncMock(side_effect=OSError(errno.EACCES,marker))):
-            await remap.Plugin()._uninstall()
-        rows=self.events('controller','restore_failed')+self.events('remap','restore_failed')
-        self.assertEqual(len(rows),2);self.assertTrue(all(row['context']['pending'] for row in rows))
-        self.assertEqual([row['error']['errno'] for row in rows],[errno.EIO,errno.EACCES])
-        self.assertNotIn(marker,json.dumps(self.records));self.assertNotIn(marker,str(logger.mock_calls))
+    def test_cpu_status_on_unrecoverable_settings_is_generic_and_private(self):
+        for path in (self.store.path, self.store.backup_path):
+            Path(path).write_text('{"' + MARKER)  # both copies damaged
+        logger = Mock()
+        with patch.object(tdp.decky, 'logger', logger):
+            result = self.rpc('get_cpu_power_controls')
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error'], 'CPU power controls unavailable')
+        row, = self.events('tdp', 'cpu_status_failed')
+        self.assertEqual(row['error']['type'], 'CorruptSettings')
+        self.assertNotLogged(MARKER, logger)
 
-    async def test_cpu_status_dependency_failure_remains_generic_and_private(self):
-        marker='ConfidentialValue_Z7';logger=Mock()
-        with patch.object(tdp.decky,'logger',logger),patch.object(tdp,'_offload',side_effect=call_sync), \
-                patch.object(tdp,'_cpu_scoped_status',side_effect=OSError(errno.EIO,marker)):
-            result=await tdp.Plugin().get_cpu_power_controls()
-        self.assertFalse(result['success']);self.assertEqual(result['error'],'CPU power controls unavailable')
-        row,=self.events('tdp','cpu_status_failed');self.assertEqual(row['error']['errno'],errno.EIO)
-        self.assertNotIn(marker,json.dumps(self.records));self.assertNotIn(marker,str(logger.mock_calls))
+    def test_returned_helper_error_stays_out_of_the_log_and_is_not_saved_or_retried(self):
+        self.unlock_extras()
+        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])
+        active = self.saved()['active_sppt']
+        test, attempts = self, []
 
-    async def test_controller_battery_read_fault_is_private_and_expected_absence_stays_quiet(self):
-        marker='ConfidentialValue_Z7';plugin=controller.Plugin()
-        with patch.object(controller,'_hid_inventory',return_value=({'fixture':True},None)), \
-                patch.object(controller,'_open_reader',side_effect=PermissionError(errno.EACCES,marker)) as reader:
-            result=plugin._controller_batteries()
-            self.assertEqual(plugin._controller_batteries(),result)
-        reader.assert_called_once()
-        self.assertFalse(result['available']);self.assertIn(marker,result['reason'])
-        row,=self.events('controller','battery_read_failed')
-        self.assertEqual(row['error']['errno'],errno.EACCES)
-        self.assertTrue(row['error']['frames']);self.assertNotIn(marker,json.dumps(self.records))
-        with patch.object(controller,'_hid_inventory',return_value=(None,None)), \
-                patch.object(controller,'_open_reader') as reader:
-            self.assertFalse(controller.Plugin()._controller_batteries()['available'])
-        reader.assert_not_called()
-        with patch.object(controller,'_hid_inventory',return_value=({'fixture':True},None)), \
-                patch.object(controller,'_open_reader',return_value=17), \
-                patch.object(controller.select,'select',return_value=([],[],[])),patch.object(controller.os,'close') as close:
-            self.assertFalse(controller.Plugin()._controller_batteries()['available'])
-        close.assert_called_once_with(17)
-        self.assertEqual(len(self.events('controller','battery_read_failed')),1)
+        class Rejecting:  # ryzenadj exits 4 and prints private text
+            def __init__(self, argv, **_options):
+                if argv[1:] != ['--info']:
+                    attempts.append(argv[1:])
+                self.returncode = 4
 
-    async def test_battery_returned_restore_error_is_a_fixed_outcome_not_a_log_payload(self):
-        marker='ConfidentialValue_Z7';plugin=battery.Plugin();logger=Mock()
-        with patch.object(battery.decky,'logger',logger),patch.object(plugin,'_unload',AsyncMock()), \
-                patch.object(plugin,'release_control',AsyncMock(return_value={'success':False,'error':marker})):
-            self.assertIsNone(await plugin._uninstall())
-        row,=self.events('battery','restore_failed')
-        self.assertFalse(row['context']['restored']);self.assertEqual(row['context']['reason'],'operation_unconfirmed')
-        self.assertNotIn(marker,json.dumps(self.records));self.assertNotIn(marker,str(logger.mock_calls))
+            def communicate(self, timeout=None):
+                return MARKER.encode(), MARKER.encode()
+        self.app = '111'  # a game without a profile starts: Global is reapplied
+        logger = Mock()
+        with patch.object(tdp.subprocess, 'Popen', Rejecting), patch.object(tdp.decky, 'logger', logger):
+            self.enforce(passes=1)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.saved()['active_sppt'], active)
+        row, = self.events('tdp', 'limits_apply_failed')
+        self.assertEqual(row['context']['returncode'], 4)
+        self.assertNotLogged(MARKER, logger)
+        del test
 
-    async def test_returned_tdp_error_stays_in_result_without_raw_diagnostic_or_extra_apply(self):
-        marker='ConfidentialValue_Z7';result={'success':False,'stderr':marker,'stdout':marker,'returncode':4};logger=Mock()
-        with patch.object(tdp.decky,'logger',logger),patch.object(tdp,'_load_settings',return_value={'enabled':True}), \
-                patch.object(tdp,'_clamp_for_settings',return_value=(15000,18000,25000)), \
-                patch.object(tdp,'_apply_limits_with_saved_cpu_power',return_value=result) as apply,patch.object(tdp,'_save_active') as save:
-            self.assertIs(tdp._apply_and_record(15000,18000,25000,'fixture','global'),result)
-        apply.assert_called_once();save.assert_not_called()
-        row,=self.events('tdp','limits_apply_failed');self.assertEqual(row['context']['returncode'],4)
-        self.assertNotIn(marker,json.dumps(self.records));self.assertNotIn(marker,str(logger.mock_calls))
+    def test_enforcement_loop_logs_liveness_and_recovery(self):
+        self.ac = True  # charger plugged in: the pass reports it to the panel
+        with patch.object(tdp.decky, 'emit', AsyncMock(side_effect=[OSError(errno.EIO, MARKER)])):
+            self.enforce(passes=2)
+        rows = self.events('tdp', 'enforcement_loop')
+        self.assertEqual([row['context']['status'] for row in rows], ['unavailable', 'running'])
+        self.assertEqual(rows[0]['error']['errno'], errno.EIO)
+        self.assertEqual(rows[-1]['context']['outcome'], 'cycle_complete')
+        self.assertNotLogged(MARKER)
 
-    async def test_enforcement_loop_logs_liveness_recovery_without_claiming_hardware_apply(self):
-        plugin=tdp.Plugin();calls=0
-        async def pause(_seconds):
-            nonlocal calls
-            if calls==3:raise asyncio.CancelledError()
-            calls+=1
-        with patch.object(tdp.asyncio,'sleep',side_effect=pause), \
-                patch.object(tdp,'_offload',AsyncMock(side_effect=[OSError(errno.EIO,'ConfidentialValue_Z7'),{},{}])):
-            with self.assertRaises(asyncio.CancelledError):await plugin._enforce_loop()
-        rows=self.events('tdp','enforcement_loop')
-        self.assertEqual([row['context']['status'] for row in rows],['unavailable','running'])
-        self.assertEqual(rows[-1]['context']['outcome'],'cycle_complete')
-        self.assertNotIn('ConfidentialValue_Z7',json.dumps(self.records))
+    def test_applied_limits_record_watts_source_and_reason(self):
+        self.app = '111'
+        self.enforce(passes=1)  # game start without a profile: Global, reason 'global'
+        self.assertTrue(self.rpc('apply_tdp', 15000, 18000, 20000)['success'])
+        transition, rpc = self.events('tdp', 'limits_applied')
+        self.assertEqual({key: transition['context'][key] for key in ('spl', 'sppt', 'fppt', 'source', 'reason')},
+                         {'spl': 15, 'sppt': 20, 'fppt': 25, 'source': 'wmi', 'reason': 'global'})
+        self.assertEqual({key: rpc['context'][key] for key in ('spl', 'sppt', 'fppt')},
+                         {'spl': 15, 'sppt': 18, 'fppt': 20})
+        self.assertIsNone(rpc['context'].get('reason'))
 
-    async def test_runtime_event_identifies_device_firmware_and_software_without_ec_access(self):
+
+class BatteryEventTests(Events, unittest.IsolatedAsyncioTestCase):
+    async def test_unconfirmed_uninstall_restore_is_a_fixed_outcome_not_a_log_payload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'sys'
+            identity = root / 'class/dmi/id'
+            identity.mkdir(parents=True)
+            (identity / 'sys_vendor').write_text('LENOVO', encoding='ascii')
+            (identity / 'product_name').write_text('83N0', encoding='ascii')
+            (root / 'class/power_supply').mkdir()  # the battery interface is gone
+            store = AtomicSettingsManager('battery_settings', str(Path(temporary) / 'settings'))
+            store.replace({'state': {**battery.DEFAULT_STATE, 'managed': True, 'requested_enabled': True,
+                                     'baseline': 'Fast', 'normal_mode': 'Fast', 'last_applied': 'Long_Life'}})
+            with patch.object(battery, 'SYS_ROOT', root), patch.object(battery, 'settings', store):
+                self.assertIsNone(await battery.Plugin()._uninstall())
+            self.assertTrue(store.getSetting('state')['managed'])  # ownership kept for a later restore
+        row, = self.events('battery', 'restore_failed')
+        self.assertEqual({key: row['context'][key] for key in ('restored', 'reason', 'pending')},
+                         {'restored': False, 'reason': 'operation_unconfirmed', 'pending': True})
+        self.assertNotIn('error', row)  # the RPC's returned error text is the panel's, not this event's
+
+
+class DisplayEventTests(Events, test_display_hybrid.DisplayFixture):
+    def test_mode_change_records_both_modes_and_the_pending_restart(self):
+        self.start('pq')
+        asyncio.run(display_plugin().set_panel_mode('gamma22'))
+        row, = self.events('display', 'mode_changed')
+        self.assertEqual({key: row['context'][key] for key in ('previous', 'mode', 'pending')},
+                         {'previous': 'pq', 'mode': 'gamma22', 'pending': True})
+
+
+def display_plugin():
+    return test_display_hybrid.display.Plugin()
+
+
+class DiagnosticsFormatTests(Events, unittest.TestCase):
+    def test_runtime_event_identifies_device_firmware_and_software_without_ec_access(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for name, value in (('product_name', '83N0'), ('bios_version', 'RRCN16WW'), ('ec_firmware_release', '1.16')):
@@ -291,53 +509,13 @@ class CoreLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagnostics_reader.normalize_event(self.records[-1], 'backend')['context'],
                          {'source': 'decky', 'operation': None, **identity})
 
-    async def test_only_this_plugins_exceptions_add_a_bounded_private_message(self):
+    def test_only_this_plugins_exceptions_add_a_bounded_private_message(self):
         diagnostics.event('remap', 'restore_failed', level='warning',
                           error=safe_settings.CorruptSettings('settings at /home/deck/x are unreadable'))
         diagnostics.event('remap', 'restore_failed', level='warning', error=RuntimeError('SSID=Private Net'))
         ours, foreign = self.records
         self.assertEqual(ours['error']['message'], 'settings at [private-path] are unreadable')
         self.assertNotIn('message', foreign['error'])
-
-    async def test_applied_tdp_limits_record_watts_source_and_reason(self):
-        def apply(spl, sppt, fppt):
-            tdp._applied_mw, tdp._last_source = (spl, sppt, fppt), 'wmi'
-            return {'success': True}
-        with patch.object(tdp, '_apply_limits', side_effect=apply), \
-                patch.object(tdp, '_best_effort_reapply_saved_cpu_power_locked', return_value=[]), \
-                patch.object(tdp, '_applied_mw', ()), patch.object(tdp, '_last_source', ''):
-            tdp._apply_limits_with_saved_cpu_power({}, 25000, 30000, 35000, reason='game')
-            tdp._apply_limits_with_saved_cpu_power({}, 15000, 18000, 20000)
-        game, rpc = self.events('tdp', 'limits_applied')
-        self.assertEqual({key: game['context'][key] for key in ('spl', 'sppt', 'fppt', 'source', 'reason')},
-                         {'spl': 25, 'sppt': 30, 'fppt': 35, 'source': 'wmi', 'reason': 'game'})
-        self.assertIsNone(rpc['context']['reason'])
-        with patch.object(tdp, '_apply_limits', return_value={'success': False}), \
-                patch.object(tdp, '_best_effort_reapply_saved_cpu_power_locked', return_value=[]):
-            tdp._apply_limits_with_saved_cpu_power({}, 25000, 30000, 35000, reason='drift')
-        self.assertEqual(len(self.events('tdp', 'limits_applied')), 2)
-
-    async def test_display_mode_change_records_both_modes_and_pending_restart(self):
-        state = dict(display.Plugin._state, panel_mode='pq', active_mode='pq', restart_pending=False,
-                     reset_in_progress=False, reset_restart_pending=False)
-        def refresh():
-            state['restart_pending'] = True
-        with patch.object(display.Plugin, '_state', state), patch.object(display, '_offload', side_effect=call_sync), \
-                patch.object(display.Plugin, '_refresh_native_support'), \
-                patch.object(display.Plugin, 'native_display_active', return_value=False), \
-                patch.object(display, '_bind_script_dir'), patch.object(display.os.path, 'lexists', return_value=False), \
-                patch.object(display, '_install_script', return_value=(True, 'installed')), \
-                patch.object(display, '_select_mode', side_effect=lambda mode: mode), \
-                patch.object(display, 'settings', Mock()), patch.object(display.Plugin, '_refresh_setup', side_effect=refresh), \
-                patch.object(display.Plugin, '_gamescope_started_at', None):
-            await display.Plugin._apply_mode_locked('gamma22')
-        row, = self.events('display', 'mode_changed')
-        self.assertEqual({key: row['context'][key] for key in ('previous', 'mode', 'pending')},
-                         {'previous': 'pq', 'mode': 'gamma22', 'pending': True})
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 @unittest.skipUnless(os.name == 'posix', 'dir_fd and O_NOFOLLOW semantics')
@@ -397,3 +575,7 @@ class LogRotationTests(unittest.TestCase):
         self.assertTrue((outside / '05.log').exists())
         self.assertTrue((self.logs / 'aa.log').is_symlink())
         self.assertFalse((self.logs / '00.log').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()
