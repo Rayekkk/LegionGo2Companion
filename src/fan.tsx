@@ -13,7 +13,7 @@ export interface FanState {
   needs_curve_review?: boolean;
   settings: { enabled: boolean; revision: number; assign_tdp_presets?: boolean; display_unit?: "rpm" | "percent"; global_curve: Curve; presets: Record<string, Curve> };
   templates?: Record<string, Curve>;
-  limits: { min_rpm: number; max_rpm: number; step: number; hard_max: number };
+  limits: { min_rpm: number; last_min_rpm: number; max_rpm: number; step: number; hard_max: number };
   ownership?: {blocked: boolean; state: string; reason: string};
   presets: string[];
   readings?: { valid: boolean; rpm?: number; apu_temperature?: number; age_seconds?: number;
@@ -355,7 +355,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
       <div data-fan-dialog-graph="true" style={{minHeight:260,flex:"1 0 260px",maxHeight:480}}>{graph}</div>
       {failed && <div role="status">{failed.text}</div>}
       {scope!=="global" && status.settings.presets[scope] && <DialogButton disabled={busy || dirty} onClick={useGlobal}>Use global curve for {title(scope)}</DialogButton>}
-      <div style={{fontSize:13,color:"#afb7c0"}}>8 points · the 100°C point can't go below {speedLabel(limits.min_rpm,status)}{dirty ? " · Unsaved changes" : ""}</div>
+      <div style={{fontSize:13,color:"#afb7c0"}}>8 points · the 100°C point can't go below {speedLabel(limits.last_min_rpm,status)}{dirty ? " · Unsaved changes" : ""}</div>
     </DialogBody>
     <DialogFooter style={{display:"flex",gap:12,margin:0,padding:0,flexShrink:0}}>
       <Focusable flow-children="row" data-fan-footer="true" style={{display:"flex",gap:12,width:"100%"}}>

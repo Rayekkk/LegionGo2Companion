@@ -452,9 +452,9 @@ class FanProcessTests(unittest.TestCase):
         self.assertIn('sensor_started_at',record['sample'])
 
     def test_100_hardmax_without_handover_or_heating_hardware(self):
-        from fan_policy import DEFAULT_CURVE,MIN_RPM
+        from fan_policy import DEFAULT_CURVE,MIN_RPM,LAST_MIN_RPM
         self.put('ec-temperature','45')
-        self.configure(curve=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE]);(self.root/'thermal').touch()
+        self.configure(curve=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE[:7]]+[[100,LAST_MIN_RPM]]);(self.root/'thermal').touch()
         end=time.monotonic()+1.5
         while time.monotonic()<end:
             state=self.receive_kind('telemetry',1)
@@ -541,9 +541,9 @@ class FanProcessTests(unittest.TestCase):
         self.fail('Warming stop did not restart')
 
     def test_stopped_frozen_worker_thermal_backup_releases(self):
-        from fan_policy import DEFAULT_CURVE,MIN_RPM
-        # The final point at the running minimum must not weaken the backup's hard maximum.
-        self.configure(curve=[[t,0 if i<7 else MIN_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)]);self.receive_kind('telemetry',1)
+        from fan_policy import DEFAULT_CURVE,LAST_MIN_RPM
+        # The final point at its lowest speed must not weaken the backup's hard maximum.
+        self.configure(curve=[[t,0 if i<7 else LAST_MIN_RPM] for i,(t,_) in enumerate(DEFAULT_CURVE)]);self.receive_kind('telemetry',1)
         self.put('ec-temperature','45')
         os.kill(self.p.pid,signal.SIGSTOP);self.put('temperature','100')
         # Frozen worker cannot service heat; backup sets max before progress-lease recovery.

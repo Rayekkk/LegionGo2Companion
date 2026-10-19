@@ -49,7 +49,7 @@ def states():
                                           {'app_id':'3000000001','active':False,'ac_separate':False,'preset':'custom','spl':12000,'ac_preset':'','ac_spl':12000}]},
         'fan_get_state':{'supported':True,'active_curve':'global','settings':{'enabled':False,'revision':0,'assign_tdp_presets':False,'display_unit':'rpm','global_curve':copy.deepcopy(CURVE),'presets':{}},
                          'templates':{name:copy.deepcopy(CURVE) for name in ('silent','balanced','aggressive')},'presets':['silent','balanced','performance','max','custom'],
-                         'limits':{'min_rpm':1500,'max_rpm':4800,'step':1,'hard_max':100},'ownership':{'blocked':False},
+                         'limits':{'min_rpm':1500,'last_min_rpm':2000,'max_rpm':4800,'step':1,'hard_max':100},'ownership':{'blocked':False},
                          'readings':{'valid':True,'rpm':1800,'apu_temperature':48,'age_seconds':0,'automatic':True,'source':'CPU Tctl / GPU edge (offline fixture)'},'telemetry':{'active':False,'automatic':True}},
         'vibe_is_ready':{'ready':True},'vibe_get_settings':{'settings':{'level':2,'mode':2,'touchpadIntensity':2,'touchpadEnabled':True},'app_id':'0','profile_id':'0','overwrite':False},
         'vibe_get_capabilities':{'intensity':['off','low','medium','high'],'mode':['fps','racing','standard','spg','rpg'],'tp_intensity':['off','low','medium','high']},

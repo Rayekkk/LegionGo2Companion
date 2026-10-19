@@ -47,16 +47,18 @@ class FanPolicyTests(unittest.TestCase):
                 validate_curve(bad)
 
     def test_final_point_speed_is_editable_but_100c_still_forces_full_speed(self):
-        for rpm in (MIN_RPM, 1501, 3000, MAX_RPM-1, MAX_RPM):
+        for rpm in (LAST_MIN_RPM, LAST_MIN_RPM+1, 3000, MAX_RPM-1, MAX_RPM):
             curve=[[t,0 if i<7 else rpm] for i,(t,_) in enumerate(DEFAULT_CURVE)]
             self.assertEqual(validate_curve(curve)[7],[100,rpm])
-        low=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE]
+        for rpm in (0, MIN_RPM, LAST_MIN_RPM-1):
+            with self.assertRaises(ValueError):validate_curve([[t,0 if i<7 else rpm] for i,(t,_) in enumerate(DEFAULT_CURVE)])
+        low=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE[:7]]+[[100,LAST_MIN_RPM]]
         self.assertEqual(validate_curve(low),low)
-        self.assertEqual(target_for(low,99.9),MIN_RPM)
+        self.assertLessEqual(target_for(low,99.9),LAST_MIN_RPM)
         for temp in (100,100.5,120):self.assertEqual(target_for(low,temp),MAX_RPM)
         p=CurveControl(0,99,low)
-        for tick in range(1,41):self.assertEqual(p.step(low,99,tick/4),MIN_RPM)
-        self.assertEqual(p.step(low,100,10.25),MAX_RPM,'hard maximum bypasses a 1500 RPM final point')
+        for tick in range(1,41):self.assertLessEqual(p.step(low,99,tick/4),LAST_MIN_RPM)
+        self.assertEqual(p.step(low,100,10.25),MAX_RPM,'hard maximum bypasses a 2000 RPM final point')
         self.assertEqual(CurveControl(0,100,low).target,MAX_RPM)
 
     def test_interpolation_never_requests_firmware_deadband(self):
@@ -150,8 +152,17 @@ class FanPolicyTests(unittest.TestCase):
         for i in range(177,200):p.step(high,50,i/4)
         self.assertLessEqual(len(p.history),49)
 
+    def test_a_saved_curve_from_before_2_2_1_is_lifted_to_the_new_100c_floor(self):
+        old=[[t,MIN_RPM] for t,_ in DEFAULT_CURVE[:7]]+[[100,MIN_RPM]]
+        loaded=validate_settings(dict(defaults(),global_curve=old,presets={'silent':[*old[:7],[100,1800]]}))
+        self.assertEqual(loaded['global_curve'],[*old[:7],[100,LAST_MIN_RPM]])
+        self.assertEqual(loaded['presets']['silent'],[*old[:7],[100,LAST_MIN_RPM]])
+        with self.assertRaises(ValueError):validate_curve(old)  # A new save still needs the floor.
+        stopped=[*old[:7],[100,0]]
+        with self.assertRaises(ValueError):validate_settings(dict(defaults(),global_curve=stopped))
+
     def test_hard_max_ramps_a_running_fan_without_masking_failure(self):
-        curve=[[0,1500],[35,1500],[45,1500],[55,1500],[65,1500],[75,1500],[99,1500],[100,MIN_RPM]]
+        curve=[[0,1500],[35,1500],[45,1500],[55,1500],[65,1500],[75,1500],[99,1500],[100,LAST_MIN_RPM]]
         validate_curve(curve)
         p=CurveControl(0,99,curve)
         for tick in range(1,121):p.step(curve,99,tick/4)
@@ -164,7 +175,7 @@ class FanPolicyTests(unittest.TestCase):
         self.assertFalse(p.is_stalled(MAX_RPM,43.25))
 
     def test_hard_max_starts_a_stopped_fan_with_bounded_startup_grace(self):
-        curve=[[0,0],[35,0],[45,0],[55,0],[65,0],[75,0],[99,0],[100,MIN_RPM]]
+        curve=[[0,0],[35,0],[45,0],[55,0],[65,0],[75,0],[99,0],[100,LAST_MIN_RPM]]
         validate_curve(curve)
         p=CurveControl(0,99,curve)
         for tick in range(1,121):p.step(curve,99,tick/4)

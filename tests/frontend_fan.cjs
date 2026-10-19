@@ -3,7 +3,7 @@ const { assert, run, settle, mount, find, label, button, nodes: walk } = require
 const curve=[[50,3000],[57,3120],[64,3540],[71,3960],[78,4440],[85,4800],[93,4800],[100,4800]];
 const initial={supported:true,error:'',active_curve:'global',settings:{enabled:false,assign_tdp_presets:true,revision:0,display_unit:'rpm',global_curve:curve,presets:{}},
   templates:{silent:curve.map(([t,r],i)=>[t,i<7?0:r]),balanced:curve,aggressive:curve.map(([t])=>[t,4800])},
-  presets:['silent','balanced','performance','max','custom'],limits:{min_rpm:1500,max_rpm:4800,step:1,hard_max:100},telemetry:{active:false,automatic:true},
+  presets:['silent','balanced','performance','max','custom'],limits:{min_rpm:1500,last_min_rpm:2000,max_rpm:4800,step:1,hard_max:100},telemetry:{active:false,automatic:true},
   readings:{valid:true,rpm:1600,apu_temperature:44.5,age_seconds:0,automatic:true,error:''}};
 const json=x=>JSON.parse(JSON.stringify(x));
 const flush=()=>settle(30);
@@ -100,8 +100,9 @@ run(async()=>{
   assert.equal(h.exports.editPoint(curve,7,0,99,limits)[7][0],100);
   assert.equal(h.exports.editPoint(curve,7,1,0,limits)[7][1],4800,'Point 8 cannot drop below point 7');
   const low=[[0,0],[10,0],[20,0],[30,0],[40,0],[50,0],[95,0],[100,4800]];
-  assert.equal(h.exports.editPoint(low,7,1,1500,limits)[7][1],1500,'Point 8 moves down to the running minimum');
-  for(const v of [0,1,1499,-100])assert.equal(h.exports.editPoint(low,7,1,v,limits)[7][1],1500,'Point 8 can never stop or go below 1500 RPM');
+  assert.equal(h.exports.editPoint(low,7,1,2000,limits)[7][1],2000,'Point 8 moves down to its own floor');
+  for(const v of [0,1,1500,1999,-100])assert.equal(h.exports.editPoint(low,7,1,v,limits)[7][1],2000,'Point 8 can never stop or go below 2000 RPM');
+  assert.equal(h.exports.editPoint(low,6,1,1500,limits)[6][1],1500,'Other points keep the 1500 RPM running minimum');
   assert.equal(h.exports.editPoint(low,7,1,9999,limits)[7][1],4800);
   assert.equal(h.exports.editPoint(low,7,0,50,limits)[7][0],100,'Point 8 stays at 100°C');
   const lowLast=[[0,0],[45,1500],[55,2000],[65,2600],[75,2700],[85,2800],[95,2900],[100,3000]];

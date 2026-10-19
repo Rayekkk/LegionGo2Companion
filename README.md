@@ -268,7 +268,7 @@ The graph has **8 points from 0 to 100°C**. Drag a point, or focus the graph an
 <summary><b>Curve rules, readings and units</b></summary>
 
 Move the first seven points freely; the last stays at **100°C** and only its speed changes,
-never below **1500 RPM**. At 100°C the fan runs at full speed whatever the curve says.
+never below **2000 RPM**. At 100°C the fan runs at full speed whatever the curve says.
 Temperatures stay in order and speeds can only stay equal or rise with temperature; the
 editor stops a point from crossing its neighbours. Positive speeds below 1500 RPM are
 skipped; **0 RPM** requests a real stop.
@@ -583,7 +583,7 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | Fan Control turned off after an error | Read the reason, let recovery finish, check your curve, then turn it on again. |
 | Turned off: the BIOS/EC version changed how the fan is controlled | The check after a firmware update failed. Turn Fan Control on again to repeat it; if it keeps failing, report it with your BIOS and EC versions. |
 | My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
-| A curve point will not move further | Temperatures stay in order and speeds cannot drop between points; the last point stays at 100°C and at least 1500 RPM. |
+| A curve point will not move further | Temperatures stay in order and speeds cannot drop between points; the last point stays at 100°C and at least 2000 RPM. |
 | The gyro test works but the game does not react | Check that game's Steam Input layout. |
 | Battery stays above 80% with protection on | Normal: protection stops charging, it does not discharge the battery. |
 | A game still reads old HDR values | Turn on **Fix HDR brightness in games** and restart the game. |

@@ -5,6 +5,7 @@ import math
 from collections import deque
 
 MIN_RPM, MAX_RPM, RPM_STEP = 1500, 4800, 1
+LAST_MIN_RPM = 2000  # The 100°C point never runs slower than this.
 STOP_SETTLE_S = 20  # A rotor coasting down from 4800 RPM can exceed 12 seconds.
 # Nonzero sub-threshold override selects a real stop; override zero releases it.
 STOP_OVERRIDE = 256
@@ -50,10 +51,18 @@ def validate_curve(value):
             raise ValueError('Temperature and RPM must be integers.')
         if not last_t < t <= 100 or not valid_rpm(rpm) or rpm < last_r:
             raise ValueError('Curve points must be ordered and inside the validated operating range.')
-        if i == 7 and (t != 100 or rpm < MIN_RPM):
-            raise ValueError('The last point must be at 100°C and cannot stop or run below the minimum speed.')
+        if i == 7 and (t != 100 or rpm < LAST_MIN_RPM):
+            raise ValueError(f'The last point must be at 100°C and run at least {LAST_MIN_RPM} RPM.')
         result.append([t, rpm]); last_t, last_r = t, rpm
     return result
+
+
+def _lift_last_point(curve):
+    """Before 2.2.1 the 100°C point could go down to MIN_RPM; such a saved curve keeps its shape, lifted to the new floor."""
+    if (isinstance(curve, list) and len(curve) == 8 and isinstance(curve[7], (list, tuple)) and len(curve[7]) == 2
+            and type(curve[7][1]) is int and MIN_RPM <= curve[7][1] < LAST_MIN_RPM):
+        return [*curve[:7], [curve[7][0], LAST_MIN_RPM]]
+    return curve
 
 
 def validate_settings(value):
@@ -73,8 +82,8 @@ def validate_settings(value):
     if type(assignment_mode) is not bool:
         raise ValueError('TDP curve assignments must be a boolean.')
     return dict(schema=4, enabled=value['enabled'], revision=value['revision'], display_unit=unit,
-                global_curve=validate_curve(value.get('global_curve')),
-                presets={k: validate_curve(v) for k, v in mappings.items()},
+                global_curve=validate_curve(_lift_last_point(value.get('global_curve'))),
+                presets={k: validate_curve(_lift_last_point(v)) for k, v in mappings.items()},
                 assign_tdp_presets=assignment_mode)
 
 

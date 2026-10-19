@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Types of fan.mjs for the Decky panel (the Desktop app imports the module from QML).
 type Curve = [number, number][];
-type Limits = { min_rpm: number; max_rpm: number; step: number };
+type Limits = { min_rpm: number; last_min_rpm: number; max_rpm: number; step: number };
 export const STARTING_STUCK_MS: number;
 export function curveName(name: string): string;
 export function readingFresh(readings: { valid?: boolean; age_seconds?: number } | undefined, transportAge: number): boolean;

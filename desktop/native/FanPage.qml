@@ -136,7 +136,7 @@ ColumnLayout {
         }
         CurveGraph {
             id:graph; Layout.fillWidth:true; Layout.preferredHeight:330
-            curve:panel.draft; maximum:Number(limits.max_rpm || 4800); minimumRunning:Number(limits.min_rpm || 1500)
+            curve:panel.draft; maximum:Number(limits.max_rpm || 4800); minimumRunning:Number(limits.min_rpm || 1500); lastMinimum:Number(limits.last_min_rpm || 2000)
             speedStep:panel.speedStep; unit:panel.unit; writable:panel.editable
             liveValid:panel.fresh && tick>=0; liveTemperature:Number(readings.apu_temperature || 0); liveRpm:Number(readings.rpm || 0)
             onEdited:function(points) { panel.draft=points; panel.dirty=true; }
@@ -186,12 +186,12 @@ ColumnLayout {
             }
             CurveGraph {
                 id:editorGraph
-                Layout.fillWidth:true; Layout.fillHeight:true; curve:panel.draft; maximum:Number(limits.max_rpm || 4800); minimumRunning:Number(limits.min_rpm || 1500)
+                Layout.fillWidth:true; Layout.fillHeight:true; curve:panel.draft; maximum:Number(limits.max_rpm || 4800); minimumRunning:Number(limits.min_rpm || 1500); lastMinimum:Number(limits.last_min_rpm || 2000)
                 unit:panel.unit; speedStep:panel.speedStep; writable:panel.editable
                 liveValid:panel.fresh && tick>=0; liveTemperature:Number(readings.apu_temperature || 0); liveRpm:Number(readings.rpm || 0)
                 onEdited:function(points) { panel.draft=points; panel.dirty=true; }
             }
-            Label { textFormat:Text.PlainText; text:"Drag a point, or select it and use the buttons. The 100°C point can't go below "+panel.speed(limits.min_rpm || 1500)+"."; color:theme.muted; font.pixelSize:theme.fontSmall; Layout.fillWidth:true; wrapMode:Text.WordWrap }
+            Label { textFormat:Text.PlainText; text:"Drag a point, or select it and use the buttons. The 100°C point can't go below "+panel.speed(limits.last_min_rpm || 2000)+"."; color:theme.muted; font.pixelSize:theme.fontSmall; Layout.fillWidth:true; wrapMode:Text.WordWrap }
             // Touch first: every edit the keyboard can do has a 48 px button.
             Flow {
                 objectName:"fanEditorBar"; Layout.fillWidth:true; spacing:10

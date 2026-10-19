@@ -10,6 +10,7 @@ FocusScope {
     property var curve:[]
     property int maximum:4800
     property int minimumRunning:1500
+    property int lastMinimum:2000
     property int speedStep:100
     property string unit:"rpm"
     property int selected:0
@@ -24,7 +25,7 @@ FocusScope {
     Accessible.role:Accessible.Chart
     Accessible.name:"Fan curve. Activate to edit. Left and right change temperature. Up and down change speed. Q and E select points. The 100 °C point changes speed only. Escape ends editing."
     function displaySpeed(rpm) { return Fan.speedText(rpm,unit,maximum); }
-    readonly property var limits:({min_rpm:minimumRunning,max_rpm:maximum,step:1})
+    readonly property var limits:({min_rpm:minimumRunning,last_min_rpm:lastMinimum,max_rpm:maximum,step:1})
     function pointX(t) { return plot.x+plot.width*Math.max(0,Math.min(100,t))/100; }
     function pointY(r) { return plot.y+plot.height*(1-Math.max(0,Math.min(maximum,r))/maximum); }
     function editPoint(index, temp, speed) {

@@ -48,8 +48,8 @@ export function editPoint(curve, index, axis, value, limits) {
   } else {
     let rpm = Math.round(value / limits.step) * limits.step;
     if (rpm > 0 && rpm < limits.min_rpm) rpm = rpm >= limits.min_rpm / 2 ? limits.min_rpm : 0;
-    // The 100°C point stays at 100°C and can never stop.
-    next[index][1] = Math.max(index ? curve[index - 1][1] : 0, last ? limits.min_rpm : 0, Math.min(last ? limits.max_rpm : curve[index + 1][1], limits.max_rpm, rpm));
+    // The 100°C point stays at 100°C and never runs below its own floor.
+    next[index][1] = Math.max(index ? curve[index - 1][1] : 0, last ? limits.last_min_rpm : 0, Math.min(last ? limits.max_rpm : curve[index + 1][1], limits.max_rpm, rpm));
   }
   return next;
 }

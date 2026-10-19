@@ -21,7 +21,7 @@ from fan_ec import platform_check
 from fan_guardian import secure_root, check_owners, Sensors, outcome_of
 from fan_ec import Ports, EC
 from fan_sleep import Pause, Retry
-from fan_policy import defaults, validate_settings, validate_curve, PRESETS, TEMPLATES, MIN_RPM, MAX_RPM, RPM_STEP, HARD_MAX_C, SELF_TEST_S
+from fan_policy import defaults, validate_settings, validate_curve, PRESETS, TEMPLATES, MIN_RPM, LAST_MIN_RPM, MAX_RPM, RPM_STEP, HARD_MAX_C, SELF_TEST_S
 
 settings = SettingsManager('fan_settings', decky.DECKY_PLUGIN_SETTINGS_DIR)
 READING_MAX_AGE_S = 2.5
@@ -664,7 +664,7 @@ class Plugin:
                     # A closed session's own error is history once Fan is OFF; a latched fault keeps self._error.
                     error=self._error or (telemetry.get('error', '') if telemetry and self._state['enabled'] else ''), active_curve=self._preset or 'global',
                     telemetry=telemetry,
-                    limits=dict(min_rpm=MIN_RPM, max_rpm=MAX_RPM, step=RPM_STEP,
+                    limits=dict(min_rpm=MIN_RPM, last_min_rpm=LAST_MIN_RPM, max_rpm=MAX_RPM, step=RPM_STEP,
                                 hard_max=HARD_MAX_C), presets=list(PRESETS), templates=copy.deepcopy(TEMPLATES))
 
     async def set_enabled(self, enabled):

@@ -19,12 +19,12 @@ TestCase {
         graph.editPoint(7,50,0);compare(graph.curve[7][0],100);compare(graph.curve[7][1],4500,"Point 8 cannot drop below point 7");
         graph.editPoint(7,50,9999);compare(graph.curve[7][0],100);compare(graph.curve[7][1],4800);
         graph.curve=[[0,0],[10,0],[20,0],[30,0],[40,0],[50,0],[95,0],[100,4800]];
-        graph.editPoint(7,100,1500);compare(graph.curve[7][1],1500,"Point 8 moves down to the running minimum");
-        for(const v of [0,600,1499]) { graph.editPoint(7,100,v);compare(graph.curve[7][1],1500,"Point 8 never stops"); }
-        graph.editPoint(6,95,4000);compare(graph.curve[6][1],1500,"Point 7 cannot rise above point 8");
-        graph.curve=[[0,0],[10,0],[20,0],[30,0],[40,0],[50,0],[95,0],[100,1600]];
-        graph.selected=7;graph.editing=true;keyClick(Qt.Key_Down);compare(graph.curve[7][1],1500);
-        keyClick(Qt.Key_Down);compare(graph.curve[7][1],1500);keyClick(Qt.Key_Left);compare(graph.curve[7][0],100);
+        graph.editPoint(7,100,2000);compare(graph.curve[7][1],2000,"Point 8 moves down to its own floor");
+        for(const v of [0,600,1500,1999]) { graph.editPoint(7,100,v);compare(graph.curve[7][1],2000,"Point 8 never runs below 2000 RPM"); }
+        graph.editPoint(6,95,4000);compare(graph.curve[6][1],2000,"Point 7 cannot rise above point 8");
+        graph.curve=[[0,0],[10,0],[20,0],[30,0],[40,0],[50,0],[95,0],[100,2050]];
+        graph.selected=7;graph.editing=true;keyClick(Qt.Key_Down);compare(graph.curve[7][1],2000);
+        keyClick(Qt.Key_Down);compare(graph.curve[7][1],2000);keyClick(Qt.Key_Left);compare(graph.curve[7][0],100);
     }
     function test_lastPointCanBeDraggedVertically() {
         mousePress(graph,graph.pointX(100),graph.pointY(4800));verify(graph.editing);

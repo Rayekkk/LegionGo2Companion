@@ -16,6 +16,7 @@ Not released yet.
 
 ### Changed
 
+- **Fan Control:** the 100°C point of a curve now runs at least 2000 RPM (before: 1500 RPM); its speed stays editable between 2000 RPM and full speed in both panels. A saved curve whose 100°C point was lower is raised to 2000 RPM, with the rest of the curve unchanged. At 100°C and above the fan still runs at full speed.
 - **TDP, Allow up to 50 W:** the Legion Go 2 keeps sustained power at its firmware limit (35 W) even when a higher value is requested; only the boost limits go to 50 W. The panel now shows that instead of the requested sustained value, and Custom offers sustained power up to 35 W with boosts up to 50 W.
 - **Fan Control** works and reads the same in the Decky panel and the Desktop app:
   - Dragging a curve point below the minimum running speed stops the fan only when dragged below half of that minimum; above it, the point snaps to the minimum. Stepping with the D-pad or keys is unchanged.
