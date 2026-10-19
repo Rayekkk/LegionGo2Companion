@@ -267,9 +267,17 @@ class VibrationProfileTests(FakeDevice):
     async def test_edit_without_a_controller_is_kept_for_when_it_appears(self):
         with patch.object(vibe, '_get_device_path', return_value=None):
             result = await self.plugin.set_intensity(3)
+            self.assertEqual((await self.plugin.get_settings())['settings']['level'], 3)
+            reset = await self.plugin.reset_to_default()
         self.assertFalse(result['success'])
+        self.assertEqual(result['error'], vibe.NOT_CONNECTED)
         self.assertEqual(result['settings']['level'], 3)
-        self.assertEqual(self.persisted()['0']['settings']['level'], 3)
+        self.assertEqual((reset['success'], reset['error'], reset['settings']),
+                         (False, vibe.NOT_CONNECTED, vibe.DEFAULT_PROFILE))
+        self.assertEqual(self.persisted()['0']['settings'], vibe.DEFAULT_PROFILE)
+        # Both UIs show this text as is; the Desktop app and Decky read it from vibration.mjs too.
+        shared = (Path(__file__).resolve().parents[1] / 'desktop/native/vibration.mjs').read_text(encoding='utf-8')
+        self.assertIn(f'export const NOT_CONNECTED = "{vibe.NOT_CONNECTED}";', shared)
 
     async def test_profile_toggle_reports_committed_scope_when_hardware_apply_fails(self):
         self.running = '111'

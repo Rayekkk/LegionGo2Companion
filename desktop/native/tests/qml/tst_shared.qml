@@ -83,6 +83,23 @@ TestCase {
         model.mutate("rgb_set_brightness",[50]);response(1,{success:false,error:"busy"});
         compare(model.state("rgb_get_status").settings.hue,359,"A reply without status keeps the last one");
     }
+    function test_vibrationChangeWithoutAControllerShowsTheSavedValueAndWhy() {
+        const why="Controller not connected. The change is saved and applies when it connects.";
+        model.page="controller";
+        model.snapshots=Object.assign({},model.snapshots,{get_version:{blocked:false,modules:{vibration:{ready:true}}},
+            vibe_get_settings:{settings:{level:1},app_id:"0",profile_id:"0",overwrite:false}});
+        model.windowActive=true;model.controllerDetailsAt=fake.clock; // settings were just read
+        model.mutate("vibe_set_intensity",[3,"0","0"]);
+        // RpcClient reports a failed reply by its error text.
+        response(fake.calls.length-1,{success:false,error:why,settings:{level:3},app_id:"0",profile_id:"0",overwrite:false},why);
+        compare(model.error,why);
+        fake.calls=[];model.refreshPanel();
+        const read=fake.calls.findIndex(c=>c.method==="vibe_get_settings");
+        verify(read>=0,"The settings are read again right after the change");
+        response(read,{settings:{level:3},app_id:"0",profile_id:"0",overwrite:false});
+        compare(model.state("vibe_get_settings").settings.level,3);
+        compare(model.error,why,"The reason stays shown with the saved value");
+    }
     function test_leavingTheEditorPageReadsTheRunningGamesProfileAgain() {
         model.snapshots=Object.assign({},model.snapshots,{desktop_context:{app_id:"42"}});
         model.page="tdp";model.editApp="99";compare(model.profileApp(),"99");

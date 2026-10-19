@@ -384,6 +384,18 @@ run(async () => {
   assert.ok(find(tree, 'Vibration strength')); assert.ok(button(tree, 'Test vibration'));
   presentation.unmount();
 
+  // No controller: the backend keeps the change; the panel shows it with the Desktop app's text. A rejected change
+  // shows the value the controller kept.
+  for (const [saved, error, body] of [
+    [3, 'Controller not connected. The change is saved and applies when it connects.', 'Controller not connected. The change is saved and applies when it connects.'],
+    [2, undefined, 'Could not apply setting: The driver rejected the change'],
+  ]) {
+    const h = mount({ vibe_set_intensity: () => ({ success: false, ...(error ? { error } : {}), ...settings('0', saved) }) });
+    find(await ready(h), 'Vibration strength').props.onChange(3); h.flush(); await settle();
+    assert.equal(find(h.render(), 'Vibration strength').props.value, saved);
+    assert.deepEqual(h.toasts.map(t => t.body), [body]); h.unmount();
+  }
+
   // The names and rule both UIs share (src/vibration.tsx and the Desktop ModulePage.qml import the same module).
   const V = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/vibration.mjs')).href);
   assert.deepEqual(V.FALLBACK_MODES.map(V.modeShort), ['FPS', 'Race', 'Std', 'SPG', 'RPG'], 'the panel notches fit the QAM width');

@@ -392,7 +392,8 @@ class TdpCoreTests(unittest.TestCase):
         self.assertFalse(asyncio.run(plugin.get_caps())['extras'])
         self.assertEqual(self.ppts(), (35, 37, 45))  # runs inside the firmware range meanwhile
         saved = self.saved()
-        self.assertEqual((saved['extras_unlocked'], saved['spl'], saved['fppt']), (True, 40000, 50000))
+        # Extras intent is kept; a sustained limit above the firmware ceiling reads as the 35 W that runs.
+        self.assertEqual((saved['extras_unlocked'], saved['spl'], saved['fppt']), (True, 35000, 50000))
         self.assertEqual(self.saved('game_profiles')['123']['spl'], 40000)
 
     def test_start_without_firmware_or_helper_is_ready_but_reports_tdp_unavailable(self):

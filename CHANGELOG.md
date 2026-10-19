@@ -17,6 +17,12 @@ The Decky panel and the Desktop app now share one set of rules and texts for eve
 - **Desktop app:** the Overview TDP badge reads "Off · Lenovo defaults" while TDP control is off and otherwise names the preset with its sustained power, as in the panel; the TDP page shows "Loading power limits…" instead of placeholder 15/20/25 W values until the first reading; About shows the result of the update check ("Up to date", "No public release yet", …) instead of "Not checked"; Vibration shows "Controller driver not found" when the panel does.
 - **Desktop app:** a change that gets no answer in time now says to check the current value before trying again, since it may already have been applied.
 - **Vibration:** if the controller does not accept a change, the setting goes back to the value the controller really has, instead of showing the new one.
+- **Vibration:** a change made while no controller is connected now says "Controller not connected. The change is saved and applies when it connects." in the panel and the Desktop app, and both show the saved value (before: "The driver rejected the change" or "The change wasn't confirmed").
+- **TDP, Allow up to 50 W:** a sustained power (SPL) above 35 W saved by 2.2.0 or earlier, globally or in a game profile, now reads as the 35 W that actually runs, in the panel and the Desktop app.
+- **Startup:** modules now start one at a time, which avoids firmware errors when several of them touch the hardware right after boot.
+- **TDP and battery:** they share one firmware lock, so their firmware calls never overlap.
+- **Fan Control:** the BIOS/EC versions Companion has already tested are saved in a way that survives a power cut, so the fan self-test is not repeated after one.
+- **Desktop app:** the connection to Companion refuses NaN and Infinity values, which the panels never send.
 - Removing old plugin logs never follows a link out of the log folder, and Companion logs a warning when a Decky update stops its unload workaround from applying.
 
 ### Changed

@@ -50,6 +50,8 @@ DEFAULT_APP = "0"
 APP_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_GAME_PROFILES = 512
 MAX_NAME_LENGTH = 128
+# Same text as NOT_CONNECTED in desktop/native/vibration.mjs (both UIs show it as is).
+NOT_CONNECTED = "Controller not connected. The change is saved and applies when it connects."
 
 # How long reapply() keeps looking for the controller after a resume. The
 # notification fires the moment the system wakes, several seconds before USB has
@@ -900,7 +902,7 @@ class Plugin:
                 return {"success": True, **payload, "settings": values}
             if _get_device_path() is None:
                 # No controller yet: keep the choice; hotplug applies it, as before.
-                return {"success": False, **payload, "settings": values}
+                return {"success": False, **payload, "settings": values, "error": NOT_CONNECTED}
             # Rejected: save and re-write the previous value so both UIs show what the controller has.
             values = _update_active(field, payload["settings"][field], profile_id=payload["profile_id"])
             _apply_settings(values)
@@ -940,7 +942,10 @@ class Plugin:
             entry["settings"] = dict(DEFAULT_PROFILE)
             _save_profiles(profiles)
             ok = _apply_settings(entry["settings"], force=True)
-            return {"success": ok, **payload, "settings": entry["settings"]}
+            result = {"success": ok, **payload, "settings": entry["settings"]}
+            if not ok and _get_device_path() is None:
+                result["error"] = NOT_CONNECTED
+            return result
         return await _offload(_do)
 
     @module_runtime.controller_operation('vibration')

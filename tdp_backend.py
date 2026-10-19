@@ -338,6 +338,14 @@ def _clamp_triplet(spl, sppt, fppt,
     return spl, sppt, fppt
 
 
+def _load_ceilings_mw() -> tuple[int, int, int]:
+    """Bounds for saved values: no mode runs SPL above the firmware ceiling, so a
+    higher SPL saved by 2.2.0 or earlier reads as what actually runs."""
+    # The Legion Go 2 ceiling as a constant: loads are frequent and every firmware read
+    # is a WMI call; applying still clamps to the live firmware ceiling.
+    return FALLBACK_STD_W["spl"] * 1000, HARD_MAX_MW, HARD_MAX_MW
+
+
 def _clamp_for_settings(state: dict, spl, sppt, fppt) -> tuple[int, int, int]:
     """Clamp a target to the range currently unlocked and actually available."""
     return _clamp_triplet(spl, sppt, fppt, _allowed_ceilings_mw(state))
@@ -403,16 +411,19 @@ def _load_settings() -> dict:
         boost if type(boost) is bool else None)
     s[SETTINGS_FIELD_EPP] = _canonical_epp_syntax(
         s.get(SETTINGS_FIELD_EPP))
+    ceilings = _load_ceilings_mw()
     s["spl"], s["sppt"], s["fppt"] = _clamp_triplet(
         s.get("spl",  _defaults()["spl"]),
         s.get("sppt", _defaults()["sppt"]),
         s.get("fppt", _defaults()["fppt"]),
+        ceilings,
     )
     if any(k in s for k in ("active_spl", "active_sppt", "active_fppt")):
         s["active_spl"], s["active_sppt"], s["active_fppt"] = _clamp_triplet(
             s.get("active_spl",  s["spl"]),
             s.get("active_sppt", s["sppt"]),
             s.get("active_fppt", s["fppt"]),
+            ceilings,
         )
     s["active_preset"] = _safe_label(s.get("active_preset"))
     return s
@@ -434,6 +445,7 @@ def _load_inactive_profiles() -> dict:
 
 def _normalised_profiles(raw_profiles: dict) -> dict:
     profiles: dict[str, dict] = {}
+    ceilings = _load_ceilings_mw()
     for raw_app_id, raw_profile in raw_profiles.items():
         app_id = _normalise_app_id(raw_app_id, allow_empty=False)
         if app_id is None or not isinstance(raw_profile, dict):
@@ -452,10 +464,11 @@ def _normalised_profiles(raw_profiles: dict) -> dict:
                 p[epp_key] = _canonical_epp_syntax(p[epp_key])
         if p.get("spl") is not None:
             p["spl"], p["sppt"], p["fppt"] = _clamp_triplet(
-                p["spl"], p.get("sppt", p["spl"]), p.get("fppt", p["spl"]))
+                p["spl"], p.get("sppt", p["spl"]), p.get("fppt", p["spl"]), ceilings)
         if p.get("ac_spl") is not None:
             p["ac_spl"], p["ac_sppt"], p["ac_fppt"] = _clamp_triplet(
-                p["ac_spl"], p.get("ac_sppt", p["ac_spl"]), p.get("ac_fppt", p["ac_spl"]))
+                p["ac_spl"], p.get("ac_sppt", p["ac_spl"]), p.get("ac_fppt", p["ac_spl"]),
+                ceilings)
         profiles[app_id] = p
     # MAX_GAME_PROFILES limits only new profiles: a store already above it keeps every valid one.
     return profiles

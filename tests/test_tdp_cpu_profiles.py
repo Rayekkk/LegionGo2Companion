@@ -749,6 +749,24 @@ class CpuProfileTests(unittest.TestCase):
         self.assertEqual((saved['spl'], saved['sppt'], saved['fppt']), (35000, 37000, 45000))
         self.assertEqual(self.limits, [35000, 37000, 45000])
 
+    def test_saved_extras_spl_above_firmware_ceiling_reads_and_runs_at_the_ceiling(self):
+        # 2.2.0 saved SPL up to 50 W with Extras; the SMU never keeps more than 35 W.
+        self.seed({'111': self.game(spl=45000, sppt=48000, fppt=50000, preset='custom',
+                                    ac_separate=True, ac_spl=45000, ac_sppt=47000,
+                                    ac_fppt=50000, ac_preset='custom')},
+                  extras_unlocked=True, spl=45000, sppt=48000, fppt=50000)
+        with patch.object(tdp, '_allowed_ceilings_mw', return_value=(35000, 50000, 50000)):
+            state = asyncio.run(self.plugin.get_settings())
+            self.assertEqual((state['spl'], state['sppt'], state['fppt']), (35000, 48000, 50000))
+            game = asyncio.run(self.plugin.get_game_profile('111'))
+            self.assertEqual(game['profile']['spl'], 35000)
+            self.assertEqual((game['ac_profile']['spl'], game['ac_profile']['sppt']), (35000, 47000))
+            tdp._check_and_enforce()
+            self.assertEqual(self.limits, [35000, 48000, 50000])
+            self.app, self.ac = '111', True
+            tdp._check_and_enforce()
+            self.assertEqual(self.limits, [35000, 47000, 50000])
+
     def test_failed_tdp_result_preserves_saved_and_running_game_cpu(self):
         for operation, args in (
             ('delete_game_profile', ('111',)),
@@ -974,7 +992,8 @@ class CpuProfileTests(unittest.TestCase):
                 await self.plugin._unload()
         with patch.object(tdp.updater, 'ssl_context'), \
              patch.object(tdp, '_ensure_ryzenadj'), \
-             patch.object(tdp, '_wmi_caps', return_value={'present': True}):
+             patch.object(tdp, '_wmi_caps', return_value={
+                 key: {'min': 5, 'max': top} for key, top in (('spl', 35), ('sppt', 37), ('fppt', 45))}):
             asyncio.run(scenario())
 
     def test_invalid_legacy_cpu_fields_inherit_without_changing_unrelated_values(self):

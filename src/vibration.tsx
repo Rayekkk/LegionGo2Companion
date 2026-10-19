@@ -20,7 +20,7 @@ import {
 } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
-import { driverNotice, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
+import { driverNotice, failureText, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -103,7 +103,7 @@ const notifyFailure = (what: string, err: unknown) => {
 
 /** Report a backend result that carries its own error string. */
 const checkResult = (what: string, res: { success: boolean; error?: string }) => {
-  if (!res.success) notify(`${what}: ${res.error ?? "The driver rejected the change"}`);
+  if (!res.success) notify(failureText(what, res.error));
   return res.success;
 };
 
