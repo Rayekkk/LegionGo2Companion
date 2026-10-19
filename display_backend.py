@@ -1262,6 +1262,28 @@ def _edid_owned_identity():
     return None
 
 
+def _edid_restore_action(current: bytes, original: bytes, identity, pending, owned) -> str:
+    """What a restore may do with the published EDID it just read.
+
+    "changed" and "written" are final results, "rewrite" puts the original back,
+    "not_ours" and "foreign" leave the file alone, "unverified" keeps recovery pending.
+    """
+    if pending and identity != (pending["device"], pending["inode"]):
+        # A new connector owns a different inode, even if its bytes happen
+        # to equal the interrupted partial write. Never restore over it.
+        return "changed"
+    if current == original:
+        return "written"
+    if current == _strip_displayid(original):
+        # Our trimmed bytes in a file we never wrote: a new file is not ours to restore.
+        return "not_ours" if owned not in (None, identity) else "rewrite"
+    if pending:
+        if pending.get("partial_sha256") != hashlib.sha256(current).hexdigest():
+            return "unverified"
+        return "rewrite"
+    return "foreign"
+
+
 def _forget_edid_baseline() -> bool:
     """Drop the backup, the remembered original and its file identity; False keeps them for a retry."""
     try:
@@ -1415,6 +1437,23 @@ def _gate_block_reason(mode: str, state: dict) -> str | None:
     if not state["enabled"]:
         return "turned off"
     return None
+
+
+def _hybrid_reading(props: dict) -> tuple[bool, bool, bool]:
+    """(game asks for HDR, panel reads as PQ, mode input unknown) from one Hybrid read."""
+    forced = bool(_as_int(props.get(ATOM_FORCE_HDR_SUPPORT)))
+    enabled = _as_int(props.get(ATOM_HDR_ENABLED))
+    unknown = enabled is None and forced
+    if enabled is None and not forced:
+        # gamescope does not publish this input until somebody writes it.
+        # Before we force HDR advertisement, output feedback is the only
+        # observation of the actual starting mode.
+        enabled = _as_int(props.get(ATOM_HDR_OUT)) or 0
+    # Once force is present, output feedback is intentionally synthetic. An
+    # absent input atom is therefore unknown, not gamma 2.2: the caller writes
+    # the requested mode so an interrupted earlier hand-off cannot strand PQ.
+    is_hdr = bool(_as_int(props.get(ATOM_HDR_OUT))) if unknown else bool(enabled)
+    return bool(_as_int(props.get(ATOM_HDR_APP))), is_hdr, unknown
 
 
 class Plugin:
@@ -2679,22 +2718,7 @@ class Plugin:
             return
 
         if external == 1:
-            if not Plugin._hybrid_suspended_external:
-                Plugin._reset_hybrid_timing()
-                if _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
-                    Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
-                    Plugin._hybrid_suspended_external = True
-                    output = _as_int(props.get(ATOM_HDR_OUT))
-                    if output is not None:
-                        Plugin._state["hdr_now"] = bool(output)
-                    Plugin._hdr_argument_over()
-                    decky.logger.info(
-                        f"{LOG} hybrid: suspended for external display")
-                else:
-                    Plugin._state["hybrid_reason"] = \
-                        "could not hand HDR control to the external display"
-                    return
-            Plugin._state["hybrid_reason"] = "external display, not ours to drive"
+            Plugin._hybrid_suspend_external_locked(props)
             return
 
         returned_without_baseline = (
@@ -2730,19 +2754,7 @@ class Plugin:
                 Plugin._state["hybrid_reason"] = "could not advertise HDR to games"
                 return
 
-        wants_hdr = bool(_as_int(props.get(ATOM_HDR_APP)))
-        enabled = _as_int(props.get(ATOM_HDR_ENABLED))
-        enabled_unknown = enabled is None and forced
-        if enabled is None and not forced:
-            # gamescope does not publish this input until somebody writes it.
-            # Before we force HDR advertisement, output feedback is the only
-            # observation of the actual starting mode.
-            enabled = _as_int(props.get(ATOM_HDR_OUT)) or 0
-        # Once force is present, output feedback is intentionally synthetic. An
-        # absent input atom is therefore unknown, not gamma 2.2: explicitly write
-        # the requested mode so an interrupted earlier hand-off cannot strand PQ.
-        is_hdr = (bool(_as_int(props.get(ATOM_HDR_OUT))) if enabled_unknown
-                  else bool(enabled))
+        wants_hdr, is_hdr, enabled_unknown = _hybrid_reading(props)
         Plugin._state["hdr_now"] = is_hdr
 
         now = time.monotonic()
@@ -2804,6 +2816,24 @@ class Plugin:
                 "something else keeps changing the display mode, standing off")
         else:
             Plugin._state["hybrid_reason"] = "could not switch the panel"
+
+    @staticmethod
+    def _hybrid_suspend_external_locked(props: dict) -> None:
+        """Hand HDR control to an external display once, then leave it alone."""
+        if not Plugin._hybrid_suspended_external:
+            Plugin._reset_hybrid_timing()
+            if not _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
+                Plugin._state["hybrid_reason"] = \
+                    "could not hand HDR control to the external display"
+                return
+            Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
+            Plugin._hybrid_suspended_external = True
+            output = _as_int(props.get(ATOM_HDR_OUT))
+            if output is not None:
+                Plugin._state["hdr_now"] = bool(output)
+            Plugin._hdr_argument_over()
+            decky.logger.info(f"{LOG} hybrid: suspended for external display")
+        Plugin._state["hybrid_reason"] = "external display, not ours to drive"
 
     @staticmethod
     def _hybrid_release(next_mode=None) -> bool:
@@ -2966,35 +2996,21 @@ class Plugin:
             Plugin._state["edid_reason"] = "could not read the published EDID; restoration will retry"
             diagnostic_transition('display', 'edid_recovery', 'read_failed', level='warning', error=exc, pending=True)
             return False
-        patched = _strip_displayid(original)
         identity = (current_info.st_dev, current_info.st_ino)
-        if pending and identity != (pending["device"], pending["inode"]):
-            # A new connector owns a different inode, even if its bytes happen
-            # to equal the interrupted partial write. Never restore over it.
-            result = "changed"
-        elif current == original:
-            result = "written"
-        elif current == patched and _edid_owned_identity() not in (None, identity):
-            # Our trimmed bytes in a file we never wrote: a new file is not ours to restore.
-            if not _forget_edid_baseline():
-                return False
+        action = _edid_restore_action(current, original, identity, pending, _edid_owned_identity())
+        if action == "not_ours" and not _forget_edid_baseline():
+            return False
+        if action in ("not_ours", "foreign"):
             diagnostic_transition('display', 'edid_recovery', 'foreign', pending=False)
             Plugin._state["edid_patched"] = False
             Plugin._state["edid_reason"] = "turned off, display EDID changed"
             return True
-        elif current == patched:
-            result = _rewrite_file_if_unchanged(path, current, original, expected_identity=identity)
-        elif pending:
-            if pending.get("partial_sha256") != hashlib.sha256(current).hexdigest():
-                Plugin._state["edid_reason"] = "Partial EDID ownership is unverified; original bytes were preserved"
-                diagnostic_transition('display', 'edid_recovery', 'ownership_unverified', level='warning', pending=True)
-                return False
-            result = _rewrite_file_if_unchanged(path, current, original, expected_identity=identity)
-        else:
-            diagnostic_transition('display', 'edid_recovery', 'foreign', pending=False)
-            Plugin._state["edid_patched"] = False
-            Plugin._state["edid_reason"] = "turned off, display EDID changed"
-            return True
+        if action == "unverified":
+            Plugin._state["edid_reason"] = "Partial EDID ownership is unverified; original bytes were preserved"
+            diagnostic_transition('display', 'edid_recovery', 'ownership_unverified', level='warning', pending=True)
+            return False
+        result = (_rewrite_file_if_unchanged(path, current, original, expected_identity=identity)
+                  if action == "rewrite" else action)
 
         if result == "written":
             if not _clear_edid_write_pending():

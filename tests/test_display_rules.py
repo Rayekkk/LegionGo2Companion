@@ -61,6 +61,7 @@ class HybridTimingTests(unittest.TestCase):
         self.props = {display.ATOM_IS_EXTERNAL: 0, display.ATOM_FORCE_HDR_SUPPORT: 1,
                       display.ATOM_HDR_ENABLED: 0, display.ATOM_HDR_APP: 0, display.ATOM_HDR_OUT: 0}
         self.writes = []
+        self.named = []
         self.sticks = True
         state = dict(display.Plugin._state, active_mode=display.MODE_HYBRID,
                      panel_mode=display.MODE_HYBRID, setup_done=True, reset_in_progress=False)
@@ -75,6 +76,7 @@ class HybridTimingTests(unittest.TestCase):
         self.stack.enter_context(patch.object(display, 'time', types.SimpleNamespace(monotonic=lambda: self.now)))
         def write(name, value):
             self.writes.append((self.now, value))
+            self.named.append((name, value))
             if self.sticks:
                 self.props[name] = value
             return True
@@ -85,6 +87,54 @@ class HybridTimingTests(unittest.TestCase):
         if content is not None:
             self.props[display.ATOM_HDR_APP] = content
         display.Plugin._hybrid_pass()
+
+    def test_one_pass_decides_from_the_atoms_it_read(self):
+        F, E, A, O, X = (display.ATOM_FORCE_HDR_SUPPORT, display.ATOM_HDR_ENABLED,
+                         display.ATOM_HDR_APP, display.ATOM_HDR_OUT, display.ATOM_IS_EXTERNAL)
+        g22, pq = 'no HDR content, panel in gamma 2.2', 'HDR content on screen, panel in PQ'
+        wait = 'no HDR content, waiting for a stable switch to gamma 2.2'
+        ext = 'external display, not ours to drive'
+        # (atoms over the defaults, None = unset; baseline, suspended, SDR since)
+        #   -> (writes, reason, hdr_now, baseline after)
+        cases = [
+            ({}, False, False, None, [], g22, False, False),
+            ({A: 1}, False, False, None, [(E, 1)], pq, True, False),
+            ({A: 1, E: 1}, False, False, None, [], pq, True, False),
+            ({E: 1}, False, False, None, [], wait, True, False),
+            ({F: 0}, False, False, None, [(F, 1)], g22, False, False),
+            # Forced with the input unset: output feedback is synthetic, so write the mode.
+            ({E: None}, False, False, 0.0, [(E, 0)], g22, False, False),
+            ({E: None, A: 1, O: 1}, False, False, None, [(E, 1)], pq, True, False),
+            # Unforced with the input unset: output feedback is the real starting mode.
+            ({F: 0, E: None, O: 1}, False, False, None, [(F, 1)], wait, True, False),
+            ({X: 1, O: 1}, False, False, None, [(F, 0)], ext, True, False),
+            ({X: 1, O: 1}, False, True, None, [], ext, None, False),
+            ({X: None}, False, False, None, [], 'could not verify the active display', None, False),
+            ({E: 1}, None, False, None, [], wait, True, True),
+            ({E: None, O: 1}, None, False, None, [], wait, True, False),
+            # Back from a dock with no baseline: the panel's own output, not the monitor's request.
+            ({F: 0, E: 1, O: 0}, None, True, None, [(F, 1)], wait, True, False),
+        ]
+        self.now = 10.0
+        self.stack.enter_context(patch.object(display.Plugin, '_edid_recheck_until', 0.0))
+        self.stack.enter_context(patch.object(display.Plugin, '_remember_hdr_baseline',
+            side_effect=lambda value: setattr(display.Plugin, '_hdr_baseline', bool(value))))
+        defaults = dict(self.props)
+        for atoms, baseline, suspended, sdr_since, writes, reason, hdr_now, after in cases:
+            with self.subTest(atoms=atoms, baseline=baseline, suspended=suspended):
+                self.props = {k: v for k, v in {**defaults, **atoms}.items() if v is not None}
+                self.named.clear()
+                display.Plugin._state.update(hdr_now=None, hybrid_reason=None)
+                display.Plugin._hdr_baseline = baseline
+                display.Plugin._hybrid_suspended_external = suspended
+                display.Plugin._hybrid_sdr_since = sdr_since
+                display.Plugin._hybrid_pq_hold_until = 0.0
+                display.Plugin._hdr_fights, display.Plugin._hdr_fight_target = 0, None
+                display.Plugin._hybrid_pass()
+                self.assertEqual(self.named, writes)
+                self.assertEqual(display.Plugin._state['hybrid_reason'], reason)
+                self.assertEqual(display.Plugin._state['hdr_now'], hdr_now)
+                self.assertEqual(display.Plugin._hdr_baseline, after)
 
     def test_pq_at_once_and_gamma_only_after_the_hold_and_continuous_sdr(self):
         self.tick(0.0, content=1)
