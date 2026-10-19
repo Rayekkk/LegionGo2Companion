@@ -805,6 +805,58 @@ class CpuProfileTests(unittest.TestCase):
                 self.assertEqual(self.payload(), before)
                 self.assert_hardware(False, '77')
 
+    def test_scope_refusals_keep_their_order_and_reason_and_never_write(self):
+        self.seed({'111': self.game(), '222': self.game()}); self.app = '222'
+        running = 'game is running; change its settings as the running game'
+        cases = (
+            ('apply_tdp', (9000, 9000, 9000, '111', '', '111'), 'foreground game changed'),
+            ('apply_tdp', (9000, 9000, 9000, '111', '', '111', True), 'foreground game changed'),
+            ('apply_tdp', (9000, 9000, 9000, '111'), 'game is no longer active'),
+            ('apply_tdp', (9000, 9000, 9000, '222', '', '222', True), running),
+            ('apply_tdp', (9000, 9000, 9000, '333', '', '222', True), 'this game has no profile in use'),
+            ('apply_tdp', (9000, 9000, 9000, '', '', '222', True), 'invalid TDP request'),
+            ('set_cpu_boost', (True, '111', False, '111'), 'foreground game changed'),
+            ('set_cpu_boost', (True, '111', False, '111', True), 'foreground game changed'),
+            ('set_cpu_boost', (True, '111', False, None), 'game is no longer active'),
+            ('set_epp', ('power', '222', False, '222', True), running),
+            ('set_epp', ('power', '333', False, '222', True), 'this game has no profile in use'),
+            ('set_epp', ('power', '', False, '222', True), 'invalid CPU profile context'),
+            ('set_epp', ('power', '111', True, '222', True), 'separate AC profile is disabled'),
+            ('set_game_ac_profile', ('111', 9000, 9000, 9000, True), 'game is no longer active'),
+            ('set_game_ac_profile', ('222', 9000, 9000, 9000, True, '', True), running),
+        )
+        before = self.payload()
+        for method, args, reason in cases:
+            with self.subTest(method=method, args=args):
+                result = asyncio.run(getattr(self.plugin, method)(*args))
+                self.assertFalse(result['success'], result)
+                self.assertEqual(result.get('error', result.get('stderr')), reason)
+                self.assertEqual(self.payload(), before)
+                self.assertEqual(self.applies, [])
+                self.assert_hardware(False, '77')
+        # Disabled TDP refuses a TDP edit first, but a CPU edit checks its scope first.
+        self.seed({'111': self.game(), '222': self.game()}, enabled=False)
+        self.assertEqual(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, '111', '', '111'))['stderr'],
+                         'plugin disabled')
+        self.assertEqual(asyncio.run(self.plugin.set_epp('power', '111', False, '111'))['error'],
+                         'foreground game changed')
+        self.assertEqual(asyncio.run(self.plugin.set_epp('power', '222', False, '222'))['error'],
+                         'plugin disabled')
+
+    def test_game_tdp_edit_on_ac_saves_battery_values_and_runs_the_ac_profile(self):
+        self.seed({'111': self.game(ac_separate=True, ac_spl=30000, ac_sppt=32000,
+                                    ac_fppt=40000, ac_preset='custom')})
+        self.app, self.ac = '111', True
+        result = self.rpc('apply_tdp', 20000, 22000, 25000, '111', 'custom', '111')
+        self.assertEqual((result['applied'], result['saved_only']), (True, False))
+        self.assertEqual(self.applies[-1], (30000, 32000, 40000))
+        saved = self.payload()
+        profile, state = saved['game_profiles']['111'], saved['settings']
+        self.assertEqual((profile['spl'], profile['sppt'], profile['fppt'], profile['preset'], profile['ac_spl']),
+                         (20000, 22000, 25000, 'custom', 30000))
+        self.assertEqual((state['active_spl'], state['active_sppt'], state['active_fppt']), (30000, 32000, 40000))
+        self.assertEqual((state['spl'], state['sppt'], state['fppt']), (25000, 28000, 35000))
+
     def test_cpu_commit_failure_restores_hardware_and_preserves_profiles(self):
         self.seed({'111': self.game(False, '77')}); self.app = '111'
         before = self.payload()

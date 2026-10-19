@@ -2003,6 +2003,18 @@ def _stored_edit_refusal(app_id: str, current_app_id: str) -> str | None:
     return None
 
 
+def _scope_refusal(app_id: str, current_app_id: str, expected_app_id: str | None,
+                   stored: bool) -> str | None:
+    """Why an edit for app_id ("" = Global) no longer fits the foreground game."""
+    if expected_app_id is not None and current_app_id != expected_app_id:
+        return "foreground game changed"
+    if stored:
+        return _stored_edit_refusal(app_id, current_app_id)
+    if app_id and current_app_id != app_id:
+        return "game is no longer active"
+    return None
+
+
 def _cpu_editor_profile(state: dict, profiles: dict, app_id: str,
                         ac_profile: bool) -> dict:
     selected = profiles.get(app_id) if app_id else None
@@ -2138,6 +2150,170 @@ def _tdp_user_transaction():
             raise RuntimeError(f"TDP operation failed: {exc}; {detail}") from exc
 
 
+def _set_cpu_control_locked(field: str, value, selected: str, ac_profile: bool,
+                            expected: str | None, stored: bool) -> tuple[bool, str]:
+    """Save, then apply, one CPU Boost/EPP choice; return (success, error).
+
+    Caller holds _mutation_lock and has validated the scope arguments.
+    """
+    current = _get_running_appid()
+    refusal = _scope_refusal(selected, current, expected, stored)
+    if refusal:
+        return False, refusal
+    state, profiles = _load_settings(), _load_profiles()
+    if selected and not state.get("enabled", True):
+        return False, "plugin disabled"
+    if ac_profile and not profiles.get(selected, {}).get("ac_separate"):
+        return False, "separate AC profile is disabled"
+    if field == SETTINGS_FIELD_CPU_BOOST_ENABLED:
+        if type(value) is not bool:
+            return False, "invalid CPU Boost value"
+        preflight, canonical = _capture_cpu_boost(), value
+        apply = _apply_cpu_boost_hardware
+    else:
+        preflight = _capture_epp()
+        canonical = _validated_epp_request(preflight, value)
+        apply = _apply_epp_hardware
+        if canonical is None:
+            return False, "invalid or unsupported EPP value"
+    if not preflight["can_set"]:
+        return False, preflight["error"] or "CPU control is unsupported"
+    if selected:
+        profile = _prepare_cpu_profile(
+            state, profiles, selected, required_field=field)
+        # Legacy AC profiles inherited battery CPU values. Keep
+        # their pre-edit value when the battery branch changes.
+        if (not ac_profile and profile.get("ac_separate")
+                and profile.get("ac_" + field) is None):
+            profile["ac_" + field] = _effective_cpu_values(
+                state, profile, True)[field]
+        profile[("ac_" if ac_profile else "") + field] = canonical
+    else:
+        state[field] = canonical
+    active = not stored and _cpu_editor_profile(state, profiles, selected, ac_profile)["active"]
+    values = {SETTINGS_KEY_SETTINGS: state}
+    previous = {SETTINGS_KEY_SETTINGS: _read_key(SETTINGS_KEY_SETTINGS, _defaults())}
+    if selected:
+        values[SETTINGS_KEY_GAME_PROFILES] = profiles
+        previous[SETTINGS_KEY_GAME_PROFILES] = _read_key(SETTINGS_KEY_GAME_PROFILES, {})
+    try:
+        # Saved before the write: the choice is what makes release restore
+        # the baseline, so a crash mid-write cannot orphan a changed control.
+        _write_keys(values)
+    except Exception as exc:
+        return False, f"settings persist failed: {exc}"
+    if active:
+        transaction = apply(canonical)
+        if not transaction["success"]:
+            # An incomplete rollback keeps the choice, and with it the release.
+            if transaction.get("restored", True):
+                try:
+                    _write_keys(previous)
+                except Exception as exc:
+                    return False, f"{transaction['error']}; settings revert failed: {exc}"
+            return False, transaction["error"]
+    event("tdp", "cpu_profile_saved", attribute=field,
+          scope=("game_ac" if ac_profile else "game") if selected else "global",
+          outcome="applied" if active else "saved")
+    return True, ""
+
+
+def _save_stored_tdp_locked(s: dict, app_id: str, spl: int, sppt: int, fppt: int,
+                            preset_name: str) -> dict:
+    """Edit a saved, not running, game profile without touching hardware."""
+    profiles = _load_profiles()
+    profile = profiles[app_id]
+    requested = _target_for_preset(s, spl, sppt, fppt, preset_name or profile.get("preset", ""))
+    profile.update({"spl": requested[0], "sppt": requested[1], "fppt": requested[2]})
+    if preset_name:
+        profile["preset"] = preset_name
+    _write_keys({SETTINGS_KEY_GAME_PROFILES: profiles})
+    event("tdp", "profile_saved", scope="game", outcome="saved")
+    return _ok(applied=False, saved_only=True, stored=True)
+
+
+def _save_inactive_global_tdp_locked(s: dict, spl: int, sppt: int, fppt: int,
+                                     preset_name: str) -> dict:
+    """Save Global while a game profile owns the limits.
+
+    The desktop editor can select Global while a game owns the active limits.
+    Save that future policy without replacing the game's defended target or
+    its AC ladder.
+    """
+    requested = _target_for_preset(
+        s, spl, sppt, fppt,
+        preset_name or s.get("active_preset", ""))
+    s["spl"], s["sppt"], s["fppt"] = requested
+    # active_preset is the historical global preset key;
+    # per-game labels live in their own profile entries.
+    s["active_preset"] = preset_name or s.get("active_preset", "")
+    try:
+        _save_settings(s)
+    except Exception as exc:
+        return _fail(f"Could not save global TDP settings: {exc}",
+                     applied=False, saved_only=False)
+    return _ok(applied=False, saved_only=True, message=(
+        "Global TDP settings saved. They will apply when no game profile is active."))
+
+
+def _apply_tdp_locked(s: dict, app_id: str, spl: int, sppt: int, fppt: int,
+                      preset_name: str) -> dict:
+    """Apply and save Global or the running game's limits ("" = Global).
+
+    Caller holds _mutation_lock across validation, hardware and persistence.
+    """
+    with _tdp_user_transaction() as restore_failed:
+        profiles: dict = {}
+        existing: dict = {}
+        if app_id:
+            profiles = _load_profiles()
+            existing = _prepare_cpu_profile(s, profiles, app_id)
+        effective_preset = preset_name or (
+            existing.get("preset", "") if app_id else s.get("active_preset", ""))
+        requested = _target_for_preset(
+            s, spl, sppt, fppt, effective_preset)
+        want = requested
+
+        if app_id:
+            # On AC with a separate AC profile, the sliders describe the
+            # battery values but the hardware should run the AC ones.
+            if (_get_ac_online() and existing.get("ac_separate")
+                    and existing.get("ac_spl") is not None):
+                want = _target_for_preset(
+                    s,
+                    existing["ac_spl"],
+                    existing.get("ac_sppt", existing.get("sppt", _defaults()["sppt"])),
+                    existing.get("ac_fppt", existing.get("fppt", _defaults()["fppt"])),
+                    existing.get("ac_preset", ""),
+                )
+
+        cpu_state = (
+            _effective_cpu_state(s, profiles, app_id) if app_id
+            else _effective_cpu_state(s))
+        result = _apply_limits_with_saved_cpu_power(cpu_state, *want)
+        if not result["success"]:
+            return restore_failed(result)
+
+        if app_id:
+            existing.update({"spl": requested[0], "sppt": requested[1],
+                             "fppt": requested[2]})
+            if preset_name:
+                existing["preset"] = preset_name
+            profiles[app_id] = existing
+            event("tdp", "profile_saved", scope="game", outcome="confirmed")
+        else:
+            s["spl"], s["sppt"], s["fppt"] = requested
+            s["active_preset"] = effective_preset
+        s["active_spl"], s["active_sppt"], s["active_fppt"] = want
+        values = {SETTINGS_KEY_SETTINGS: s}
+        if app_id:
+            values[SETTINGS_KEY_GAME_PROFILES] = profiles
+        _write_keys(values)
+        _cancel_ac_settle()
+        result.update(applied=True, saved_only=False)
+        return restore_failed(result)
+
+
 class Plugin:
     def __init__(self):
         self._tasks = []
@@ -2189,70 +2365,8 @@ class Plugin:
                             or (ac_profile and not selected) or (stored and not selected)
                             or (expected_app_id is not None and expected is None)):
                         return status(False, "invalid CPU profile context")
-                    current = _get_running_appid()
-                    if expected is not None and current != expected:
-                        return status(False, "foreground game changed")
-                    refusal = _stored_edit_refusal(selected, current) if stored else None
-                    if refusal:
-                        return status(False, refusal)
-                    if selected and not stored and current != selected:
-                        return status(False, "game is no longer active")
-                    state, profiles = _load_settings(), _load_profiles()
-                    if selected and not state.get("enabled", True):
-                        return status(False, "plugin disabled")
-                    if ac_profile and not profiles.get(selected, {}).get("ac_separate"):
-                        return status(False, "separate AC profile is disabled")
-                    if field == SETTINGS_FIELD_CPU_BOOST_ENABLED:
-                        if type(value) is not bool:
-                            return status(False, "invalid CPU Boost value")
-                        preflight, canonical = _capture_cpu_boost(), value
-                        apply = _apply_cpu_boost_hardware
-                    else:
-                        preflight = _capture_epp()
-                        canonical = _validated_epp_request(preflight, value)
-                        apply = _apply_epp_hardware
-                        if canonical is None:
-                            return status(False, "invalid or unsupported EPP value")
-                    if not preflight["can_set"]:
-                        return status(False, preflight["error"] or "CPU control is unsupported")
-                    if selected:
-                        profile = _prepare_cpu_profile(
-                            state, profiles, selected, required_field=field)
-                        # Legacy AC profiles inherited battery CPU values. Keep
-                        # their pre-edit value when the battery branch changes.
-                        if (not ac_profile and profile.get("ac_separate")
-                                and profile.get("ac_" + field) is None):
-                            profile["ac_" + field] = _effective_cpu_values(
-                                state, profile, True)[field]
-                        profile[("ac_" if ac_profile else "") + field] = canonical
-                    else:
-                        state[field] = canonical
-                    active = not stored and _cpu_editor_profile(state, profiles, selected, ac_profile)["active"]
-                    values = {SETTINGS_KEY_SETTINGS: state}
-                    previous = {SETTINGS_KEY_SETTINGS: _read_key(SETTINGS_KEY_SETTINGS, _defaults())}
-                    if selected:
-                        values[SETTINGS_KEY_GAME_PROFILES] = profiles
-                        previous[SETTINGS_KEY_GAME_PROFILES] = _read_key(SETTINGS_KEY_GAME_PROFILES, {})
-                    try:
-                        # Saved before the write: the choice is what makes release restore
-                        # the baseline, so a crash mid-write cannot orphan a changed control.
-                        _write_keys(values)
-                    except Exception as exc:
-                        return status(False, f"settings persist failed: {exc}")
-                    if active:
-                        transaction = apply(canonical)
-                        if not transaction["success"]:
-                            # An incomplete rollback keeps the choice, and with it the release.
-                            if transaction.get("restored", True):
-                                try:
-                                    _write_keys(previous)
-                                except Exception as exc:
-                                    return status(False, f"{transaction['error']}; settings revert failed: {exc}")
-                            return status(False, transaction["error"])
-                    event("tdp", "cpu_profile_saved", attribute=field,
-                          scope=("game_ac" if ac_profile else "game") if selected else "global",
-                          outcome="applied" if active else "saved")
-                    return status(True)
+                    return status(*_set_cpu_control_locked(
+                        field, value, selected, ac_profile, expected, stored))
                 except Exception as exc:
                     event('tdp','cpu_profile_failed',level='warning',error=exc,attribute=field)
                     try:
@@ -2443,8 +2557,7 @@ class Plugin:
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 current = _get_running_appid()
-                refusal = (_stored_edit_refusal(app_id, current) if stored
-                           else "game is no longer active" if current != app_id else None)
+                refusal = _scope_refusal(app_id, current, None, stored)
                 if refusal:
                     return _fail(refusal)
                 state = _load_settings()
@@ -2698,102 +2811,15 @@ class Plugin:
                 if not s.get("enabled", True):
                     return _fail("plugin disabled")
                 current_app_id = _get_running_appid()
-                if expected_app_id is not None and current_app_id != expected_app_id:
-                    return _fail("foreground game changed")
+                refusal = _scope_refusal(app_id, current_app_id, expected_app_id, stored)
+                if refusal:
+                    return _fail(refusal)
                 if stored:
-                    return _save_stored(s, current_app_id)
-                if app_id and current_app_id != app_id:
-                    return _fail("game is no longer active")
-
+                    return _save_stored_tdp_locked(s, app_id, spl, sppt, fppt, preset_name)
                 if (not app_id and current_app_id
                         and current_app_id in _load_profiles()):
-                    # The desktop editor can select Global while a game owns
-                    # the active limits. Save that future policy without
-                    # replacing the game's defended target or its AC ladder.
-                    requested = _target_for_preset(
-                        s, spl, sppt, fppt,
-                        preset_name or s.get("active_preset", ""))
-                    s["spl"], s["sppt"], s["fppt"] = requested
-                    # active_preset is the historical global preset key;
-                    # per-game labels live in their own profile entries.
-                    s["active_preset"] = preset_name or s.get("active_preset", "")
-                    try:
-                        _save_settings(s)
-                    except Exception as exc:
-                        return _fail(f"Could not save global TDP settings: {exc}",
-                                     applied=False, saved_only=False)
-                    return _ok(applied=False, saved_only=True, message=(
-                        "Global TDP settings saved. They will apply when no game profile is active."))
-
-                return _apply_current(s)
-
-        def _save_stored(s: dict, current_app_id: str) -> dict:
-            refusal = _stored_edit_refusal(app_id, current_app_id)
-            if refusal:
-                return _fail(refusal)
-            profiles = _load_profiles()
-            profile = profiles[app_id]
-            requested = _target_for_preset(s, spl, sppt, fppt, preset_name or profile.get("preset", ""))
-            profile.update({"spl": requested[0], "sppt": requested[1], "fppt": requested[2]})
-            if preset_name:
-                profile["preset"] = preset_name
-            _write_keys({SETTINGS_KEY_GAME_PROFILES: profiles})
-            event("tdp", "profile_saved", scope="game", outcome="saved")
-            return _ok(applied=False, saved_only=True, stored=True)
-
-        def _apply_current(s: dict) -> dict:
-            # _do retains the mutation lock across validation, hardware and
-            # persistence, including the inactive-global save above.
-            with _tdp_user_transaction() as restore_failed:
-                profiles: dict = {}
-                existing: dict = {}
-                if app_id:
-                    profiles = _load_profiles()
-                    existing = _prepare_cpu_profile(s, profiles, app_id)
-                effective_preset = preset_name or (
-                    existing.get("preset", "") if app_id else s.get("active_preset", ""))
-                requested = _target_for_preset(
-                    s, spl, sppt, fppt, effective_preset)
-                want = requested
-
-                if app_id:
-                    # On AC with a separate AC profile, the sliders describe the
-                    # battery values but the hardware should run the AC ones.
-                    if (_get_ac_online() and existing.get("ac_separate")
-                            and existing.get("ac_spl") is not None):
-                        want = _target_for_preset(
-                            s,
-                            existing["ac_spl"],
-                            existing.get("ac_sppt", existing.get("sppt", _defaults()["sppt"])),
-                            existing.get("ac_fppt", existing.get("fppt", _defaults()["fppt"])),
-                            existing.get("ac_preset", ""),
-                        )
-
-                cpu_state = (
-                    _effective_cpu_state(s, profiles, app_id) if app_id
-                    else _effective_cpu_state(s))
-                result = _apply_limits_with_saved_cpu_power(cpu_state, *want)
-                if not result["success"]:
-                    return restore_failed(result)
-
-                if app_id:
-                    existing.update({"spl": requested[0], "sppt": requested[1],
-                                     "fppt": requested[2]})
-                    if preset_name:
-                        existing["preset"] = preset_name
-                    profiles[app_id] = existing
-                    event("tdp", "profile_saved", scope="game", outcome="confirmed")
-                else:
-                    s["spl"], s["sppt"], s["fppt"] = requested
-                    s["active_preset"] = effective_preset
-                s["active_spl"], s["active_sppt"], s["active_fppt"] = want
-                values = {SETTINGS_KEY_SETTINGS: s}
-                if app_id:
-                    values[SETTINGS_KEY_GAME_PROFILES] = profiles
-                _write_keys(values)
-                _cancel_ac_settle()
-                result.update(applied=True, saved_only=False)
-                return restore_failed(result)
+                    return _save_inactive_global_tdp_locked(s, spl, sppt, fppt, preset_name)
+                return _apply_tdp_locked(s, app_id, spl, sppt, fppt, preset_name)
         return await _offload(_do)
 
     async def _push_info(self) -> bool:
