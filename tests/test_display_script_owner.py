@@ -14,6 +14,7 @@ from unittest.mock import patch
 import support  # Decky/Linux doubles before importing the backend.
 import display_backend as display
 import display_script_io
+from system_process import PYTHON
 
 POSIX = unittest.skipUnless(os.name == 'posix', 'POSIX dir_fd and symlink semantics')
 
@@ -98,7 +99,7 @@ class ScriptTargetTests(unittest.TestCase):
             self.assertEqual(display._run_script_io('write', '/etc/passwd', b'x'), 1)
         self.assertEqual(run.call_count, 2)
         argv, kwargs = run.call_args_list[0].args[0], run.call_args_list[0].kwargs
-        self.assertEqual(argv, ['/usr/bin/python3', '-I', display.SCRIPT_IO, 'write', base, display.SCRIPT_NAME])
+        self.assertEqual(argv, [PYTHON, '-I', display.SCRIPT_IO, 'write', base, display.SCRIPT_NAME])
         self.assertEqual((kwargs['user'], kwargs['group'], kwargs['extra_groups']), (1000, 1001, []))
         self.assertEqual(kwargs['input'], b'lua')
         self.assertNotIn('LD_LIBRARY_PATH', kwargs['env'])

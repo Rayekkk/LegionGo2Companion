@@ -15,6 +15,7 @@ import urllib.error
 import zipfile
 from diagnostics import event
 from bounded_http import open_http, tls_context
+from safe_settings import open_directory
 
 REPOSITORY = "Rayekkk/LegionGo2Companion"
 PLUGIN_NAME = "Legion Go 2 Companion"
@@ -279,19 +280,11 @@ class CompanionUpdates:
                 os.path.normpath(home) != home or
                 type(self.user_gid) is not int or self.user_gid < 0):
             raise ValueError("The console user's home directory could not be verified.")
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-        fd = os.open("/", flags)
-        try:
-            for part in home.lstrip("/").split("/"):
-                next_fd = os.open(part, flags, dir_fd=fd)
-                os.close(fd)
-                fd = next_fd
+        def owned(fd):
             if os.fstat(fd).st_uid != self.user_uid:
                 raise ValueError("The home directory does not belong to the console user.")
-            return fd
-        except BaseException:
-            os.close(fd)
-            raise
+        parts = home.lstrip("/").split("/")
+        return open_directory(parts[-1:], open_directory(parts[:-1]), check=owned)
 
     def _download_components(self, home_fd):
         config_fd = None
@@ -327,29 +320,19 @@ class CompanionUpdates:
         return ["Downloads"]
 
     def _open_downloads(self):
+        def owned(fd):
+            if os.fstat(fd).st_uid != self.user_uid:
+                raise ValueError("The Downloads directory does not belong to the console user.")
+            self._ensure_open()  # Before the next component, as before the first.
         fd = self._open_home()
         try:
             parts = self._download_components(fd)
-            for part in parts:
-                self._ensure_open()
-                created = False
-                try:
-                    os.mkdir(part, 0o700, dir_fd=fd)
-                    created = True
-                except FileExistsError:
-                    pass
-                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                                  dir_fd=fd)
-                os.close(fd)
-                fd = next_fd
-                if created:
-                    os.fchown(fd, self.user_uid, self.user_gid)
-                if os.fstat(fd).st_uid != self.user_uid:
-                    raise ValueError("The Downloads directory does not belong to the console user.")
-            return fd, self.user_home + "/" + "/".join(parts)
+            self._ensure_open()
         except BaseException:
             os.close(fd)
             raise
+        fd = open_directory(parts, fd, lambda part: (0o700, self.user_uid, self.user_gid), owned)
+        return fd, self.user_home + "/" + "/".join(parts)
 
     def _existing_matches(self, directory_fd, release):
         try:

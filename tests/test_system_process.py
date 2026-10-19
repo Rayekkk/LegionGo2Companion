@@ -38,6 +38,11 @@ class SystemProcessTests(unittest.TestCase):
                                          'XDG_RUNTIME_DIR': '/run/user/1000', 'LC_ALL': 'C'})
             self.assertEqual(dict(os.environ), env)
 
+    @unittest.skipUnless(os.name == 'posix', 'SteamOS interpreter')
+    def test_helpers_run_on_the_system_python_without_windows_flags(self):
+        import system_process
+        self.assertEqual((system_process.PYTHON, system_process.NO_WINDOW), ('/usr/bin/python3', {}))
+
     def test_clean_runtime_and_fallback_path(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(system_env(), {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})

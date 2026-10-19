@@ -102,6 +102,34 @@ def _harden_regular_file(path: str) -> None:
         os.close(fd)
 
 
+def open_directory(parts, fd=None, create=None, check=None) -> int:
+    """Directory fd at `parts` below directory `fd` (default /; taken over), one component at a time, never
+    through a symlink. `create(part)` gives (mode, uid, gid) for a missing component; `check(fd)` vets each."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open("/", flags) if fd is None else fd
+    try:
+        for part in parts:
+            owner = None
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if create is None:
+                    raise
+                mode, *owner = create(part)
+                os.mkdir(part, mode, dir_fd=fd)
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if owner:
+                os.fchown(fd, *owner)
+            if check:
+                check(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _validate_json_depth(payload: dict[str, Any]) -> None:
     # JSON's decoder can accept structures deep enough to exhaust deepcopy()
     # later. Bound container nesting without recursively walking untrusted data.

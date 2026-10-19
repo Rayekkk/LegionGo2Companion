@@ -13,6 +13,8 @@ import secrets
 import stat
 import sys
 
+from safe_settings import open_directory
+
 MARKER = 'LegionGo2Companion managed Desktop'
 APP_ID = 'legiongo2companion'
 
@@ -38,24 +40,13 @@ class DesktopInstall:
         return cls(source, account.pw_dir, account.pw_uid, account.pw_gid)
 
     def _directory(self, relative, create=True):
-        current = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        def safe(fd):
+            info = os.fstat(fd)
+            if info.st_uid not in (0, self.uid) or info.st_mode & 0o022:
+                raise ValueError('Unsafe Desktop installation directory.')
+        made = (lambda part: (0o700 if part == APP_ID else 0o755, self.uid, self.gid)) if create else None
+        current = open_directory(Path(self.home).parts[1:] + tuple(relative.split('/')), create=made, check=safe)
         try:
-            parts = Path(self.home).parts[1:] + tuple(relative.split('/'))
-            for part in parts:
-                try:
-                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
-                except FileNotFoundError:
-                    if not create:
-                        raise
-                    os.mkdir(part, 0o700 if part == APP_ID else 0o755, dir_fd=current)
-                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
-                    os.fchown(child, self.uid, self.gid)
-                info = os.fstat(child)
-                if info.st_uid not in (0, self.uid) or info.st_mode & 0o022:
-                    os.close(child)
-                    raise ValueError('Unsafe Desktop installation directory.')
-                os.close(current)
-                current = child
             if relative.endswith(APP_ID):
                 os.fchmod(current, 0o700)
             return current

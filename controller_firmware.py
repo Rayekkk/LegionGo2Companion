@@ -159,6 +159,7 @@ def _openssl_executable():
 
 
 def _verify_signature(original):
+    from system_process import NO_WINDOW
     key_der = base64.b64decode(b''.join(PUBLIC_KEY.splitlines()[1:-1]), validate=True)
     if hashlib.sha256(key_der).hexdigest() != KEY_SHA256:
         raise FirmwareError('The trusted firmware key is invalid.')
@@ -175,7 +176,7 @@ def _verify_signature(original):
                 '-sigopt', 'rsa_pss_saltlen:32', '-sigopt', 'rsa_mgf1_md:sha256', str(payload)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 timeout=10, check=False, env={'PATH': os.defpath, 'OPENSSL_CONF': os.devnull},
-                **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+                **NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise FirmwareError('Signature verification could not complete.') from exc
         if result.returncode != 0:

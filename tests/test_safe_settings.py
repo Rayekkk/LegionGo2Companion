@@ -276,5 +276,47 @@ class NonblockingMetadataTests(unittest.TestCase):
                         'A later descriptor type check cannot help if open itself blocks on a replaced FIFO.')
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX dir_fd and symlink semantics")
+class OpenDirectoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.fds = len(os.listdir("/proc/self/fd"))
+        self.addCleanup(lambda: self.assertEqual(len(os.listdir("/proc/self/fd")), self.fds, "descriptor leaked"))
+
+    def walk(self, *parts, **options):
+        return safe_settings.open_directory(parts, os.open(self.root, os.O_RDONLY | os.O_DIRECTORY), **options)
+
+    def test_symlink_file_missing_and_vetoed_components_are_refused(self):
+        outside = self.root / "outside"; outside.mkdir()
+        (self.root / "link").symlink_to(outside, target_is_directory=True)
+        (self.root / "file").write_text("")
+        made = lambda part: (0o700, os.getuid(), os.getgid())
+        for name, error in (("link", OSError), ("file", NotADirectoryError)):
+            with self.subTest(name), self.assertRaises(error):
+                self.walk(name, "child", create=made)
+        with self.assertRaises(FileNotFoundError):
+            self.walk("missing")
+        def foreign(fd):
+            raise ValueError("foreign owner")
+        with self.assertRaisesRegex(ValueError, "foreign owner"):
+            self.walk("vetoed", "child", create=made, check=foreign)
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["file", "link", "outside", "vetoed"])
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(list((self.root / "vetoed").iterdir()), [])
+
+    def test_missing_components_are_created_with_their_mode_and_each_is_vetted(self):
+        seen, mask = [], os.umask(0)
+        os.umask(mask)
+        fd = self.walk("a", "b", create=lambda part: (0o700 if part == "b" else 0o755, os.getuid(), os.getgid()),
+                       check=lambda fd: seen.append(os.fstat(fd).st_ino))
+        try:
+            self.assertEqual(os.fstat(fd).st_ino, (self.root / "a/b").stat().st_ino)
+        finally:
+            os.close(fd)
+        self.assertEqual([stat.S_IMODE((self.root / p).stat().st_mode) for p in ("a", "a/b")], [0o755 & ~mask, 0o700])
+        self.assertEqual(seen, [(self.root / p).stat().st_ino for p in ("a", "a/b")])
+
 if __name__ == "__main__":
     unittest.main()

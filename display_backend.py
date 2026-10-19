@@ -28,7 +28,7 @@ import hashlib
 import math
 import os
 import posixpath
-from system_process import system_env as _system_env
+from system_process import PYTHON, system_env as _system_env
 import select
 import signal
 import stat
@@ -1011,7 +1011,7 @@ def _run_script_io(operation: str, path: str, data: bytes = b"") -> int:
         return 1
     try:
         result = subprocess.run(
-            ["/usr/bin/python3", "-I", SCRIPT_IO, operation, base, os.path.basename(path)],
+            [PYTHON, "-I", SCRIPT_IO, operation, base, os.path.basename(path)],
             input=data, capture_output=True, timeout=10, env=_system_env(), cwd="/",
             user=uid, group=gid, extra_groups=[])
     except (OSError, subprocess.SubprocessError) as exc:

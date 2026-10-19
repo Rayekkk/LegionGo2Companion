@@ -15,7 +15,7 @@ import time
 import decky
 from diagnostics import event as diagnostic_event, transition as diagnostic_transition
 import module_runtime
-from system_process import system_env
+from system_process import PYTHON, system_env
 from safe_settings import SettingsManager
 from fan_ec import platform_check
 from fan_guardian import secure_root, check_owners, Sensors, outcome_of
@@ -150,7 +150,7 @@ class Client:
             for name in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONINSPECT'):
                 env.pop(name, None)
             try:
-                self.process = subprocess.Popen(['/usr/bin/python3', '-E', '-s', '-u', str(script), str(child.fileno())],
+                self.process = subprocess.Popen([PYTHON, '-E', '-s', '-u', str(script), str(child.fileno())],
                     pass_fds=(child.fileno(),), start_new_session=True, close_fds=True,
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
                 self.socket = parent
