@@ -265,8 +265,6 @@ SETTINGS_KEY_SETTINGS      = "settings"
 SETTINGS_KEY_GAME_PROFILES = "game_profiles"
 # Profiles the user turned off. A separate key, so no game_profiles lookup can apply them.
 SETTINGS_KEY_INACTIVE_GAME_PROFILES = "inactive_game_profiles"
-SETTINGS_KEY_SCHEMA        = "schema_version"
-CURRENT_SCHEMA             = 2
 SETTINGS_FIELD_CPU_BOOST_ENABLED = "cpu_boost_enabled"
 SETTINGS_FIELD_EPP = "epp"
 # What release puts back: {"pending": True[, "after_boot": id]} until captured,
@@ -458,19 +456,18 @@ def _normalised_profiles(raw_profiles: dict) -> dict:
 def _effective_cpu_values(
     state: dict, profile: dict | None = None, ac_profile: bool = False
 ) -> dict:
-    """Resolve legacy omissions without altering existing saved profiles."""
-    values = {
-        SETTINGS_FIELD_CPU_BOOST_ENABLED: (
-            state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
-            if type(state.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)) is bool else None),
-        SETTINGS_FIELD_EPP: _canonical_epp_syntax(state.get(SETTINGS_FIELD_EPP)),
-    }
+    """Resolve legacy omissions without altering existing saved profiles.
+
+    _load_settings() and _normalised_profiles() already normalised both fields.
+    """
+    values = {field: state.get(field)
+              for field in (SETTINGS_FIELD_CPU_BOOST_ENABLED, SETTINGS_FIELD_EPP)}
     if profile is not None:
         for prefix in (("", "ac_") if ac_profile else ("",)):
             boost = profile.get(prefix + SETTINGS_FIELD_CPU_BOOST_ENABLED)
             if type(boost) is bool:
                 values[SETTINGS_FIELD_CPU_BOOST_ENABLED] = boost
-            epp = _canonical_epp_syntax(profile.get(prefix + SETTINGS_FIELD_EPP))
+            epp = profile.get(prefix + SETTINGS_FIELD_EPP)
             if epp is not None:
                 values[SETTINGS_FIELD_EPP] = epp
     return values
@@ -554,13 +551,9 @@ def _save_active(s: dict, spl: int, sppt: int, fppt: int) -> None:
 
 
 def _migrate() -> None:
-    """Mark the baseline as pending and stamp the store schema, once."""
+    """Mark the baseline as pending, once."""
     with _settings_lock:
         _read_valid_settings()
-        try:
-            schema = int(settings.getSetting(SETTINGS_KEY_SCHEMA, 1))
-        except (TypeError, ValueError):
-            schema = 1
         if settings.getSetting(SETTINGS_KEY_BASELINE, None) is None:
             # A fresh store means nothing was written yet. Otherwise the hardware
             # may hold our own values until the next boot resets the CPU controls.
@@ -569,10 +562,6 @@ def _migrate() -> None:
             settings.setSetting(SETTINGS_KEY_BASELINE, {"pending": True} if fresh else
                                 {"pending": True, "after_boot": _read_sysfs(BOOT_ID_PATH)})
             settings.commit()
-        if schema >= CURRENT_SCHEMA:
-            return
-        settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
-        settings.commit()
 
 
 def _capture_baseline() -> None:
@@ -586,7 +575,7 @@ def _capture_baseline() -> None:
                 not marker["after_boot"] or _read_sysfs(BOOT_ID_PATH) in ("", marker["after_boot"])):
             return
         path = _profile_path()
-        profile = _read_profile(path) if path else ""
+        profile = _read_sysfs(path) if path else ""
         settings.setSetting(SETTINGS_KEY_BASELINE, {
             # 'custom' is the plugin's own mode, never a baseline.
             "platform_profile": profile if profile and profile != "custom" else None,
@@ -785,14 +774,6 @@ def _profile_path() -> str | None:
                  if "custom" in _profile_choices(path)), None)
 
 
-def _read_profile(path: str) -> str:
-    try:
-        with open(path) as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
 def _write_profile(path: str, value: str) -> bool:
     try:
         with open(path, "w") as f:
@@ -830,7 +811,7 @@ def _apply_wmi(spl_w: int, sppt_w: int, fppt_w: int) -> dict:
         return _fail("no custom platform profile")
 
     # Fast path: if we can latch a write in place, skip the visible profile bounce.
-    if _read_profile(path) == "custom":
+    if _read_sysfs(path) == "custom":
         _write_ppt(spl_w, sppt_w, fppt_w, retried=True)
         if _ppt_matches(spl_w, sppt_w, fppt_w):
             decky.logger.info(f"[legotdp] wmi apply {spl_w}W/{sppt_w}W/{fppt_w}W")
@@ -1008,7 +989,7 @@ def _wmi_profile_lost() -> bool:
     if _last_source != "wmi":
         return False
     path = _profile_path()
-    return path is not None and _read_profile(path) != "custom"
+    return path is not None and _read_sysfs(path) != "custom"
 
 
 # On the ryzenadj path a limits read spawns a process and the enforce loop asks every
@@ -1115,13 +1096,13 @@ def _scan_proc_for_appid() -> str:
 # ── TDP enforce ────────────────────────────────────────────────────────────────
 
 def _global_triplet(s: dict) -> tuple[int, int, int]:
-    return _target_for_preset(
-        s,
-        s.get("spl",  _defaults()["spl"]),
-        s.get("sppt", _defaults()["sppt"]),
-        s.get("fppt", _defaults()["fppt"]),
-        s.get("active_preset", ""),
-    )
+    return _target_for_preset(s, s["spl"], s["sppt"], s["fppt"], s.get("active_preset", ""))
+
+
+def _active_triplet(s: dict) -> tuple[int, int, int]:
+    """The last applied target, clamped for the current Extras state."""
+    return _clamp_for_settings(
+        s, *(s.get("active_" + key, s[key]) for key in ("spl", "sppt", "fppt")))
 
 
 def _startup_context_target(s: dict) -> tuple[str, tuple[int, int, int], bool]:
@@ -1135,18 +1116,15 @@ def _startup_context_target(s: dict) -> tuple[str, tuple[int, int, int], bool]:
     return app_id, target, profile is not None
 
 
-def _cancel_ac_settle() -> int:
-    global _ac_target, _ac_generation
-    _ac_generation += 1
-    _ac_target = ()
-    return _ac_generation
-
-
 def _arm_ac_settle(target: tuple) -> int:
     global _ac_target, _ac_generation
     _ac_generation += 1
     _ac_target = tuple(target)
     return _ac_generation
+
+
+def _cancel_ac_settle() -> int:
+    return _arm_ac_settle(())
 
 
 def _apply_and_record(spl: int, sppt: int, fppt: int, why: str, reason: str) -> dict:
@@ -1194,12 +1172,7 @@ def _reapply_current_target(expected_generation: int | None = None) -> bool:
         if not s.get("enabled", True):
             _cancel_ac_settle()
             return True
-        target = _ac_target or _clamp_for_settings(
-            s,
-            s.get("active_spl",  s.get("spl",  _defaults()["spl"])),
-            s.get("active_sppt", s.get("sppt", _defaults()["sppt"])),
-            s.get("active_fppt", s.get("fppt", _defaults()["fppt"])),
-        )
+        target = _ac_target or _active_triplet(s)
         if _target_matches(target):
             _best_effort_reapply_saved_cpu_power_locked(s)
             _ac_target = ()
@@ -1313,12 +1286,7 @@ def _check_and_enforce_locked() -> dict:
         _current_game_id = appid if result.get("success") else "\x00"
         return events
 
-    _enforce_target(_clamp_for_settings(
-        s,
-        s.get("active_spl",  s.get("spl",  _defaults()["spl"])),
-        s.get("active_sppt", s.get("sppt", _defaults()["sppt"])),
-        s.get("active_fppt", s.get("fppt", _defaults()["fppt"])),
-    ))
+    _enforce_target(_active_triplet(s))
     return events
 
 
@@ -1438,7 +1406,7 @@ def _restore_defaults_locked() -> dict:
         if path:
             target = (saved if isinstance(saved, str) and saved != "custom"
                       and saved in _profile_choices(path) else "balanced")
-            if not _write_profile(path, target) or _read_profile(path) != target:
+            if not _write_profile(path, target) or _read_sysfs(path) != target:
                 return _fail(f"{target.capitalize()} firmware profile was not confirmed")
             _last_source, _applied_mw, _applied_at = "", (), 0.0
             _invalidate_limits_cache()
@@ -1515,13 +1483,8 @@ def _clamp_profile(profile: dict, ceilings: tuple[int, int, int]) -> None:
 def _lock_extras_state(state: dict, profiles: dict) -> tuple:
     """Clamp every persisted target to firmware limits and return the active one."""
     ceilings = _standard_ceilings_mw()
-    global_before = (state.get("spl", _defaults()["spl"]),
-                     state.get("sppt", _defaults()["sppt"]),
-                     state.get("fppt", _defaults()["fppt"]))
-    state["spl"], state["sppt"], state["fppt"] = _clamp_triplet(
-        state.get("spl", _defaults()["spl"]),
-        state.get("sppt", _defaults()["sppt"]),
-        state.get("fppt", _defaults()["fppt"]), ceilings)
+    global_before = (state["spl"], state["sppt"], state["fppt"])
+    state["spl"], state["sppt"], state["fppt"] = _clamp_triplet(*global_before, ceilings)
     if (state["spl"], state["sppt"], state["fppt"]) != global_before:
         state["active_preset"] = "custom"
     if any(key in state for key in ("active_spl", "active_sppt", "active_fppt")):
@@ -2098,6 +2061,15 @@ def _apply_limits_with_saved_cpu_power(
     return result
 
 
+def _apply_active_target(state: dict, cpu_state: dict, target: tuple) -> dict:
+    """Apply a target and, once it holds, record it as active. Caller holds _mutation_lock."""
+    result = _apply_limits_with_saved_cpu_power(cpu_state, *target)
+    if result["success"]:
+        state["active_spl"], state["active_sppt"], state["active_fppt"] = target
+        _cancel_ac_settle()
+    return result
+
+
 # ── Plugin class ───────────────────────────────────────────────────────────────
 
 from contextlib import contextmanager
@@ -2119,10 +2091,8 @@ def _tdp_user_transaction():
         def restore_previous() -> bool:
             try:
                 if before.get("enabled", True):
-                    old = _clamp_for_settings(before, *(
-                        before.get("active_" + key, before.get(key, _defaults()[key]))
-                        for key in ("spl", "sppt", "fppt")))
-                    rollback = _apply_limits_with_saved_cpu_power(before_cpu, *old, reason="rollback")
+                    rollback = _apply_limits_with_saved_cpu_power(
+                        before_cpu, *_active_triplet(before), reason="rollback")
                 else:
                     rollback = _restore_defaults_locked()
                     rollback["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(before_cpu)
@@ -2444,19 +2414,15 @@ class Plugin:
                     preset = (profile.get("ac_preset" if ac_online and profile.get("ac_separate")
                                           else "preset", "") if profile
                               else state.get("active_preset", ""))
-                    raw = (_pick_profile_values(profile, ac_online) if profile else (
-                        state.get("spl", _defaults()["spl"]),
-                        state.get("sppt", _defaults()["sppt"]),
-                        state.get("fppt", _defaults()["fppt"])))
+                    raw = (_pick_profile_values(profile, ac_online) if profile
+                           else (state["spl"], state["sppt"], state["fppt"]))
                     if _is_custom_preset(*raw, preset):
                         target = (_profile_target(state, profile, ac_online) if profile
                                   else _global_triplet(state))
-                        cpu_state = _effective_cpu_state(state, profiles, app_id, ac_online)
-                        result = _apply_limits_with_saved_cpu_power(cpu_state, *target)
+                        result = _apply_active_target(
+                            state, _effective_cpu_state(state, profiles, app_id, ac_online), target)
                         if not result["success"]:
                             return restore_failed(result)
-                        state["active_spl"], state["active_sppt"], state["active_fppt"] = target
-                        _cancel_ac_settle()
                 _save_settings(state)
                 return {"success": True}
         return await _offload(_do)
@@ -2588,12 +2554,10 @@ class Plugin:
                         want = _target_for_preset(
                             state, p["spl"], p["sppt"], p["fppt"], p.get("preset", ""))
                 if want is not None:
-                    result = _apply_limits_with_saved_cpu_power(
-                        _effective_cpu_state(state, profiles, app_id), *want)
+                    result = _apply_active_target(
+                        state, _effective_cpu_state(state, profiles, app_id), want)
                     if not result["success"]:
                         return restore_failed(result)
-                    state["active_spl"], state["active_sppt"], state["active_fppt"] = want
-                    _cancel_ac_settle()
 
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles})
@@ -2613,12 +2577,10 @@ class Plugin:
                 state = _load_settings()
                 if state.get("enabled", True) and _get_running_appid() == app_id:
                     target = _global_triplet(state)
-                    result = _apply_limits_with_saved_cpu_power(
-                        _effective_cpu_state(state, profiles, app_id), *target)
+                    result = _apply_active_target(
+                        state, _effective_cpu_state(state, profiles, app_id), target)
                     if not result["success"]:
                         return restore_failed(result)
-                    state["active_spl"], state["active_sppt"], state["active_fppt"] = target
-                    _cancel_ac_settle()
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles,
                              SETTINGS_KEY_INACTIVE_GAME_PROFILES: inactive})
@@ -2658,12 +2620,10 @@ class Plugin:
                     profile = profiles.get(app_id)
                     target = (_profile_target(state, profile, _get_ac_online())
                               if profile is not None else _global_triplet(state))
-                    result = _apply_limits_with_saved_cpu_power(
-                        _effective_cpu_state(state, profiles, app_id), *target)
+                    result = _apply_active_target(
+                        state, _effective_cpu_state(state, profiles, app_id), target)
                     if not result["success"]:
                         return restore_failed(result)
-                    state["active_spl"], state["active_sppt"], state["active_fppt"] = target
-                    _cancel_ac_settle()
                 _write_keys({SETTINGS_KEY_SETTINGS: state,
                              SETTINGS_KEY_GAME_PROFILES: profiles,
                              SETTINGS_KEY_INACTIVE_GAME_PROFILES: inactive})

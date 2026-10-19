@@ -634,7 +634,12 @@ class TdpRpcTests(unittest.TestCase):
 
     def test_failed_restore_keeps_the_plugin_enabled(self):
         self.assertTrue(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
-        with patch.object(tdp_core.tdp, '_read_profile', return_value='custom'):
+        tdp, read = tdp_core.tdp, tdp_core.tdp._read_sysfs
+        profile = tdp._profile_path()
+        self.assertIsNotNone(profile)
+        # Only the platform profile reads back stuck; boot-id and AC reads stay real.
+        with patch.object(tdp, '_read_sysfs',
+                          side_effect=lambda path: 'custom' if path == profile else read(path)):
             result = self.rpc('set_plugin_enabled', False)
         self.assertFalse(result['success'])
         self.assertTrue(self.saved().getSetting('settings')['enabled'])
