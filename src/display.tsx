@@ -11,6 +11,7 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { confirmAction, detailsRows, errorText, infoRow, statusPlaceholder } from "./shared";
+import { brightnessShown, displayPaused, firstRunLocked, RESET_RETRY } from "../desktop/native/display.mjs";
 
 type PanelMode = "gamma22" | "pq" | "hybrid";
 
@@ -295,14 +296,10 @@ export const DisplayPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
   if (!state || !statusTrusted.current)
     return statusPlaceholder({ label: "Display status unavailable", error: statusError, onRetry: () => void refresh() });
 
-  if (state.settings_error) return <PanelSection title="Display settings unavailable">
-    {infoRow("Display controls are paused", state.settings_error)}
-  </PanelSection>;
-
-  if (state.reset_in_progress) return <PanelSection title="Finish display reset">
-    {infoRow("Display controls are paused",
-      state.reset_error || "An earlier reset did not finish. Retry to restore the display and remove the Companion script.")}
-    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>Retry display reset</ButtonItem></PanelSectionRow>
+  const paused = displayPaused(state);
+  if (paused) return <PanelSection title={state.settings_error ? "Display settings unavailable" : "Finish display reset"}>
+    {infoRow(...paused)}
+    {!state.settings_error && <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={reset}>{RESET_RETRY}</ButtonItem></PanelSectionRow>}
   </PanelSection>;
 
   const edidToggle = <PanelSectionRow>
@@ -361,19 +358,19 @@ export const DisplayPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
       <PanelSection title="Display">
         {state.reset_restart_pending && restartRow("Restart Gaming Mode to finish the reset")}
         {infoRow("Choose a display mode", state.setup_error || "You can change it later.")}
-        <ModeChoice mode={RECOMMENDED} busy={busy || !!state.reset_restart_pending} onPick={confirmSetup} />
+        <ModeChoice mode={RECOMMENDED} busy={busy || firstRunLocked(state)} onPick={confirmSetup} />
         <PanelSectionRow>
           <ButtonItem
             layout="below"
             onClick={() => setShowOthers((v) => !v)}
-            disabled={busy || !!state.reset_restart_pending}
+            disabled={busy || firstRunLocked(state)}
           >
             {showOthers ? "Hide other options" : "Other options"}
           </ButtonItem>
         </PanelSectionRow>
         {showOthers &&
           MODE_ORDER.filter((m) => m !== RECOMMENDED).map((m) => (
-            <ModeChoice key={m} mode={m} busy={busy || !!state.reset_restart_pending} onPick={confirmSetup} />
+            <ModeChoice key={m} mode={m} busy={busy || firstRunLocked(state)} onPick={confirmSetup} />
           ))}
         {edidToggle}
         {detailsPanel}
@@ -428,7 +425,7 @@ export const DisplayPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
     <PanelSection title="Display">
       {changeButton}
       {switchRows((picked) => { setShowSwitch(false); changeMode(picked); })}
-      {state.panel_ok && <PanelSectionRow>
+      {brightnessShown(state) && <PanelSectionRow>
         <ToggleField
           label="Brightness slider in HDR"
           description={`Lets the Steam brightness slider dim the screen in PQ.${!state.enabled ? ""

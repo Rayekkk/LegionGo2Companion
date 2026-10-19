@@ -14,6 +14,8 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { controlNote, effectsEditable, powerChecked as powerShown, powerNote, RESTORE_NOTE, ringsNote, SPEEDS, speedStep,
+  usesColor as colorEffect, usesSpeed as speedEffect } from "../desktop/native/rgb.mjs";
 
 interface RgbSettings {
   control_enabled: boolean;
@@ -308,12 +310,10 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
   const selectedEffect = effectOptions.find(
     (option) => "data" in option && option.data === settings.effect,
   );
-  const usesColor = settings.effect === "monocolor" || settings.effect === "breathe";
-  const usesSpeed = settings.effect !== "monocolor";
+  const usesColor = colorEffect(settings);
+  const usesSpeed = speedEffect(settings);
   const blocked = busy || status.recovery_required === true;
-  const powerChecked = settings.power_led_managed
-    ? settings.power_led_enabled
-    : power?.current ?? true;
+  const powerChecked = powerShown(status);
   const failure = (control: string) => failed?.control === control ? failed.text : undefined;
   const swatch = <span aria-label="Stick light color" style={{ display: "inline-block", width: "0.8em", height: "0.8em",
     borderRadius: "50%", marginRight: "6px", verticalAlign: "middle",
@@ -327,9 +327,7 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         <PanelSectionRow>
           <ToggleField
             label="Enable lighting control"
-            description={failure("enabled") ?? (rgb?.supported === true
-              ? "Companion sets the stick lights and restores them after sleep."
-              : `Not available: ${rgb?.reason ?? "the controller lights were not detected."}`)}
+            description={failure("enabled") ?? controlNote(status)}
             checked={settings.control_enabled}
             disabled={blocked || rgb?.supported !== true}
             onChange={(value) => void enqueue(() => setControlEnabled(value), "enabled")}
@@ -339,14 +337,14 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
           <PanelSectionRow>
             <ToggleField
               label="Stick lights"
-              description={failure("rings") ?? (rgb?.drift ? "Restoring saved state…" : undefined)}
+              description={failure("rings") ?? (ringsNote(status) || undefined)}
               checked={settings.rings_enabled}
               disabled={blocked}
               onChange={(value) => void enqueue(() => setRingsEnabled(value), "rings")}
             />
           </PanelSectionRow>
         )}
-        {settings.control_enabled && settings.rings_enabled && <>
+        {effectsEditable(settings) && <>
           <PanelSectionRow>
             <DropdownItem
               label="Effect"
@@ -415,17 +413,13 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
               <SliderField
                 label="Speed"
                 description={failure("speed")}
-                value={settings.speed <= 25 ? 0 : settings.speed >= 75 ? 100 : 50}
+                value={speedStep(settings.speed)}
                 min={0}
                 max={100}
                 step={50}
                 notchCount={3}
                 notchTicksVisible
-                notchLabels={[
-                  { notchIndex: 0, label: "Slow", value: 0 },
-                  { notchIndex: 1, label: "Medium", value: 50 },
-                  { notchIndex: 2, label: "Fast", value: 100 },
-                ]}
+                notchLabels={SPEEDS.map(({ id, label }, notchIndex) => ({ notchIndex, label, value: id }))}
                 disabled={blocked}
                 onChange={(value) => { const speed = Math.round(value); schedule("speed", { speed }, () => setSpeed(speed)); }}
               />
@@ -439,9 +433,7 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         <PanelSectionRow>
           <ToggleField
             label="Power button light"
-            description={failure("power") ?? (power?.supported
-              ? `Turn the light in the power button on or off.${power.drift ? " Restoring saved state…" : ""}`
-              : power?.reason ?? "The power button light is unavailable.")}
+            description={failure("power") ?? powerNote(status)}
             checked={powerChecked}
             disabled={blocked || power?.supported !== true}
             onChange={(value) => void enqueue(() => setPowerLed(value), "power")}
@@ -449,7 +441,7 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         </PanelSectionRow>
         {/* The page's last row is always enabled; the backend refuses it during recovery. */}
         <PanelSectionRow>
-          <ButtonItem layout="below" description={failure("restore") ?? "Returns the lights to how they were before Companion."}
+          <ButtonItem layout="below" description={failure("restore") ?? RESTORE_NOTE}
             onClick={() => void enqueue(restoreOriginal, "restore")}>
             Restore original lighting
           </ButtonItem>

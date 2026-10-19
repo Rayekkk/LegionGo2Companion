@@ -100,5 +100,13 @@ run(async () => {
     h.respond('rgb_set_brightness', {success:true,status:{...rgb,settings:{...rgb.settings,hue:120,brightness:90}}});
     await settle(); assert.equal(find(h.render(), 'Hue').props.value, 120); h.unmount();
   }
+  // The rules both UIs share (src/rgb.tsx and the Desktop ModulePage.qml import the same module).
+  const R = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/rgb.mjs')).href);
+  assert.equal(R.effectsEditable({ control_enabled: true, rings_enabled: false }), false, 'effects wait for the stick lights');
+  assert.equal(R.effectsEditable({ control_enabled: false, rings_enabled: true }), false);
+  assert.deepEqual([R.speedStep(25), R.speedStep(26), R.speedStep(75)], [0, 50, 100]);
+  assert.equal(R.ringsNote({ rgb: { drift: true } }), 'Restoring saved state…');
+  assert.equal(R.powerChecked({ settings: { power_led_managed: false }, power_led: { current: false } }), false, 'what the light shows until Companion manages it');
+  assert.equal(R.powerNote({ power_led: { supported: false, reason: 'No LED.' } }), 'No LED.');
   console.log('RGB page verified.');
 });

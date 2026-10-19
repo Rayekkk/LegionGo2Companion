@@ -37,5 +37,10 @@ run(async () => {
   const menu = find(hidden.render(), 'Desktop button'); hidden.visible(false); menu.props.onChange({ data: 'f3' }); await settle();
   assert.equal(hidden.calls.filter(c => c.name === 'remap_set_action').length, 1, 'a dropdown choice still saves while QAM is hidden');
   hidden.respond('remap_set_action', { success: true, status: { ...remap, desktop_action: 'f3' } }); await settle(); hidden.unmount();
+  // The rules both UIs share (src/remap.tsx and the Desktop ModulePage.qml import the same module).
+  const M = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/remap.mjs')).href);
+  assert.equal(M.mappingEditable({ supported: true, enabled: false }), false, 'button choices wait for mapping');
+  assert.equal(M.mappingEditable({ supported: false, enabled: true }), false);
+  assert.match(M.enableNote({ enabled: true, active: false }), /Waiting to reapply…$/);
   console.log('Remap page verified.');
 });

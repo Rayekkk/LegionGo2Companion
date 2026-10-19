@@ -4,6 +4,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "fan.mjs" as Fan
 import "tdp.mjs" as Tdp
+import "battery.mjs" as Battery
+import "vibration.mjs" as Vibe
+import "controller.mjs" as Gyro
 ColumnLayout {
     id:overview
     objectName:"deviceOverview"
@@ -30,14 +33,14 @@ ColumnLayout {
     function fresh(method,limit) { return !!backend && backend.connected && (!backend.canRead || backend.canRead(method)) && backend.age(method)<limit; }
     function named(value) { const name=String(value || "");return name?name.charAt(0).toUpperCase()+name.slice(1).replace(/_/g," "):"—"; }
     function networkFrequency() { const raw=network.live?.frequency; const value=Number(raw); return raw===null || raw===undefined || raw===""?"—":Number.isFinite(value)?Math.round(value)+" MHz":String(raw); }
-    function batteryPercent(value) { return value===null || value===undefined?"—":Math.round(Number(value))+"%"; }
+    function batteryPercent(value) { return Battery.levelText(value); }
     function vibrationLevel() {
         const settings=vibration.settings || {},caps=s("vibe_get_capabilities");
         if(settings.level===undefined)return "—";
-        const mode=(caps.mode || [])[settings.mode];
-        return named((caps.intensity || [])[settings.level])+(mode?" · "+(({fps:"FPS",spg:"SPG",rpg:"RPG"})[mode] || named(mode)):"");
+        const mode=(caps.mode?.length ? caps.mode : Vibe.FALLBACK_MODES)[settings.mode];
+        return (Vibe.LEVELS[settings.level] || "—")+(mode?" · "+Vibe.modeLabel(mode):"");
     }
-    readonly property var gyroLabels:({system:"System default",combined:"Both controllers",left:"Left controller",right:"Right controller"})
+    readonly property var gyroLabels:Gyro.SOURCE_LABELS
     readonly property var bandLabels:({off:"Automatic",five_six_no_24:"Prefer 5/6 GHz",five_six_only:"Only 5/6 GHz",six_ghz_only:"Only 6 GHz"})
     function available(name) { return !backend.connected?"Offline":modules[name]?.pending?"Restoring":modules[name]?.enabled===false?"Off":modules[name]?.error?"Needs attention":modules[name]?.ready?"On":"Unavailable"; }
     Timer { interval:500; repeat:true; running:overview.backend && overview.backend.windowActive; onTriggered:overview.tick=overview.backend.now() }

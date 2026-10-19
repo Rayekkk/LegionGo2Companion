@@ -6,6 +6,8 @@ import { ButtonItem, DropdownItem, DropdownOption, PanelSection, PanelSectionRow
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { FirmwarePanel } from "./firmware";
 import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { reportingText, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
+  vectorText } from "../desktop/native/controller.mjs";
 
 export type GyroSource = "system" | "combined" | "left" | "right";
 type Vector = { x: number | null; y: number | null; z: number | null };
@@ -60,14 +62,7 @@ const stopDiagnostics = callable<[string], ControllerDiagnostics>("controller_st
 const setGyroSource = callable<[GyroSource], ControllerStatus>("controller_set_gyro_source");
 const releaseControl = callable<[], ControllerStatus>("controller_release_control");
 
-const sourceLabels: Record<GyroSource, string> = {
-  system: "System default",
-  combined: "Both controllers",
-  left: "Left controller",
-  right: "Right controller",
-};
 const sourceOptions: DropdownOption[] = Object.entries(sourceLabels).map(([data, label]) => ({ data, label }));
-const sourceLabel = (source: GyroSource | null) => source ? sourceLabels[source] || "Unknown" : "Not confirmed";
 
 export const controllerSummary = (status?: ControllerStatus) => {
   if (!status) return "Gyro source and controller diagnostics";
@@ -79,21 +74,7 @@ export const controllerSummary = (status?: ControllerStatus) => {
 };
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
-/** "X 12 · Y -3 · Z 840" in raw sensor counts, or a dash when nothing arrived. */
-const vectorText = (value: Vector | null | undefined) => value
-  ? ["x", "y", "z"].map((axis) => `${axis.toUpperCase()} ${finite(value[axis as keyof Vector]) ? value[axis as keyof Vector] : "—"}`).join(" · ")
-  : "—";
-const touchText = (value: Touchpad | null | undefined) => !value || typeof value.is_touching !== "boolean" ? "—"
-  : !value.is_touching ? "no touch"
-  : `touch at ${finite(value.x) ? value.x.toFixed(2) : "—"},${finite(value.y) ? value.y.toFixed(2) : "—"}`;
-/** Report rate for a test row description; a silent stream is not evidence of a faulty sensor. */
-const streamText = (stream: Stream<unknown>) => {
-  const rate = !stream.received ? "No reports yet."
-    : `${stream.reports} reports · ${finite(stream.rate_hz) ? `${stream.rate_hz.toFixed(1)} Hz` : "rate unknown"}`;
-  return stream.error ? `${stream.error} ${rate}` : rate;
-};
 const notify = (body: string) => toaster.toast({ title: "Gyro & touchpad", body });
-const reportingLabel = (value: unknown) => value === true ? "On" : value === false ? "Off" : "Unknown";
 
 export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
   const [status, setStatus] = useState<ControllerStatus | null>(null);
@@ -288,7 +269,6 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
 
   const testing = starting || stopping || !!diagnostics?.active;
   const blocked = busy || testing;
-  const pending = status.gyro_source !== "system" && !status.controlled;
   const remaining = diagnostics?.active && finite(diagnostics.remaining_s) ? Math.ceil(diagnostics.remaining_s) : null;
   const physical = diagnostics?.physical.sample, steam = diagnostics?.virtual.sample;
 
@@ -301,11 +281,11 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
         <DropdownItem
           label="Gyro source"
           description={busy ? "Applying…" : (error || status.error) ? (error || status.error)
-            : `Which controller's motion Steam uses. System default hands control back to SteamOS.${pending ? " Not confirmed yet…" : ""}`}
+            : sourceNote(status)}
           strDefaultLabel={sourceLabel(status.gyro_source)}
           selectedOption={status.gyro_source}
           rgOptions={sourceOptions}
-          disabled={blocked || !status.available || status.conflict}
+          disabled={busy || sourceLocked(status, testing)}
           onChange={(option) => {
             const source = String(option.data);
             if (!(source in sourceLabels)) return;
@@ -338,7 +318,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
       </>}
       {detailsRows(details, () => setDetails(value => !value), [
         ["Motion route", sourceLabel(status.applied_source)],
-        ["Gyro reporting", `left ${reportingLabel(status.imu?.actual?.left)} · right ${reportingLabel(status.imu?.actual?.right)}`],
+        ["Gyro reporting", reportingText(status)],
         ["Physical controller", status.physical ? status.physical.path : "—"],
         ["Steam controller", status.virtual ? status.virtual.path : "—"],
       ])}

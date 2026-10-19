@@ -4,6 +4,14 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "tdp.mjs" as Tdp
 import "wifi.mjs" as Wifi
+import "battery.mjs" as Battery
+import "rgb.mjs" as Rgb
+import "vibration.mjs" as Vibe
+import "remap.mjs" as Remap
+import "controller.mjs" as Gyro
+import "firmware.mjs" as Firmware
+import "display.mjs" as Display
+import "modules.mjs" as Modules
 RowLayout {
     id:panel
     UiTheme { id:theme }
@@ -40,7 +48,6 @@ RowLayout {
     readonly property int columns:cards.length>1 && width>=theme.twoColumns?2:1
     spacing:theme.gap
     function s(method) { return backend ? backend.state(method) : {}; }
-    readonly property var firmwareBusy:({checking:"Checking…",downloading:"Downloading…",installing:"Installing…",verifying:"Verifying…"})
     function firmwareFresh() {
         const value=s("firmware_get_status");
         return tick>=0 && backend.connected && backend.age("firmware_get_status")<8 && !backend.readErrors?.firmware_get_status &&
@@ -48,7 +55,7 @@ RowLayout {
             ["idle","checking","up_to_date","available","downloading","downloaded","installing","verifying","installed","failed"].includes(value?.phase);
     }
     function firmwareMessage() { return firmwareFresh() ? s("firmware_get_status").error || s("firmware_get_status").message || "" : backend.readErrors?.firmware_get_status || "Wait for a fresh firmware status before updating."; }
-    function firmwarePhase() { return firmwareFresh() ? {idle:"Controller firmware",checking:"Checking for updates",up_to_date:"Up to date",available:"Update available",downloading:"Downloading update",downloaded:"Update downloaded",installing:"Installing update",verifying:"Verifying update",installed:"Update installed",failed:"Update failed"}[s("firmware_get_status").phase] : "Status unavailable"; }
+    function firmwarePhase() { return firmwareFresh() ? Firmware.PHASE_LABELS[s("firmware_get_status").phase] : "Status unavailable"; }
     // RPC lists arrive as Qt sequences, which Array.isArray() does not accept.
     function items(value) { return !!value && typeof value==="object" && typeof value.length==="number"?Array.from(value):[]; }
     function firmwareComponent(id) { return items((s("firmware_get_status") || {}).components).find(c=>c && c.id===id) || {}; }
@@ -56,7 +63,7 @@ RowLayout {
     function firmwareRowVisible(id) { const c=firmwareComponent(id);return firmwareFresh() && !!(c.installed || c.available); }
     function firmwareInstallReason() { const value=s("firmware_get_status");return firmwareFresh() && value.phase==="downloaded" && value.install_enabled!==true ? value.install_reason || "" : ""; }
     function firmwareCanInstall(value) { return value.phase==="downloaded" && value.install_enabled===true; }
-    function firmwareActionLabel() { const value=firmwareFresh()?s("firmware_get_status"):{};return firmwareBusy[value.phase] || (value.phase==="available"?"Download":firmwareCanInstall(value)?"Install":"Check for updates"); }
+    function firmwareActionLabel() { const value=firmwareFresh()?s("firmware_get_status"):{};return Firmware.BUSY_LABELS[value.phase] || (value.phase==="available"?"Download":firmwareCanInstall(value)?"Install":"Check for updates"); }
     function firmwareActionAvailable() {
         const value=s("firmware_get_status");
         return firmwareFresh() && (["idle","up_to_date","installed","failed","available"].includes(value.phase) ||
@@ -66,8 +73,7 @@ RowLayout {
         if(!firmwareActionAvailable())return;
         const value=s("firmware_get_status");
         if(value.phase==="available")change("firmware_download");
-        else if(firmwareCanInstall(value))confirm("firmware_install",[value.token],(value.components || []).filter(c=>c && c.newer).map(c=>c.label+": "+c.installed+" → "+c.available).join("\n")+
-            "\n\nThe update takes about 5 minutes. Keep AC power connected and do not detach the controllers. Controller input may be unavailable until it finishes.");
+        else if(firmwareCanInstall(value)) { const ask=Firmware.installConfirm(value);confirm("firmware_install",[value.token],ask.text,ask.title,ask.ok); }
         else change("firmware_check");
     }
     function change(method,args,then) { backend.mutate(method,args || [],then); }
@@ -85,8 +91,6 @@ RowLayout {
     function pretty(value) { const labels={fps:"FPS",spg:"SPG",rpg:"RPG",ac:"Plugged in",game:"This game"};const text=String(value).replace(/_/g," ");return labels[value] || text.charAt(0).toUpperCase()+text.slice(1); }
     function presetTable() { return s("get_caps").presets || Tdp.PRESETS; }
     function powerOptions() { const table=presetTable();return Tdp.PRESET_ORDER.filter(k=>k==="custom" || !!table[k]).map(k=>({id:k,label:Tdp.PRESET_LABELS[k]})); }
-    function options(values) { return (values || []).map(v=>typeof v==="object"?v:{id:v,label:pretty(v)}); }
-    function indexedOptions(values) { return (values || []).map((label,id)=>({id:id,label:pretty(label)})); }
     function field(label,kind,get,set,extra) { return Object.assign({label:label,kind:kind,get:get,set:set,available:()=>true},extra || {}); }
     function text(label,get,extra) { return field(label,"text",get,()=>{},extra); }
     function notice(label,get) { return field(label,label?"text":"paragraph",get,()=>{},{visible:()=>String(get() || "").length>0}); }
@@ -94,7 +98,6 @@ RowLayout {
     function switcher(label,get,method,args,extra) { return field(label,"toggle",get,v=>change(method,args?args(v):[v]),extra); }
     function choices(label,get,set,values,extra) { return field(label,"choice",get,set,Object.assign({choices:values},extra || {})); }
     function number(label,get,set,min,max,extra) { return field(label,"range",get,set,Object.assign({minimum:min,maximum:max},extra || {})); }
-    function percent(value) { return value===undefined || value===null || !Number.isFinite(Number(value))?"—":Math.round(Number(value))+"%"; }
     // Saved game profiles, by name: what each game uses and its limits (mW in the settings).
     function profileRows() {
         const rows=s("list_game_profiles").profiles,limit=(preset,spl)=>(preset?(Tdp.PRESET_LABELS[preset] || pretty(preset))+" · ":"")+watts(Number(spl)/1000)+" W";
@@ -262,39 +265,36 @@ RowLayout {
     // Decky's "Could not load profile": the game's profile read failed; the editor stays locked until it loads.
     function profileReadError() { return page==="tdp" && !!app()?backend.readErrors?.get_game_profile || "":""; }
     function cpuShown() { return Tdp.editorControls(s("get_cpu_power_controls")) || {}; }
+    // As in Decky: four fixed strength levels, and the driver's modes (or the known five) by index.
+    function vibeLevels() { return Vibe.LEVELS.map((label,id)=>({id:id,label:label})); }
+    function vibeModes() { const modes=items(s("vibe_get_capabilities").mode);return (modes.length?modes:Vibe.FALLBACK_MODES).map((raw,id)=>({id:id,label:Vibe.modeLabel(raw)})); }
     function vibeArgs(value) { const state=s("vibe_get_settings"); return [value,state.app_id,state.profile_id]; }
     function rgbSettings() { return s("rgb_get_status").settings || {}; }
-    function rgbUsesColor() { return ["monocolor","breathe"].indexOf(rgbSettings().effect)>=0; }
-    function rgbSpeed() { const speed=Number(rgbSettings().speed);return Number.isFinite(speed)?[0,50,100].reduce((a,b)=>Math.abs(b-speed)<Math.abs(a-speed)?b:a):undefined; }
-    readonly property var moduleText:({
-        tdp:["TDP","Power limits and CPU settings. Off: Lenovo's default limits return."],
-        fan:["Fan Control","Your own fan curve. Off: the fan returns to automatic."],
-        vibration:["Vibration","Controller and touchpad vibration."],
-        rgb:["Lighting","Stick lights and power button light."],
-        remap:["Button mapping","The two extra buttons on the left controller."],
-        controller:["Gyro & touchpad","Gyro source and controller test."],
-        battery:["Battery","Charge limit of about 80%."],
-        display:["Display","OLED brightness and HDR fixes. Changes need a Gaming Mode restart."],
-        wifi:["Wi-Fi","Wi-Fi band preference."]})
+    function rgbUsesColor() { return Rgb.usesColor(rgbSettings()); }
+    function rgbSpeed() { const speed=Number(rgbSettings().speed);return Number.isFinite(speed)?Rgb.speedStep(speed):undefined; }
+    // Like Decky, which hides them: the effect controls wait for lighting control and the stick lights.
+    function rgbEditable() { return Rgb.effectsEditable(rgbSettings()); }
     function moduleFields(name) {
-        const label=moduleText[name][0];
+        const label=Modules.MODULE_LABELS[name];
         const entry=()=>s("get_version").modules?.[name] || {};
         return [
-            switcher(label,()=>entry().enabled,"modules_set_enabled",v=>[name,v],{
+            switcher(label,()=>Modules.moduleChecked(entry()),"modules_set_enabled",v=>[name,v],{
                 set:v=>{ if(!backend.busy && backend.connected)applyingModule=name; change("modules_set_enabled",[name,v]); },
-                available:()=>!entry().maintenance && !entry().pending,
-                note:()=>applyingModule===name?"Applying…":entry().error || entry().note || (entry().pending?"Restoration is pending.":entry().enabled===false?"":moduleText[name][1])}),
-            action("Retry "+label+" cleanup","modules_set_enabled",()=>[name,false],{
-                visible:()=>!!entry().pending && !entry().maintenance}),
-            action("Retry "+label+" start","modules_set_enabled",()=>[name,true],{
-                visible:()=>entry().enabled===true && entry().ready===false && !entry().pending && !entry().maintenance})
+                available:()=>!Modules.moduleLocked(entry()),
+                note:()=>applyingModule===name?"Applying…":Modules.moduleNote(name,entry())}),
+            action("Retry "+label+" cleanup","modules_set_enabled",()=>[name,false],{visible:()=>Modules.cleanupRetryShown(entry())}),
+            action("Retry "+label+" start","modules_set_enabled",()=>[name,true],{visible:()=>Modules.startRetryShown(entry())})
         ];
     }
     // The Decky scale in 1% steps (Decky moves in 10% steps).
     function eppPercent() { return Tdp.eppPercent(cpuShown().epp,1); }
     function fieldEnabled(owner,entry) {
         if(entry.kind==="text" || entry.kind==="paragraph")return true;
-        if(owner==="rgb" && s("rgb_get_status").recovery_required)return false;
+        // Restore original lighting stays available: the backend finishes the recovery first or refuses.
+        if(owner==="rgb" && s("rgb_get_status").recovery_required && !entry.restore)return false;
+        // As in Decky: a display settings error or an unfinished reset pauses everything but the reset.
+        // A reset cannot read unreadable settings either, so only an unfinished reset keeps it available.
+        if(owner==="display" && Display.displayPaused(display()) && (!entry.restore || !!display().settings_error))return false;
         const gate=s("get_version");
         return !!gate && typeof gate==="object" && !Array.isArray(gate) && gate.blocked===false &&
             backend.age("get_version")<8 && backend.connected && !backend.busy &&
@@ -302,15 +302,9 @@ RowLayout {
             (owner==="about" || owner==="modules" || owner==="firmware" || !!gate.modules?.[owner]?.ready) && entry.available();
     }
     // Readable controller test rows instead of raw JSON (UX spec 4.5).
-    function onOff(value) { return value===true?"On":value===false?"Off":"—"; }
     function testRunning() { return !!backend.diagnosticToken; }
     function testSample(stream) { return s("controller_get_diagnostics")[stream]?.sample || {}; }
-    function vectorText(value) { return value?["x","y","z"].map(axis=>axis.toUpperCase()+" "+(Number.isFinite(value[axis])?value[axis]:"—")).join(" · "):"—"; }
-    function touchText(value) { return !value || typeof value.is_touching!=="boolean"?"—":value.is_touching?"touch at "+Number(value.x).toFixed(2)+","+Number(value.y).toFixed(2):"no touch"; }
-    function streamText(name) {
-        const stream=s("controller_get_diagnostics")[name] || {};
-        return !stream.received?"No reports yet.":stream.reports+" reports · "+(Number.isFinite(stream.rate_hz)?Number(stream.rate_hz).toFixed(0)+" Hz":"rate unknown");
-    }
+    function streamText(name) { return Gyro.streamText(s("controller_get_diagnostics")[name]); }
     readonly property var displayModes:({hybrid:"Hybrid",pq:"PQ",gamma22:"Gamma 2.2"})
     // Same one upside and one downside per mode as the Decky panel.
     readonly property var displayTradeoffs:({
@@ -320,6 +314,12 @@ RowLayout {
     function displayModeNow() {
         const state=s("display_get_state"),mode=state.panel_mode;
         return mode==="hybrid"?"Now: Hybrid"+(state.gamescope_reachable?" (screen in "+(state.hdr_now?"PQ":"Gamma 2.2")+")":""):"Now: "+(displayModes[mode] || pretty(mode));
+    }
+    function displayPausedText() { const paused=Display.displayPaused(display());return paused?paused[0]+". "+paused[1]:""; }
+    function resetDisplay() {
+        // Finishing an interrupted reset needs no second question, as in Decky.
+        if(display().reset_in_progress)change("display_reset_settings");
+        else confirm("display_reset_settings",[],"Companion removes its display changes and restores your previous display script, if there was one. Gaming Mode may need a restart.","Reset display fix?","Reset",true);
     }
     function displayRestartPending() { return !!display().restart_pending || !!display().reset_restart_pending; }
     // First run: every mode with its trade-off, Hybrid recommended; later: only the other two.
@@ -407,54 +407,54 @@ RowLayout {
                 notice("",()=>s("vibe_is_ready").error || ""),
                 switcher("Per-game profile",()=>s("vibe_get_settings").overwrite,"vibe_set_profile_overwrite",v=>[app(),v,""],{available:()=>vibeReady() && !!app(),
                     note:()=>!app()?"Start a game to give it its own settings.":s("vibe_get_settings").overwrite?"This game has its own settings.":"This game uses the global settings."}),
-                choices("Vibration strength",()=>s("vibe_get_settings").settings?.level,v=>change("vibe_set_intensity",vibeArgs(v)),()=>indexedOptions(s("vibe_get_capabilities").intensity),{kind:"options",available:vibeReady}),
-                choices("Vibration mode",()=>s("vibe_get_settings").settings?.mode,v=>change("vibe_set_rumble_mode",vibeArgs(v)),()=>indexedOptions(s("vibe_get_capabilities").mode),{kind:"options",note:"A vibration pattern tuned for a game type.",available:vibeReady}),
+                choices("Vibration strength",()=>s("vibe_get_settings").settings?.level,v=>change("vibe_set_intensity",vibeArgs(v)),vibeLevels,{kind:"options",available:vibeReady}),
+                choices("Vibration mode",()=>s("vibe_get_settings").settings?.mode,v=>change("vibe_set_rumble_mode",vibeArgs(v)),vibeModes,{kind:"options",note:"A vibration pattern tuned for a game type.",available:vibeReady}),
                 switcher("Touchpad vibration",()=>s("vibe_get_settings").settings?.touchpadEnabled,"vibe_set_touchpad_enabled",vibeArgs,{available:vibeReady}),
-                choices("Touchpad strength",()=>s("vibe_get_settings").settings?.touchpadIntensity,v=>change("vibe_set_touchpad_intensity",vibeArgs(v)),()=>indexedOptions(s("vibe_get_capabilities").tp_intensity),{kind:"options",available:vibeReady}),
+                choices("Touchpad strength",()=>s("vibe_get_settings").settings?.touchpadIntensity,v=>change("vibe_set_touchpad_intensity",vibeArgs(v)),vibeLevels,
+                    {kind:"options",available:()=>vibeReady() && Vibe.touchpadStrengthEditable(s("vibe_get_settings").settings)}),
                 action("Test vibration","vibe_test_vibration",()=>[500],{note:"A short buzz with the current settings.",available:vibeReady}),
                 action("Reset to defaults","vibe_reset_to_default",()=>[s("vibe_get_settings").app_id,s("vibe_get_settings").profile_id],{available:vibeReady}),
                 action("Reapply settings","vibe_reapply",null,{bar:true,available:vibeReady})
             ]}],
             rgb:[{title:"Lighting",fields:[
                 notice("",()=>s("rgb_get_status").recovery_required?"Lighting is restoring its last state. Controls unlock when it finishes.":""),
-                switcher("Enable lighting control",()=>rgbSettings().control_enabled,"rgb_set_control_enabled",null,{available:()=>!!s("rgb_get_status").rgb?.supported,note:"Companion sets the stick lights and restores them after sleep."}),
-                switcher("Stick lights",()=>rgbSettings().rings_enabled,"rgb_set_rings_enabled",null,{available:()=>!!rgbSettings().control_enabled}),
-                choices("Effect",()=>rgbSettings().effect,v=>change("rgb_set_effect",[v]),()=>s("rgb_get_status").rgb?.effects || [],{kind:"options",available:()=>!!rgbSettings().control_enabled}),
-                number("Hue",()=>rgbSettings().hue,v=>change("rgb_set_color",[v,Number(rgbSettings().saturation || 0)]),0,359,{kind:"range",hue:true,suffix:"°",visible:rgbUsesColor,available:()=>!!rgbSettings().control_enabled}),
-                number("Saturation",()=>rgbSettings().saturation,v=>change("rgb_set_color",[Number(rgbSettings().hue || 0),v]),0,100,{kind:"range",suffix:"%",visible:rgbUsesColor,available:()=>!!rgbSettings().control_enabled}),
-                number("Brightness",()=>rgbSettings().brightness,v=>change("rgb_set_brightness",[v]),0,100,{kind:"range",suffix:"%",available:()=>!!rgbSettings().control_enabled}),
-                choices("Speed",rgbSpeed,v=>change("rgb_set_speed",[v]),()=>[{id:0,label:"Slow"},{id:50,label:"Medium"},{id:100,label:"Fast"}],{kind:"options",visible:()=>rgbSettings().effect!=="monocolor",available:()=>!!rgbSettings().control_enabled}),
-                // As in Decky: the saved choice only once Companion manages the light, otherwise what the light shows.
-                switcher("Power button light",()=>rgbSettings().power_led_managed?rgbSettings().power_led_enabled:s("rgb_get_status").power_led?.current ?? true,"rgb_set_power_led",null,{available:()=>!!s("rgb_get_status").power_led?.supported,
-                    note:()=>"Turn the light in the power button on or off."+(s("rgb_get_status").power_led?.drift?" Restoring saved state…":"")}),
-                action("Restore original lighting","rgb_restore_original",null,{note:"Returns the lights to how they were before Companion."}),
-                notice("",()=>s("rgb_get_status").error || (s("rgb_get_status").power_led?.supported===false?s("rgb_get_status").power_led?.reason || "":""))
+                switcher("Enable lighting control",()=>rgbSettings().control_enabled,"rgb_set_control_enabled",null,{available:()=>!!s("rgb_get_status").rgb?.supported,note:()=>Rgb.controlNote(s("rgb_get_status"))}),
+                switcher("Stick lights",()=>rgbSettings().rings_enabled,"rgb_set_rings_enabled",null,{available:()=>!!rgbSettings().control_enabled,note:()=>Rgb.ringsNote(s("rgb_get_status"))}),
+                choices("Effect",()=>rgbSettings().effect,v=>change("rgb_set_effect",[v]),()=>s("rgb_get_status").rgb?.effects || [],{kind:"options",available:rgbEditable}),
+                number("Hue",()=>rgbSettings().hue,v=>change("rgb_set_color",[v,Number(rgbSettings().saturation || 0)]),0,359,{kind:"range",hue:true,suffix:"°",visible:rgbUsesColor,available:rgbEditable}),
+                number("Saturation",()=>rgbSettings().saturation,v=>change("rgb_set_color",[Number(rgbSettings().hue || 0),v]),0,100,{kind:"range",suffix:"%",visible:rgbUsesColor,available:rgbEditable}),
+                number("Brightness",()=>rgbSettings().brightness,v=>change("rgb_set_brightness",[v]),0,100,{kind:"range",suffix:"%",available:rgbEditable}),
+                choices("Speed",rgbSpeed,v=>change("rgb_set_speed",[v]),()=>Rgb.SPEEDS,{kind:"options",visible:()=>Rgb.usesSpeed(rgbSettings()),available:rgbEditable}),
+                switcher("Power button light",()=>Rgb.powerChecked(s("rgb_get_status")),"rgb_set_power_led",null,{available:()=>!!s("rgb_get_status").power_led?.supported,
+                    note:()=>Rgb.powerNote(s("rgb_get_status"))}),
+                action("Restore original lighting","rgb_restore_original",null,{note:Rgb.RESTORE_NOTE,restore:true}),
+                notice("",()=>s("rgb_get_status").error || "")
             ]}],
             remap:[{title:"Button mapping",fields:[
                 notice("",()=>s("remap_get_status").supported===false?"Button mapping unavailable. "+(s("remap_get_status").reason || ""):s("remap_get_status").error || ""),
                 switcher("Enable button mapping",()=>s("remap_get_status").enabled,"remap_set_enabled",null,{available:()=>!!s("remap_get_status").supported,
-                    note:()=>"Change what the two extra buttons on the left controller do."+(s("remap_get_status").enabled && s("remap_get_status").active===false?" Waiting to reapply…":"")}),
-                choices("Desktop button",()=>s("remap_get_status").desktop_action,v=>change("remap_set_action",["desktop",v]),()=>s("remap_get_status").actions || [],{note:"Default: SteamOS behaviour."}),
-                choices("Page button",()=>s("remap_get_status").page_action,v=>change("remap_set_action",["page",v]),()=>s("remap_get_status").actions || [],{note:"Default: takes a screenshot."}),
-                action("Restore defaults","remap_restore_defaults")
+                    note:()=>Remap.enableNote(s("remap_get_status"))}),
+                // As in Decky: the choices wait for mapping to be on, and an unsupported controller shows none of them.
+                ...Remap.BUTTONS.map(b=>choices(b.label,()=>s("remap_get_status")[b.id+"_action"],v=>change("remap_set_action",[b.id,v]),()=>s("remap_get_status").actions || [],
+                    {note:b.note,visible:()=>s("remap_get_status").supported===true,available:()=>Remap.mappingEditable(s("remap_get_status"))})),
+                action("Restore defaults","remap_restore_defaults",null,{visible:()=>s("remap_get_status").supported===true})
             ]}],
             controller:[{title:"Gyro & touchpad",column:1,barTitle:"Troubleshooting",fields:[
                 notice("",()=>gyro().recovery_pending?"A controller change didn't finish. Restore the previous settings first.":gyro().error || (gyro().available===false || gyro().conflict?gyro().reason || "":"")),
-                choices("Gyro source",()=>gyro().gyro_source,v=>change("controller_set_gyro_source",[v]),()=>[{id:"system",label:"System default"},{id:"combined",label:"Both controllers"},{id:"left",label:"Left controller"},{id:"right",label:"Right controller"}],
-                    {kind:"options",available:()=>!!gyro().available && !gyro().conflict,
-                     note:()=>"Which controller's motion Steam uses. System default hands control back to SteamOS."+(gyro().gyro_source && gyro().gyro_source!=="system" && gyro().applied_source!==gyro().gyro_source?" Not confirmed yet…":"")}),
+                choices("Gyro source",()=>gyro().gyro_source,v=>change("controller_set_gyro_source",[v]),()=>Object.keys(Gyro.SOURCE_LABELS).map(id=>({id:id,label:Gyro.SOURCE_LABELS[id]})),
+                    {kind:"options",available:()=>!Gyro.sourceLocked(gyro(),testRunning()),note:()=>Gyro.sourceNote(gyro())}),
                 field("Controller test","button",()=>backend.diagnosticToken?"Stop test · "+Math.max(0,Math.ceil(Number(s("controller_get_diagnostics").remaining_s ?? 30)))+" s left":"Start controller test",
                     ()=>backend.diagnosticToken?change("controller_stop_diagnostics",[backend.diagnosticToken]):change("controller_start_diagnostics"),
                     // The test only reads the physical controller, so it does not need InputPlumber (gyro().available).
                     {note:"Move the controllers and touch the touchpad for 30 s to see live readings.",available:()=>!!backend.diagnosticToken || !!gyro().physical}),
-                text("Left gyro",()=>vectorText(testSample("physical").gyro_left),{visible:testRunning,note:()=>streamText("physical")}),
-                text("Right gyro",()=>vectorText(testSample("physical").gyro_right),{visible:testRunning}),
-                text("Steam gyro",()=>vectorText(testSample("virtual").gyro),{visible:testRunning,note:()=>streamText("virtual")}),
-                text("Touchpad",()=>"Physical: "+touchText(testSample("physical").touchpad)+" · Steam: "+touchText(testSample("virtual").touchpad),{visible:testRunning}),
+                text("Left gyro",()=>Gyro.vectorText(testSample("physical").gyro_left),{visible:testRunning,note:()=>streamText("physical")}),
+                text("Right gyro",()=>Gyro.vectorText(testSample("physical").gyro_right),{visible:testRunning}),
+                text("Steam gyro",()=>Gyro.vectorText(testSample("virtual").gyro),{visible:testRunning,note:()=>streamText("virtual")}),
+                text("Touchpad",()=>"Physical: "+Gyro.touchText(testSample("physical").touchpad)+" · Steam: "+Gyro.touchText(testSample("virtual").touchpad),{visible:testRunning}),
                 field("","button",()=>controllerDetails?"Hide details":"Show details",()=>{ controllerDetails=!controllerDetails; },{name:"Details"}),
                 text("Physical controller",()=>gyro().physical?.path || "—",{visible:()=>controllerDetails}),
                 text("Steam controller",()=>gyro().virtual?.path || "—",{visible:()=>controllerDetails}),
-                text("Gyro reporting",()=>{ const actual=gyro().imu?.actual;return actual?"left "+onOff(actual.left)+" · right "+onOff(actual.right):"—"; },{visible:()=>controllerDetails}),
+                text("Gyro reporting",()=>Gyro.reportingText(gyro()),{visible:()=>controllerDetails}),
                 action("Restore previous controller settings","controller_release_control",null,{bar:true,visible:()=>!!gyro().recovery_pending || !!gyro().conflict})
             ]},{title:"Controller firmware",owner:"firmware",column:0,fields:[
                 notice("",firmwareMessage),
@@ -467,22 +467,23 @@ RowLayout {
             ]}],
             battery:[{title:"Battery",barTitle:"Troubleshooting",fields:[
                 notice("",()=>battery().recovery_pending?"A charging change didn't finish. Restore the previous charging mode before changing it again.":battery().error || (battery().supported===false?battery().reason || "":"")),
-                text("Battery",()=>battery().capacity===undefined || battery().capacity===null?"—":percent(battery().capacity)+" · "+(battery().charging_status || "Unknown")),
-                text("Controllers",()=>"left "+percent(s("battery_get_controller_levels").left)+" · right "+percent(s("battery_get_controller_levels").right)),
-                switcher("Battery protection",()=>battery().enabled,"battery_set_enabled",null,{available:()=>!!battery().supported && !battery().recovery_pending,
-                    note:()=>"Stops charging at about 80% to protect the battery."+(typeof battery().enabled!=="boolean"?" Current state unknown.":
-                        battery().managed && typeof battery().requested_enabled==="boolean" && battery().requested_enabled!==battery().enabled?" Waiting for the battery to confirm…":"")}),
+                text("Battery",()=>Battery.levelText(battery().capacity)+(battery().charging_status?" · "+battery().charging_status:"")),
+                text("Controllers",()=>Battery.controllersText(s("battery_get_controller_levels"))),
+                switcher("Battery protection",()=>Battery.protectionChecked(battery()),"battery_set_enabled",null,{available:()=>!Battery.protectionLocked(battery()),
+                    note:()=>Battery.protectionNote(battery())}),
                 notice("",()=>battery().current_mode?"Charging mode reported: "+battery().current_mode:""),
                 action("Restore previous charging mode","battery_release_control",null,{bar:true,visible:()=>!!battery().managed || !!battery().recovery_pending})
             ]}],
             display:[
                 {title:"Display",column:0,visible:()=>nativeDisplay(),fields:[
+                    notice("",displayPausedText),
                     notice("",()=>confirmedNativeDisplay()?"SteamOS supports this screen. Companion's display fix is off. The HDR game fix below still works.":display().native_support_reason || "Native display support was detected earlier. Waiting for confirmation."),
                     notice("",()=>display().native_cleanup_error || (display().native_cleanup_pending?"Removing Companion's earlier display changes.":"")),
                     field("Restart Gaming Mode","button",()=>"Restart Gaming Mode",restartGamingMode,{visible:()=>!!display().native_restart_pending && !!s("desktop_context").gamescope}),
                     notice("",()=>display().native_restart_pending && !s("desktop_context").gamescope?"Takes effect when you return to Gaming Mode.":"")
                 ]},
                 {title:"Display fix",column:0,visible:()=>!nativeDisplay(),barTitle:"Troubleshooting",fields:[
+                    notice("",displayPausedText),
                     notice("",()=>display().setup_error || ""),
                     field("Restart Gaming Mode","button",()=>"Restart Gaming Mode",restartGamingMode,{visible:()=>displayRestartPending() && !!s("desktop_context").gamescope,
                         note:()=>display().restart_error?display().restart_error+". Restart from the Steam menu (Power → Switch to Desktop and back) or reboot.":"Steam closes and reopens."}),
@@ -490,16 +491,19 @@ RowLayout {
                     // As in Decky: the mode is a decision already made, so its alternatives stay folded away.
                     field("","button",()=>displaySwitch?"Cancel":"Change display mode",()=>{ displaySwitch=!displaySwitch; },{name:"Change display mode",note:displayModeNow,visible:()=>!!display().panel_mode && !!display().setup_done}),
                     choices("Display mode",()=>display().panel_mode,pickDisplayMode,displayModeChoices,{kind:"options",visible:()=>!display().panel_mode || (displaySwitch && !!display().setup_done),
+                        available:()=>!Display.firstRunLocked(display()),
                         note:()=>display().panel_mode?"":"Choose one. You can change it later."}),
                     field("Install display fix","button",()=>"Install display fix",()=>confirmDisplaySetup(display().panel_mode || "hybrid"),{visible:()=>!!display().panel_mode && !display().setup_done,
                         note:()=>"Display script needed ("+(displayModes[display().panel_mode] || pretty(display().panel_mode))+"). "+(display().setup_note || "Install it to use this mode.")}),
-                    switcher("Brightness slider in HDR",()=>display().enabled,"display_set_enabled",null,{available:()=>!!display().setup_done,visible:()=>!!display().setup_done,
+                    switcher("Brightness slider in HDR",()=>display().enabled,"display_set_enabled",null,{visible:()=>Display.brightnessShown(display()),
                         note:()=>"Lets the Steam brightness slider dim the screen in PQ."+(!display().enabled?"":display().active?" Working now ("+watts(display().nits)+" nits).":" Not needed in the current mode.")}),
                     field("","button",()=>displayDetails?"Hide details":"Show details",()=>{ displayDetails=!displayDetails; },{name:"Display details"}),
                     text("Panel",()=>display().panel_desc || "—",{visible:()=>displayDetails}),
                     // What the brightness forwarding is doing; "0 nits" while nothing is forwarded would mislead.
                     text("Brightness",()=>display().reason || "—",{visible:()=>displayDetails}),
-                    field("Reset display fix","button",()=>"Reset display fix",()=>confirm("display_reset_settings",[],"Companion removes its display changes and restores your previous display script, if there was one. Gaming Mode may need a restart.","Reset display fix?","Reset",true),{bar:true,danger:true})
+                    // As in Decky: nothing to reset before a mode is chosen (the HDR game fix has its own switch).
+                    field("Reset display fix","button",()=>display().reset_in_progress?Display.RESET_RETRY:"Reset display fix",resetDisplay,
+                        {bar:true,danger:true,restore:true,visible:()=>!!display().panel_mode || !!display().reset_in_progress})
                 ]},
                 {title:"HDR info for games",column:1,fields:[
                     switcher("Fix HDR brightness in games",()=>display().edid_fix,"display_set_edid_fix",null,{note:"Games see the screen's real HDR brightness. Restart the game after changing."}),
@@ -520,7 +524,7 @@ RowLayout {
                 text("Driver",()=>Wifi.driverText(wifi())),
                 text("Frequency",()=>Wifi.frequencyText(wifi()))
             ]}],
-            modules:[{title:"Choose your modules",note:"Turning a module off stops it. Its settings are kept.",fields:["tdp","fan","vibration","rgb","remap","controller","battery","display","wifi"].reduce((fields,name)=>fields.concat(moduleFields(name)),[]).concat([
+            modules:[{title:"Choose your modules",note:"Turning a module off stops it. Its settings are kept.",fields:Object.keys(Modules.MODULE_LABELS).reduce((fields,name)=>fields.concat(moduleFields(name)),[]).concat([
                 notice("",()=>s("get_version").modules?.display?.note?"Takes effect when you return to Gaming Mode.":"")])}],
             about:[{title:"Companion",fields:[
                 text("Version",()=>s("get_version").version || "—"),

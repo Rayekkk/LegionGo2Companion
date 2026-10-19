@@ -115,5 +115,11 @@ run(async()=>{
   h.respond('firmware_check',new Error('Lost result'),true);await settle();
   assert.equal(h.button().props.disabled,true,'lost write result requires fresh status, no replay');
   assert.equal(h.count('firmware_check'),1);h.unmount();
+  // The texts both UIs share (src/firmware.tsx and the Desktop ModulePage.qml import the same module).
+  const F = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/firmware.mjs')).href);
+  const ask = F.installConfirm({ components: [{ label: 'Left controller', installed: '1', available: '2', newer: true },
+    { label: 'Receiver', installed: '3', available: '3', newer: false }] });
+  assert.deepEqual([ask.title, ask.ok], ['Install controller firmware?', 'Install']);
+  assert.ok(ask.text.startsWith('Left controller: 1 → 2\n\nThe update takes about 5 minutes.'), 'only newer components are listed');
   console.log('Firmware frontend: explicit Check/Download/Install steps, confirmation token binding, double-click exclusion, read/write order and hidden polling passed.');
 });

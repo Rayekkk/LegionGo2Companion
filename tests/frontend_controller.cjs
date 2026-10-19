@@ -110,5 +110,15 @@ run(async () => {
   assert.equal(overlay.count('controller_set_gyro_source'), 1, 'native dropdown selection must save while QAM is hidden');
   overlay.respond('controller_set_gyro_source', { ...status, controlled: true, gyro_source: 'right', applied_source: 'right' });
   await settle(); overlay.unmount();
+  // The rules both UIs share (src/controller.tsx and the Desktop ModulePage.qml import the same module).
+  const G = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/controller.mjs')).href);
+  assert.match(G.sourceNote({ gyro_source: 'left', applied_source: 'left', controlled: false }), /Not confirmed yet…$/,
+    'matching filters alone are not confirmed routing');
+  assert.doesNotMatch(G.sourceNote({ gyro_source: 'left', controlled: true }), /Not confirmed/);
+  assert.doesNotMatch(G.sourceNote({ gyro_source: 'system', controlled: false }), /Not confirmed/);
+  assert.equal(G.sourceLocked({ available: true }, true), true, 'no gyro change during the controller test');
+  assert.equal(G.sourceLocked({ available: true, conflict: false }, false), false);
+  assert.equal(G.streamText({ received: true, reports: 120, rate_hz: 125.44 }), '120 reports · 125.4 Hz');
+  assert.equal(G.reportingText({ imu: { actual: null } }), 'left Unknown · right Unknown');
   console.log('Controller UI: bounded leases, hidden/unmount cleanup, late replies, unknown readings and source-write races verified.');
 });

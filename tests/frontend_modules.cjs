@@ -32,7 +32,9 @@ run(async () => {
     const view = h.render({ modules });
     const retry = findButton(view, 'Retry Lighting start');
     assert.ok(retry, 'failed startup offers a distinct retry without cleanup first');
-    assert.equal(find(view, 'Lighting').props.checked, false, 'failed readiness is visible');
+    const lighting = find(view, 'Lighting');
+    assert.equal(lighting.props.checked, true, 'the switch shows the saved choice, so a failed module can be turned off');
+    assert.equal(lighting.props.description, 'Startup failed', 'failed readiness is visible');
     retry.props.onClick(); retry.props.onClick(); await settle();
     assert.equal(h.calls.filter(c => c.name === 'modules_set_enabled').length, 1);
     h.respond('modules_set_enabled', { rgb: { enabled: true, ready: true } }); await settle();
@@ -40,5 +42,22 @@ run(async () => {
       'Retry Lighting start'), undefined);
     h.unmount();
   }
+  {
+    const h = harness('index.tsx', 'ModulesPage');
+    const view = h.render({ modules: { rgb: { enabled: true, ready: false, error: 'Startup failed', pending: false } } });
+    find(view, 'Lighting').props.onChange(false); await settle();
+    assert.deepEqual(h.calls.find(c => c.name === 'modules_set_enabled')?.args, ['rgb', false], 'a module that failed to start can be turned off');
+    h.unmount();
+  }
+  // The rules both UIs share (src/index.tsx and the Desktop ModulePage.qml import the same module).
+  const M = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/modules.mjs')).href);
+  assert.equal(M.moduleChecked({ enabled: true, ready: false }), true);
+  assert.equal(M.moduleChecked({ enabled: false, pending: true }), false);
+  assert.equal(M.moduleLocked({ enabled: false, pending: true }), true);
+  assert.equal(M.moduleLocked({ enabled: true, ready: false, maintenance: true }), true);
+  assert.equal(M.moduleNote('battery', { enabled: false }), 'Charge limit of about 80%.', 'an Off module still says what it does');
+  assert.equal(M.moduleNote('battery', { enabled: false, pending: true, error: 'Restore failed' }), 'Restore failed');
+  assert.equal(M.startRetryShown({ enabled: true, ready: false, maintenance: true }), false);
+  assert.equal(M.cleanupRetryShown({ enabled: false, pending: true }), true);
   console.log('Modules page verified.');
 });

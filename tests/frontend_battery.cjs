@@ -157,5 +157,16 @@ run(async()=>{
   assert.equal(count(h,'battery_get_status'),initialReads);
   h.setVisible(true);await settle();h.render();assert.equal(count(h,'battery_get_status'),initialReads+1);
   h.unmount();assert.equal(h.timers.size,0);
+
+  // The rules both UIs share (src/battery.tsx and the Desktop ModulePage.qml import the same module).
+  const B=await import(require('node:url').pathToFileURL(require('node:path').join(__dirname,'../desktop/native/battery.mjs')).href);
+  assert.equal(B.protectionChecked(base({managed:true,enabled:false,requested_enabled:true})),true,'the saved choice while Companion manages charging');
+  assert.equal(B.protectionChecked(base({enabled:true})),true,'the actual state otherwise');
+  assert.equal(B.protectionLocked(base({enabled:null})),true,'an unknown actual state locks the switch');
+  assert.equal(B.protectionLocked(base({recovery_pending:true})),true);
+  assert.equal(B.protectionLocked(base()),false);
+  assert.match(B.protectionNote(base({enabled:null})),/Current state unknown\.$/);
+  assert.equal(B.controllersText({left:80.4,right:250,connection_left:'detached'}),'left 80% (detached) · right —','impossible levels are not shown');
+  assert.equal(B.levelText(-1),'—');assert.equal(B.levelText(null),'—');
   console.log('Battery UI keeps actual/saved states distinct, reports rollback/recovery, prevents stale saves, and stops hidden polling.');
 });

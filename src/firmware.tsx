@@ -3,6 +3,7 @@ import { callable, toaster } from "@decky/api";
 import { ButtonItem, ConfirmModal, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 import { errorText, infoRow } from "./shared";
+import { BUSY_LABELS as busyPhases, installConfirm, PHASE_LABELS as phaseLabel } from "../desktop/native/firmware.mjs";
 
 type FirmwareComponent = { id: string; label: string; installed: string; available: string; newer: boolean; downloaded: boolean };
 type FirmwareStatus = { phase: string; message: string; error: string; component: string; install_enabled: boolean;
@@ -11,19 +12,14 @@ const getStatus = callable<[], FirmwareStatus>("firmware_get_status");
 const checkUpdates = callable<[], FirmwareStatus>("firmware_check");
 const downloadUpdate = callable<[], FirmwareStatus>("firmware_download");
 const installUpdate = callable<[string], FirmwareStatus>("firmware_install");
-const busyPhases: Record<string, string> = { checking: "Checking…", downloading: "Downloading…", installing: "Installing…", verifying: "Verifying…" };
 const checkPhases = ["idle", "up_to_date", "installed", "failed"];
 const canInstall = (value: FirmwareStatus) => value.phase === "downloaded" && value.install_enabled;
-const phaseLabel: Record<string, string> = { idle: "Controller firmware", checking: "Checking for updates", up_to_date: "Up to date",
-  available: "Update available", downloading: "Downloading update", downloaded: "Update downloaded", installing: "Installing update",
-  verifying: "Verifying update", installed: "Update installed", failed: "Update failed" };
 const has = (table: object, key: unknown) => typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key);
 const knownStatus = (value: FirmwareStatus) => !!value && has(phaseLabel, value.phase) &&
   [value.message, value.error, value.token, value.install_reason].every(v => v === undefined || typeof v === "string") &&
   (value.components === undefined || Array.isArray(value.components));
 const actionLabel = (value: FirmwareStatus) => (has(busyPhases, value.phase) ? busyPhases[value.phase] : "") ||
   (value.phase === "available" ? "Download" : canInstall(value) ? "Install" : "Check for updates");
-const targets = (value: FirmwareStatus | null) => (value?.components || []).filter(c => c?.newer);
 export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = ({ visible, allowUpdates = true }) => {
   const [state, setState] = useState<FirmwareStatus | null>(null);
   const [error, setError] = useState("");
@@ -135,9 +131,9 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
   const confirmInstall = () => {
     const seen = statusRef.current;
     if (!seen || seen.phase !== "downloaded" || !seen.install_enabled || !freshRef.current) return;
-    const changes = targets(seen).map(c => `${c.label}: ${c.installed} → ${c.available}`).join("\n");
-    showModal(<ConfirmModal strTitle="Install controller firmware?" strOKButtonText="Install"
-      strDescription={<div style={{ whiteSpace: "pre-line" }}>{changes + "\n\nThe update takes about 5 minutes. Keep AC power connected and do not detach the controllers. Controller input may be unavailable until it finishes."}</div>}
+    const ask = installConfirm(seen);
+    showModal(<ConfirmModal strTitle={ask.title} strOKButtonText={ask.ok}
+      strDescription={<div style={{ whiteSpace: "pre-line" }}>{ask.text}</div>}
       onOK={() => void install(seen.token)} />);
   };
   const act = () => {

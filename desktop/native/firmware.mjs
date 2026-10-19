@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Controller firmware texts, shared by the Desktop app and the Decky panel (src/firmware.tsx imports this file).
+// The steps and their gates stay in each UI; this file only names them.
+
+export const PHASE_LABELS = { idle: "Controller firmware", checking: "Checking for updates", up_to_date: "Up to date",
+  available: "Update available", downloading: "Downloading update", downloaded: "Update downloaded", installing: "Installing update",
+  verifying: "Verifying update", installed: "Update installed", failed: "Update failed" };
+export const BUSY_LABELS = { checking: "Checking…", downloading: "Downloading…", installing: "Installing…", verifying: "Verifying…" };
+
+/** The install confirmation: every newer component with its versions, then what to expect. */
+export function installConfirm(status) {
+  const changes = (status?.components || []).filter(c => c?.newer).map(c => `${c.label}: ${c.installed} → ${c.available}`).join("\n");
+  return { title: "Install controller firmware?", ok: "Install",
+    text: `${changes}\n\nThe update takes about 5 minutes. Keep AC power connected and do not detach the controllers. Controller input may be unavailable until it finishes.` };
+}

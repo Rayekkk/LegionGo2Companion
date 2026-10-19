@@ -537,6 +537,15 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_error_is_not_reported_once_the_module_is_off(self):
+        with tempfile.TemporaryDirectory() as raw, patch.object(main.decky, 'DECKY_PLUGIN_SETTINGS_DIR', raw):
+            loader = main.Plugin()
+            loader._module_health['rgb'] = {'ready': False, 'error': 'Startup failed.'}
+            loader._module_state['rgb'] = {'enabled': True}
+            self.assertEqual(loader._module_status()['rgb']['error'], 'Startup failed.')
+            loader._module_state['rgb'] = {'enabled': False, 'note': ''}
+            self.assertEqual(loader._module_status()['rgb']['error'], '')
+
     async def test_failed_display_start_is_gated_and_retries_after_storage_recovers(self):
         with tempfile.TemporaryDirectory() as raw, ExitStack() as stack:
             stack.enter_context(patch.object(main.decky, 'DECKY_PLUGIN_SETTINGS_DIR', raw))

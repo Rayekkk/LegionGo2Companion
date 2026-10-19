@@ -20,6 +20,7 @@ import {
 } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
+import { FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -63,30 +64,7 @@ interface ReadyState {
 const DEFAULT_APP = "0";
 const APP_HEARTBEAT_MS = 6000;
 
-const LEVEL_NOTCHES = ["Off", "Low", "Med", "High"];
-
-// Display names for the driver's raw mode values. Anything the driver
-// reports that is not listed here is title-cased at render time, so a new
-// kernel mode shows up without needing a plugin release.
-const MODE_LABELS: Record<string, string> = {
-  fps: "FPS",
-  racing: "Racing",
-  standard: "Standard",
-  spg: "SPG",
-  rpg: "RPG",
-};
-const MODE_NOTCHES: Record<string, string> = {
-  fps: "FPS",
-  racing: "Race",
-  standard: "Std",
-  spg: "SPG",
-  rpg: "RPG",
-};
-
-const FALLBACK_MODES = ["fps", "racing", "standard", "spg", "rpg"];
-
-const titleCase = (raw: string) => raw.charAt(0).toUpperCase() + raw.slice(1);
-const modeNotch = (raw: string) => MODE_NOTCHES[raw] ?? (MODE_LABELS[raw] ?? titleCase(raw)).slice(0, 5);
+const LEVEL_NOTCHES = LEVELS_SHORT;
 
 // ── Backend callables ─────────────────────────────────────────────────────────
 
@@ -669,7 +647,7 @@ const LGoVibeControl = () => {
             max={Math.max(0, modes.length - 1)}
             step={1}
             notchCount={modes.length}
-            notchLabels={modes.map((raw, notchIndex) => ({ notchIndex, label: modeNotch(raw) }))}
+            notchLabels={modes.map((raw, notchIndex) => ({ notchIndex, label: modeShort(raw) }))}
             onChange={handleMode}
           />
         </PanelSectionRow>
@@ -693,7 +671,7 @@ const LGoVibeControl = () => {
             step={1}
             notchCount={4}
             notchLabels={LEVEL_NOTCHES.map((label, notchIndex) => ({ notchIndex, label }))}
-            disabled={profileChanging || !settings.touchpadEnabled}
+            disabled={profileChanging || !touchpadStrengthEditable(settings)}
             onChange={handleTpIntensity}
           />
         </PanelSectionRow>

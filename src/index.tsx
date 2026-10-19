@@ -30,25 +30,14 @@ import { ControllerPage, getControllerStatus, controllerSummary, type Controller
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
+import { cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, startRetryShown } from "../desktop/native/modules.mjs";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
 type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
 // Key order is the menu and Manage Modules order.
-const moduleLabels: Record<ModuleKey, string> = {tdp: "TDP", fan: "Fan Control", vibration: "Vibration", rgb: "Lighting",
-  remap: "Button mapping", controller: "Gyro & touchpad", battery: "Battery", display: "Display", wifi: "Wi-Fi"};
-const moduleDescriptions: Record<ModuleKey, string> = {
-  tdp: "Power limits and CPU settings. Off: Lenovo's default limits return.",
-  fan: "Your own fan curve. Off: the fan returns to automatic.",
-  vibration: "Controller and touchpad vibration.",
-  rgb: "Stick lights and power button light.",
-  remap: "The two extra buttons on the left controller.",
-  controller: "Gyro source and controller test.",
-  battery: "Charge limit of about 80%.",
-  display: "OLED brightness and HDR fixes. Changes need a Gaming Mode restart.",
-  wifi: "Wi-Fi band preference.",
-};
+const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
 const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
@@ -482,11 +471,11 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
   return <PanelSection title="Manage Modules">
     {infoRow("Choose your modules", "Turning a module off stops it and hides it. Its settings are kept.")}
     {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
-      <ToggleField label={moduleLabels[name]} checked={modules[name]?.maintenance ? modules[name]?.enabled === true : moduleEnabled(modules, name)} disabled={busy !== null || !!modules[name]?.pending || !!modules[name]?.maintenance}
-        description={busy === name ? "Applying…" : (error?.key === name && error.text) || modules[name]?.error || modules[name]?.note || moduleDescriptions[name]}
+      <ToggleField label={moduleLabels[name]} checked={moduleChecked(modules[name])} disabled={busy !== null || moduleLocked(modules[name])}
+        description={busy === name ? "Applying…" : (error?.key === name && error.text) || moduleNote(name, modules[name])}
         onChange={enabled => void change(name, enabled)} />
-      {modules[name]?.pending && !modules[name]?.maintenance && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} cleanup</ButtonItem>}
-      {modules[name]?.enabled && modules[name]?.ready === false && !modules[name]?.pending && !modules[name]?.maintenance &&
+      {cleanupRetryShown(modules[name]) && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} cleanup</ButtonItem>}
+      {startRetryShown(modules[name]) &&
         <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, true)}>Retry {moduleLabels[name]} start</ButtonItem>}
     </PanelSectionRow>)}
     {/* The last row stays enabled; restart() ignores presses while another change runs. */}

@@ -10,6 +10,7 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { detailsRows, infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { controllersText, levelText, protectionChecked, protectionLocked, protectionNote } from "../desktop/native/battery.mjs";
 
 export interface BatteryStatus {
   success: boolean;
@@ -65,17 +66,8 @@ const protectionLabel = (enabled: boolean | null) =>
   enabled === true ? "On" : enabled === false ? "Off" : "Unknown";
 const notify = (body: string) => toaster.toast({ title: "Battery", body });
 
-const validControllerLevel = (value: number | null | undefined): value is number =>
-  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
-
 const controllerLevel = (value: number | null | undefined, connection: string | null | undefined) =>
-  validControllerLevel(value)
-    ? `${Math.round(value)}%`
-    : connection === "detached" ? "Not connected" : "Unknown";
-
-/** One controller in the battery line: "left 80%", "left 80% (detached)" or "left —". */
-const controllerShort = (side: string, value: number | null | undefined, connection: string | null | undefined) =>
-  `${side} ${validControllerLevel(value) ? `${Math.round(value)}%` : "—"}${connection === "detached" && validControllerLevel(value) ? " (detached)" : ""}`;
+  levelText(value) !== "—" ? levelText(value) : connection === "detached" ? "Not connected" : "Unknown";
 
 export const batterySummary = (status?: BatteryStatus, controllers?: ControllerBatteryStatus) => {
   const levels = controllers ? ` · L ${controllerLevel(controllers.left, controllers.connection_left)}`
@@ -215,16 +207,7 @@ export const BatteryPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
   if (!status) return statusPlaceholder({ title: "Battery", label: "Status unavailable", error,
     onRetry: () => void refresh(), retryLabel: "Check again" });
 
-  const actualKnown = typeof status.enabled === "boolean";
-  const savedKnown = status.managed && typeof status.requested_enabled === "boolean";
-  const mismatch = savedKnown && status.requested_enabled !== status.enabled;
-  const blocked = busy || !status.supported || !actualKnown || status.recovery_pending === true;
-  const capacity = typeof status.capacity === "number"
-    && Number.isFinite(status.capacity)
-    && status.capacity >= 0
-    && status.capacity <= 100
-    ? `${Math.round(status.capacity)}%`
-    : "—";
+  const capacity = levelText(status.capacity);
   const restore = () => void apply(() => releaseBatteryControl(), "Previous charging mode restored.", "restore");
   const restoreButton = <PanelSectionRow>
     <ButtonItem layout="below" disabled={busy} description={failed?.control === "restore" ? failed.text : undefined}
@@ -239,16 +222,13 @@ export const BatteryPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
       status.reason || "A compatible battery charging interface was not detected.")
       : error && infoRow("Battery status not updated", error)}
     {infoRow(`Battery ${capacity}${status.charging_status ? ` · ${status.charging_status}` : ""}`,
-      `Controllers: ${controllerShort("left", controllers.left, controllers.connection_left)} · ${
-        controllerShort("right", controllers.right, controllers.connection_right)}`)}
+      `Controllers: ${controllersText(controllers)}`)}
     {status.supported && <PanelSectionRow>
       <ToggleField
         label="Battery protection"
-        description={busy ? "Applying…" : failed?.control === "toggle" ? failed.text
-          : `Stops charging at about 80% to protect the battery.${!actualKnown ? " Current state unknown."
-            : mismatch ? " Waiting for the battery to confirm…" : ""}`}
-        checked={savedKnown ? status.requested_enabled === true : status.enabled === true}
-        disabled={blocked}
+        description={busy ? "Applying…" : failed?.control === "toggle" ? failed.text : protectionNote(status)}
+        checked={protectionChecked(status)}
+        disabled={busy || protectionLocked(status)}
         onChange={(enabled) => void apply(
           () => setBatteryEnabled(enabled),
           enabled ? "Battery protection on." : "Battery protection off.",

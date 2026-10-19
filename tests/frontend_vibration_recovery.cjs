@@ -383,5 +383,13 @@ run(async () => {
   assert.equal(find(tree, 'Endpoints'), undefined);
   assert.ok(find(tree, 'Vibration strength')); assert.ok(button(tree, 'Test vibration'));
   presentation.unmount();
+
+  // The names and rule both UIs share (src/vibration.tsx and the Desktop ModulePage.qml import the same module).
+  const V = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/vibration.mjs')).href);
+  assert.deepEqual(V.FALLBACK_MODES.map(V.modeShort), ['FPS', 'Race', 'Std', 'SPG', 'RPG'], 'the panel notches fit the QAM width');
+  assert.deepEqual(V.FALLBACK_MODES.map(V.modeLabel), ['FPS', 'Racing', 'Standard', 'SPG', 'RPG']);
+  assert.equal(V.modeLabel('turbo_mode'), 'Turbo_mode'); assert.equal(V.modeShort('turbo_mode'), 'Turbo');
+  assert.deepEqual([V.LEVELS[2], V.LEVELS_SHORT[2]], ['Medium', 'Med']);
+  assert.equal(V.touchpadStrengthEditable({ touchpadEnabled: false }), false, 'touchpad strength waits for touchpad vibration');
   console.log('Vibration recovery: serialized mutations, scoped late replies, retries, stable drafts, save-on-close and failed profile transitions pass.');
 });

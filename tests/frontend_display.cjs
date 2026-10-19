@@ -222,5 +222,14 @@ run(async () => {
     assert.equal(h.toasts.at(-1).body, 'temporary RPC failure', 'a hidden failure is a toast');
     h.unmount();
   }
+  // The rules both UIs share (src/display.tsx and the Desktop ModulePage.qml import the same module).
+  const D = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/display.mjs')).href);
+  assert.deepEqual(D.displayPaused({ settings_error: 'Unreadable.' }), ['Display controls are paused', 'Unreadable.']);
+  assert.match(D.displayPaused({ reset_in_progress: true })[1], /^An earlier reset did not finish\./);
+  assert.equal(D.displayPaused({ panel_mode: 'pq' }), null);
+  assert.equal(D.brightnessShown({ setup_done: true, panel_ok: true, restart_pending: true }), false, 'not while a restart is pending');
+  assert.equal(D.brightnessShown({ setup_done: true, panel_ok: false }), false);
+  assert.equal(D.firstRunLocked({ panel_mode: null, reset_restart_pending: true }), true);
+  assert.equal(D.firstRunLocked({ panel_mode: 'pq', reset_restart_pending: true }), false);
   console.log('Display page verified.');
 });

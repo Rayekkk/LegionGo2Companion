@@ -380,8 +380,10 @@ class Plugin:
         result = {name: {'enabled': self._module_enabled(name),
                        'ready': self._module_health.get(name, {}).get('ready', True),
                        'pending': bool(self._module_state.get(name, {}).get('pending')),
+                       # A startup error no longer applies once the module is turned off.
                        'error': (self._module_state.get(name, {}).get('error', '')
-                                 or self._module_health.get(name, {}).get('error', '')),
+                                 or (self._module_health.get(name, {}).get('error', '')
+                                     if self._module_enabled(name) else '')),
                        'note': self._module_state.get(name, {}).get('note', '')}
                 for name in MODULE_NAMES}
         for name, entry in result.items():

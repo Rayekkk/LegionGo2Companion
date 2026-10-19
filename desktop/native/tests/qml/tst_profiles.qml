@@ -77,6 +77,13 @@ TestCase {
         }}});
         verify(!cleanup.visible);verify(!startup.visible);verify(!toggle.enabled);
     }
+    function test_moduleSwitchShowsTheSavedChoiceAndTheSharedNote() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{rgb:{enabled:true,ready:false,error:"Startup failed"},battery:{enabled:false}}}});
+        const lighting=field("modules","Lighting");
+        verify(lighting.get(),"a module that failed to start reads On, so it can be turned off");compare(lighting.note(),"Startup failed");
+        verify(lighting.available());lighting.set(false);compare(fake.calls[0].args.join(),"rgb,false");
+        compare(field("modules","Battery").note(),"Charge limit of about 80%.");
+    }
     function test_inactiveGlobalSaveExplainsThatTheGameProfileStillApplies() {
         panel.editPower("spl",18);
         fake.mutationDone("apply_tdp",{success:true,saved_only:true,applied:false,
@@ -280,6 +287,7 @@ TestCase {
         compare(panel.pendingMethod,"firmware_install");compare(panel.pendingArgs[0],"abc");
         verify(panel.confirmation.indexOf("Left controller: 260310A → 260401A")===0);
         verify(panel.confirmation.indexOf("AC power")>0);
+        compare(confirmDialog().title,"Install controller firmware?");compare(confirmDialog().okText,"Install");confirmDialog().close();
         fake.data.firmware_get_status=firmware("downloaded",{token:"abc",install_enabled:false,install_reason:"Disabled in this build."});
         compare(step.get(),"Check for updates");verify(step.available());compare(panel.firmwareInstallReason(),"Disabled in this build.");
         step.set();compare(fake.calls.length,1);compare(fake.calls[0].method,"firmware_check");
@@ -390,7 +398,7 @@ TestCase {
             virtual:{received:false,reports:0,rate_hz:null,sample:null}}});
         compare(field("controller","Controller test").get(),"Stop test · 13 s left");
         const left=field("controller","Left gyro");verify(left.visible());
-        compare(left.get(),"X 1 · Y -2 · Z 3");compare(left.note(),"120 reports · 125 Hz");
+        compare(left.get(),"X 1 · Y -2 · Z 3");compare(left.note(),"120 reports · 125.4 Hz","Decky's rate format");
         compare(field("controller","Right gyro").get(),"—");
         compare(field("controller","Steam gyro").note(),"No reports yet.");
         compare(field("controller","Touchpad").get(),"Physical: touch at 0.50,0.25 · Steam: —");
@@ -409,17 +417,81 @@ TestCase {
         verify(!fields.find(f=>f.label==="Speed").visible());
         fake.data=Object.assign({},fake.data,{rgb_get_status:{settings:{control_enabled:true},recovery_required:true}});
         verify(!panel.fieldEnabled("rgb",field("rgb","Enable lighting control")));
+        verify(panel.fieldEnabled("rgb",field("rgb","Restore original lighting")),"a restore action: the backend recovers first or refuses");
+    }
+    function test_lightingEffectsWaitForTheStickLights() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{rgb:{ready:true}}},
+            rgb_get_status:{rgb:{supported:true,drift:true},settings:{control_enabled:true,rings_enabled:false,effect:"breathe",speed:75},power_led:{supported:false,reason:"No light."}}});
+        for(const label of ["Effect","Hue","Saturation","Brightness","Speed"])verify(!panel.fieldEnabled("rgb",field("rgb",label)),label+" waits for the stick lights");
+        compare(field("rgb","Stick lights").note(),"Restoring saved state…");
+        compare(field("rgb","Power button light").note(),"No light.");
+        compare(field("rgb","Speed").get(),100,"Decky's speed steps");
+        fake.data=Object.assign({},fake.data,{rgb_get_status:{rgb:{supported:true},settings:{control_enabled:true,rings_enabled:true,effect:"breathe"}}});
+        verify(panel.fieldEnabled("rgb",field("rgb","Hue")));
+    }
+    function test_batteryFollowsTheSharedRules() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{battery:{ready:true}}},
+            battery_get_status:{supported:true,managed:true,enabled:false,requested_enabled:true,capacity:150},
+            battery_get_controller_levels:{left:80,right:-5,connection_left:"detached"}});
+        const toggle=field("battery","Battery protection");
+        verify(toggle.get(),"the saved choice while Companion manages charging");verify(toggle.available());
+        compare(toggle.note(),"Stops charging at about 80% to protect the battery. Waiting for the battery to confirm…");
+        compare(field("battery","Battery").get(),"—");compare(field("battery","Controllers").get(),"left 80% (detached) · right —");
+        fake.data=Object.assign({},fake.data,{battery_get_status:{supported:true,managed:false,enabled:null}});
+        verify(!toggle.available(),"an unknown actual state locks the switch");
+    }
+    function test_vibrationNamesAndTouchpadStrength() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{vibration:{ready:true}}},vibe_is_ready:{ready:true},
+            vibe_get_settings:{settings:{touchpadEnabled:false}},vibe_get_capabilities:{mode:[]}});
+        compare(field("vibration","Vibration strength").choices().map(c=>c.label).join(),"Off,Low,Medium,High");
+        compare(field("vibration","Vibration mode").choices().map(c=>c.label).join(),"FPS,Racing,Standard,SPG,RPG");
+        verify(!field("vibration","Touchpad strength").available(),"touchpad strength waits for touchpad vibration");
+    }
+    function test_remapChoicesWaitForMapping() {
+        fake.data=Object.assign({},fake.data,{remap_get_status:{supported:true,enabled:false,active:false,actions:[{id:"default",label:"Default"}]}});
+        verify(!field("remap","Desktop button").available());verify(!field("remap","Page button").available());
+        verify(field("remap","Restore defaults").visible());
+        fake.data=Object.assign({},fake.data,{remap_get_status:{supported:true,enabled:true,active:false,actions:[]}});
+        verify(field("remap","Desktop button").available());
+        compare(field("remap","Enable button mapping").note(),"Change what the two extra buttons on the left controller do. Waiting to reapply…");
+        fake.data=Object.assign({},fake.data,{remap_get_status:{supported:false,enabled:true}});
+        verify(!field("remap","Page button").visible());verify(!field("remap","Restore defaults").visible());
+    }
+    function test_gyroSourceIsConfirmedByTheBackendAndWaitsForTheTest() {
+        fake.data=Object.assign({},fake.data,{controller_get_status:{available:true,gyro_source:"left",applied_source:"left",controlled:false}});
+        const source=field("controller","Gyro source");
+        verify(source.note().endsWith(" Not confirmed yet…"),"matching filters alone are not confirmed routing");
+        verify(source.available());
+        fake.diagnosticToken="tok";verify(!source.available(),"no gyro change during the controller test");fake.diagnosticToken="";
+        fake.data=Object.assign({},fake.data,{controller_get_status:{available:true,gyro_source:"left",controlled:true}});
+        verify(source.note().indexOf("Not confirmed")<0);
+    }
+    function test_displayPausesOnSettingsErrorOrUnfinishedReset() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{display:{ready:true}}},
+            display_get_state:{settings_error:"Settings unreadable.",panel_mode:"pq",setup_done:true,panel_ok:true,edid_fix:true}});
+        compare(card("Display fix").fields[0].get(),"Display controls are paused. Settings unreadable.");
+        verify(!panel.fieldEnabled("display",field("display","Fix HDR brightness in games")));
+        verify(!panel.fieldEnabled("display",displayField("Brightness slider in HDR")));
+        verify(!panel.fieldEnabled("display",displayField("Reset display fix")),"a reset cannot read unreadable settings either, as in Decky");
+        fake.data=Object.assign({},fake.data,{display_get_state:{reset_in_progress:true,reset_error:"",panel_mode:"pq"}});
+        const reset=displayField("Reset display fix");compare(reset.get(),"Retry display reset");
+        reset.set();compare(fake.calls[0].method,"display_reset_settings","finishing a reset asks nothing more, as in Decky");
+        fake.data=Object.assign({},fake.data,{display_get_state:{setup_done:false,panel_mode:null,reset_restart_pending:true}});
+        verify(!displayField("Reset display fix").visible(),"nothing to reset before a mode is chosen");
+        verify(!displayField("Display mode").available(),"first-run choices wait for the restart that finishes a reset");
+        fake.data=Object.assign({},fake.data,{display_get_state:{setup_done:true,panel_mode:"pq",panel_ok:true,restart_pending:true}});
+        verify(!displayField("Brightness slider in HDR").visible(),"not while a restart is pending");
     }
     function test_nativeDisplayHidesLegacyControlsButKeepsIndependentEdid() {
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{display:{ready:true}}},display_get_state:{native_support_detected:true,native_support_reason:"Gamescope includes the native Legion Go 2 display profile. Companion's display fix is no longer needed.",edid_fix:true}});
         panel.page="display";
         const upstream=card("Display"),legacy=card("Display fix");
         verify(upstream.visible());verify(!legacy.visible());
-        compare(upstream.fields[0].get(),"SteamOS supports this screen. Companion's display fix is off. The HDR game fix below still works.");
+        compare(upstream.fields[1].get(),"SteamOS supports this screen. Companion's display fix is off. The HDR game fix below still works.");
         const edid=field("display","Fix HDR brightness in games");verify(edid.available());verify(panel.fieldEnabled("display",edid));
         edid.set(false);compare(fake.calls[0].method,"display_set_edid_fix");compare(fake.calls[0].args[0],false);
         fake.data=Object.assign({},fake.data,{display_get_state:{native_support_detected:true,native_support_reason:"Native support was detected earlier."}});
-        compare(upstream.fields[0].get(),"Native support was detected earlier.");verify(!legacy.visible());
+        compare(upstream.fields[1].get(),"Native support was detected earlier.");verify(!legacy.visible());
         fake.data=Object.assign({},fake.data,{display_get_state:{native_support_detected:false,setup_done:true}});
         verify(!upstream.visible());verify(legacy.visible());verify(field("display","Brightness slider in HDR").available());
     }

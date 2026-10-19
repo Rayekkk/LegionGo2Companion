@@ -12,6 +12,7 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { BUTTONS, enableNote, mappingEditable } from "../desktop/native/remap.mjs";
 
 interface ActionOption {
   id: string;
@@ -147,14 +148,14 @@ export const RemapPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true 
 
   const failure = (control: string) => failed?.control === control ? failed.text : undefined;
   const dropdown = (button: "desktop" | "page", value: string, label: string, description: string) => (
-    <PanelSectionRow>
+    <PanelSectionRow key={button}>
       <DropdownItem
         label={label}
         description={failure(button) ?? description}
         strDefaultLabel={actionLabel(status, value)}
         selectedOption={value}
         rgOptions={options}
-        disabled={blocked || !status.enabled}
+        disabled={busy || !mappingEditable(status)}
         onChange={(option) => {
           if (!mounted.current) return;
           const action = String(option.data);
@@ -178,8 +179,7 @@ export const RemapPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true 
     <PanelSectionRow>
       <ToggleField
         label="Enable button mapping"
-        description={failure("enabled") ?? `Change what the two extra buttons on the left controller do.${
-          status.enabled && !status.active ? " Waiting to reapply…" : ""}`}
+        description={failure("enabled") ?? enableNote(status)}
         checked={status.enabled}
         disabled={blocked}
         onChange={(enabled) => void enqueue(
@@ -190,8 +190,7 @@ export const RemapPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true 
       />
     </PanelSectionRow>
     {status.supported && <>
-      {dropdown("desktop", status.desktop_action, "Desktop button", "Default: SteamOS behaviour.")}
-      {dropdown("page", status.page_action, "Page button", "Default: takes a screenshot.")}
+      {BUTTONS.map(({ id, label, note }) => dropdown(id, status[`${id}_action`], label, note))}
       {/* The page's last row: always enabled; the mutation queue orders presses. */}
       <PanelSectionRow>
         <ButtonItem layout="below" description={failure("defaults")}
