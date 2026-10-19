@@ -1605,7 +1605,7 @@ class Plugin:
                              native_cleanup_error="", reset_in_progress=False,
                              reset_restart_pending=False, reset_error="")
         Plugin._reset_hybrid_timing()
-        Plugin._hdr_mode_settled()
+        Plugin._hdr_argument_over()
 
     @staticmethod
     def _refresh_native_support(force=False) -> None:
@@ -1797,7 +1797,7 @@ class Plugin:
         Plugin._state["restart_error"] = ""
         Plugin._hybrid_suspended_external = False
         Plugin._reset_hybrid_timing()
-        Plugin._hdr_mode_settled()
+        Plugin._hdr_argument_over()
 
         # Both baselines belong to one X/gamescope session. Recover them across a
         # Decky reload, but never carry them into a new session whose atoms reset.
@@ -1842,7 +1842,7 @@ class Plugin:
             if previous == mode:
                 return
             Plugin._reset_hybrid_timing()
-            Plugin._hdr_mode_settled()
+            Plugin._hdr_argument_over()
             if previous == MODE_HYBRID:
                 Plugin._hybrid_release(next_mode=mode)
             if mode == MODE_HYBRID:
@@ -1948,7 +1948,7 @@ class Plugin:
                 Plugin._edid_recheck_until = 0.0
                 Plugin._hybrid_suspended_external = False
                 Plugin._reset_hybrid_timing()
-                Plugin._hdr_mode_settled()
+                Plugin._hdr_argument_over()
                 Plugin._state.update(panel_mode=None, active_mode=None, setup_done=False,
                     setup_note="", setup_error="", restart_pending=False, restart_error="",
                     enabled=DEFAULT_SETTINGS["enabled"], edid_fix=DEFAULT_SETTINGS["edid_fix"],
@@ -2586,6 +2586,12 @@ class Plugin:
         Plugin._hdr_backoff_until = 0.0
 
     @staticmethod
+    def _hdr_argument_over() -> None:
+        """A mode change, reset, new session or display hand-off starts afresh."""
+        Plugin._hdr_fights, Plugin._hdr_fight_target = 0, None
+        Plugin._hdr_backoff_until = 0.0
+
+    @staticmethod
     def _standing_off() -> bool:
         return time.monotonic() < Plugin._hdr_backoff_until
 
@@ -2682,7 +2688,7 @@ class Plugin:
                     output = _as_int(props.get(ATOM_HDR_OUT))
                     if output is not None:
                         Plugin._state["hdr_now"] = bool(output)
-                    Plugin._hdr_mode_settled()
+                    Plugin._hdr_argument_over()
                     decky.logger.info(
                         f"{LOG} hybrid: suspended for external display")
                 else:
@@ -2698,7 +2704,7 @@ class Plugin:
         if Plugin._hybrid_suspended_external:
             Plugin._hybrid_suspended_external = False
             Plugin._reset_hybrid_timing()
-            Plugin._hdr_mode_settled()
+            Plugin._hdr_argument_over()
 
         forced = bool(_as_int(props.get(ATOM_FORCE_HDR_SUPPORT)))
 
@@ -2833,7 +2839,7 @@ class Plugin:
                 Plugin._forget_hdr_baseline()
                 Plugin._hybrid_suspended_external = False
                 Plugin._state["hybrid_reason"] = ""
-                Plugin._hdr_mode_settled()
+                Plugin._hdr_argument_over()
                 decky.logger.info(
                     f"{LOG} hybrid: released control to the external display")
                 return True
@@ -2858,7 +2864,7 @@ class Plugin:
             if dropped:
                 Plugin._hybrid_suspended_external = False
                 Plugin._state["hybrid_reason"] = ""
-                Plugin._hdr_mode_settled()
+                Plugin._hdr_argument_over()
                 return True
             Plugin._state["hybrid_reason"] = "could not hand HDR control back"
             return False
@@ -2872,7 +2878,7 @@ class Plugin:
             # Xwayland disappeared halfway through unload, a Decky reload in
             # the same gamescope session still has enough information to retry.
             Plugin._forget_hdr_baseline()
-            Plugin._hdr_mode_settled()
+            Plugin._hdr_argument_over()
             Plugin._hybrid_suspended_external = False
             Plugin._state["hybrid_reason"] = ""
             decky.logger.info(

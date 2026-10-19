@@ -136,6 +136,21 @@ class HybridTimingTests(unittest.TestCase):
         self.assertEqual(len(self.writes), display.HDR_FIGHT_LIMIT)
         self.assertIn('standing off', display.Plugin._state['hybrid_reason'])
 
+    def test_a_display_hand_off_starts_the_argument_afresh(self):
+        self.sticks = False             # another writer keeps reverting the mode
+        self.props[display.ATOM_HDR_APP] = 1
+        for second in range(4):
+            self.tick(float(second))
+        self.assertEqual(len(self.writes), 4)
+        self.props[display.ATOM_IS_EXTERNAL] = 1
+        self.tick(4.0)
+        self.props[display.ATOM_IS_EXTERNAL] = 0
+        self.props[display.ATOM_FORCE_HDR_SUPPORT] = 1
+        self.props[display.ATOM_HDR_ENABLED] = 0
+        self.tick(5.0)
+        self.assertEqual(self.writes[-1], (5.0, 1))  # corrected again, not a stand-off
+        self.assertNotIn('standing off', display.Plugin._state['hybrid_reason'])
+
     def test_corrections_far_apart_or_to_another_target_never_stand_off(self):
         self.props[display.ATOM_HDR_APP] = 1
         for n in range(8):                  # one undone switch every 40 s
