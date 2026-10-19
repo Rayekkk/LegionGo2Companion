@@ -159,12 +159,11 @@ def open_http(url, *, headers, context, timeout, limit, total_seconds, policy, c
         body = tempfile.TemporaryFile("w+b")
         with tempfile.TemporaryFile("w+b") as configuration, tempfile.TemporaryFile("w+b") as status:
             configuration.write(request); configuration.seek(0)
-            from system_process import system_env
-            interpreter = sys.executable if os.name == "nt" else "/usr/bin/python3"
+            from system_process import NO_WINDOW, PYTHON, system_env
             check()
-            worker = subprocess.Popen([interpreter, "-I", "-B", str(Path(__file__).resolve()), "--fetch"],
+            worker = subprocess.Popen([PYTHON, "-I", "-B", str(Path(__file__).resolve()), "--fetch"],
                 stdin=configuration, stdout=body, stderr=status, env=system_env(),
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+                **NO_WINDOW)
             while True:
                 check()
                 try: worker.wait(timeout=min(.1, max(.001, deadline-time.monotonic())))

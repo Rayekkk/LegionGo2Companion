@@ -7,11 +7,9 @@ authentication; every selected image is authenticated before device access.
 """
 from datetime import date, datetime, timezone
 import json
-import os
 from pathlib import Path
 import re
 import ssl
-import subprocess
 import sys
 import time
 import urllib.error
@@ -170,35 +168,17 @@ def _check_http():
 
 def check_catalog(cancelled):
     """Parent wall deadline also covers DNS, TLS, headers and JSON parsing."""
-    from system_process import system_env
+    from system_process import run_helper
     from diagnostics import event
     if cancelled.is_set():
         raise CatalogError('Lenovo catalog check stopped.')
-    interpreter = sys.executable if os.name == 'nt' else '/usr/bin/python3'
-    deadline = time.monotonic() + WALL_SECONDS
-    worker = subprocess.Popen([interpreter, '-I', str(Path(__file__).resolve()), '--catalog-data'],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=system_env(),
-        **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if cancelled.is_set() or remaining <= 0:
-                raise CatalogError('Lenovo catalog check stopped or timed out.')
-            try:
-                data, _ = worker.communicate(timeout=min(.2, remaining))
-            except subprocess.TimeoutExpired:
-                continue
-            if cancelled.is_set() or time.monotonic() >= deadline:
-                raise CatalogError('Lenovo catalog check stopped or timed out.')
-            if worker.returncode != 0 or len(data) > 16384:
-                event('firmware','catalog_helper_failed',stage='catalog',returncode=worker.returncode,
-                    reason='nonzero_exit' if worker.returncode else 'output_size')
-                raise CatalogError('Lenovo catalog check failed. Try again later.')
-            return _json(data)
-    finally:
-        if worker.poll() is None:
-            worker.kill()
-        worker.communicate(timeout=3)
+    returncode, data = run_helper([str(Path(__file__).resolve()), '--catalog-data'], cancelled,
+        WALL_SECONDS, CatalogError('Lenovo catalog check stopped or timed out.'))
+    if returncode != 0 or len(data) > 16384:
+        event('firmware','catalog_helper_failed',stage='catalog',returncode=returncode,
+            reason='nonzero_exit' if returncode else 'output_size')
+        raise CatalogError('Lenovo catalog check failed. Try again later.')
+    return _json(data)
 
 
 if __name__ == '__main__':

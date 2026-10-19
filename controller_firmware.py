@@ -262,7 +262,7 @@ def _download_http(release, cancelled):
 
 def download_image(release, cancelled):
     """Isolate DNS/HTTP/TLS parsing behind a parent-enforced wall deadline."""
-    from system_process import system_env
+    from system_process import run_helper
     from diagnostics import event
     if not isinstance(release, Release) or not valid_image_url(release.url):
         raise FirmwareError('Invalid Lenovo firmware location.')
@@ -272,33 +272,15 @@ def download_image(release, cancelled):
         raise FirmwareError('Invalid firmware download size.')
     if cancelled.is_set():
         raise FirmwareError('Firmware preparation stopped before validation.')
-    interpreter = sys.executable if os.name == 'nt' else '/usr/bin/python3'
-    deadline = time.monotonic() + 35
-    worker = subprocess.Popen([interpreter, '-I', str(Path(__file__).resolve()),
-        '--download-data', release.component, release.version, release.url, str(release.size)], stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=system_env(),
-        **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if cancelled.is_set() or remaining <= 0:
-                raise FirmwareError('Firmware preparation stopped before validation.')
-            try:
-                data, _ = worker.communicate(timeout=min(0.2, remaining))
-            except subprocess.TimeoutExpired:
-                continue
-            if cancelled.is_set() or time.monotonic() >= deadline:
-                raise FirmwareError('Firmware preparation stopped before validation.')
-            if worker.returncode != 0 or not MIN_IMAGE_BYTES <= len(data) <= MAX_IMAGE_BYTES or (release.size and len(data) != release.size):
-                event('firmware','download_helper_failed',level='warning',scope=release.component,
-                    stage='download',returncode=worker.returncode,bytes=len(data),reason='nonzero_exit' if worker.returncode else 'output_size')
-                raise FirmwareError('The Lenovo image download did not complete.')
-            return data
-    finally:
-        # This process only downloads bytes. It never owns a device or flashes.
-        if worker.poll() is None:
-            worker.kill()
-        worker.communicate(timeout=3)
+    # The helper only downloads bytes. It never owns a device or flashes.
+    returncode, data = run_helper([str(Path(__file__).resolve()), '--download-data', release.component,
+        release.version, release.url, str(release.size)], cancelled, 35,
+        FirmwareError('Firmware preparation stopped before validation.'))
+    if returncode != 0 or not MIN_IMAGE_BYTES <= len(data) <= MAX_IMAGE_BYTES or (release.size and len(data) != release.size):
+        event('firmware','download_helper_failed',level='warning',scope=release.component,
+            stage='download',returncode=returncode,bytes=len(data),reason='nonzero_exit' if returncode else 'output_size')
+        raise FirmwareError('The Lenovo image download did not complete.')
+    return data
 
 
 FWUPDTOOL = '/usr/bin/fwupdtool'

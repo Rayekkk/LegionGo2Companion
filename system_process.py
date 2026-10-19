@@ -2,6 +2,12 @@
 """Environment for external Linux programs launched by frozen Decky Python."""
 
 import os
+import subprocess
+import sys
+import time
+
+PYTHON = sys.executable if os.name == "nt" else "/usr/bin/python3"
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 
 def system_env(**extra) -> dict:
@@ -12,3 +18,26 @@ def system_env(**extra) -> dict:
     env.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     env.update(extra)
     return env
+
+
+def run_helper(args, cancelled, seconds: float, stopped: Exception):
+    """(returncode, stdout) of `python -I args`, raising `stopped` on cancel or the wall deadline."""
+    deadline = time.monotonic() + seconds
+    worker = subprocess.Popen([PYTHON, "-I", *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, env=system_env(), **NO_WINDOW)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if cancelled.is_set() or remaining <= 0:
+                raise stopped
+            try:
+                data, _ = worker.communicate(timeout=min(.2, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                raise stopped
+            return worker.returncode, data
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+        worker.communicate(timeout=3)
