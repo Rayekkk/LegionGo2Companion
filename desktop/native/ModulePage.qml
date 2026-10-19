@@ -2,7 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "Tdp.js" as Tdp
+import "tdp.mjs" as Tdp
 import "wifi.mjs" as Wifi
 RowLayout {
     id:panel
@@ -13,7 +13,7 @@ RowLayout {
     property var cards:[]
     property string tdpScope:"global"
     property bool acSeparate:false
-    // The Custom draft as in Decky: watts, boosts as headroom above SPL (see Tdp.js).
+    // The Custom draft as in Decky: watts, boosts as headroom above SPL (see tdp.mjs).
     property var powerDraft:({spl:15,spptOff:5,fpptOff:10})
     property bool powerDirty:false
     readonly property bool editing:powerDirty
@@ -82,8 +82,9 @@ RowLayout {
         const action=pendingAction;pendingAction=null;
         if(action)action();else change(pendingMethod,pendingArgs);
     }
-    function pretty(value) { const labels={fps:"FPS",spg:"SPG",rpg:"RPG",max:"Maximum",ac:"Plugged in",game:"This game",balance_performance:"Balanced performance",balance_power:"Balanced power",power:"Power saving",default:"System default"};const text=String(value).replace(/_/g," ");return labels[value] || text.charAt(0).toUpperCase()+text.slice(1); }
-    function powerOptions() { const presets=Object.keys(s("get_caps").presets || {}),order=["silent","balanced","performance","max"];return options(order.filter(v=>presets.indexOf(v)>=0).concat(presets.filter(v=>order.indexOf(v)<0 && v!=="custom"),["custom"])); }
+    function pretty(value) { const labels={fps:"FPS",spg:"SPG",rpg:"RPG",ac:"Plugged in",game:"This game"};const text=String(value).replace(/_/g," ");return labels[value] || text.charAt(0).toUpperCase()+text.slice(1); }
+    function presetTable() { return s("get_caps").presets || Tdp.PRESETS; }
+    function powerOptions() { const table=presetTable();return Tdp.PRESET_ORDER.filter(k=>k==="custom" || !!table[k]).map(k=>({id:k,label:Tdp.PRESET_LABELS[k]})); }
     function options(values) { return (values || []).map(v=>typeof v==="object"?v:{id:v,label:pretty(v)}); }
     function indexedOptions(values) { return (values || []).map((label,id)=>({id:id,label:pretty(label)})); }
     function field(label,kind,get,set,extra) { return Object.assign({label:label,kind:kind,get:get,set:set,available:()=>true},extra || {}); }
@@ -96,7 +97,7 @@ RowLayout {
     function percent(value) { return value===undefined || value===null || !Number.isFinite(Number(value))?"—":Math.round(Number(value))+"%"; }
     // Saved game profiles, by name: what each game uses and its limits (mW in the settings).
     function profileRows() {
-        const rows=s("list_game_profiles").profiles,limit=(preset,spl)=>(preset?pretty(preset)+" · ":"")+watts(Number(spl)/1000)+" W";
+        const rows=s("list_game_profiles").profiles,limit=(preset,spl)=>(preset?(Tdp.PRESET_LABELS[preset] || pretty(preset))+" · ":"")+watts(Number(spl)/1000)+" W";
         return items(rows).map(p=>{
             const id=String(p.app_id);
             return {id:id,title:gameTitle(id)+(id===running()?" · running":""),
@@ -135,16 +136,17 @@ RowLayout {
         if(tdpScope!=="global" && s("get_game_profile").exists)
             source=tdpScope==="ac"?s("get_game_profile").ac_profile || source:s("get_game_profile").profile || source;
         // "Custom" picked here shows the sliders until something is applied; polling must not hide them.
-        powerPreset=customPicked?"custom":source.preset || source.ac_preset || source.active_preset || "custom";
-        const w=Math.round(Number(source.spl || 15000)/1000);
+        const w=Math.round(Number(source.spl || 15000)/1000),sw=Math.round(Number(source.sppt || 20000)/1000),fw=Math.round(Number(source.fppt || 25000)/1000);
+        // As in Decky: the saved name while its values still match, otherwise the preset these values are.
+        powerPreset=customPicked?"custom":Tdp.resolvedPreset(w,sw,fw,source.preset || source.ac_preset || source.active_preset,presetTable());
         // Without Separate boost limits a Custom profile follows the single-dial rule, as in Decky.
         powerDraft=!tdpAdvanced() && powerPreset==="custom"?Tdp.simpleTuning(w,customCaps(),tdpMin()):
-            Tdp.fromAbsolute(w,Math.round(Number(source.sppt || 20000)/1000),Math.round(Number(source.fppt || 25000)/1000));
+            Tdp.fromAbsolute(w,sw,fw);
         if(s("get_game_profile").exists)acSeparate=!!s("get_game_profile").ac_separate;
         draftGame=app();
     }
-    // What the running game uses: its saved profile decides; without one, the local choice stands
-    // until the first Apply or preset creates the profile.
+    // What the running game uses: its saved profile decides; without one (or without a TDP provider to save
+    // it), the local choice stands.
     function gameUse() {
         const profile=gameProfile();
         if(profile.exists)return profile.active===false?"global":profile.ac_separate?"charger":"game";
@@ -189,10 +191,11 @@ RowLayout {
                 else change("set_game_ac_profile",acArgs(value==="charger"));
             } else {
                 acSeparate=value==="charger";
-                // Like Decky, save the new profile and its charger split now: CPU settings on charger need it.
-                // The backend starts it from the Global settings, the same values this panel shows.
+                // Like Decky, create the profile at once, and its charger split after it: CPU settings on charger need it.
+                // The backend starts the profile from the Global settings, the same values this panel shows.
                 const g=s("get_settings");
-                if(acSeparate && s("get_caps").tdp_available)change("set_game_ac_profile",[app(),g.spl,g.sppt,g.fppt,true,g.active_preset || ""]);
+                if(value!=="global" && s("get_caps").tdp_available)change("set_game_profile_active",[app(),true],
+                    acSeparate?{method:"set_game_ac_profile",args:[app(),g.spl,g.sppt,g.fppt,true,"",stored()]}:null);
             }
             tdpScope=value==="global"?"global":value==="charger" && acOnline()?"ac":"game";
             scopeChanged();
@@ -202,13 +205,10 @@ RowLayout {
         const next=value==="charger"?"ac":"game";
         if(next!==tdpScope)guardDraft(()=>{ tdpScope=next; scopeChanged(); });
     }
-    function editTargetNote() {
-        const charger=tdpScope==="ac";
-        return (acOnline()?"Plugged in now.":"On battery now.")+(charger && !acOnline()?" Changes apply when you plug in.":!charger && acOnline()?" Changes apply when you unplug.":"");
-    }
+    function editTargetNote() { return Tdp.sourceNote(acOnline(),tdpScope==="ac"); }
     function choosePreset(value) {
         if(value==="custom") { customPicked=true; powerPreset="custom"; if(!tdpAdvanced())powerDraft=Tdp.simpleTuning(powerDraft.spl,customCaps(),tdpMin()); return; }
-        const preset=s("get_caps").presets?.[value];
+        const preset=presetTable()[value];
         if(!preset)return;
         // A preset replaces a Custom draft without asking: the sliders exist only in Custom.
         powerDirty=false; customPicked=false;
@@ -224,7 +224,7 @@ RowLayout {
     function tdpAdvanced() { return s("get_settings").advanced_tdp_control!==false; }
     function customCaps() { return tdpAdvanced()?tdpCaps():Tdp.simpleCaps(tdpCaps(),extrasActive()); }
     function boostRoom() { return Tdp.offsetMax(powerDraft.spl,tdpCaps()); }
-    function boostNote(offset,room) { return room===0?"No room left at this power.":"Up to "+(powerDraft.spl+offset)+" W."; }
+    function boostNote(offset,room) { return Tdp.boostRoomNote(powerDraft.spl,offset,room); }
     // The slider handlers of the Decky panel: every edit leaves a valid FPPT >= SPPT >= SPL draft.
     function editPower(key,value) {
         powerNotice="";
@@ -240,25 +240,28 @@ RowLayout {
         if(tdpScope==="ac") change("set_game_ac_profile",[app(),Math.round(a.spl*1000),Math.round(a.sppt*1000),Math.round(a.fppt*1000),acSeparate,powerPreset,stored()]);
         else change("apply_tdp",[Math.round(a.spl*1000),Math.round(a.sppt*1000),Math.round(a.fppt*1000),powerTarget(),powerPreset,expectedGame(),storedEdit()]);
     }
+    function capsNow() { return Tdp.capsState(s("get_caps")); }
+    function unlocked() { return s("get_extras_unlocked")===true; }
+    function stdCaps() { const std=s("get_caps").std;return std?{spl:Number(std.spl),sppt:Number(std.sppt),fppt:Number(std.fppt)}:Tdp.FALLBACK_STD; }
+    // As in Decky: who sets the limits that run now, named by their values. A saved profile being edited
+    // is not the running game's, so then the values tell whether Global runs.
     function tdpSummary() {
-        const settings=s("get_settings");
-        if(settings.enabled===false)return "Off · the console uses Lenovo's power limits.";
-        if(settings.enabled!==true)return "";
-        const values=s("get_tdp_info").values || {},spl=Number(values.spl_limit ?? Number(settings.active_spl || settings.spl || 0)/1000);
-        const standard=Number(s("get_caps").std?.spl || 0),profile=gameProfile();
-        return (profile.exists && profile.active!==false?"This game":"Global")+": "+pretty(settings.active_preset || "custom")+" · "+watts(spl)+" W"+
-            (values.package_draw===undefined || values.package_draw===null?"":" · drawing "+Number(values.package_draw).toFixed(1)+" W")+
-            (standard>0 && spl>standard?" · above Lenovo's limit":"");
+        const settings=s("get_settings"),now=Tdp.activeLimits(settings,presetTable());
+        if(settings.enabled===false)return Tdp.powerSummary(false);
+        if(settings.enabled!==true || !now)return "";
+        const profile=stored()?null:gameProfile(),own=profile?!!profile.exists && profile.active!==false:!now.global;
+        const info=s("get_tdp_info");
+        return Tdp.powerSummary(true,own?gameTitle(running()):"Global",now.label,now,info.success?info.values?.package_draw:null,unlocked(),stdCaps());
     }
     function setExtras(value) {
         if(!value) { change("set_extras_unlocked",[false]); return; }
-        confirm("set_extras_unlocked",[true],"This goes beyond Lenovo's power limits. The console runs hotter and louder, and the battery drains faster."+
-            (s("get_caps").extras?"":" Companion first downloads the verified RyzenAdj helper from GitHub."),"Allow up to 50 W?","Allow 50 W");
+        const ask=Tdp.extrasConfirm(capsNow());
+        confirm("set_extras_unlocked",[true],ask.text,ask.title,ask.ok);
     }
-    function extrasNote() {
-        if(s("get_extras_unlocked")===true)return "Custom goes up to 50 W. Turning off lowers profiles above "+watts(s("get_caps").std?.spl)+" W.";
-        return s("get_caps").extras?"Beyond Lenovo's limits. Hotter, louder, shorter battery.":"Downloads a verified helper from GitHub first.";
-    }
+    function tdpNoticeText() { const notice=Tdp.tdpNotice(capsNow(),unlocked());return notice?notice[0]+". "+notice[1]:""; }
+    // Decky's "Could not load profile": the game's profile read failed; the editor stays locked until it loads.
+    function profileReadError() { return page==="tdp" && !!app()?backend.readErrors?.get_game_profile || "":""; }
+    function cpuShown() { return Tdp.editorControls(s("get_cpu_power_controls")) || {}; }
     function vibeArgs(value) { const state=s("vibe_get_settings"); return [value,state.app_id,state.profile_id]; }
     function rgbSettings() { return s("rgb_get_status").settings || {}; }
     function rgbUsesColor() { return ["monocolor","breathe"].indexOf(rgbSettings().effect)>=0; }
@@ -287,12 +290,8 @@ RowLayout {
                 visible:()=>entry().enabled===true && entry().ready===false && !entry().pending && !entry().maintenance})
         ];
     }
-    function eppPercent() {
-        const cpu=s("get_cpu_power_controls"),value=cpu.profile?.epp ?? cpu.epp?.value;
-        const named={performance:0,balance_performance:128,balance_power:191,power:255};
-        const raw=/^\d+$/.test(String(value))?Number(value):named[value];
-        return raw===undefined?null:Math.round(raw*100/255);
-    }
+    // The Decky scale in 1% steps (Decky moves in 10% steps).
+    function eppPercent() { return Tdp.eppPercent(cpuShown().epp,1); }
     function fieldEnabled(owner,entry) {
         if(entry.kind==="text" || entry.kind==="paragraph")return true;
         if(owner==="rgb" && s("rgb_get_status").recovery_required)return false;
@@ -357,17 +356,19 @@ RowLayout {
         const battery=()=>s("battery_get_status");
         return {
             tdp:[{title:"Power",column:0,fields:[
-                notice("",()=>s("get_caps").tdp_error || ""),
+                notice("",tdpNoticeText),
+                notice("Could not load profile",profileReadError),
+                field("Retry profile","button",()=>"Retry profile",()=>backend.issue("get_game_profile",[app()]),{visible:()=>profileReadError().length>0,scope:true}),
                 field("Editing a saved profile","button",()=>"Done",()=>editProfile(running()),{visible:stored,
                     note:()=>gameTitle(editGame)+" isn't running. Changes are saved for it and apply when it starts."}),
                 switcher("Enable TDP control",()=>s("get_settings").enabled,"set_plugin_enabled",null,{available:()=>!!s("get_caps").tdp_available,note:tdpSummary}),
                 choices("Settings for this game",gameUse,chooseUse,()=>[{id:"global",label:"Global"},{id:"game",label:"This game"},{id:"charger",label:"This game + charger"}],
                     {kind:"options",scope:true,visible:()=>!!app() && s("get_settings").enabled===true,available:gameProfileFresh,
-                     note:()=>({global:"This game uses Global settings, shared by all games.",game:"Only this game uses these settings.",charger:"This game has separate settings on battery and on charger."})[gameUse()]}),
+                     note:()=>Tdp.scopeNote(gameUse(),gameTitle(app()))}),
                 choices("Edit settings for",()=>tdpScope==="ac"?"charger":"battery",chooseEditTarget,()=>[{id:"battery",label:"Battery"},{id:"charger",label:"Charger"}],
                     {kind:"options",scope:true,visible:()=>!!app() && s("get_settings").enabled===true && gameUse()==="charger",available:gameProfileFresh,note:editTargetNote}),
                 choices("Preset",()=>powerPreset,choosePreset,powerOptions,{kind:"options",available:()=>!!s("get_caps").tdp_available && !!s("get_settings").enabled,
-                    note:()=>{ const p=s("get_caps").presets?.[powerPreset];return powerPreset==="custom"?"Set your own limits below.":p?pretty(powerPreset)+" · "+watts(p.spl)+" W (boost "+watts(p.sppt)+"/"+watts(p.fppt)+" W)":""; }}),
+                    note:()=>Tdp.presetNote(powerPreset,presetTable())}),
                 number("Sustained power",()=>powerDraft.spl,v=>editPower("spl",v),tdpMin,()=>customCaps().spl,{kind:"range",suffix:" W",visible:()=>powerPreset==="custom",
                     note:()=>tdpAdvanced()?"":"Boost follows automatically."}),
                 number("Slow boost",()=>powerDraft.spptOff,v=>editPower("sppt",v),0,()=>boostRoom().sppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerPreset==="custom" && tdpAdvanced(),
@@ -377,28 +378,28 @@ RowLayout {
                 field("","buttons",()=>powerDirty?"Unsaved changes":"",id=>{ if(id==="apply")applyPower(); else { powerDirty=false; customPicked=powerPreset==="custom"; loadPower(); } },
                     {name:"Custom limits",visible:()=>powerPreset==="custom",available:()=>profileReady() && !!s("get_caps").tdp_available && !!s("get_settings").enabled,
                      choices:()=>[{id:"apply",label:applyLabel(),tone:"primary",enabled:powerDirty},{id:"discard",label:"Discard",enabled:powerDirty}]}),
-                text("Power limit now",()=>{
-                    const values=s("get_tdp_info").values || {};
-                    return values.spl_limit===undefined || values.spl_limit===null?"—":watts(values.spl_limit)+" W (boost "+watts(values.sppt_limit)+"/"+watts(values.fppt_limit)+" W)";
-                }),
+                text("Limits now",()=>Tdp.limitsText(s("get_tdp_info"))),
+                text("Set by",()=>Tdp.sourceText(s("get_tdp_info"))),
                 text("APU power",()=>{
                     const value=s("get_tdp_info").values?.package_draw;
                     return value===undefined || value===null?"—":Number(value).toFixed(1)+" W";
                 }),
                 notice("Power profile",()=>powerNotice)
             ]},{title:"CPU",column:1,fields:[
-                switcher("CPU Boost",()=>cpu().profile?.cpu_boost_enabled ?? cpu().cpu_boost?.enabled,"set_cpu_boost",v=>[v,powerTarget(),tdpScope==="ac",expectedGame(),storedEdit()],{available:()=>cpuScopeReady() && !!cpu().cpu_boost?.available,
-                    note:()=>cpu().cpu_boost?.available===false?"Not supported on this device.":(cpu().profile?.cpu_boost_enabled ?? cpu().cpu_boost?.enabled)?"Higher CPU clocks; uses more power.":"CPU stays at base clock; saves power."}),
-                number("CPU energy preference",eppPercent,v=>change("set_epp",[String(Math.round(v*255/100)),powerTarget(),tdpScope==="ac",expectedGame(),storedEdit()]),0,100,{kind:"range",suffix:"%",lowLabel:"Prefer CPU",highLabel:"Prefer GPU",note:"Left: faster CPU. Right: more power left for the GPU.",visible:()=>!!cpu().epp?.numeric_supported && eppPercent()!==null,available:()=>cpuScopeReady() && !!cpu().epp?.available}),
-                choices("CPU energy profile",()=>cpu().profile?.epp ?? cpu().epp?.value,v=>change("set_epp",[v,powerTarget(),tdpScope==="ac",expectedGame(),storedEdit()]),()=>options(cpu().epp?.profiles || []),{kind:"options",visible:()=>!cpu().epp?.numeric_supported || eppPercent()===null,available:()=>cpuScopeReady() && !!cpu().epp?.available}),
+                // Each UI keeps its control style (Decky: a 10% slider, or a slider over the named profiles plus "Use …" buttons).
+                switcher("CPU Boost",()=>cpuShown().cpu_boost?.enabled,"set_cpu_boost",v=>[v,powerTarget(),tdpScope==="ac",expectedGame(),storedEdit()],{available:()=>cpuScopeReady() && Tdp.boostUsable(cpuShown().cpu_boost),
+                    note:()=>Tdp.boostNote(cpuShown().cpu_boost)}),
+                number("CPU energy preference",eppPercent,v=>change("set_epp",[Tdp.eppValue(v),powerTarget(),tdpScope==="ac",expectedGame(),storedEdit()]),0,100,{kind:"range",suffix:"%",lowLabel:Tdp.eppLabel("performance"),highLabel:Tdp.eppLabel("power"),note:()=>Tdp.eppNote(cpuShown().epp),visible:()=>!!cpu().epp?.numeric_supported,available:()=>cpuScopeReady() && !!cpu().epp?.available}),
+                choices("CPU energy preference",()=>cpuShown().epp?.value,v=>change("set_epp",[v,powerTarget(),tdpScope==="ac",expectedGame(),storedEdit()]),()=>items(cpu().epp?.profiles).map(p=>({id:p,label:Tdp.eppLabel(p)})),{name:"CPU energy profile",kind:"options",visible:()=>!cpu().epp?.numeric_supported,available:()=>cpuScopeReady() && !!cpu().epp?.available,
+                    note:()=>cpu().epp?.available?"":Tdp.eppUnavailable(cpu().epp)}),
                 notice("",()=>cpu().error || cpu().epp?.compatibility_note || "")
             ]},{title:"Game profiles",column:1,note:"Games with their own settings. Edit opens a game's settings above, also when it isn't running.",fields:[
                 field("","list",profileRows,profileAction,{name:"Game profiles"})
             ]},{title:"More",column:1,barTitle:"Troubleshooting",fields:[
                 switcher("Separate boost limits",()=>s("get_settings").advanced_tdp_control,"set_advanced_tdp_control",null,{note:"Set slow and fast boost yourself in Custom."}),
-                field("Allow up to 50 W","toggle",()=>s("get_extras_unlocked")===true,setExtras,{note:extrasNote,visible:()=>!!s("get_caps").extras || !!s("get_caps").helper_retry_available}),
+                field("Allow up to 50 W","toggle",unlocked,setExtras,{note:()=>Tdp.extrasNote(unlocked(),capsNow(),stdCaps().spl),visible:()=>Tdp.extrasShown(capsNow())}),
                 action("Reapply saved settings","reapply",null,{bar:true}),
-                action("Retry helper download","retry_extras",null,{bar:true,visible:()=>!!s("get_caps").helper_retry_available}),
+                action("Retry helper download","retry_extras",null,{bar:true,visible:()=>Tdp.helperRetryShown(capsNow(),unlocked())}),
                 field("Delete profile for this game","button",()=>"Delete profile for this game",()=>confirm("delete_game_profile",[app()],"Its power, CPU Boost and energy settings are removed. This game will use Global settings.","Delete profile for this game?","Delete",true),
                     {bar:true,danger:true,visible:()=>!!gameProfile().exists})
             ]}],

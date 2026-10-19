@@ -1,7 +1,6 @@
 // Shared page harness for the per-page frontend tests: real src/*.tsx pages with deferred RPCs, a fake clock and QAM visibility.
 const { assert, run, settle: wait, mount, label: find, button: findButton } = require('./frontend_harness.cjs');
 const settle = () => wait(16);
-const tdpModeLabel = mount('tdp.tsx').exports.tdpModeLabel;
 const batterySummary = mount('battery.tsx').exports.batterySummary;
 function harness(file, component, initiallyVisible = true) {
   let panelShown = true, intersectionCallback;
@@ -20,7 +19,6 @@ function harness(file, component, initiallyVisible = true) {
     api: { removeEventListener() {}, toaster: { toast: item => { toasts.push(item); } } },
     modules: name => name.startsWith('./') ? new Proxy({}, { get: (_object, key) => {
       if (key in relativeReads) return (...args) => h.callable(relativeReads[key])(...args);
-      if (key === 'tdpModeLabel') return tdpModeLabel;
       if (key === 'batterySummary') return batterySummary;
       if (key === 'fanSummary') return fan.exports.fanSummary;
       if (/^(start|stop)/.test(key)) return () => {};

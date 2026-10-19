@@ -11,7 +11,7 @@
     "test": "python -m unittest discover -s tests -p test_*.py",
     "test:desktop": "node scripts/check-desktop-build.mjs",
     "package": "node scripts/package.mjs",
-    "test:frontend": "node tests/frontend_lifecycle.cjs && node tests/frontend_navigation.cjs && node tests/frontend_guard.cjs && node tests/frontend_battery.cjs && node tests/frontend_controller.cjs && node tests/frontend_firmware.cjs && node tests/frontend_edit_ordering.cjs && node tests/frontend_page_lifecycle.cjs && node tests/frontend_modules.cjs && node tests/frontend_rgb.cjs && node tests/frontend_remap.cjs && node tests/frontend_display.cjs && node tests/frontend_wifi.cjs && node tests/frontend_overview.cjs && node tests/frontend_updates.cjs && node tests/frontend_focusable_info.cjs && node tests/frontend_vibration_recovery.cjs && node tests/frontend_tdp_recovery.cjs && node tests/frontend_fan.cjs && node tests/frontend_desktop_parity.cjs"
+    "test:frontend": "node tests/frontend_lifecycle.cjs && node tests/frontend_navigation.cjs && node tests/frontend_guard.cjs && node tests/frontend_battery.cjs && node tests/frontend_controller.cjs && node tests/frontend_firmware.cjs && node tests/frontend_edit_ordering.cjs && node tests/frontend_page_lifecycle.cjs && node tests/frontend_modules.cjs && node tests/frontend_rgb.cjs && node tests/frontend_remap.cjs && node tests/frontend_display.cjs && node tests/frontend_wifi.cjs && node tests/frontend_overview.cjs && node tests/frontend_updates.cjs && node tests/frontend_focusable_info.cjs && node tests/frontend_vibration_recovery.cjs && node tests/frontend_tdp_recovery.cjs && node tests/frontend_fan.cjs"
   },
   "devDependencies": {
     "@decky/api": "^1.1.3",

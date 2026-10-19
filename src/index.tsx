@@ -12,7 +12,8 @@ import {
 } from "@decky/ui";
 import { FC, ReactNode, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
-import { TdpPage, startTdpWatcher, stopTdpWatcher, tdpModeLabel } from "./tdp";
+import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
+import { activeLimits } from "../desktop/native/tdp.mjs";
 import { FanPage, getFanState, fanSummary, type FanState } from "./fan";
 import {
   VibrationPage,
@@ -417,12 +418,8 @@ const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBac
 const tdpSummary = (settings?: TdpSettings) => {
   if (!settings) return "Power limits and CPU settings";
   if (settings.enabled === false) return "Off · Lenovo defaults";
-  const spl = settings.active_spl ?? settings.spl, sppt = settings.active_sppt ?? settings.sppt;
-  const fppt = settings.active_fppt ?? settings.fppt;
-  if (spl == null || sppt == null || fppt == null) return "Custom";
-  const global = spl === settings.spl && sppt === settings.sppt && fppt === settings.fppt;
-  const [w, sw, fw] = [spl, sppt, fppt].map(value => Math.round(value / 1000));
-  return `${tdpModeLabel(w, sw, fw, global ? settings.active_preset : undefined)} · ${w} W`;
+  const now = activeLimits(settings);
+  return now ? `${now.label} · ${now.spl} W` : "Custom";
 };
 
 const VIBE_LEVELS = ["Off", "Low", "Medium", "High"];

@@ -135,6 +135,57 @@ TestCase {
         verify(!panel.fieldEnabled("tdp",slow));
         field("Sustained power").set(30);verify(slow.available());compare(slow.note(),"Up to 30 W.");
     }
+    // Rules and texts from tdp.mjs, the same as in the Decky panel.
+    function test_summaryWarnsAboveLenovosLimitOnlyWithout50Watts() {
+        start(true,40,45,50);
+        fake.data=Object.assign({},fake.data,{get_tdp_info:{success:true,values:{package_draw:18.25,spl_limit:40}}});
+        compare(field("Enable TDP control").note(),"Global: Custom · 40 W · drawing 18.3 W · above Lenovo's limit");
+        fake.data=Object.assign({},fake.data,{get_extras_unlocked:true});
+        compare(field("Enable TDP control").note(),"Global: Custom · 40 W · drawing 18.3 W");
+        fake.gameProfileApp="20";
+        fake.data=Object.assign({},fake.data,{desktop_context:{app_id:"20"},get_game_profile:{exists:true,active:true,profile:{}},
+            get_settings:Object.assign(settings(true,40,45,50),{active_spl:16000,active_sppt:25000,active_fppt:30000})});
+        compare(field("Enable TDP control").note(),"App 20: Balanced · 16 W · drawing 18.3 W","The game is named and its preset follows its values");
+        fake.data=Object.assign({},fake.data,{get_settings:{enabled:false}});
+        compare(field("Enable TDP control").note(),"Off · the console uses Lenovo's power limits.");
+        fake.gameProfileApp="";
+    }
+    function test_helperNoticesAndRetryFollowTheMissingHelper() {
+        start(true,15,20,25);
+        const caps=extra=>Object.assign({},fake.data.get_caps,extra);
+        fake.data=Object.assign({},fake.data,{get_caps:caps({helper_retry_available:true})});
+        verify(!field("Retry helper download").visible(),"Nothing to retry while TDP and 50 W work");
+        compare(panel.tdpNoticeText(),"");
+        fake.data=Object.assign({},fake.data,{get_caps:caps({helper_retry_available:true,extras:false}),get_extras_unlocked:true});
+        verify(field("Retry helper download").visible());
+        compare(panel.tdpNoticeText(),"50 W paused. Firmware limits are active until the 50 W helper is available. Saved profiles are kept.");
+        fake.data=Object.assign({},fake.data,{get_caps:caps({tdp_available:false})});
+        compare(panel.tdpNoticeText(),"TDP control unavailable. Neither the firmware TDP interface nor the verified RyzenAdj helper is available.");
+    }
+    function test_failedProfileReadShowsARetry() {
+        start(true,15,20,25);
+        fake.data=Object.assign({},fake.data,{desktop_context:{app_id:"20"}});
+        verify(!field("Retry profile").visible());
+        fake.readErrors={get_game_profile:"Timed out."};
+        compare(field("Could not load profile").get(),"Timed out.");verify(field("Retry profile").visible());
+        verify(panel.fieldEnabled("tdp",field("Retry profile")),"Retry works while the profile is missing");
+        fake.readErrors={};
+    }
+    function test_cpuControlsUseThePanelsLabelsAndRules() {
+        start(true,15,20,25);
+        const cpu=extra=>Object.assign({available:true,cpu_boost:{available:true,enabled:null},
+            epp:{available:true,value:null,numeric_supported:true,profiles:["default","performance","balance_power","low-power"]}},extra || {});
+        fake.data=Object.assign({},fake.data,{get_cpu_power_controls:cpu()});
+        const boost=field("CPU Boost");
+        verify(!boost.available(),"An unknown CPU Boost state cannot be toggled");compare(boost.note(),"The current state could not be read.");
+        const slider=field("CPU energy preference");
+        verify(slider.visible());compare(slider.get(),50);compare(slider.note(),"Set by the system. Move the slider to choose.");
+        compare([slider.lowLabel,slider.highLabel],["Prefer CPU","Prefer GPU"]);
+        fake.data=Object.assign({},fake.data,{get_cpu_power_controls:cpu({epp:{available:true,value:"balance_power",numeric_supported:false,profiles:["default","performance","balance_power","low-power"]}})});
+        const list=field("CPU energy profile");
+        verify(list.visible());verify(!slider.visible());compare(list.label,"CPU energy preference");
+        compare(list.choices().map(c=>c.label),["System default","Prefer CPU","Balanced · Prefer GPU","Low power"]);
+    }
     function test_noEditSequenceFormsAnInvalidConfiguration() {
         start(true,15,20,25);
         let seed=7;const next=()=>(seed=(seed*1103515245+12345)%2147483648)/2147483648;

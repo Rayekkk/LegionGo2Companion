@@ -3,6 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "fan.mjs" as Fan
+import "tdp.mjs" as Tdp
 ColumnLayout {
     id:overview
     objectName:"deviceOverview"
@@ -29,7 +30,6 @@ ColumnLayout {
     function fresh(method,limit) { return !!backend && backend.connected && (!backend.canRead || backend.canRead(method)) && backend.age(method)<limit; }
     function named(value) { const name=String(value || "");return name?name.charAt(0).toUpperCase()+name.slice(1).replace(/_/g," "):"—"; }
     function networkFrequency() { const raw=network.live?.frequency; const value=Number(raw); return raw===null || raw===undefined || raw===""?"—":Number.isFinite(value)?Math.round(value)+" MHz":String(raw); }
-    function watts(key) { const value=powerInfo.values?.[key];return value===undefined || value===null?"—":Number(value).toFixed(0); }
     function batteryPercent(value) { return value===null || value===undefined?"—":Math.round(Number(value))+"%"; }
     function vibrationLevel() {
         const settings=vibration.settings || {},caps=s("vibe_get_capabilities");
@@ -65,14 +65,14 @@ ColumnLayout {
             padding:20
             Layout.fillWidth:true; Layout.fillHeight:true; Layout.preferredWidth:2; Layout.minimumWidth:0
             title:"Performance & cooling"; icon:"tdp"
-            trailing:UiBadge { objectName:"overviewPreset"; text:fresh("get_settings",12)?(overview.power.active_preset || overview.power.preset)==="max"?"Maximum":named(overview.power.active_preset || overview.power.preset):overview.available("tdp") }
+            trailing:UiBadge { objectName:"overviewPreset"; text:fresh("get_settings",12)?Tdp.activeLimits(overview.power)?.label ?? "Custom":overview.available("tdp") }
             RowLayout { Layout.fillWidth:true; spacing:18; Layout.topMargin:10
                 UiMetric { objectName:"overviewTemperature"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU temperature"; value:overview.fanFresh?Number(overview.fan.readings.apu_temperature).toFixed(1)+" °C":"—"; note:"Hotter of CPU and GPU" }
                 UiMetric { objectName:"overviewPower"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU power"; value:overview.performanceFresh && overview.powerInfo.values?.package_draw!==undefined?Number(overview.powerInfo.values.package_draw).toFixed(1)+" W":"—" }
                 UiMetric { objectName:"overviewFan"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"Fan speed"; value:overview.fanFresh?Fan.speedText(overview.fan.readings.rpm,overview.fan.settings?.display_unit,overview.fan.limits?.max_rpm):"—" }
             }
             Rectangle { Layout.fillWidth:true; implicitHeight:1; color:theme.divider; Layout.topMargin:6 }
-            UiReadout { objectName:"overviewPowerLimit"; Layout.fillWidth:true; label:"Power limit"; value:overview.performanceFresh && overview.watts("spl_limit")!=="—"?overview.watts("spl_limit")+" W (boost "+overview.watts("sppt_limit")+"/"+overview.watts("fppt_limit")+" W)":"—" }
+            UiReadout { objectName:"overviewPowerLimit"; Layout.fillWidth:true; label:"Limits now"; value:overview.performanceFresh && overview.powerInfo.values?.spl_limit!=null?Tdp.limitsText(overview.powerInfo):"—" }
             UiReadout { objectName:"overviewFanControl"; Layout.fillWidth:true; label:"Fan control"; value:fresh("fan_get_state",3)?Fan.fanStatus(overview.fan).headline:"—" }
             Item { Layout.fillHeight:true }
             RowLayout { Layout.fillWidth:true; spacing:10

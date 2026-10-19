@@ -151,6 +151,15 @@ TestCase {
         fake.data=Object.assign({},fake.data,{get_game_profile:gameProfile({active:false})});
         compare(scope.get(),"global");
     }
+    function test_thisGameCreatesTheProfileAtOnceLikeDecky() {
+        field("tdp","Settings for this game").set("game");
+        compare(fake.calls.length,1,"No Apply or preset needed");
+        compare(fake.calls[0].method,"set_game_profile_active");compare(fake.calls[0].args.join(","),"42,true");
+        compare(fake.calls[0].then,null);compare(panel.tdpScope,"game");
+        fake.calls=[];fake.data=Object.assign({},fake.data,{get_caps:Object.assign({},fake.data.get_caps,{tdp_available:false})});
+        panel.tdpScope="global";field("tdp","Settings for this game").set("game");
+        compare(fake.calls.length,0,"Without a TDP provider the choice only picks the CPU settings to edit");
+    }
     function test_scopeSelectorReactivatesAndSplitsTheChargerProfile() {
         fake.data=Object.assign({},fake.data,{get_game_profile:gameProfile({active:false})});
         const scope=field("tdp","Settings for this game");
@@ -202,7 +211,8 @@ TestCase {
         field("tdp","Settings for this game").set("charger");
         compare(panel.tdpScope,"ac");
         compare(fake.calls.length,1,"The new profile and its charger split are saved right away");
-        compare(fake.calls[0].method,"set_game_ac_profile");compare(fake.calls[0].args.join(","),"42,25000,28000,35000,true,balanced");
+        compare(fake.calls[0].method,"set_game_profile_active");compare(fake.calls[0].args.join(","),"42,true");
+        compare(fake.calls[0].then.method,"set_game_ac_profile");compare(fake.calls[0].then.args.join(","),"42,25000,28000,35000,true,,false");
         const epp=findChild(panel,"field_tdp_CPU energy preference");verify(epp!==null);
         tryVerify(function(){ return epp.visible; });
         verify(!epp.enabled,"Charger CPU settings wait for the saved split");

@@ -443,5 +443,51 @@ run(async () => {
     last().props.onClick();
     assert.equal(last().props.label, 'Set by'); h.unmount();
   });
+  await test('the rules and texts both UIs share (desktop/native/tdp.mjs)', async () => {
+    const T = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/tdp.mjs')).href);
+    // No slider sequence breaks FPPT >= SPPT >= SPL or the ceilings.
+    let seed = 7, t = T.fromAbsolute(15, 20, 25);
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    for (let i = 0; i < 600; i++) {
+      const c = i < 300 ? caps.std : caps.max, v = Math.round(next() * 60) - 5, pick = Math.floor(next() * 3);
+      t = pick === 0 ? T.withSpl(t, v, c, 5) : pick === 1 ? T.withSppt(t, v, c) : T.withFppt(t, v, c);
+      const a = T.absolute(t);
+      assert.ok(a.spl >= 5 && a.spl <= a.sppt && a.sppt <= a.fppt, `order ${JSON.stringify(a)}`);
+      assert.ok(a.spl <= c.spl && a.sppt <= c.sppt && a.fppt <= c.fppt, `ceilings ${JSON.stringify(a)}`);
+    }
+    assert.deepEqual(T.absolute(T.simpleTuning(30, T.simpleCaps(caps.max, false), 5)), { spl: 30, sppt: 37, fppt: 45 });
+    // "Above Lenovo's limit" warns only while 50 W is not allowed.
+    const high = { spl: 40, sppt: 45, fppt: 50 };
+    assert.equal(T.powerSummary(true, 'Game 1', 'Custom', high, 18.25, false, caps.std), "Game 1: Custom · 40 W · drawing 18.3 W · above Lenovo's limit");
+    assert.equal(T.powerSummary(true, 'Global', 'Custom', high, null, true, caps.std), 'Global: Custom · 40 W');
+    assert.equal(T.powerSummary(false, 'Global', 'Custom', high, null, false, caps.std), "Off · the console uses Lenovo's power limits.");
+    // A game's limits are named by their values; the saved name belongs to Global.
+    assert.deepEqual(T.activeLimits({ spl: 16000, sppt: 25000, fppt: 30000, active_preset: 'balanced' }),
+      { spl: 16, sppt: 25, fppt: 30, global: true, label: 'Balanced' });
+    assert.equal(T.activeLimits({ spl: 15000, sppt: 20000, fppt: 25000, active_spl: 35000, active_sppt: 37000, active_fppt: 45000, active_preset: 'custom' }).label, 'Maximum');
+    assert.equal(T.activeLimits({}), null);
+    // Retry helper download only while TDP or the 50 W unlock is missing the helper.
+    const ok = T.capsState({ ...caps, helper_retry_available: true });
+    assert.equal(T.helperRetryShown(ok, true), false);
+    const paused = T.capsState({ ...caps, extras: false, helper_retry_available: true });
+    assert.equal(T.helperRetryShown(paused, false), false);
+    assert.equal(T.helperRetryShown(paused, true), true);
+    assert.equal(T.tdpNotice(paused, true)[0], '50 W paused');
+    assert.deepEqual(T.tdpNotice(T.capsState({ tdp_available: false }), false),
+      ['TDP control unavailable', 'Neither the firmware TDP interface nor the verified RyzenAdj helper is available.']);
+    // CPU Boost cannot change while its state is unknown.
+    assert.equal(T.boostUsable({ available: true, enabled: null, error: '' }), false);
+    assert.equal(T.boostNote({ available: true, enabled: null, error: '' }), 'The current state could not be read.');
+    // One EPP scale; the panel steps by 10%, the Desktop app by 1%; unknown is 50%, set by the system.
+    const epp = { available: true, value: '64', numeric_value: null, numeric_supported: true, profiles: [], min: 0, max: 255, error: '' };
+    assert.deepEqual([T.eppPercent(epp, 10), T.eppPercent(epp, 1)], [30, 25]);
+    assert.equal(T.eppPercent({ ...epp, value: null }, 1), 50);
+    assert.equal(T.eppNote({ ...epp, value: null }), 'Set by the system. Move the slider to choose.');
+    assert.equal(T.eppNote({ ...epp, value: 'balance_power' }), T.EPP_PREFERENCE);
+    assert.equal(T.eppValue(40), '102');
+    assert.deepEqual(['default', 'performance', 'balance_performance', 'balance_power', 'power', 'low-power'].map(T.eppLabel),
+      ['System default', 'Prefer CPU', 'Balanced · Prefer CPU', 'Balanced · Prefer GPU', 'Prefer GPU', 'Low power']);
+    assert.equal(T.limitsText({ success: true, values: { spl_limit: 20, sppt_limit: 25 } }), 'SPL 20 · SPPT 25 · FPPT – W');
+  });
   console.log(`Passed ${tests} TDP recovery regressions.`);
 });

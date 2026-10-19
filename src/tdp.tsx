@@ -20,122 +20,20 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { confirmAction, detailsRows, errorText, infoRow, runningApp, watchRunningApp, type RunningApp } from "./shared";
+import {
+  absolute, boostNote, boostUsable, capsState, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote,
+  eppPercent, eppTitle, eppUnavailable, eppValue, extrasConfirm, extrasNote, extrasShown, FALLBACK_MAX, FALLBACK_MIN,
+  FALLBACK_STD, fromAbsolute, helperRetryShown, limitsText, normalise, offsetMax, powerSummary,
+  PRESET_LABELS, PRESET_ORDER, PRESETS, presetNote, resolvedPreset, scopeNote, simpleCaps, simpleTuning, sourceNote,
+  sourceText, tdpNotice, boostRoomNote, withFppt, withSpl, withSppt,
+  type Caps, type CapsInfo, type CpuPowerControls, type PresetKey, type PresetTable, type TdpInfo, type Tuning,
+} from "../desktop/native/tdp.mjs";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const toMw  = (w: number)  => w * 1000;
 const toW   = (mw: number) => Math.round(mw / 1000);
-const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 
-// ── Tuning model ───────────────────────────────────────────────────────────────
-// SPL is the actual TDP dial. SPPT and FPPT are expressed as headroom *above* SPL
-// rather than absolute watts, so raising the TDP carries the burst limits with it.
-interface Tuning { spl: number; spptOff: number; fpptOff: number }
-interface Caps   { spl: number; sppt: number; fppt: number }
-
-const OFFSET_MAX = { sppt: 15, fppt: 15 };
-
-// Used until get_caps() answers; the backend reports the firmware's real ceilings
-// and falls back to these same numbers (FALLBACK_STD_W in main.py) if it cannot.
-const FALLBACK_STD: Caps = { spl: 35, sppt: 37, fppt: 45 };
-const FALLBACK_MAX: Caps = { spl: 50, sppt: 50, fppt: 50 };
-const FALLBACK_MIN = 5;
-
-/** Headroom still available above the current SPL, per parameter. */
-const offsetMax = (spl: number, caps: Caps) => ({
-  sppt: Math.max(0, Math.min(OFFSET_MAX.sppt, caps.sppt - spl)),
-  fppt: Math.max(0, Math.min(OFFSET_MAX.fppt, caps.fppt - spl)),
-});
-
-/** Force a tuning back inside the ceilings, keeping SPPT <= FPPT. */
-function normalise(t: Tuning, caps: Caps, minW: number): Tuning {
-  const spl = clamp(t.spl, minW, caps.spl);
-  const max = offsetMax(spl, caps);
-  const spptOff = clamp(t.spptOff, 0, max.sppt);
-  const fpptOff = Math.max(clamp(t.fpptOff, 0, max.fppt), spptOff);
-  return { spl, spptOff, fpptOff };
-}
-
-const absolute = (t: Tuning) => ({
-  spl: t.spl, sppt: t.spl + t.spptOff, fppt: t.spl + t.fpptOff,
-});
-
-const fromAbsolute = (spl: number, sppt: number, fppt: number): Tuning => ({
-  spl, spptOff: Math.max(0, sppt - spl), fpptOff: Math.max(0, fppt - spl),
-});
-
-/** Standard single-dial Custom mode uses the same caps as the Go 2 firmware. */
-function simpleCaps(caps: Caps, unlocked: boolean): Caps {
-  return unlocked ? caps : {
-    spl: Math.min(caps.spl, FALLBACK_STD.spl),
-    sppt: Math.min(caps.sppt, FALLBACK_STD.sppt),
-    fppt: Math.min(caps.fppt, FALLBACK_STD.fppt),
-  };
-}
-
-function simpleTuning(spl: number, caps: Caps, minW: number): Tuning {
-  const bounded = clamp(spl, minW, caps.spl);
-  return fromAbsolute(bounded, Math.min(bounded + 10, caps.sppt),
-                      Math.min(bounded + 15, caps.fppt));
-}
-
-/** Slider handlers implementing the coupling rules between the three limits. */
-function makeTuningHandlers(t: Tuning, set: (next: Tuning) => void, caps: Caps, minW: number) {
-  return {
-    // Moving SPL re-clamps both offsets: at the ceiling there is no headroom left.
-    onSpl: (v: number) => set(normalise({ ...t, spl: v }, caps, minW)),
-    onSppt: (v: number) => {
-      const spptOff = clamp(v, 0, offsetMax(t.spl, caps).sppt);
-      // Pushing SPPT up drags FPPT along so SPPT never overtakes it.
-      set({ ...t, spptOff, fpptOff: Math.max(t.fpptOff, spptOff) });
-    },
-    onFppt: (v: number) => {
-      const fpptOff = clamp(v, 0, offsetMax(t.spl, caps).fppt);
-      // Pulling FPPT below SPPT drags SPPT down to meet it.
-      set({ ...t, fpptOff, spptOff: Math.min(t.spptOff, fpptOff) });
-    },
-  };
-}
-
-// ── Presets ────────────────────────────────────────────────────────────────────
-type PresetKey = "silent" | "balanced" | "performance" | "max" | "custom";
-
-type PresetTable = Record<Exclude<PresetKey, "custom">,
-                          { spl: number; sppt: number; fppt: number }>;
-
-// Used until get_caps() answers. The backend remains the source of truth.
-const PRESETS: PresetTable = {
-  silent:      { spl: 8,  sppt: 15, fppt: 20 },
-  balanced:    { spl: 16, sppt: 25, fppt: 30 },
-  performance: { spl: 20, sppt: 32, fppt: 35 },
-  max:         { spl: 35, sppt: 37, fppt: 45 },
-};
-
-const PRESET_LABELS: Record<PresetKey, string> = {
-  silent:      "Silent",
-  balanced:    "Balanced",
-  performance: "Performance",
-  max:         "Maximum",
-  custom:      "Custom",
-};
-
-const PRESET_ORDER: PresetKey[] = ["silent", "balanced", "performance", "max", "custom"];
-
-function detectPreset(spl: number, sppt: number, fppt: number,
-                      table: PresetTable = PRESETS): PresetKey {
-  for (const key of Object.keys(table) as Exclude<PresetKey, "custom">[]) {
-    const v = table[key];
-    if (v.spl === spl && v.sppt === sppt && v.fppt === fppt) return key;
-  }
-  return "custom";
-}
-
-function resolvedPreset(spl: number, sppt: number, fppt: number, stored: string | undefined,
-                        table: PresetTable): PresetKey {
-  if (stored === "custom") return "custom";
-  const value = table[stored as keyof PresetTable];
-  return value?.spl === spl && value.sppt === sppt && value.fppt === fppt
-    ? stored as PresetKey : detectPreset(spl, sppt, fppt, table);
-}
+// The slider model, presets and texts are in desktop/native/tdp.mjs, shared with the Desktop app.
 
 /** Slider view of saved limits (mW). In simple mode a Custom profile follows the single-dial rule. */
 function savedTuning(limits: { spl: number; sppt: number; fppt: number }, stored: string | undefined,
@@ -145,24 +43,10 @@ function savedTuning(limits: { spl: number; sppt: number; fppt: number }, stored
   return { preset, tuning: !advanced && preset === "custom" ? simpleTuning(spl, caps, minW) : fromAbsolute(spl, sppt, fppt) };
 }
 
-export const tdpModeLabel = (spl: number, sppt: number, fppt: number, stored?: string) =>
-  PRESET_LABELS[resolvedPreset(spl, sppt, fppt, stored, PRESETS)];
-
-const exceedsCaps = (spl: number, sppt: number, fppt: number, caps: Caps) =>
-  spl > caps.spl || sppt > caps.sppt || fppt > caps.fppt;
-
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface Settings   { spl: number; sppt: number; fppt: number; enabled: boolean;
                        active_preset?: string; advanced_tdp_control?: boolean }
 interface TdpResult  { success: boolean; stderr?: string; skipped?: boolean; returncode?: number }
-interface TdpValues  {
-  spl_limit?:  number;
-  sppt_limit?: number;
-  fppt_limit?: number;
-  package_draw?: number;
-  source?: string;
-}
-interface TdpInfo     { success: boolean; values: TdpValues; error?: string }
 interface PowerSource { ac: boolean }
 interface GameProfile {
   error?: string;
@@ -173,44 +57,8 @@ interface GameProfile {
   ac_separate: boolean;
   ac_profile: { spl: number; sppt: number; fppt: number; ac_preset?: string };
 }
-interface CapsInfo   { min: number; std: Caps; max: Caps; wmi?: boolean; extras?: boolean;
-                       presets?: PresetTable; tdp_available?: boolean; tdp_error?: string;
-                       helper_retry_available?: boolean }
 interface RunningGame { appId: string; name: string }
 interface ReadyState  { ready: boolean; error: string }
-interface CpuBoostControl {
-  available: boolean;
-  enabled: boolean | null;
-  error: string;
-}
-
-interface EppControl {
-  compatibility_note?: string;
-  available: boolean;
-  value: string | null;
-  profiles: string[];
-  numeric_supported: boolean;
-  numeric_value: number | null;
-  min: number;
-  max: number;
-  error: string;
-}
-
-/** Shared payload for the CPU power controls getter and both setters. */
-interface CpuPowerControls {
-  success: boolean;
-  available: boolean;
-  cpu_boost: CpuBoostControl;
-  epp: EppControl;
-  error: string;
-  profile?: {
-    app_id: string;
-    ac_profile: boolean;
-    active: boolean;
-    cpu_boost_enabled: boolean | null;
-    epp: string | null;
-  };
-}
 
 // ── Backend callables ──────────────────────────────────────────────────────────
 const isReady           = callable<[], ReadyState>("is_ready");
@@ -406,12 +254,6 @@ const useTdpInfo = ({ visible: tabShown = true }: { visible?: boolean } = {}) =>
 
 // ── CPU power controls ────────────────────────────────────────────────────────
 
-const EPP_NAMED_VALUES: Record<string, number> = {
-  performance: 0,
-  balance_performance: 128,
-  balance_power: 191,
-  power: 255,
-};
 const EPP_DEBOUNCE_MS = 350;
 
 const unavailableCpuPowerControls = (error = ""): CpuPowerControls => ({
@@ -449,46 +291,7 @@ function checkedCpuPowerControls(value: unknown, appId: string, acProfile: boole
   return raw;
 }
 
-const readableEppProfile = (profile: string | null) => {
-  if (!profile) return "Unknown";
-  const labels: Record<string, string> = {
-    default: "System default",
-    performance: "Prefer CPU",
-    balance_performance: "Balanced · Prefer CPU",
-    balance_power: "Balanced · Prefer GPU",
-    power: "Prefer GPU",
-  };
-  if (labels[profile]) return labels[profile];
-  const readable = profile.replace(/[-_]+/g, " ").trim();
-  return readable.charAt(0).toUpperCase() + readable.slice(1);
-};
-
-const parseNumericEpp = (value: string | null) => {
-  if (!value || !/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 255 ? parsed : null;
-};
-
-const eppSliderPercent = (epp: EppControl) => {
-  const parsed = parseNumericEpp(epp.value);
-  const named = epp.value ? EPP_NAMED_VALUES[epp.value] : undefined;
-  const rawValue = epp.numeric_value ?? parsed ?? named ?? 128;
-  return clamp(Math.round((rawValue * 100 / 255) / 10) * 10, 0, 100);
-};
-
 type CpuPowerAction = "boost" | "epp";
-
-// An inactive editor shows its saved target while retaining live capabilities.
-// Hardware readback remains authoritative for the profile that is active now.
-const cpuControlsForEditor = (controls: CpuPowerControls): CpuPowerControls => {
-  const profile = controls.profile;
-  if (!profile || profile.active) return controls;
-  return {
-    ...controls,
-    cpu_boost: { ...controls.cpu_boost, enabled: profile.cpu_boost_enabled },
-    epp: { ...controls.epp, value: profile.epp, numeric_value: parseNumericEpp(profile.epp) },
-  };
-};
 
 interface CpuPowerControlsSectionProps {
   appId?: string;
@@ -535,12 +338,12 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   const acceptControls = useCallback((next: CpuPowerControls) => {
     controlsRef.current = next;
     setControls(next);
-    if (!eppPendingRef.current) setEppDraft(eppSliderPercent(cpuControlsForEditor(next).epp));
+    if (!eppPendingRef.current) setEppDraft(eppPercent(editorControls(next).epp, 10));
   }, []);
 
   const rollbackEppDraft = useCallback(() => {
     const confirmed = controlsRef.current;
-    if (confirmed) setEppDraft(eppSliderPercent(cpuControlsForEditor(confirmed).epp));
+    if (confirmed) setEppDraft(eppPercent(editorControls(confirmed).epp, 10));
   }, []);
 
   const cancelEppDebounce = useCallback(() => {
@@ -703,14 +506,14 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   };
 
   const changeBoost = (enabled: boolean) => {
-    const boost = controlsRef.current && cpuControlsForEditor(controlsRef.current).cpu_boost;
+    const boost = controlsRef.current && editorControls(controlsRef.current).cpu_boost;
     if (!visibleRef.current || !boost?.available || boost.enabled == null ||
         actionRef.current || eppPendingRef.current || enabled === boost.enabled) return;
     void runAction("boost", () => setCpuBoost(enabled, appId, acProfile, expectedAppId));
   };
 
   const changeEpp = (value: string) => {
-    const current = controlsRef.current && cpuControlsForEditor(controlsRef.current);
+    const current = controlsRef.current && editorControls(controlsRef.current);
     const epp = current?.epp;
     if (!visibleRef.current || !epp?.available || actionRef.current ||
         (value === epp.value && (current?.profile?.epp == null || value === current.profile.epp))) return;
@@ -718,11 +521,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   };
 
   const scheduleNumericEpp = (value: number) => {
-    const epp = controlsRef.current && cpuControlsForEditor(controlsRef.current).epp;
+    const epp = controlsRef.current && editorControls(controlsRef.current).epp;
     if (!mountedRef.current || !visibleRef.current || !epp?.available ||
         !epp.numeric_supported || actionRef.current) return;
-    const percent = Math.round(clamp(value, 0, 100) / 10) * 10;
-    const rawValue = Math.round(percent * 255 / 100);
+    const percent = Math.round(Math.min(Math.max(value, 0), 100) / 10) * 10;
+    const rawValue = eppValue(percent);
     setEppDraft(percent);
     eppPendingRef.current = true;
     setEppPending(true);
@@ -739,7 +542,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
       setEppPending(false);
       // Keep the scope and foreground game from this gesture, including when
       // a remount flushes the slider after switching game or battery/AC editor.
-      void runAction("epp", () => setEpp(String(rawValue), appId, acProfile, expectedAppId));
+      void runAction("epp", () => setEpp(rawValue, appId, acProfile, expectedAppId));
     };
     flushEppRef.current = flush;
     eppTimerRef.current = setTimeout(flush, EPP_DEBOUNCE_MS);
@@ -755,14 +558,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
     </PanelSection>
   );
 
-  const editorControls = cpuControlsForEditor(controls);
-  const boost = editorControls.cpu_boost;
-  const epp = editorControls.epp;
+  const shown = editorControls(controls);
+  const boost = shown.cpu_boost;
+  const epp = shown.epp;
   const busy = loading || changing !== null || eppPending;
-  const numericCurrent = parseNumericEpp(epp.value);
-  const eppLabel = epp.numeric_supported && numericCurrent != null
-    ? "CPU energy preference"
-    : `CPU energy preference · ${readableEppProfile(epp.value)}`;
+  const title = eppTitle(epp);
   const biasProfiles = epp.profiles.filter((profile) =>
     Object.prototype.hasOwnProperty.call(EPP_NAMED_VALUES, profile));
   const specialProfiles = epp.profiles.filter((profile) =>
@@ -773,14 +573,10 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
   const noDiscreteChoice = profileIndex >= 0
     ? biasProfiles.length < 2
     : biasProfiles.length < 1;
-  const driverManagedNumeric = epp.numeric_supported && numericCurrent == null &&
-    (epp.value == null || EPP_NAMED_VALUES[epp.value] == null);
   // A failed change shows on its control; a failed read on CPU Boost, the first row.
   const globalError = requestError || controls.error;
   const errorFor = (kind: CpuPowerAction) =>
     (failedAction ?? "boost") === kind ? globalError : "";
-  const PREFERENCE = "Left: faster CPU. Right: more power left for the GPU.";
-  const eppUnavailable = epp.error || "Not supported on this device.";
 
   return (
     <PanelSection title="CPU">
@@ -788,20 +584,16 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
         <ToggleField
           label="CPU Boost"
           description={errorFor("boost") || (
-            !boost.available ? (boost.error || "Not supported on this device.")
-            : boost.enabled == null ? (boost.error || "The current state could not be read.")
-            : changing === "boost" ? "Applying…"
-            : boost.enabled ? "Higher CPU clocks; uses more power."
-            : "CPU stays at base clock; saves power.")}
+            boostUsable(boost) && changing === "boost" ? "Applying…" : boostNote(boost))}
           checked={boost.enabled === true}
-          disabled={busy || !boost.available || boost.enabled == null}
+          disabled={busy || !boostUsable(boost)}
           onChange={changeBoost}
         />
       </PanelSectionRow>
       <PanelSectionRow>
         {epp.numeric_supported ? (
           <SliderField
-            label={eppLabel}
+            label={title}
             value={eppDraft}
             min={0}
             max={100}
@@ -811,14 +603,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
             disabled={loading || changing !== null || !epp.available}
             onChange={scheduleNumericEpp}
             description={errorFor("epp") || (
-              !epp.available ? eppUnavailable
-              : changing === "epp" || eppPending ? "Applying…"
-              : driverManagedNumeric ? "Set by the system. Move the slider to choose."
-              : PREFERENCE)}
+              epp.available && (changing === "epp" || eppPending) ? "Applying…" : eppNote(epp))}
           />
         ) : (
           <SliderField
-            label={eppLabel}
+            label={title}
             value={discreteProfileValue}
             min={0}
             max={Math.max(1, biasProfiles.length - 1 + profileOffset)}
@@ -830,11 +619,11 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
               if (profile) changeEpp(profile);
             }}
             description={errorFor("epp") || (
-              !epp.available ? eppUnavailable
+              !epp.available ? eppUnavailable(epp)
               : changing === "epp" ? "Applying…"
               : noDiscreteChoice ? "No other choice on this device."
-              : profileIndex < 0 ? `Choose: ${biasProfiles.map(readableEppProfile).join(" / ")}`
-              : PREFERENCE)}
+              : profileIndex < 0 ? `Choose: ${biasProfiles.map(eppLabel).join(" / ")}`
+              : EPP_PREFERENCE)}
           />
         )}
       </PanelSectionRow>
@@ -845,7 +634,7 @@ const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
             disabled={busy || !epp.available || (controls.profile?.epp ?? epp.value) === profile}
             onClick={() => changeEpp(profile)}
           >
-            {`Use ${readableEppProfile(profile)}`}
+            {`Use ${eppLabel(profile)}`}
           </ButtonItem>
         </PanelSectionRow>
       ))}
@@ -971,13 +760,11 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
       setStdCaps(c.std); setMaxCaps(c.max); setMinW(c.min);
       setPresets(c.presets ?? PRESETS);
     }
-    const extras = c.extras !== false;
-    const available = c.tdp_available ?? (c.wmi === undefined && c.extras === undefined
-      ? true : c.wmi === true || c.extras === true);
-    setExtrasAvailable(extras);
-    setTdpAvailable(available);
-    setTdpError(c.tdp_error || (available ? "" : "Neither the firmware TDP interface nor the verified RyzenAdj helper is available."));
-    setHelperRetryAvailable(c.helper_retry_available ?? !extras);
+    const state = capsState(c);
+    setExtrasAvailable(state.extrasAvailable);
+    setTdpAvailable(state.tdpAvailable);
+    setTdpError(state.tdpError);
+    setHelperRetryAvailable(state.helperRetryAvailable);
   };
   const onCpuBusyChange = useCallback((owner: object, busy: boolean) => {
     if (busy) cpuBusyOwnersRef.current.add(owner);
@@ -1005,7 +792,11 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
     setDirty(true);
     setActive(next);
   };
-  const handlers = makeTuningHandlers(active, editActive, customCaps, minW);
+  const handlers = {
+    onSpl: (v: number) => editActive(withSpl(active, v, customCaps, minW)),
+    onSppt: (v: number) => editActive(withSppt(active, v, customCaps)),
+    onFppt: (v: number) => editActive(withFppt(active, v, customCaps)),
+  };
   /** Run `proceed` now, or after confirming that the unsaved Custom limits are dropped. */
   const askDiscard = (proceed: () => void) => {
     if (!dirtyRef.current) return proceed();
@@ -1626,29 +1417,19 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
   const runningStored = !perGame ? globalProfile.preset : acSeparate && acOnline ? savedAcPreset : savedPreset;
   const now = absolute(running);
   const nowLabel = PRESET_LABELS[resolvedPreset(now.spl, now.sppt, now.fppt, runningStored, presets)];
-  const draw = info?.success && info.values?.package_draw != null ? ` · drawing ${info.values.package_draw.toFixed(1)} W` : "";
-  const enableDescription = failureFor("enabled") ?? (!enabled ? "Off · the console uses Lenovo's power limits."
-    : profilePending || profileError ? "Reading profile…"
-    : `${perGame && game ? game.name : "Global"}: ${nowLabel} · ${now.spl} W${draw}${
-      !extrasUnlocked && exceedsCaps(now.spl, now.sppt, now.fppt, stdCaps) ? " · above Lenovo's limit" : ""}`);
-    const presetDescription = failureFor("preset") ?? (preset === "custom" ? "Set your own limits below."
-    : `${PRESET_LABELS[preset]} · ${presets[preset].spl} W (boost ${presets[preset].sppt}/${presets[preset].fppt} W)`);
-  const scopeDescription = !game ? "" : failureFor("scope") ?? (scope === "global"
-    ? `${game.name} uses Global settings, shared by all games.`
-    : scope === "game" ? `Only ${game.name} uses these settings.`
-    : `${game.name} has separate settings on battery and on charger.`);
-  const sourceDescription = `${acOnline ? "Plugged in now." : "On battery now."}${editingAc === acOnline ? ""
-    : editingAc ? " Changes apply when you plug in." : " Changes apply when you unplug."}`;
-  const v: TdpValues = (info?.success && info.values) || {};
-  const watts = (value?: number) => value == null ? "–" : value.toFixed(0);
+  const enableDescription = failureFor("enabled") ?? (enabled && (profilePending || profileError) ? "Reading profile…"
+    : powerSummary(enabled, perGame && game ? game.name : "Global", nowLabel, now,
+      info?.success ? info.values?.package_draw : null, extrasUnlocked, stdCaps));
+  const presetDescription = failureFor("preset") ?? presetNote(preset, presets);
+  const scopeDescription = !game ? "" : failureFor("scope") ?? scopeNote(scope === "game_ac" ? "charger" : scope, game.name);
+  const sourceDescription = sourceNote(acOnline, editingAc);
+  const capsNow = { tdpAvailable, extrasAvailable, helperRetryAvailable, tdpError };
+  const notice = tdpNotice(capsNow, extrasUnlocked);
 
   return (
     <>
-      {(!tdpAvailable || (!extrasAvailable && extrasUnlocked) || profileError) && <PanelSection>
-        {!tdpAvailable ? infoRow("TDP control unavailable", tdpError)
-          : !extrasAvailable && extrasUnlocked ? infoRow("50 W paused",
-            "Firmware limits are active until the 50 W helper is available. Saved profiles are kept.")
-          : null}
+      {(notice || profileError) && <PanelSection>
+        {notice && infoRow(notice[0], notice[1])}
         {profileError && <>
           {infoRow("Could not load profile", profileError)}
           <PanelSectionRow><ButtonItem layout="below" onClick={() => {
@@ -1726,7 +1507,7 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
               value={active.spptOff} min={0} max={om.sppt || 1} step={1}
               disabled={om.sppt === 0 || loading || !tdpAvailable}
               onChange={handlers.onSppt}
-              description={om.sppt === 0 ? "No room left at this power." : `Up to ${active.spl + active.spptOff} W.`}
+              description={boostRoomNote(active.spl, active.spptOff, om.sppt)}
             />
           </PanelSectionRow>
           <PanelSectionRow>
@@ -1735,7 +1516,7 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
               value={active.fpptOff} min={0} max={om.fppt || 1} step={1}
               disabled={om.fppt === 0 || loading || !tdpAvailable}
               onChange={handlers.onFppt}
-              description={om.fppt === 0 ? "No room left at this power." : `Up to ${active.spl + active.fpptOff} W.`}
+              description={boostRoomNote(active.spl, active.fpptOff, om.fppt)}
             />
           </PanelSectionRow>
           </>}
@@ -1771,19 +1552,14 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
             onChange={handleAdvancedTdpControlToggle}
           />
         </PanelSectionRow>
-        {(extrasAvailable || helperRetryAvailable) && <PanelSectionRow>
+        {extrasShown(capsNow) && <PanelSectionRow>
           <ToggleField
             label={`Allow up to ${FALLBACK_MAX.spl} W`}
-            description={failureFor("extras") ?? (extrasUnlocked
-              ? `Custom goes up to ${FALLBACK_MAX.spl} W. Turning off lowers profiles above ${stdCaps.spl} W.`
-              : extrasAvailable ? "Beyond Lenovo's limits. Hotter, louder, shorter battery."
-              : "Downloads a verified helper from GitHub first.")}
+            description={failureFor("extras") ?? extrasNote(extrasUnlocked, capsNow, stdCaps.spl)}
             checked={extrasUnlocked}
             disabled={loading || !tdpAvailable}
-            onChange={checked => checked ? confirmAction(`Allow up to ${FALLBACK_MAX.spl} W?`,
-              "This goes beyond Lenovo's power limits. The console runs hotter and louder, and the battery drains faster."
-                + (extrasAvailable ? "" : " Companion first downloads the verified RyzenAdj helper from GitHub."),
-              `Allow ${FALLBACK_MAX.spl} W`, () => void handleExtrasUnlockedToggle(true))
+            onChange={checked => checked ? confirmAction(extrasConfirm(capsNow).title, extrasConfirm(capsNow).text,
+              extrasConfirm(capsNow).ok, () => void handleExtrasUnlockedToggle(true))
               : void handleExtrasUnlockedToggle(false)}
           />
         </PanelSectionRow>}
@@ -1795,13 +1571,13 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
             {`Delete profile for ${game.name}`}
           </ButtonItem>
         </PanelSectionRow>}
-        {helperRetryAvailable && (!tdpAvailable || (!extrasAvailable && extrasUnlocked)) && <PanelSectionRow>
+        {helperRetryShown(capsNow, extrasUnlocked) && <PanelSectionRow>
           <ButtonItem layout="below" disabled={operationLoading} description={failureFor("helper")}
             onClick={handleHelperRetry}>Retry helper download</ButtonItem>
         </PanelSectionRow>}
         {detailsRows(details, () => setDetails(value => !value), [
-          ["Limits now", info?.success ? `SPL ${watts(v.spl_limit)} · SPPT ${watts(v.sppt_limit)} · FPPT ${watts(v.fppt_limit)} W` : "—"],
-          ["Set by", v.source || "—"],
+          ["Limits now", limitsText(info)],
+          ["Set by", sourceText(info)],
           ...(cpuNote ? [["CPU energy", cpuNote] as [string, string]] : []),
         ])}
       </PanelSection>
