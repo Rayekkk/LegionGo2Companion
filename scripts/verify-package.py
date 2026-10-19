@@ -28,9 +28,13 @@ with zipfile.ZipFile(archive) as payload:
     assert sum(member.file_size for member in payload.infolist()) <= 128 * 1024 * 1024, 'Updater expansion limit'
     assert len(names) == len(set(names)), 'Duplicate members'
     assert {'LegionGo2Companion/' + name for name in required} <= set(names), 'Missing payload'
+    # package.mjs output is reproducible: sorted names, one timestamp, fixed modes.
+    assert names == sorted(names), 'Unsorted members'
+    assert len({member.date_time for member in payload.infolist()}) == 1, 'Mixed timestamps'
     files = 0
     for member in payload.infolist():
         path = PurePosixPath(member.filename)
+        assert member.external_attr >> 16 == (0o40755 if member.is_dir() else 0o100644), f'Mode: {path}'
         assert path.parts[0] == 'LegionGo2Companion' and '..' not in path.parts and '\\' not in member.filename
         assert not forbidden.intersection(path.parts), f'Private path: {path}'
         assert not stat.S_ISLNK(member.external_attr >> 16), f'Symlink: {path}'
