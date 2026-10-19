@@ -2957,6 +2957,16 @@ class Plugin:
             return refuse("preflight_failed", "6 GHz only requires the native WPA WiFi backend.")
 
         if current_mode not in BAND_POLICIES:
+            state = settings.get("band_policy_state") or {}
+            if mode == BAND_POLICY_OFF and not (state.get("owns_iwd") or state.get("owns_nm_band")):
+                # Nothing was recorded as changed, so there is nothing to put back.
+                self._write_band_settings_fields(SETTINGS_FILE, {
+                    "band_policy": BAND_POLICY_OFF, "band_policy_state": {}})
+                diagnostic_event("wifi", "band_policy_forgotten", reason="invalid_saved_band_policy")
+                return {"success": True, "band_policy": BAND_POLICY_OFF, "reconnected": False,
+                        "rolled_back": False,
+                        "message": "The saved band policy was not recognized and changed nothing; "
+                                   "WiFi is back on Automatic."}
             return refuse("invalid_saved_band_policy",
                           "Saved band policy is not recognized; no network changes were made.")
 
@@ -2988,8 +2998,15 @@ class Plugin:
             }
 
         ownership_error = transition_ownership_error
+        replaced_outside = False
         if ownership_error:
-            return refuse("ownership_conflict", ownership_error)
+            # Automatic means the original WiFi behaviour, so the recorded original
+            # goes back even over a value changed outside Companion. An unreadable
+            # or incomplete state still refuses: the original cannot be trusted then.
+            if mode != BAND_POLICY_OFF or "changed outside" not in ownership_error:
+                return refuse("ownership_conflict", ownership_error)
+            replaced_outside = True
+            diagnostic_event("wifi", "band_policy_outside_change_replaced")
 
         transition_error = self._band_policy_transition_error(settings, mode)
         if transition_error:
@@ -3338,7 +3355,9 @@ class Plugin:
                 "message": ("Saved iwd preference cleared; the WPA connection was not changed."
                             if inactive_iwd_cleanup else
                             "Band policy cleared; WiFi has not reconnected yet."
-                            if not_reconnected else "Band policy applied and verified."),
+                            if not_reconnected else "Band policy applied and verified.")
+                           + (" A band setting changed outside Companion was put back to its original value."
+                              if replaced_outside else ""),
             }
         except Exception as e:
             diagnostic_event('wifi', 'band_policy_failed', level='error', stage='apply', code=type(e).__name__)

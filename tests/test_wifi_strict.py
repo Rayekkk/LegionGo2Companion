@@ -257,6 +257,16 @@ class StrictWifiTests(unittest.TestCase):
         self.assertTrue(accepted["success"])
         self.assertEqual(accepted["frequency"], 5320)
 
+    def test_automatic_restores_the_iwd_original_over_an_outside_change(self):
+        self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
+        self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")   # someone else's value
+        self.assertEqual(self.change(wifi.BAND_POLICY_STRICT_HIGH)["error"], "ownership_conflict")
+        result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertTrue(result["success"], result)
+        self.assertIn("changed outside Companion was put back", result["message"])
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
+        self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
+
     def test_status_reports_strict_drift_even_when_wifi_disconnected(self):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
         self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")

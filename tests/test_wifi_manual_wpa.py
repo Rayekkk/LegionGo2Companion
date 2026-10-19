@@ -342,10 +342,26 @@ class SixOnlySupportAndReleaseTests(unittest.TestCase):
         self.assertEqual(wifi._load_settings()['band_policy'], wifi.BAND_POLICY_OFF)
         modify.assert_not_called()
 
-    def test_off_still_refuses_a_different_external_band(self):
-        result, _ = self.turn_off(('a', {'success': True}), UUID)
-        self.assertEqual(result['error'], 'ownership_conflict')
-        self.assertEqual(wifi._load_settings()['band_policy'], wifi.BAND_POLICY_SIX_ONLY)
+    def test_automatic_puts_the_original_back_over_a_band_changed_outside(self):
+        band = ['a']                       # someone else set 5 GHz after our 6 GHz only
+        self.six_only_state()
+        self.commands.side_effect = lambda *_a, **_k: {'success': True, 'stdout': UUID}
+        with patch.object(self.plugin, '_get_current_backend', return_value='wpa_supplicant'),              patch.object(self.plugin, '_get_active_connection_uuid', return_value=None),              patch.object(self.plugin, '_nmcli_get', side_effect=lambda *_a, **_k: (band[0], {'success': True})),              patch.object(self.plugin, '_nmcli_modify', side_effect=lambda _u, _k, v, **_kw: (
+                 band.__setitem__(0, v), {'success': True})[1]) as modify:
+            result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertTrue(result['success'], result)
+        self.assertEqual(band[0], '')       # the recorded original: no band restriction
+        self.assertIn('changed outside Companion was put back', result['message'])
+        self.assertEqual(wifi._load_settings()['band_policy'], wifi.BAND_POLICY_OFF)
+
+    def test_automatic_with_an_unrecognized_policy_and_nothing_owned_changes_nothing(self):
+        state = dict(wifi.DEFAULT_SETTINGS, band_policy='from_a_newer_version', band_policy_state={})
+        self.settings.write_text(json.dumps(state), encoding='utf-8')
+        with patch.object(self.plugin, '_get_current_backend', return_value='wpa_supplicant'),              patch.object(self.plugin, '_nmcli_modify') as modify:
+            result = self.change(wifi.BAND_POLICY_OFF)
+        self.assertTrue(result['success'], result)
+        self.assertEqual(wifi._load_settings()['band_policy'], wifi.BAND_POLICY_OFF)
+        modify.assert_not_called()
 
     def test_off_still_refuses_an_unreadable_profile_that_exists(self):
         result, _ = self.turn_off(('', {'success': False}), UUID)

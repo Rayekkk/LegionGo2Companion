@@ -14,6 +14,7 @@ Not released yet.
 
 ### Changed
 
+- **Wi-Fi:** **Automatic** always means the original Wi-Fi behaviour. If the band setting Companion applied was changed outside Companion, choosing Automatic now puts the recorded original back (and says so) instead of refusing. If a saved policy is not recognized and Companion never changed anything for it, Automatic simply clears it. A profile that cannot be read still refuses, because the original could not be checked.
 - Settings from the old standalone plugins (LeGoTDP, LeGo Vibe Control, LeGo2 Brightness Fix) and from versions before 2.1.0 are no longer imported. Companion still pauses while those plugins are installed.
 - Internal cleanup: duplicated and unused code was removed across the backend and both interfaces, with no change in what Companion does.
 
