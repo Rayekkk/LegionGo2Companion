@@ -58,6 +58,66 @@ class ProfileSelectionTests(unittest.TestCase):
         self.assertEqual(sum("up" in args for args in commands), 1)
 
 
+class IwdNativeFallbackTests(unittest.TestCase):
+    """NM's iwd backend can refuse every activation of a profile; iwd itself still joins."""
+    STATION = "/net/connman/iwd/0/9"
+    NETWORK = STATION + "/4e45_psk"
+
+    def tree(self, known=True, duplicate=False):
+        objects = {self.STATION: {"net.connman.iwd.Device": {"Name": {"data": "wlan0"}},
+                                  "net.connman.iwd.Station": {}}}
+        network = {"Name": {"data": "Home"}, "Device": {"data": self.STATION}}
+        if known:
+            network["KnownNetwork"] = {"data": "/net/connman/iwd/4e45_psk"}
+        objects[self.NETWORK] = {"net.connman.iwd.Network": network}
+        if duplicate:
+            objects[self.NETWORK + "x"] = {"net.connman.iwd.Network": dict(network)}
+        return json.dumps({"type": "a{oa{sa{sv}}}", "data": [objects]})
+
+    def execute(self, **tree):
+        plugin = wifi.Plugin()
+        clock, commands, activated = [0.0], [], [False]
+
+        def command(argv, **kwargs):
+            commands.append(argv)
+            if argv[:3] == ["/usr/bin/nmcli", "con", "up"]:
+                return {"success": False, "stderr": "Connection activation failed: No reason given"}
+            if "GetManagedObjects" in argv:
+                return {"success": True, "stdout": self.tree(**tree)}
+            if argv[-1] == "Connect":
+                activated[0] = True
+                return {"success": True, "stdout": ""}
+            return {"success": True, "stdout": "30 (disconnected)\n"}
+
+        with patch.object(plugin, "_run_cmd", side_effect=command), \
+             patch.object(plugin, "_get_current_backend", return_value="iwd"), \
+             patch.object(plugin, "_get_iwd_profile_conflict", return_value=""), \
+             patch.object(plugin, "_get_profile_ssid", return_value="Home"), \
+             patch.object(plugin, "_get_wifi_interface", return_value="wlan0"), \
+             patch.object(plugin, "_get_link_frequency", return_value=5260), \
+             patch.object(plugin, "_profile_is_active", side_effect=lambda *_: activated[0]), \
+             patch.object(wifi.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(wifi.time, "sleep", side_effect=lambda n: clock.__setitem__(0, clock[0] + n)):
+            result = plugin._reconnect_profile(UUID, cycle=True)
+        return result, commands
+
+    def test_refused_nm_activation_falls_back_to_iwd_once(self):
+        result, commands = self.execute()
+        self.assertTrue(result["success"], result)
+        connects = [argv for argv in commands if argv[-1] == "Connect"]
+        self.assertEqual(len(connects), 1)
+        self.assertIn(self.NETWORK, connects[0])
+        first_up = next(i for i, argv in enumerate(commands) if argv[:3] == ["/usr/bin/nmcli", "con", "up"])
+        self.assertGreater(commands.index(connects[0]), first_up)  # NetworkManager is always tried first.
+
+    def test_no_unique_known_network_never_calls_iwd_connect(self):
+        for tree in ({"known": False}, {"duplicate": True}):
+            with self.subTest(**tree):
+                result, commands = self.execute(**tree)
+                self.assertFalse(result["success"])
+                self.assertFalse(any(argv[-1] == "Connect" for argv in commands))
+
+
 class BandEnforcementTests(unittest.TestCase):
     setUp = strict_tests.StrictWifiTests.setUp
     change = strict_tests.StrictWifiTests.change

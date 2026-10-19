@@ -1731,6 +1731,43 @@ class Plugin:
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             return None
 
+    def _iwd_connect_profile(self, uuid: str, iface: str, timeout: float) -> dict:
+        """Ask iwd itself to join the profile's known network.
+
+        NetworkManager's iwd backend can refuse every activation of a profile
+        (measured on a WPA2/WPA3 network with an SAE profile: `prepare -> failed`,
+        no reason) while iwd still joins it on its own; NetworkManager then adopts
+        that link. Without this a rollback could never bring WiFi back.
+        """
+        ssid = self._get_profile_ssid(uuid)
+        tree = self._run_cmd([
+            "/usr/bin/busctl", "--json=short", "call", "net.connman.iwd", "/",
+            "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+        ], timeout=2)
+        path_re = r"/net/connman/iwd/[a-zA-Z0-9_/]+"
+        try:
+            objects = json.loads(tree.get("stdout", ""))["data"][0]
+            stations = [path for path, interfaces in objects.items()
+                        if interfaces.get("net.connman.iwd.Device", {}).get("Name", {}).get("data") == iface
+                        and "net.connman.iwd.Station" in interfaces and re.fullmatch(path_re, path)]
+            if not tree.get("success") or ssid is None or len(stations) != 1:
+                raise ValueError("No unique station")
+            networks = [path for path, interfaces in objects.items()
+                        if (network := interfaces.get("net.connman.iwd.Network"))
+                        and network.get("Name", {}).get("data") == ssid
+                        and network.get("Device", {}).get("data") == stations[0]
+                        and network.get("KnownNetwork", {}).get("data") not in (None, "", "/")
+                        and re.fullmatch(path_re, path)]
+            if len(networks) != 1:
+                raise ValueError("No unique known network")
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            return {"success": False, "stdout": "", "stderr": "iwd network unavailable", "returncode": 1}
+        seconds = max(1, int(timeout))
+        return self._run_cmd([
+            "/usr/bin/busctl", f"--timeout={seconds}", "call", "net.connman.iwd", networks[0],
+            "net.connman.iwd.Network", "Connect",
+        ], timeout=seconds + 2)
+
     def _reconnect_profile(
         self, uuid: str, was_active: bool = True, cycle: bool = True,
         activation_timeout: int = 25,
@@ -1746,7 +1783,9 @@ class Plugin:
 
         if not cycle and active() and frequency() is not None:
             return {"success": True, "reconnected": True, "autoconnected": True}
-        if self._get_current_backend() == "iwd":
+        on_iwd = self._get_current_backend() == "iwd"
+        iwd_fallback_used = False
+        if on_iwd:
             conflict = self._get_iwd_profile_conflict(uuid, allow_disabled_duplicates=not cycle)
             if conflict:
                 return {"success": False, "reconnected": False,
@@ -1826,6 +1865,13 @@ class Plugin:
                             and self._get_link_frequency(iface) is not None):
                         last_result["reconnected"] = True
                         return last_result
+                    remaining_activation = deadline - time.monotonic() - 1.0
+                    if (on_iwd and not iwd_fallback_used and not last_result.get("success")
+                            and not active() and remaining_activation >= 3.0):
+                        iwd_fallback_used = True
+                        self._iwd_connect_profile(uuid, iface, remaining_activation)
+                        # The loop verifies the profile and its radio link either way.
+                        next_manual_activation = time.monotonic()
 
             time.sleep(0.25)
 
