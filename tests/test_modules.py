@@ -233,6 +233,43 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result[name]['error'], '')
                 self.assertEqual(getattr(self.plugin, '_' + name)._unload.await_count, 2)
 
+    async def test_startup_runs_modules_one_at_a_time_and_isolates_failures(self):
+        # The Legion's AML aborts WMI/EC methods called concurrently from two startups.
+        running, order = set(), []
+        def step(name, fail=False):
+            async def run():
+                self.assertFalse(running, f'{name} started while {running} still starting')
+                running.add(name); order.append(name)
+                await asyncio.sleep(0.01)
+                running.discard(name)
+                if fail:
+                    raise RuntimeError(name + ' failed')
+            return run
+        for name in main.MODULE_NAMES:
+            getattr(self.plugin, '_' + name)._main.side_effect = step(name, fail=name == 'fan')
+        self.plugin._start_desktop = AsyncMock()
+        await self.plugin._main()
+        self.assertEqual(order, list(main.MODULE_NAMES))
+        self.assertFalse(self.plugin._module_status()['fan']['ready'])
+        self.assertTrue(all(self.plugin._module_status()[name]['ready'] for name in main.MODULE_NAMES if name != 'fan'))
+
+    async def test_shutdown_during_startup_skips_modules_not_yet_started(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow():
+            entered.set()
+            await release.wait()
+        self.plugin._tdp._main.side_effect = slow
+        self.plugin._start_desktop = AsyncMock()
+        start = asyncio.create_task(self.plugin._main())
+        await entered.wait()
+        stop = asyncio.create_task(self.plugin._unload())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(start, stop), 2)
+        self.plugin._tdp._unload.assert_awaited_once()
+        for name in main.MODULE_NAMES[1:]:
+            getattr(self.plugin, '_' + name)._main.assert_not_awaited()
+
     async def test_retry_cannot_start_over_workers_whose_cleanup_failed(self):
         self.plugin._rgb._main.side_effect = RuntimeError('startup failed')
         self.plugin._rgb._unload.side_effect = RuntimeError('worker cleanup failed')

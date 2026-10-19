@@ -511,11 +511,20 @@ class Plugin:
             and (stage == '_unload' or not module_runtime.is_paused(name))
             and callable(getattr(component, stage, None))
         )
-        results = await asyncio.gather(
-            *(self._start_module(name) if stage == '_main' else getattr(component, stage)()
-              for name, component in runnable),
-            return_exceptions=True,
-        )
+        if stage == '_main':
+            # One at a time: the Legion's AML aborts WMI/EC methods run concurrently
+            # (AE_AML_NOT_OWNER on ECMT). Unload keeps gather for Decky's 5 s budget.
+            results = []
+            for name, _ in runnable:
+                if self._closing:
+                    break  # Shutdown waits on the guard lock; skip modules not yet started.
+                try:
+                    results.append(await self._start_module(name))
+                except Exception as exc:
+                    results.append(exc)
+        else:
+            results = await asyncio.gather(*(getattr(component, stage)() for _, component in runnable),
+                                           return_exceptions=True)
         for (name, _), result in zip(runnable, results):
             if isinstance(result, BaseException):
                 diagnostics.event(name, 'module_stage_failed', level='error', stage=stage, error=result)
@@ -691,12 +700,14 @@ class Plugin:
                 self._updater_wait = module_runtime.background_task(self._start_controllers_after_updater())
             await self._start_modules(MODULE_NAMES)
             # One summary instead of a record per healthy module; failures logged their own cause.
-            diagnostics.event('plugin', 'startup_complete', source='backend',
-                ready=','.join(name for name in MODULE_NAMES if self._module_enabled(name)
-                               and self._module_health.get(name, {}).get('ready', True)) or None,
-                failed=','.join(name for name in MODULE_NAMES
-                                if self._module_health.get(name, {}).get('ready') is False
-                                or self._module_state.get(name, {}).get('pending')) or None)
+            # A shutdown during startup skipped the remaining modules, so there is nothing to summarise.
+            if not self._closing:
+                diagnostics.event('plugin', 'startup_complete', source='backend',
+                    ready=','.join(name for name in MODULE_NAMES if self._module_enabled(name)
+                                   and self._module_health.get(name, {}).get('ready', True)) or None,
+                    failed=','.join(name for name in MODULE_NAMES
+                                    if self._module_health.get(name, {}).get('ready') is False
+                                    or self._module_state.get(name, {}).get('pending')) or None)
         startup.set()
         await self._publish_modules()
         await self._check_guard()
@@ -707,6 +718,8 @@ class Plugin:
             if not module_runtime.is_paused(name):
                 await self._recover_pending_module(name)
         await self._run_stage("_main", names)
+        if self._closing:
+            return  # Modules skipped by a shutdown never started; nothing to restore into.
         for name in names:
             entry = self._module_state.get(name, {})
             if (self._module_enabled(name) and self._module_health.get(name, {}).get('ready', True)
