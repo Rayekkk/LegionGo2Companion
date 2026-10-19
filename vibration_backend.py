@@ -71,13 +71,11 @@ DEFAULT_PROFILE = {
 }
 
 SETTINGS_KEY_GAME_PROFILES = "game_profiles"
-SETTINGS_KEY_SCHEMA        = "schema_version"
 # Driver values found before the first write: {"pending": True} until captured,
 # {} when unknown (an existing install), else {attribute: value}.
 SETTINGS_KEY_BASELINE      = "baseline"
 _PROFILE_ATTRS = ('rumble_intensity', 'left_handle/rumble_mode', 'right_handle/rumble_mode',
                   'touchpad/vibration_intensity', 'touchpad/vibration_enabled')
-CURRENT_SCHEMA             = 2
 
 settings = SettingsManager(
     name="vibration_settings",
@@ -472,33 +470,14 @@ def _active_values(profiles: dict | None = None, app_id: str | None = None) -> d
 
 
 def _migrate() -> None:
-    """Create the default profile '0' and stamp the store schema, once."""
+    """Record, once, whether the controller still holds its own driver values."""
     with _settings_lock:
         _read_valid_settings()
-        # A hand-edited or truncated store can hold anything here, and this runs
-        # from _migration() - where a raise kills the plugin before its RPC
-        # socket exists.
-        try:
-            schema = int(settings.getSetting(SETTINGS_KEY_SCHEMA, 1))
-        except (TypeError, ValueError):
-            schema = 1
         if settings.getSetting(SETTINGS_KEY_BASELINE, None) is None:
             # Only an empty store proves the controller still holds its own values.
             fresh = not settings.settings
             settings.setSetting(SETTINGS_KEY_BASELINE, {"pending": True} if fresh else {})
             settings.commit()
-        if schema >= CURRENT_SCHEMA:
-            return
-        profiles = settings.getSetting(SETTINGS_KEY_GAME_PROFILES, {}) or {}
-        if not isinstance(profiles, dict):
-            profiles = {}
-        if DEFAULT_APP not in profiles:
-            profiles[DEFAULT_APP] = {"overwrite": False,
-                                     "settings": _coerce_profile(None)}
-            event("vibration", "settings_migrated", scope="global", version=str(CURRENT_SCHEMA))
-        settings.setSetting(SETTINGS_KEY_GAME_PROFILES, profiles)
-        settings.setSetting(SETTINGS_KEY_SCHEMA, CURRENT_SCHEMA)
-        settings.commit()
 
 
 def _profile_context() -> tuple[dict, dict]:
