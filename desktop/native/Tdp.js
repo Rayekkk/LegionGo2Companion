@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 .pragma library
-// The Custom slider model of the Decky panel (src/tdp.tsx), kept identical: SPL is the dial,
-// slow and fast boost are headroom above it, so no slider position breaks FPPT >= SPPT >= SPL
-// or the ceilings. A tuning is {spl, spptOff, fpptOff} in watts; caps are {spl, sppt, fppt}.
+// The Custom slider model of the Decky panel (src/tdp.tsx), kept identical; tests/frontend_desktop_parity.cjs
+// compares the two. SPL is the dial, slow and fast boost are headroom above it, so no slider position
+// breaks FPPT >= SPPT >= SPL or the ceilings. A tuning is {spl, spptOff, fpptOff} in watts; caps are {spl, sppt, fppt}.
 var OFFSET_MAX = {sppt: 15, fppt: 15};
 var FALLBACK_STD = {spl: 35, sppt: 37, fppt: 45};
 
