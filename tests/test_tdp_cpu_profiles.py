@@ -246,19 +246,107 @@ class CpuProfileTests(unittest.TestCase):
         self.assert_hardware(False, 'performance')
         self.assertEqual(self.payload()['settings']['epp'], 'performance')
 
-    def test_default_epp_persistence_failure_restores_concrete_readback(self):
+    def test_epp_persistence_failure_never_touches_the_hardware(self):
         self.seed({}, epp='performance')
         self.hardware(False, 'performance')
-        writer = tdp._write_cpu_power_text
-        def kernel_write(path, value):
-            writer(path, 'balance_performance' if value == 'default' else value)
-        with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write), \
+        with patch.object(tdp, '_write_cpu_power_text') as write, \
                 patch.object(tdp, '_write_keys', side_effect=OSError('isolated persistence failure')):
             result = asyncio.run(self.plugin.set_epp('default'))
         self.assertFalse(result['success'])
-        self.assertIn('previous state restored', result['error'])
+        self.assertIn('settings persist failed', result['error'])
+        write.assert_not_called()
         self.assert_hardware(False, 'performance')
         self.assertEqual(self.payload()['settings']['epp'], 'performance')
+
+    def test_first_cpu_change_interrupted_mid_write_is_still_released(self):
+        # R02: with no earlier choice, only the saved choice makes release restore the control.
+        self.seed({}, cpu_boost_enabled=None, epp=None)
+        self.hardware(False, '77')
+        writer = tdp._write_cpu_power_text
+        def crash_after_first_write(path, value):
+            writer(path, value)
+            raise SystemExit('plugin killed mid-write')
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=crash_after_first_write):
+            with self.assertRaises(SystemExit):
+                asyncio.run(self.plugin.set_epp('power'))
+        self.assertEqual(self.epp_paths[0].read_text(), 'power')
+        self.assertTrue(tdp._release_controls_locked()['success'])
+        self.assertEqual([p.read_text() for p in self.epp_paths], ['balance_performance'] * 2)
+
+    def test_incomplete_rollback_keeps_the_choice_so_release_restores(self):
+        self.seed({}, cpu_boost_enabled=None, epp=None)
+        self.hardware(False, '77')
+        reader, writer = tdp._read_cpu_power_text, tdp._write_cpu_power_text
+        written = []
+        def write(path, value):
+            writer(path, value)
+            written.append(path)
+        def flaky_read(path):
+            if written:  # the write landed, then sysfs reads start failing
+                raise OSError('isolated read failure')
+            return reader(path)
+        with patch.object(tdp, '_read_cpu_power_text', side_effect=flaky_read), \
+                patch.object(tdp, '_write_cpu_power_text', side_effect=write):
+            result = asyncio.run(self.plugin.set_epp('power'))
+        self.assertFalse(result['success'])
+        self.assertIn('rollback incomplete', result['error'])
+        self.assertEqual(self.payload()['settings']['epp'], 'power')
+        self.assertTrue(tdp._release_controls_locked()['success'])
+        self.assertEqual([p.read_text() for p in self.epp_paths], ['balance_performance'] * 2)
+
+    def test_unresolved_default_epp_readback_failure_keeps_the_choice(self):
+        self.seed({}, cpu_boost_enabled=None, epp=None)
+        self.hardware(False, '77')
+        reader, writer = tdp._read_cpu_power_text, tdp._write_cpu_power_text
+        failed = []
+        def write(path, value):
+            writer(path, 'balance_performance' if value == 'default' else value)
+        def read_once_failing(path):
+            if Path(path) == self.epp_paths[0] and self.epp_paths[0].read_text() != '77' and not failed:
+                failed.append(path)
+                raise OSError('isolated read failure')
+            return reader(path)
+        with patch.object(tdp, '_read_cpu_power_text', side_effect=read_once_failing),                 patch.object(tdp, '_write_cpu_power_text', side_effect=write):
+            result = asyncio.run(self.plugin.set_epp('default'))
+        self.assertFalse(result['success'])
+        self.assertEqual(self.epp_paths[0].read_text(), 'balance_performance')
+        self.assertEqual(self.payload()['settings']['epp'], 'default')
+
+    def test_failed_settings_revert_reports_the_hardware_error(self):
+        self.seed({}, cpu_boost_enabled=None, epp=None)
+        self.hardware(False, '77')
+        writer, persist = tdp._write_cpu_power_text, tdp._write_keys
+        def refused(path, value):
+            writer(path, value)
+            if value != '77':
+                raise OSError('isolated write failure')
+        writes = []
+        def persist_once(values):
+            writes.append(values)
+            if len(writes) > 1:
+                raise OSError('disk full on revert')
+            persist(values)
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=refused),                 patch.object(tdp, '_write_keys', side_effect=persist_once):
+            result = asyncio.run(self.plugin.set_epp('power'))
+        self.assertFalse(result['success'])
+        self.assertIn('isolated write failure', result['error'])
+        self.assertIn('settings revert failed: disk full on revert', result['error'])
+        self.assert_hardware(False, '77')
+
+    def test_refused_cpu_change_with_complete_rollback_keeps_the_old_choice(self):
+        self.seed({}, cpu_boost_enabled=None, epp=None)
+        self.hardware(False, '77')
+        writer = tdp._write_cpu_power_text
+        def refused(path, value):
+            writer(path, value)
+            if value != '77':
+                raise OSError('isolated write failure')
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=refused):
+            result = asyncio.run(self.plugin.set_epp('power'))
+        self.assertFalse(result['success'])
+        self.assertIn('previous state restored', result['error'])
+        self.assertIsNone(self.payload()['settings']['epp'])
+        self.assert_hardware(False, '77')
 
     def test_default_epp_rollback_preserves_external_writer(self):
         self.seed({}, epp='performance')

@@ -1776,8 +1776,10 @@ def _rollback_cpu_power_write(
     requested: dict[str, str],
     changed: list[str],
     equivalent,
-) -> list[str]:
-    """Best-effort rollback without overwriting a third-party new value."""
+) -> tuple[list[str], list[str]]:
+    """Best-effort rollback without overwriting a third-party new value.
+    Returns (external, failures): only `failures` may leave our own value behind."""
+    external: list[str] = []
     failures: list[str] = []
     for path in reversed(changed):
         try:
@@ -1785,7 +1787,8 @@ def _rollback_cpu_power_write(
             if equivalent(current, originals[path]):
                 continue
             if not equivalent(current, requested[path]):
-                failures.append(
+                # An unresolved "default" alias may read back as our own concrete value.
+                (failures if requested[path] == "default" else external).append(
                     f"{_sysfs_short_name(path)} changed externally")
                 continue
             _write_cpu_power_text(path, originals[path])
@@ -1796,13 +1799,7 @@ def _rollback_cpu_power_write(
         except (OSError, ValueError) as exc:
             failures.append(
                 f"{_sysfs_short_name(path)} rollback failed: {exc}")
-    return failures
-
-
-def _rollback_detail(originals, requested, changed, equivalent) -> str:
-    rollback = _rollback_cpu_power_write(originals, requested, changed, equivalent)
-    return (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
-            else "; previous state restored")
+    return external, failures
 
 
 def _transactional_cpu_power_write(
@@ -1837,10 +1834,14 @@ def _transactional_cpu_power_write(
                 raise OSError(
                     f"{_sysfs_short_name(path)} final readback mismatch")
     except (OSError, ValueError, KeyError) as exc:
-        suffix = _rollback_detail(originals, requested, changed, equivalent)
+        external, failures = _rollback_cpu_power_write(originals, requested, changed, equivalent)
+        rollback = external + failures
+        suffix = (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
+                  else "; previous state restored")
         return {
             "success": False,
             "error": f"{label} write failed: {exc}{suffix}",
+            "restored": not failures,
             "originals": originals,
             "requested": requested,
             "changed": changed,
@@ -2205,11 +2206,11 @@ class Plugin:
                         if type(value) is not bool:
                             return status(False, "invalid CPU Boost value")
                         preflight, canonical = _capture_cpu_boost(), value
-                        apply, equivalent = _apply_cpu_boost_hardware, _boost_equivalent
+                        apply = _apply_cpu_boost_hardware
                     else:
                         preflight = _capture_epp()
                         canonical = _validated_epp_request(preflight, value)
-                        apply, equivalent = _apply_epp_hardware, _epp_equivalent
+                        apply = _apply_epp_hardware
                         if canonical is None:
                             return status(False, "invalid or unsupported EPP value")
                     if not preflight["can_set"]:
@@ -2227,21 +2228,27 @@ class Plugin:
                     else:
                         state[field] = canonical
                     active = not stored and _cpu_editor_profile(state, profiles, selected, ac_profile)["active"]
-                    transaction = None
+                    values = {SETTINGS_KEY_SETTINGS: state}
+                    previous = {SETTINGS_KEY_SETTINGS: _read_key(SETTINGS_KEY_SETTINGS, _defaults())}
+                    if selected:
+                        values[SETTINGS_KEY_GAME_PROFILES] = profiles
+                        previous[SETTINGS_KEY_GAME_PROFILES] = _read_key(SETTINGS_KEY_GAME_PROFILES, {})
+                    try:
+                        # Saved before the write: the choice is what makes release restore
+                        # the baseline, so a crash mid-write cannot orphan a changed control.
+                        _write_keys(values)
+                    except Exception as exc:
+                        return status(False, f"settings persist failed: {exc}")
                     if active:
                         transaction = apply(canonical)
                         if not transaction["success"]:
+                            # An incomplete rollback keeps the choice, and with it the release.
+                            if transaction.get("restored", True):
+                                try:
+                                    _write_keys(previous)
+                                except Exception as exc:
+                                    return status(False, f"{transaction['error']}; settings revert failed: {exc}")
                             return status(False, transaction["error"])
-                    try:
-                        values = {SETTINGS_KEY_SETTINGS: state}
-                        if selected:
-                            values[SETTINGS_KEY_GAME_PROFILES] = profiles
-                        _write_keys(values)
-                    except Exception as exc:
-                        error = f"settings persist failed: {exc}" + (_rollback_detail(
-                            transaction["originals"], transaction["requested"],
-                            transaction["changed"], equivalent) if transaction is not None else "")
-                        return status(False, error)
                     event("tdp", "cpu_profile_saved", attribute=field,
                           scope=("game_ac" if ac_profile else "game") if selected else "global",
                           outcome="applied" if active else "saved")
