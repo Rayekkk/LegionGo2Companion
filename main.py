@@ -38,6 +38,7 @@ from safe_settings import SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 from desktop_bridge import DesktopBridge
 from desktop_install import DesktopInstall
+from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 
 MODULE_NAMES = ('tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
 FIRMWARE_RPCS = frozenset({'firmware_get_status', 'firmware_check', 'firmware_download', 'firmware_install'})
@@ -110,7 +111,6 @@ def _rpc_module(name):
         if name.startswith(prefix):
             return module
     return None if name.startswith('modules_') or name in UPDATE_RPCS else 'tdp'
-from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 
 
 def _plugin_version() -> str:
@@ -224,12 +224,6 @@ def _guard_component_calls(cls):
                 if self._startup is not None:
                     # A request must not reach modules before _main has started them.
                     await self._startup.wait()
-                if fn.__name__ == 'modules_get_status':
-                    # This read-only snapshot must remain available while a
-                    # slow RPC or pending restoration holds the mutation gate.
-                    if self._guard_blocked or self._guard_error or self._closing:
-                        raise module_runtime.AdmissionClosed(self._guard_message())
-                    return await fn(self, *args, **kwargs)
                 async with self._guard_lock:
                     if self._guard_blocked or self._guard_error or self._closing:
                         raise module_runtime.AdmissionClosed(self._guard_message())
@@ -427,9 +421,6 @@ class Plugin:
             await decky.emit('companion_guard', await asyncio.to_thread(self._guard_status))
         except Exception as exc:
             diagnostics.event('plugin', 'module_status_notification_failed', level='warning', error=exc, repeat=60)
-
-    async def modules_get_status(self):
-        return await asyncio.to_thread(self._module_status)
 
     async def modules_restart_session(self):
         result = await self._display.restart_session()
@@ -787,12 +778,15 @@ class Plugin:
             self._desktop = None
             diagnostics.event('desktop', 'frontend_unavailable', level='warning', error=exc)
 
-    async def _desktop_panel_active(self, active):
+    async def _panel_active(self, deadline, active):
         if type(active) is not bool:
             raise ValueError('active must be a boolean')
         now = time.monotonic()
-        self._desktop_panel_deadline = now + 90 if active else 0
+        setattr(self, deadline, now + 90 if active else 0)
         return await self._tdp.set_panel_active(now < max(self._desktop_panel_deadline, self._qam_panel_deadline))
+
+    async def _desktop_panel_active(self, active):
+        return await self._panel_active('_desktop_panel_deadline', active)
 
     async def _desktop_display_restart(self):
         if await asyncio.to_thread(display_backend._gamescope_start_time) is None:
@@ -1022,11 +1016,7 @@ class Plugin:
         return await self._tdp.get_caps()
 
     async def set_panel_active(self, active):
-        if type(active) is not bool:
-            raise ValueError('active must be a boolean')
-        now = time.monotonic()
-        self._qam_panel_deadline = now + 90 if active else 0
-        return await self._tdp.set_panel_active(now < max(self._desktop_panel_deadline, self._qam_panel_deadline))
+        return await self._panel_active('_qam_panel_deadline', active)
 
     async def reapply(self):
         return await self._tdp.reapply()
@@ -1139,8 +1129,6 @@ class Plugin:
         return await self._wifi.set_band_policy(mode, allow_unverified_scan)
 
     async def wifi_rescan_and_reconnect(self, target_band="high"):
-        if target_band == "high":
-            return await self._wifi.rescan_and_reconnect()
         return await self._wifi.rescan_and_reconnect(target_band)
 
     # RGB rings / power-button light -------------------------------------------

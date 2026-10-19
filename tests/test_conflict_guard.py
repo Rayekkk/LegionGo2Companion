@@ -321,7 +321,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_inflight_rpc_finishes_before_modules_stop(self):
         plugin = self.make_plugin(); conflicts = []; entered = asyncio.Event(); finish = asyncio.Event(); order = []
-        async def operation():
+        async def operation(*args):
             entered.set(); await finish.wait(); order.append("rpc finished"); return {"success": True}
         async def stop(): order.append("modules stopped")
         plugin._wifi.rescan_and_reconnect = operation
@@ -432,16 +432,6 @@ class ConflictAdmissionTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._inspect_guard()
         scanning.assert_called_once()
         self.assertTrue(self.plugin._guard_blocked)
-
-    async def test_read_only_module_status_still_rejects_conflict_and_shutdown(self):
-        for flag in ('_guard_blocked', '_closing'):
-            with self.subTest(flag=flag):
-                setattr(self.plugin, flag, True)
-                try:
-                    with self.assertRaises(RuntimeError):
-                        await self.plugin.modules_get_status()
-                finally:
-                    setattr(self.plugin, flag, False)
 
 
 class ConflictLifecycleTests(unittest.IsolatedAsyncioTestCase):

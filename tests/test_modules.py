@@ -117,7 +117,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                        'battery_get_controller_levels', 'controller_get_status']:
             with self.subTest(method=method), self.assertRaisesRegex(RuntimeError, 'disabled'):
                 await getattr(self.plugin, method)()
-        self.assertEqual(len(await self.plugin.modules_get_status()), 9)
+        self.assertEqual(len((await self.plugin.get_version())['modules']), 9)
 
     async def test_uninstall_retries_pending_cleanup_without_starting_module(self):
         resume = {'source': 'right'}
@@ -779,11 +779,11 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._wifi.get_status = slow_read
         hardware = asyncio.create_task(self.plugin.wifi_get_status())
         await asyncio.wait_for(entered.wait(), 1)
-        status = asyncio.create_task(self.plugin.modules_get_status())
+        status = asyncio.create_task(self.plugin.get_version())
         try:
             done, _ = await asyncio.wait([status], timeout=.2)
             self.assertIn(status, done, 'Management status must not drain unrelated hardware reads.')
-            self.assertTrue(status.result()['wifi']['enabled'])
+            self.assertTrue(status.result()['modules']['wifi']['enabled'])
         finally:
             release.set()
             await asyncio.gather(hardware, status, return_exceptions=True)
@@ -797,11 +797,11 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'withdraw', new=slow_cleanup):
             change = asyncio.create_task(self.plugin.modules_set_enabled('wifi', False))
             await asyncio.wait_for(entered.wait(), 1)
-            status = asyncio.create_task(self.plugin.modules_get_status())
+            status = asyncio.create_task(self.plugin.get_version())
             try:
                 done, _ = await asyncio.wait([status], timeout=.2)
                 self.assertIn(status, done, 'Pending restoration must remain visible while the management gate is held.')
-                self.assertTrue(status.result()['wifi']['pending'])
+                self.assertTrue(status.result()['modules']['wifi']['pending'])
             finally:
                 release.set()
                 await asyncio.gather(change, status, return_exceptions=True)
@@ -845,9 +845,9 @@ class ModuleEventLoopTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._module_state['display'] = {'enabled': False, 'session': 100.0}
         observed = []
         with patch.object(display, '_gamescope_start_time', side_effect=self.held_io(observed, 200.0)):
-            for operation in (self.plugin.modules_get_status, self.plugin.get_version, self.plugin._publish_modules):
+            for operation in (self.plugin.get_version, self.plugin._publish_modules):
                 await operation()
-        self.assertEqual(observed, [True, True, True], 'Status probes must allow an event-loop heartbeat while I/O waits.')
+        self.assertEqual(observed, [True, True], 'Status probes must allow an event-loop heartbeat while I/O waits.')
 
     async def test_display_withdrawal_session_probe_keeps_event_loop_responsive(self):
         observed = []

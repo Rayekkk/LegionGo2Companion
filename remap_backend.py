@@ -77,9 +77,7 @@ ACTION_LABELS = {
     "disabled": "Disabled",
 }
 
-SCHEMA_VERSION = 1
 DEFAULT_STATE: dict[str, Any] = {
-    "schema_version": SCHEMA_VERSION,
     "enabled": False,
     "desktop_action": "default",
     "page_action": "default",

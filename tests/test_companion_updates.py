@@ -225,14 +225,6 @@ class UpdateChecks(_UpdateFixture):
             self.updater._cached = None
             self.assertFalse(self.updater.check()["success"])
 
-    def test_final_response_url_is_rechecked_and_closed_on_escape(self):
-        response = Response(b"bad", url="https://evil.test/file")
-        with patch("companion_updates.open_http", return_value=response), \
-                patch("companion_updates.tls_context"):
-            with self.assertRaises(ValueError):
-                self.updater._open(updates.API_URL, metadata=True)
-        self.assertTrue(response.closed)
-
 
 class ArchiveChecks(unittest.TestCase):
     def validate(self, payload):

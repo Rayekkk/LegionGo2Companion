@@ -14,7 +14,7 @@ import time
 import urllib.error
 import zipfile
 from diagnostics import event
-from bounded_http import checked_url, open_http, tls_context
+from bounded_http import open_http, tls_context
 
 REPOSITORY = "Rayekkk/LegionGo2Companion"
 PLUGIN_NAME = "Legion Go 2 Companion"
@@ -102,8 +102,8 @@ class CompanionUpdates:
     def _open(self, url, *, metadata):
         self._ensure_open()
         policy = "metadata" if metadata else "archive"
-        checked_url(url, url, policy)
-        response = open_http(url, headers={
+        # open_http validates the initial and final URLs and only returns HTTP 200.
+        return open_http(url, headers={
             "User-Agent": "LegionGo2Companion-release-check",
             "Accept": "application/vnd.github+json" if metadata else "application/octet-stream",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -111,14 +111,6 @@ class CompanionUpdates:
             limit=MAX_METADATA if metadata else MAX_DOWNLOAD,
             total_seconds=METADATA_SECONDS if metadata else DOWNLOAD_SECONDS,
             policy=policy, cancel=self._ensure_open)
-        try:
-            checked_url(response.geturl(), url, policy)
-            if response.status != 200:
-                raise ValueError("GitHub returned an unexpected response status.")
-        except BaseException:
-            response.close()
-            raise
-        return response
 
     def _metadata(self):
         deadline = time.monotonic() + METADATA_SECONDS

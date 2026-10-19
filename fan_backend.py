@@ -416,6 +416,13 @@ class Plugin:
         self._loaded = True
         diagnostic_transition('fan', 'settings', 'ready', store='fan_settings', pending=False)
 
+    def _revised(self, **changes):
+        return dict(self._state, **changes, revision=self._state['revision'] + 1)
+
+    async def _ensure_loaded(self):
+        if not self._loaded:
+            await module_runtime.offload('fan', self._load)
+
     async def _persist(self, value):
         # Cancellation cannot release the settings lock while its write still
         # runs, or allow an old revision to overwrite a later disable/save.
@@ -529,7 +536,7 @@ class Plugin:
 
     async def _save_off(self, reason):
         # Firmware automatic is already proven; a disk failure still blocks any re-arm.
-        value = dict(self._state, enabled=False, revision=self._state['revision']+1)
+        value = self._revised(enabled=False)
         self._applied = None
         try:
             await self._persist(value)
@@ -563,7 +570,7 @@ class Plugin:
             self._state['enabled'] = False
             if self._settings_valid:
                 try:
-                    await self._persist(dict(self._state, revision=self._state['revision']+1))
+                    await self._persist(self._revised())
                 except Exception as save_error:
                     self._error += ' ' + str(save_error)
 
@@ -634,8 +641,7 @@ class Plugin:
     async def get_state(self):
         if not self._loaded:
             async with self._mutation:
-                if not self._loaded:
-                    await module_runtime.offload('fan', self._load)
+                await self._ensure_loaded()
         telemetry = self._client.snapshot() if self._client else None
         if not self._supported:
             readings = dict(valid=False, error='Fan Control unavailable on this platform.')
@@ -665,8 +671,7 @@ class Plugin:
         if type(enabled) is not bool:
             raise ValueError('Enabled must be a boolean.')
         async with self._mutation:
-            if not self._loaded:
-                await module_runtime.offload('fan', self._load)
+            await self._ensure_loaded()
             if enabled and self._closing:
                 raise RuntimeError('Fan Control is shutting down.')
             if enabled and not self._supported:
@@ -678,7 +683,7 @@ class Plugin:
                 if ownership.get('ownership', {}).get('blocked', True):
                     raise RuntimeError(ownership.get('ownership', {}).get('reason') or 'Fresh exclusive fan ownership is required.')
             # Disable takes physical precedence even if saving settings fails.
-            value = dict(self._state, enabled=enabled, revision=self._state['revision']+1)
+            value = self._revised(enabled=enabled)
             if not enabled:
                 if self._state['enabled']:
                     self._error = ''  # Resume/pause notes describe the ON intent; a fault latch is already OFF and keeps its reason.
@@ -723,7 +728,7 @@ class Plugin:
                     self._state['enabled'] = False; self._applied = None
                     if not self._closing:  # Unload never changes the saved intent.
                         try:
-                            await self._persist(dict(self._state, revision=self._state['revision']+1))
+                            await self._persist(self._revised())
                         except Exception as save_error:
                             self._error += ' ' + str(save_error)
                     await self._shutdown()
@@ -741,11 +746,10 @@ class Plugin:
         if unit not in ('rpm', 'percent'):
             raise ValueError('Unknown fan display unit.')
         async with self._mutation:
-            if not self._loaded:
-                await module_runtime.offload('fan', self._load)
+            await self._ensure_loaded()
             if not self._settings_valid or type(expected_revision) is not int or expected_revision != self._state['revision']:
                 raise ValueError('Fan settings changed elsewhere. Reload before changing units.')
-            value = dict(self._state, display_unit=unit, revision=self._state['revision']+1)
+            value = self._revised(display_unit=unit)
             await self._persist(value)
         return await self.get_state()
 
@@ -754,8 +758,7 @@ class Plugin:
             raise ValueError('Unknown curve scope.')
         checked = None if curve is None and scope != 'global' else validate_curve(curve)
         async with self._mutation:
-            if not self._loaded:
-                await module_runtime.offload('fan', self._load)
+            await self._ensure_loaded()
             if type(expected_revision) is not int or expected_revision != self._state['revision']:
                 raise ValueError('The curve changed elsewhere. Reload before saving.')
             value = copy.deepcopy(self._state)
@@ -778,11 +781,10 @@ class Plugin:
         if type(enabled) is not bool:
             raise ValueError('TDP curve assignments must be a boolean.')
         async with self._mutation:
-            if not self._loaded:
-                await module_runtime.offload('fan', self._load)
+            await self._ensure_loaded()
             if not self._settings_valid or type(expected_revision) is not int or expected_revision != self._state['revision']:
                 raise ValueError('Fan settings changed elsewhere. Reload before changing assignments.')
-            value = dict(self._state, assign_tdp_presets=enabled, revision=self._state['revision']+1)
+            value = self._revised(assign_tdp_presets=enabled)
             await self._persist(value)
             if self._live():
                 try:
@@ -790,7 +792,7 @@ class Plugin:
                 except Exception as exc:
                     # A failed curve switch must not leave the previous mode armed.
                     self._error = str(exc); self._applied = None
-                    self._state = dict(self._state, enabled=False, revision=self._state['revision']+1)
+                    self._state = self._revised(enabled=False)
                     try:
                         await self._persist(self._state)
                     finally:
