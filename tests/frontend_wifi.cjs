@@ -214,7 +214,7 @@ run(async () => {
   const unsupported=harness('wifi.tsx','WifiPage');unsupported.render();
   unsupported.respond('wifi_get_status',{...wifi,settings:{...wifi.settings,driver:'iwlwifi'}});await settle();
   assert.equal(find(unsupported.render(),'Wi-Fi tweaks unavailable').props.description,'Only for the Legion Go 2 Wi-Fi card (MT7922).');
-  assert.deepEqual(options(unsupported.render()),['Prefer 5/6 GHz']);
+  assert.deepEqual(options(unsupported.render()),['Automatic','Prefer 5/6 GHz'],'a saved policy can be cleared on any Wi-Fi card');
   unsupported.unmount();
 
   const cleanup=harness('wifi.tsx','WifiPage');cleanup.render();
@@ -246,5 +246,32 @@ run(async () => {
   strayed.respond('wifi_get_status',{...wifi,settings:{...wifi.settings,band_policy:'five_six_only'},live:{...wifi.live,frequency:'2437'}});await settle();
   assert.equal(band(strayed.render()).props.description,'Saved: Only 5/6 GHz, but connected on 2.4 GHz.');
   strayed.unmount();
+
+  // The rules both UIs share (src/wifi.tsx and the Desktop ModulePage.qml import the same module).
+  const W=await import(require('node:url').pathToFileURL(require('node:path').join(__dirname,'../desktop/native/wifi.mjs')).href);
+  const st=(settings,live,extra)=>({...wifi,...extra,settings:{...wifi.settings,...settings},live:{...wifi.live,...live}});
+  const ids=status=>W.bandOptions(status).map(o=>o.id).join(',');
+  assert.equal(W.canRun(st({band_policy:'five_six_only'},{connection_state:'unknown'},{connected:false}),'off'),true,'Automatic stays available while the link state is unknown');
+  assert.equal(W.canRun(st({band_policy:'five_six_only'},{recovery_required:true}),'off'),true,'Automatic stays available while recovery is pending');
+  assert.equal(W.canRun(st({band_policy:'off'},{}),'off'),false,'Automatic with nothing to restore is a no-op');
+  assert.equal(W.canRun(st({band_policy:'off'},{band_policy_restore_available:true}),'off'),true);
+  assert.equal(W.canRun(st({band_policy:'five_six_no_24'},{wifi_backend:''}),'off'),false,'no Wi-Fi backend: the backend refuses every change');
+  assert.equal(ids(st({band_policy:'off'},{},{connected:false})),'off,five_six_no_24','Only 5/6 GHz needs a live connection');
+  assert.equal(ids(st({band_policy:'off'},{band_policy_error:'Changed outside Companion.'})),'off','an ownership problem blocks new policies');
+  assert.equal(ids(st({band_policy:'off'},{wifi_backend:'wpa_supplicant',six_ghz_only_supported:true})),'off,six_ghz_only');
+  assert.equal(ids(st({band_policy:'off',driver:'iwlwifi'},{wifi_backend:'wpa_supplicant',six_ghz_only_supported:true})),'off','other Wi-Fi cards get no band policy');
+  assert.equal(W.canRun(st({band_policy:'off'},{wifi_backend:'wpa_supplicant'},{connected:false}),'six'),false,'one-time 6 GHz needs a connection');
+  assert.equal(W.canRun(st({band_policy:'five_six_no_24'},{},{connected:false}),'high'),false,'Reconnect needs a connection');
+  assert.equal(W.canRun(st({band_policy:'five_six_no_24'},{}),'high'),true);
+  assert.equal(W.bandNote(st({band_policy:'six_ghz_only'},{wifi_backend:'wpa_supplicant',frequency:'5180'})),'Saved: Only 6 GHz, but connected on 5 GHz.');
+  assert.equal(W.bandNote(st({band_policy:'five_six_only'},{frequency:'4940'})),'Never uses 2.4 GHz.','4.9 GHz is a 5 GHz channel, not a stray');
+  assert.equal(W.linkText(st({},{frequency:'',channel:''})),'Unknown band');
+  assert.equal(W.linkText(st({},{connection_state:'unknown'},{connected:false})),'Connection state unavailable.');
+  assert.equal(W.networkName(st({},{ssid:'',connection_state:'connecting'},{connected:false})),'Connecting…');
+  assert.deepEqual(W.wifiNotice(st({},{recovery_required:true,recovery_errors:['a','b']})),['Wi-Fi settings are locked','a; b']);
+  assert.equal(W.operationVerified('prefer',wifi,st({band_policy:'five_six_no_24'},{})),true);
+  assert.equal(W.operationVerified('off',wifi,st({band_policy:'off'},{connection_uuid:'other'})),false,'another network is not a verified result');
+  assert.equal(W.operationVerified('six',wifi,st({},{frequency:'5975'})),true);
+  assert.equal(W.operationVerified('high',wifi,st({},{frequency:'2437'})),false);
   console.log('Wi-Fi page verified.');
 });

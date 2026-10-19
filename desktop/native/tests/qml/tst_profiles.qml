@@ -413,16 +413,55 @@ TestCase {
         fake.data=Object.assign({},fake.data,{display_get_state:{native_support_detected:false,setup_done:true}});
         verify(!upstream.visible());verify(legacy.visible());verify(field("display","Brightness slider in HDR").available());
     }
-    function test_wifiBandChoicesFollowTheBackend() {
-        const ids=()=>field("wifi","Band").choices().map(o=>o.id).join(",");
-        fake.data=Object.assign({},fake.data,{wifi_get_status:{settings:{band_policy:"off"},live:{wifi_backend:"wpa_supplicant",six_ghz_only_supported:false}}});
-        compare(ids(),"off");
-        fake.data=Object.assign({},fake.data,{wifi_get_status:{settings:{band_policy:"off"},live:{wifi_backend:"wpa_supplicant",six_ghz_only_supported:true}}});
+    function wifiState(settings,live,extra) {
+        fake.data=Object.assign({},fake.data,{wifi_get_status:Object.assign({success:true,connected:true,
+            settings:Object.assign({device_family:"legion_go_2",driver:"mt7921e",band_policy:"off"},settings),
+            live:Object.assign({wifi_backend:"iwd",connection_state:"connected",connection_uuid:"home",frequency:"5180"},live)},extra || {})});
+    }
+    function test_wifiBandChoicesFollowTheSharedRules() {
+        const band=field("wifi","Band"),ids=()=>band.choices().map(o=>o.id).join(",");
+        wifiState({},{wifi_backend:"wpa_supplicant",six_ghz_only_supported:false});
+        compare(ids(),"off");verify(!band.available(),"one choice: nothing to pick");
+        wifiState({},{wifi_backend:"wpa_supplicant",six_ghz_only_supported:true});
+        compare(ids(),"off,six_ghz_only");verify(band.available());
+        wifiState({band_policy:"six_ghz_only"},{wifi_backend:"wpa_supplicant",six_ghz_only_supported:false});
         compare(ids(),"off,six_ghz_only");
-        fake.data=Object.assign({},fake.data,{wifi_get_status:{settings:{band_policy:"six_ghz_only"},live:{wifi_backend:"wpa_supplicant",six_ghz_only_supported:false}}});
-        compare(ids(),"off,six_ghz_only");
-        fake.data=Object.assign({},fake.data,{wifi_get_status:{settings:{band_policy:"off"},live:{wifi_backend:"iwd"}}});
+        wifiState({},{});
         compare(ids(),"off,five_six_no_24,five_six_only");
+        wifiState({},{},{connected:false});
+        compare(ids(),"off,five_six_no_24","Only 5/6 GHz needs a live connection, as in Decky");
+        wifiState({band_policy:"five_six_only"},{recovery_required:true,connection_state:"unknown"},{connected:false});
+        compare(ids(),"off,five_six_only","Automatic stays available to restore");
+        wifiState({},{wifi_backend:""});verify(!band.visible(),"no backend, no band choice");
+    }
+    function test_wifiReconnectNeedsAConnectionAndSharedTexts() {
+        wifiState({band_policy:"five_six_no_24"},{},{connected:false});
+        const reconnect=field("wifi","Reconnect to 5/6 GHz");verify(reconnect.visible());verify(!reconnect.available());
+        reconnect.set();compare(fake.calls.length,0);
+        wifiState({},{wifi_backend:"wpa_supplicant"},{connected:false});
+        verify(!field("wifi","Connect to 6 GHz once").available());
+        wifiState({},{wifi_backend:"wpa_supplicant",ssid:"Home",channel:"36",frequency:"5180"});
+        verify(field("wifi","Connect to 6 GHz once").available());
+        compare(field("wifi","Network").get(),"Home");compare(field("wifi","Network").note(),"5 GHz · channel 36");
+        compare(field("wifi","Frequency").get(),"5180 MHz");compare(field("wifi","Backend").get(),"WPA supplicant");
+        wifiState({band_policy:"six_ghz_only"},{wifi_backend:"wpa_supplicant",frequency:"5180"});
+        compare(field("wifi","Band").note(),"Saved: Only 6 GHz, but connected on 5 GHz.");
+        const notice=allFields("wifi")[0];
+        wifiState({},{recovery_required:true,recovery_errors:["Rollback failed"]});
+        compare(notice.get(),"Wi-Fi settings are locked. Rollback failed");
+        wifiState({driver:"iwlwifi"},{});
+        compare(notice.get(),"Wi-Fi tweaks unavailable. Only for the Legion Go 2 Wi-Fi card (MT7922).");
+    }
+    function test_wifiChangeIsVerifiedInTheNextStatus() {
+        wifiState({},{});
+        field("wifi","Band").set("five_six_no_24");compare(fake.calls[0].args[0],"five_six_no_24");
+        fake.mutationDone("wifi_set_band_policy",{success:true},true);
+        fake.changed("wifi_get_status");
+        compare(fake.error,"The final connection or setting could not be verified. Check the current Wi-Fi state.");
+        fake.error="";field("wifi","Band").set("five_six_no_24");
+        fake.mutationDone("wifi_set_band_policy",{success:true},true);
+        wifiState({band_policy:"five_six_no_24"},{});fake.changed("wifi_get_status");
+        compare(fake.error,"");
     }
     function test_unknownExtendedLimitsStateIsOffAndKeepsStandardCaps() {
         fake.data=Object.assign({},fake.data,{get_caps:{min:5,extras:true,tdp_available:true,presets:{},
@@ -459,14 +498,17 @@ TestCase {
         fake.data=Object.assign({},fake.data,{get_game_profile:{exists:false}});verify(!remove.visible());
     }
     function test_strictWifiBandsAskButOtherBandChangesAndReconnectDoNot() {
-        fake.data=Object.assign({},fake.data,{wifi_get_status:{connected:true,settings:{band_policy:"off"},live:{wifi_backend:"iwd",frequency:"5180"}}});
+        wifiState({},{});
         const band=field("wifi","Band");
         band.set("five_six_no_24");compare(fake.calls[0].method,"wifi_set_band_policy");compare(fake.calls[0].args[0],"five_six_no_24");
         band.set("five_six_only");compare(fake.calls.length,1);compare(confirmDialog().title,"Use only 5/6 GHz?");
         confirmDialog().accept();compare(fake.calls[1].args[0],"five_six_only");compare(fake.calls[1].args[1],true);confirmDialog().close();
-        band.set("six_ghz_only");compare(fake.calls.length,2);compare(confirmDialog().title,"Use only 6 GHz?");confirmDialog().close();
-        fake.data=Object.assign({},fake.data,{wifi_get_status:{connected:true,settings:{band_policy:"five_six_no_24"},live:{wifi_backend:"iwd",frequency:"5180"}}});
-        field("wifi","Reconnect to 5/6 GHz").set();compare(fake.calls[2].method,"wifi_rescan_and_reconnect");
+        band.set("six_ghz_only");compare(fake.calls.length,2,"Only 6 GHz is not offered with iwd");
+        wifiState({},{wifi_backend:"wpa_supplicant",six_ghz_only_supported:true});
+        band.set("six_ghz_only");compare(fake.calls.length,2);compare(confirmDialog().title,"Use only 6 GHz?");
+        confirmDialog().accept();compare(fake.calls[2].args[0],"six_ghz_only");compare(fake.calls[2].args[1],false);confirmDialog().close();
+        wifiState({band_policy:"five_six_no_24"},{});
+        field("wifi","Reconnect to 5/6 GHz").set();compare(fake.calls[3].method,"wifi_rescan_and_reconnect");
     }
     function test_displayResetAndRestartUseTheSharedConfirmations() {
         fake.data=Object.assign({},fake.data,{desktop_context:{app_id:"",gamescope:true},display_get_state:{setup_done:true,panel_mode:"hybrid"}});

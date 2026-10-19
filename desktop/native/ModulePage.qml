@@ -3,6 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "Tdp.js" as Tdp
+import "wifi.mjs" as Wifi
 RowLayout {
     id:panel
     UiTheme { id:theme }
@@ -31,6 +32,7 @@ RowLayout {
     property bool controllerDetails:false
     property bool displaySwitch:false
     property bool displayDetails:false
+    property var wifiCheck:null
     onTdpScopeChanged: { powerNotice=""; backend.cpuApp=powerTarget(); backend.cpuAc=tdpScope==="ac"; }
     // Several cards share two equal columns on a wide page: in Decky order each card goes to the
     // column that is shorter with typical content (fixed per card so nothing jumps while editing);
@@ -332,22 +334,18 @@ RowLayout {
     }
     function pickDisplayMode(mode) { displaySwitch=false; if(!display().panel_mode)confirmDisplaySetup(mode);else change("display_set_panel_mode",[mode]); }
     function restartGamingMode() { confirm("display_restart_session",[],"Steam and any running game will close and reopen. Save your game first.","Restart Gaming Mode?","Restart"); }
-    function wifiLive() { return s("wifi_get_status").live || {}; }
-    function wifiPolicy() { return s("wifi_get_status").settings?.band_policy || "off"; }
-    readonly property var wifiPolicies:({off:"Automatic",five_six_no_24:"Prefer 5/6 GHz",five_six_only:"Only 5/6 GHz",six_ghz_only:"Only 6 GHz"})
-    function wifiBand(frequency) { const value=parseFloat(String(frequency));return !Number.isFinite(value) || value<=0?"":value<3000?"2.4 GHz":value<5925?"5 GHz":"6 GHz"; }
-    function setWifiPolicy(value) {
-        if(value==="five_six_only")confirm("wifi_set_band_policy",[value,true],"Wi-Fi stops using 2.4 GHz and reconnects. If no 5/6 GHz network connects, your previous setting comes back automatically.","Use only 5/6 GHz?","Use only 5/6 GHz");
-        else if(value==="six_ghz_only")confirm("wifi_set_band_policy",[value,false],"Wi-Fi will connect only to 6 GHz networks, also after a restart. Away from a 6 GHz router you'll have no Wi-Fi until you choose Automatic.","Use only 6 GHz?","Use only 6 GHz");
-        else change("wifi_set_band_policy",[value,false]);
+    function wifi() { return s("wifi_get_status"); }
+    // Like Decky: check the action against the status shown, then verify it in the next status read.
+    function wifiRun(action,method,args) {
+        if(!Wifi.canRun(wifi(),action)) { backend.error=Wifi.CHANGED; return; }
+        wifiCheck={action:action,before:wifi(),done:false};
+        change(method,args);
     }
-    function wifiNote() {
-        const status=s("wifi_get_status"),live=wifiLive(),policy=wifiPolicy(),frequency=parseFloat(String(live.frequency));
-        if(status.connected && ((policy==="five_six_only" && frequency<4900) || (policy==="six_ghz_only" && frequency<5925)))
-            return "Saved: "+wifiPolicies[policy]+", but connected on "+wifiBand(frequency)+".";
-        if(!status.connected && policy==="five_six_only")return "No 5/6 GHz network. Choose Automatic or Prefer 5/6 GHz.";
-        return ({off:live.wifi_backend==="iwd"?"SteamOS picks the band.":"SteamOS picks the band and roams automatically.",
-            five_six_no_24:"Uses 2.4 GHz only when 5/6 GHz isn't available.",five_six_only:"Never uses 2.4 GHz.",six_ghz_only:"Connects only to 6 GHz networks."})[policy] || "";
+    function setWifiPolicy(value) {
+        const action=Wifi.POLICY_ACTIONS[value],ask=Wifi.CONFIRMATIONS[value];
+        if(value===Wifi.savedPolicy(wifi()) || !Wifi.canRun(wifi(),action))return;
+        if(ask)confirmAction(ask.text,ask.title,ask.ok,()=>wifiRun(action,"wifi_set_band_policy",[value,value==="five_six_only"]));
+        else wifiRun(action,"wifi_set_band_policy",[value,false]);
     }
     function forms() {
         const vibeReady=()=>!!s("vibe_is_ready").ready;
@@ -509,19 +507,17 @@ RowLayout {
                 ]}
             ],
             wifi:[{title:"Wi-Fi",fields:[
-                notice("",()=>s("wifi_get_status").error || wifiLive().band_policy_error || s("wifi_get_status").message || ""),
-                text("Network",()=>s("wifi_get_status").connected?wifiLive().ssid || "Connected":"Not connected"),
-                text("Frequency",()=>!s("wifi_get_status").connected || !wifiBand(wifiLive().frequency)?"—":wifiBand(wifiLive().frequency)+(wifiLive().channel?" · channel "+wifiLive().channel:"")),
-                choices("Band",wifiPolicy,setWifiPolicy,()=>{const live=wifiLive(),iwd=live.wifi_backend==="iwd";
-                    // Offer only what this backend supports; the saved policy always stays visible so it can be turned off.
-                    const ok={off:true,five_six_no_24:iwd,five_six_only:iwd,six_ghz_only:!iwd&&live.six_ghz_only_supported===true};
-                    return ["off","five_six_no_24","five_six_only","six_ghz_only"].map(id=>({id:id,label:wifiPolicies[id]})).filter(o=>ok[o.id]||o.id===s("wifi_get_status").settings?.band_policy);},
-                    {kind:"options",note:wifiNote}),
-                field("Reconnect to 5/6 GHz","button",()=>"Reconnect",()=>change("wifi_rescan_and_reconnect",["high"]),
-                    {visible:()=>(wifiLive().wifi_backend==="iwd" && wifiPolicy()==="five_six_no_24") || (wifiLive().wifi_backend==="wpa_supplicant" && wifiPolicy()==="off")}),
-                field("Connect to 6 GHz once","button",()=>"Connect",()=>change("wifi_rescan_and_reconnect",["six"]),
-                    {note:"Then roams normally again.",visible:()=>wifiLive().wifi_backend==="wpa_supplicant" && wifiPolicy()==="off"}),
-                notice("",()=>wifiLive().wifi_backend?"Backend: "+(wifiLive().wifi_backend==="iwd"?"iwd":wifiLive().wifi_backend==="wpa_supplicant"?"WPA supplicant":wifiLive().wifi_backend)+(s("wifi_get_status").settings?.driver?" · driver "+s("wifi_get_status").settings.driver:""):"")
+                notice("",()=>{const notice=Wifi.wifiNotice(wifi());return wifi().error || wifi().message || (notice?notice[0]+". "+notice[1]:"");}),
+                text("Network",()=>Wifi.networkName(wifi()),{note:()=>Wifi.linkText(wifi())}),
+                choices("Band",()=>Wifi.savedPolicy(wifi()),setWifiPolicy,()=>Wifi.bandOptions(wifi()),
+                    {kind:"options",note:()=>Wifi.bandNote(wifi()),visible:()=>Wifi.actionShown(wifi(),"band"),available:()=>Wifi.bandOptions(wifi()).length>1}),
+                field("Reconnect to 5/6 GHz","button",()=>"Reconnect",()=>wifiRun("high","wifi_rescan_and_reconnect",["high"]),
+                    {visible:()=>Wifi.actionShown(wifi(),"high"),available:()=>Wifi.canRun(wifi(),"high")}),
+                field("Connect to 6 GHz once","button",()=>"Connect",()=>wifiRun("six","wifi_rescan_and_reconnect",["six"]),
+                    {note:"Then roams normally again.",visible:()=>Wifi.actionShown(wifi(),"six"),available:()=>Wifi.canRun(wifi(),"six")}),
+                text("Backend",()=>Wifi.backendName(wifi())),
+                text("Driver",()=>Wifi.driverText(wifi())),
+                text("Frequency",()=>Wifi.frequencyText(wifi()))
             ]}],
             modules:[{title:"Choose your modules",note:"Turning a module off stops it. Its settings are kept.",fields:["tdp","fan","vibration","rgb","remap","controller","battery","display","wifi"].reduce((fields,name)=>fields.concat(moduleFields(name)),[]).concat([
                 notice("",()=>s("get_version").modules?.display?.note?"Takes effect when you return to Gaming Mode.":"")])}],
@@ -547,7 +543,7 @@ RowLayout {
         for(const owner of owners) merged=merged.concat((sections[owner] || []).map(card=>Object.assign({owner:owner},card)));
         cards=merged.map((card,index)=>Object.assign({column:index%2},card));
     }
-    onPageChanged: { if(editGame) { editGame=""; backend.editApp=""; } tdpScope="global"; powerDirty=false; customPicked=false; controllerDetails=false; displaySwitch=false; displayDetails=false; loadPower(); rebuild(); }
+    onPageChanged: { if(editGame) { editGame=""; backend.editApp=""; } tdpScope="global"; powerDirty=false; customPicked=false; controllerDetails=false; displaySwitch=false; displayDetails=false; wifiCheck=null; loadPower(); rebuild(); }
     Component.onCompleted: { loadPower(); rebuild(); }
     Timer { interval:500; repeat:true; running:backend.windowActive; onTriggered:panel.tick=backend.now() }
     Connections {
@@ -560,9 +556,16 @@ RowLayout {
             if(method==="get_game_profile" || method==="desktop_context") panel.syncScope();
             if(method==="get_settings" || method==="get_game_profile") panel.loadPower();
             if(method==="desktop_context" && panel.page==="tdp") { backend.cpuApp=panel.powerTarget(); backend.cpuAc=panel.tdpScope==="ac"; }
+            if(method==="wifi_get_status" && panel.wifiCheck?.done) {
+                if(!Wifi.operationVerified(panel.wifiCheck.action,panel.wifiCheck.before,panel.wifi()))backend.error=Wifi.UNVERIFIED;
+                panel.wifiCheck=null;
+            }
         }
+        // Like Decky while hidden: a read after the window was away may show a later, unrelated change.
+        function onWindowActiveChanged() { if(!backend.windowActive)panel.wifiCheck=null; }
         function onMutationDone(method,result,success) {
             if(method==="modules_set_enabled")panel.applyingModule="";
+            if(method.startsWith("wifi_") && panel.wifiCheck)panel.wifiCheck=success && result?.success!==false?Object.assign({},panel.wifiCheck,{done:true}):null;
             // Switching the boost model drops the draft, as in Decky.
             if(method==="set_advanced_tdp_control" && success) { panel.powerDirty=false; panel.loadPower(); }
             if(method==="apply_tdp" || method==="set_game_ac_profile") {
