@@ -1832,8 +1832,11 @@ class Plugin:
                         last_result["reconnected"] = True
                         return last_result
                     remaining_activation = deadline - time.monotonic() - 1.0
+                    # iwd's own join ignores a pinned BSSID; a pinned reconnect keeps retrying
+                    # through NetworkManager and its rollback (which unpins) may use iwd.
                     if (on_iwd and not iwd_fallback_used and not last_result.get("success")
-                            and not active() and remaining_activation >= 3.0):
+                            and not active() and remaining_activation >= 3.0
+                            and not self._nmcli_get(uuid, "802-11-wireless.bssid")[0]):
                         iwd_fallback_used = True
                         self._iwd_connect_profile(uuid, iface, remaining_activation)
                         # The loop verifies the profile and its radio link either way.

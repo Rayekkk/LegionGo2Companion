@@ -74,7 +74,7 @@ class IwdNativeFallbackTests(unittest.TestCase):
             objects[self.NETWORK + "x"] = {"net.connman.iwd.Network": dict(network)}
         return json.dumps({"type": "a{oa{sa{sv}}}", "data": [objects]})
 
-    def execute(self, **tree):
+    def execute(self, bssid="", **tree):
         plugin = wifi.Plugin()
         clock, commands, activated = [0.0], [], [False]
 
@@ -84,6 +84,8 @@ class IwdNativeFallbackTests(unittest.TestCase):
                 return {"success": False, "stderr": "Connection activation failed: No reason given"}
             if "GetManagedObjects" in argv:
                 return {"success": True, "stdout": self.tree(**tree)}
+            if "802-11-wireless.bssid" in argv:
+                return {"success": True, "stdout": bssid}
             if argv[-1] == "Connect":
                 activated[0] = True
                 return {"success": True, "stdout": ""}
@@ -109,6 +111,11 @@ class IwdNativeFallbackTests(unittest.TestCase):
         self.assertIn(self.NETWORK, connects[0])
         first_up = next(i for i, argv in enumerate(commands) if argv[:3] == ["/usr/bin/nmcli", "con", "up"])
         self.assertGreater(commands.index(connects[0]), first_up)  # NetworkManager is always tried first.
+
+    def test_a_pinned_bssid_is_never_handed_to_iwd(self):
+        result, commands = self.execute(bssid="A8:29:48:E1:7E:01")
+        self.assertFalse(result["success"])
+        self.assertFalse(any(argv[-1] == "Connect" for argv in commands))
 
     def test_no_unique_known_network_never_calls_iwd_connect(self):
         for tree in ({"known": False}, {"duplicate": True}):
