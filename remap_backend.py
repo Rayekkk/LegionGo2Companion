@@ -94,7 +94,7 @@ _state_lock = threading.RLock()
 _operation_lock = threading.RLock()
 _watch_task: asyncio.Task | None = None
 _last_error = ""
-_last_suspend_offset: float | None = None
+_resume_detected = module_runtime.ResumeWatch()
 _service_watch = ProcessWatch()
 _version_lock = threading.Lock()
 _version_cache: tuple[str, float] | None = None
@@ -720,15 +720,6 @@ def _repair_sync() -> bool:
             return False
 
 
-_suspend_offset = module_runtime.suspend_offset
-
-
-def _resume_detected() -> bool:
-    global _last_suspend_offset
-    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
-    return resumed
-
-
 async def _watch_loop() -> None:
     last_check = time.monotonic()
     settle_until = last_check + 30.0
@@ -769,8 +760,8 @@ async def _watch_loop() -> None:
 
 class Plugin:
     async def _main(self):
-        global _watch_task, _last_suspend_offset
-        _last_suspend_offset = _suspend_offset()
+        global _watch_task
+        _resume_detected.mark()
         _service_watch.clear()
         await module_runtime.offload('remap', _repair_sync)
         if _watch_task is None or _watch_task.done():

@@ -97,7 +97,7 @@ _device_path: str | None = None
 _discovery_method: str | None = None
 _monitor_task: asyncio.Task | None = None
 _drift_task: asyncio.Task | None = None
-_last_suspend_offset: float | None = None
+_resume_detected = module_runtime.ResumeWatch()
 _DRIFT_INTERVAL_S = 30.0
 _RESUME_CHECK_S = 5.0
 
@@ -521,15 +521,6 @@ async def _emit_device_status() -> None:
         event('vibration','device_status_notification_failed',level='warning',error=exc,repeat=60)
 
 
-_suspend_offset = module_runtime.suspend_offset
-
-
-def _resume_detected() -> bool:
-    global _last_suspend_offset
-    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
-    return resumed
-
-
 def _update_active(field: str, value, *, profiles: dict | None = None,
                    profile_id: str | None = None) -> dict:
     """Write one field into whichever profile is currently in effect."""
@@ -805,11 +796,10 @@ class Plugin:
 
     async def _main(self):
         Plugin._setup_error = getattr(self, '_migration_error', None)
-        global _monitor_task, _drift_task, _last_suspend_offset
+        global _monitor_task, _drift_task
         try:
             def _start() -> bool:
-                global _last_suspend_offset
-                _last_suspend_offset = _suspend_offset()
+                _resume_detected.mark()
                 values = _active_values()
                 return _apply_settings(values, force=True)
             confirmed = await _offload(_start)

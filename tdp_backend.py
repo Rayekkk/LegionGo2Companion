@@ -111,7 +111,7 @@ _current_game_id: str = ""
 _current_ac_online: bool = False
 _last_cpu_power_check: float = 0.0
 CPU_POWER_DRIFT_CHECK_S = 60.0
-_last_suspend_offset: float | None = None
+_resume_detected = module_runtime.ResumeWatch()
 APP_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_GAME_PROFILES = 512
 MAX_LABEL_LENGTH = 96
@@ -343,6 +343,7 @@ def _load_ceilings_mw() -> tuple[int, int, int]:
     higher SPL saved by 2.2.0 or earlier reads as what actually runs."""
     # The Legion Go 2 ceiling as a constant: loads are frequent and every firmware read
     # is a WMI call; applying still clamps to the live firmware ceiling.
+    # shortcut: assumes the firmware SPL max is 35 W, use a cached live ceiling if a BIOS reports otherwise.
     return FALLBACK_STD_W["spl"] * 1000, HARD_MAX_MW, HARD_MAX_MW
 
 
@@ -1083,15 +1084,6 @@ def _get_running_appid() -> str:
     the frontend has gone quiet (panel closed)."""
     return resolve_running_app(_frontend_appid, _frontend_appid_ts,
                                time.monotonic(), _scan_proc_for_appid, _FRONTEND_APPID_TTL)
-
-
-_suspend_offset = module_runtime.suspend_offset
-
-
-def _resume_detected() -> bool:
-    global _last_suspend_offset
-    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
-    return resumed
 
 
 def _scan_proc_for_appid() -> str:
@@ -2846,7 +2838,7 @@ class Plugin:
         self._helper_cancel = threading.Event()
         self._helper_error = ""
         try:
-            global _current_ac_online, _ryzenadj_available, _last_suspend_offset
+            global _current_ac_online, _ryzenadj_available
             Plugin._ready = False
             Plugin._setup_error = None
             if not await _offload(_legion_go_2):
@@ -2861,7 +2853,7 @@ class Plugin:
             _current_ac_online = await _offload(_get_ac_online)
             # Establish the suspend-clock baseline before the workers start, so
             # even an early sleep/wake cycle is detected by their first pass.
-            _last_suspend_offset = _suspend_offset()
+            _resume_detected.mark()
             wmi = await _offload(_wmi_caps)
             try:
                 # Verify a helper left by an earlier Extras opt-in; never download here.

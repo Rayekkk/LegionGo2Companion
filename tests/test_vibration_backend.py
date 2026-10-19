@@ -647,10 +647,10 @@ class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_retry_clears_transient_startup_error(self):
         plugin = vibe.Plugin()
         with patch.object(vibe.Plugin, '_setup_error', None), \
-                patch.object(vibe, '_last_suspend_offset', None), \
+                patch.object(vibe._resume_detected, 'last', None), \
                 patch.object(vibe, '_active_app_ts', None), \
                 patch.object(vibe, '_monitor_task', None), patch.object(vibe, '_drift_task', None), \
-                patch.object(vibe, '_suspend_offset', return_value=0), \
+                patch.object(vibe.module_runtime, 'suspend_offset', return_value=0), \
                 patch.object(vibe, '_active_values', side_effect=[OSError('settings unreadable'), dict(vibe.DEFAULT_PROFILE)]), \
                 patch.object(vibe, '_apply_settings', return_value=True), \
                 patch.object(vibe, '_monitor_hotplug', new=AsyncMock()), \

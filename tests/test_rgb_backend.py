@@ -385,8 +385,8 @@ class RgbBackendTests(unittest.TestCase):
                 with (
                     patch.object(rgb_backend, "settings", memory),
                     patch.object(rgb_backend, "time", fake_time),
-                    patch.object(rgb_backend, "_last_suspend_offset", 0.0),
-                    patch.object(rgb_backend, "_suspend_offset", lambda: 60.0),
+                    patch.object(rgb_backend._resume_detected, "last", 0.0),
+                    patch.object(rgb_backend.module_runtime, "suspend_offset", lambda: 60.0),
                     patch.object(rgb_backend.asyncio, "sleep", side_effect=advance),
                     patch.object(rgb_backend, "_rgb_capability", side_effect=capability),
                     patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),

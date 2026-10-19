@@ -170,11 +170,21 @@ def suspend_offset():
         return None
 
 
-def resumed(previous, current):
-    """(new baseline, whether at least a second of suspend passed since `previous`)."""
-    if current is None:
-        return previous, False
-    return current, previous is not None and current - previous >= 1.0
+class ResumeWatch:
+    """Calling it reports whether at least a second of suspend passed since the
+    last reading; an unreadable clock (None) keeps that baseline. Battery (None
+    drops the baseline) and controller/WiFi (None as 0, strictly > 1 s) differ."""
+    last = None
+
+    def mark(self):
+        self.last = suspend_offset()
+
+    def __call__(self):
+        current = suspend_offset()
+        if current is None:
+            return False
+        previous, self.last = self.last, current
+        return previous is not None and current - previous >= 1.0
 
 
 def require_success(result):

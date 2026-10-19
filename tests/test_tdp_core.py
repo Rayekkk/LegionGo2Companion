@@ -114,10 +114,12 @@ class TdpCoreTests(unittest.TestCase):
             self.stack.enter_context(patch.object(tdp, name, copy.copy(value)))
         for name, callback in {
             '_get_running_appid': lambda: self.app, '_get_ac_online': lambda: self.ac,
-            '_suspend_offset': lambda: 0.0, '_write_profile': write_profile,
+            '_write_profile': write_profile,
             '_legion_go_2': lambda: True,
         }.items():
             self.stack.enter_context(patch.object(tdp, name, side_effect=callback))
+        self.stack.enter_context(patch.object(tdp.module_runtime, 'suspend_offset', return_value=0.0))
+        self.stack.enter_context(patch.object(tdp._resume_detected, 'last', None))
         self.stack.enter_context(patch.object(tdp.subprocess, 'Popen', Ryzenadj))
         self.stack.enter_context(patch.object(tdp.updater, 'download_to', side_effect=download))
         self.stack.enter_context(patch.object(tdp.updater, 'ssl_context'))

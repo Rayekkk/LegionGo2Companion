@@ -111,11 +111,11 @@ class IntegrationTests(unittest.TestCase):
                 vibration_backend._attr_cache.pop(key, None)
 
     def test_resume_is_a_boottime_gap_of_at_least_a_second(self):
-        import module_runtime
-        self.assertEqual(module_runtime.resumed(None, 20.0), (20.0, False))
-        self.assertEqual(module_runtime.resumed(20.0, 20.2), (20.2, False))
-        self.assertEqual(module_runtime.resumed(20.2, 22.0), (22.0, True))
-        self.assertEqual(module_runtime.resumed(22.0, None), (22.0, False))
+        watch = module_runtime.ResumeWatch()
+        with patch.object(module_runtime, "suspend_offset", side_effect=[None, 20.0, 20.2, 22.0, None, 23.0, 23.5]):
+            watch.mark()  # an unreadable clock leaves no baseline
+            self.assertEqual([(watch(), watch.last) for _ in range(6)], [
+                (False, 20.0), (False, 20.2), (True, 22.0), (False, 22.0), (True, 23.0), (False, 23.5)])
 
     def test_tdp_and_namespaced_wrappers_delegate(self):
         plugin = main.Plugin()

@@ -97,7 +97,7 @@ settings = SettingsManager(
 _settings_lock = threading.RLock()
 _apply_lock = threading.RLock()
 _drift_task: asyncio.Task | None = None
-_last_suspend_offset: float | None = None
+_resume_detected = module_runtime.ResumeWatch()
 _last_error = ""
 _power_capability_cache: tuple[bool, str] | None = None
 _power_capability_retry_at = 0.0
@@ -956,15 +956,6 @@ def _reconcile(*, force: bool = False) -> bool:
         return ok
 
 
-_suspend_offset = module_runtime.suspend_offset
-
-
-def _resume_detected() -> bool:
-    global _last_suspend_offset
-    _last_suspend_offset, resumed = module_runtime.resumed(_last_suspend_offset, _suspend_offset())
-    return resumed
-
-
 _offload = functools.partial(module_runtime.offload, 'rgb')
 
 
@@ -1002,10 +993,10 @@ class Plugin:
                 event('rgb','drift_verification_failed',level='warning',error=exc,repeat=60)
 
     async def _main(self) -> None:
-        global _drift_task, _last_suspend_offset
+        global _drift_task
         try:
             await _offload(_ensure_settings_file)
-            _last_suspend_offset = _suspend_offset()
+            _resume_detected.mark()
             # The controller may appear or reset after Decky starts. Keep a
             # bounded settling window even if the very first read was successful.
             self._settle_until = time.monotonic() + STARTUP_SETTLE_S
