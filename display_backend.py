@@ -179,9 +179,9 @@ BUNDLED_SCRIPTS = {
 }
 MODE_SCRIPT = {MODE_PQ: MODE_PQ, MODE_G22: MODE_G22, MODE_HYBRID: MODE_PQ}
 
-# 1.0.0 and 1.0.1 shipped the same PQ script under SCRIPT_NAME. It must remain
-# recognisable after an update: treating it as third-party would overwrite the
-# real .backup that the old release created for the user's previous script.
+# The PQ script every release up to 2.2.0 installed under SCRIPT_NAME (still the
+# bundled one today). Once the bundled PQ changes it must stay recognisable:
+# treating it as third-party would overwrite the user's real .backup.
 LEGACY_SCRIPT_SHA256 = {
     "eea882283c9d3b13456aba526750393ad80b4cba96593741dbd3c393e982a13a": MODE_PQ,
 }
@@ -190,14 +190,10 @@ LEGACY_SCRIPT_SHA256 = {
 BUNDLED_SCRIPT = BUNDLED_SCRIPTS[MODE_PQ]
 
 
-def _normalise_mode(mode) -> str:
-    return mode if mode in MODES else MODE_PQ
-
-
 def _select_mode(mode) -> str:
     """Point the script helpers at the variant this mode needs."""
     global BUNDLED_SCRIPT
-    mode = _normalise_mode(mode)
+    mode = mode if mode in MODES else MODE_PQ
     BUNDLED_SCRIPT = BUNDLED_SCRIPTS[MODE_SCRIPT[mode]]
     return mode
 
@@ -439,11 +435,20 @@ def _xprop_command(arguments):
     return [binary] + list(arguments)
 
 
+def _is_root() -> bool:
+    get_euid = getattr(os, "geteuid", None)  # absent on the Windows test host
+    return get_euid is not None and get_euid() == 0
+
+
+def _run_xprop(args, display, timeout, check=False, text=True):
+    return subprocess.run(_xprop_command(args), capture_output=True, text=text, timeout=timeout,
+                          env=_xprop_env(display), check=check, **_xprop_user(display))
+
+
 def _xprop_user(display=None) -> dict:
     """Spawn kwargs that drop root to the display owner (no PAM session, unlike runuser)."""
-    get_euid = getattr(os, "geteuid", None)
     owner = _display_owner(display)
-    if (get_euid is None or get_euid() != 0 or owner in (None, 0) or pwd is None):
+    if not _is_root() or owner in (None, 0) or pwd is None:
         return {}
     try:
         return {"user": owner, "group": pwd.getpwuid(owner).pw_gid, "extra_groups": []}
@@ -515,11 +520,7 @@ def _read_props_uncached(names, display=None) -> dict:
     rides along with the numeric ones rather than costing a second process.
     """
     try:
-        result = subprocess.run(
-            _xprop_command(["-root"] + list(names)),
-            capture_output=True, text=True, timeout=3, env=_xprop_env(display),
-            **_xprop_user(display),
-        )
+        result = _run_xprop(["-root"] + list(names), display, 3)
     except (OSError, subprocess.SubprocessError):
         return {}
     if result.returncode != 0:  # partial output proves neither ownership nor absence
@@ -643,12 +644,7 @@ def _as_path(raw):
 
 def _probe_gamescope(display: str) -> tuple:
     try:
-        out = subprocess.run(
-            _xprop_command(["-root"]),
-            capture_output=True, text=True, timeout=5,
-            env=_xprop_env(display),
-            **_xprop_user(display),
-        ).stdout
+        out = _run_xprop(["-root"], display, 5).stdout
     except (OSError, subprocess.SubprocessError):
         return 0, False
     lines = out.splitlines()
@@ -707,13 +703,8 @@ def _float_raw(value: float) -> int:
 def _write_atom_int(name: str, value: int) -> bool:
     """Set a CARDINAL atom on the root window gamescope is listening on."""
     try:
-        subprocess.run(
-            _xprop_command(
-                ["-root", "-f", name, "32c", "-set", name, str(int(value))]
-            ),
-            capture_output=True, timeout=3, env=_xprop_env(), check=True,
-            **_xprop_user(),
-        )
+        _run_xprop(["-root", "-f", name, "32c", "-set", name, str(int(value))],
+                   None, 3, check=True, text=False)
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -821,10 +812,6 @@ def _script_variant(data):
 
 def _is_our_script(data) -> bool:
     """True for any variant we ship, so a mode swap never backs up our own script."""
-    if data is None:
-        return False
-    if data == _read_script_bytes(BUNDLED_SCRIPT):
-        return True
     return _script_variant(data) is not None
 
 
@@ -988,8 +975,7 @@ def _bind_script_dir() -> bool:
     An unprivileged plugin already is that user, so only root rebinds.
     """
     global SCRIPT_DIR, INSTALLED_SCRIPT, SCRIPT_USER, _script_binding
-    get_euid = getattr(os, "geteuid", None)
-    if get_euid is None or get_euid() != 0:
+    if not _is_root():
         return True
     _gamescope_start_time()
     pid = _gamescope_pid
@@ -1156,9 +1142,7 @@ def _restart_session() -> tuple:
         env["LOGNAME"] = account.pw_name
 
     def session_command(argv):
-        get_euid = getattr(os, "geteuid", None)
-        if (account is not None and get_euid is not None and get_euid() == 0
-                and account.pw_uid != 0
+        if (account is not None and _is_root() and account.pw_uid != 0
                 and os.path.exists("/usr/bin/runuser")):
             return [
                 "/usr/bin/runuser", "-u", account.pw_name, "--",
@@ -1351,9 +1335,11 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
                 return "changed"
             if expected_identity is not None and (opened.st_dev, opened.st_ino) != expected_identity:
                 return "changed"
-            published = os.stat(path)
-            if ((opened.st_dev, opened.st_ino)
-                    != (published.st_dev, published.st_ino)):
+            def still_published():
+                published = os.stat(path)
+                return (opened.st_dev, opened.st_ino) == (published.st_dev, published.st_ino)
+
+            if not still_published():
                 return "changed"
 
             previous_pending = copy.deepcopy(settings.getSetting("edid_write_pending", None))
@@ -1408,13 +1394,9 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
             # A connector can change while the old descriptor is being written.
             # That is safe, but report it as changed rather than claiming the new
             # published path is already patched.
-            published = os.stat(path)
-            if ((opened.st_dev, opened.st_ino)
-                    != (published.st_dev, published.st_ino)):
-                _clear_edid_write_pending()
-                return "changed"
+            current = still_published()
             _clear_edid_write_pending()
-            return "written"
+            return "written" if current else "changed"
     except OSError as exc:
         diagnostic_transition('display', 'edid_recovery', 'io_failed', level='warning', error=exc, stage='rewrite', pending=True)
         return "failed"
@@ -1802,12 +1784,7 @@ class Plugin:
     def _store_settings(values: dict, *, required: bool = False) -> None:
         """Persist one transaction; recovery baselines must succeed before writes."""
         try:
-            with _settings_lock:
-                settings.read()
-                Plugin._require_settings()
-                payload = dict(settings.settings)
-                payload.update(values)
-                settings.replace(payload)
+            Plugin._native_store(values)
         except CorruptSettings:
             raise
         except Exception as e:
@@ -2059,7 +2036,6 @@ class Plugin:
             Plugin._state["setup_error"] = "Finish the display reset and restart Gaming Mode before choosing a new mode."
             return dict(Plugin._state)
         previous = Plugin._state["panel_mode"]
-        mode = _normalise_mode(mode)
 
         def _install_then_save_locked():
             if Plugin.native_display_active():
@@ -2080,6 +2056,7 @@ class Plugin:
                     INSTALLED_SCRIPT, installed_existed, installed_before)
                 backup_ok = _restore_file_snapshot(
                     backup, backup_existed, backup_before)
+                _select_mode(previous)
                 return installed_ok and backup_ok
 
             _select_mode(mode)
@@ -2087,7 +2064,6 @@ class Plugin:
                 ok, note = _install_script()
             except Exception as e:
                 rollback_ok = _rollback_files()
-                _select_mode(previous if previous in MODES else MODE_PQ)
                 diagnostic_event('display', 'script_install_failed', level='error', error=e,
                                  stage='install', restored=rollback_ok)
                 rollback = ("previous script restored" if rollback_ok else
@@ -2095,7 +2071,6 @@ class Plugin:
                 return False, f"display script installation failed: {e}; {rollback}"
             if not ok:
                 rollback_ok = _rollback_files()
-                _select_mode(previous if previous in MODES else MODE_PQ)
                 if not rollback_ok:
                     note += "; script rollback failed"
                 return False, note
@@ -2105,7 +2080,6 @@ class Plugin:
                     settings.commit()
             except Exception as e:
                 rollback_ok = _rollback_files()
-                _select_mode(previous if previous in MODES else MODE_PQ)
                 diagnostic_event('display', 'script_install_failed', level='error', error=e,
                                  stage='settings', restored=rollback_ok)
                 try:
@@ -2485,12 +2459,10 @@ class Plugin:
             Plugin._state["reason"] = "waiting for gamescope to load a display mode"
             return False
         if (mode != MODE_HYBRID
-                and _as_int(props.get(ATOM_FORCE_HDR_SUPPORT))):
-            if _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
-                Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
-            else:
-                Plugin._state["reason"] = "could not clear stale hybrid HDR support"
-                return False
+                and _as_int(props.get(ATOM_FORCE_HDR_SUPPORT))
+                and not Plugin._set_force_hdr(0)):
+            Plugin._state["reason"] = "could not clear stale hybrid HDR support"
+            return False
         reason = _gate_block_reason(mode, Plugin._state)
         if reason:
             Plugin._release()
@@ -2546,8 +2518,7 @@ class Plugin:
         # HDR_OUTPUT_FEEDBACK would say one even with a gamma 2.2 output.
         if atoms.get(ATOM_FORCE_HDR_SUPPORT, 0):
             Plugin._release_locked()
-            if _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
-                Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
+            if Plugin._set_force_hdr(0):
                 Plugin._state["reason"] = "clearing stale hybrid HDR support"
             else:
                 Plugin._state["reason"] = "could not clear stale hybrid HDR support"
@@ -2592,10 +2563,8 @@ class Plugin:
         if now < Plugin._hdr_backoff_until:
             return False
 
-        if Plugin._ownership_session_current() is not True:
-            return False
-        props = Plugin._session_props([ATOM_IS_EXTERNAL, ATOM_HDR_APP], fresh=True)
-        if Plugin._ownership_session_current() is not True:
+        props = Plugin._fresh_owned_props([ATOM_IS_EXTERNAL, ATOM_HDR_APP])
+        if props is None:
             return False
         content = _as_int(props.get(ATOM_HDR_APP))
         if _as_int(props.get(ATOM_IS_EXTERNAL)) != 0 or content not in (0, 1):
@@ -2640,6 +2609,28 @@ class Plugin:
         """Forget transition timers that cannot cross an ownership boundary."""
         Plugin._hybrid_pq_hold_until = 0.0
         Plugin._hybrid_sdr_since = None
+
+    @staticmethod
+    def _set_force_hdr(value: int) -> bool:
+        """Write the forced-support flag; gamescope then rewrites its EDID, so recheck it."""
+        if not _write_atom_int(ATOM_FORCE_HDR_SUPPORT, value):
+            return False
+        Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
+        return True
+
+    @staticmethod
+    def _hybrid_handed_off() -> None:
+        Plugin._hybrid_suspended_external = False
+        Plugin._state["hybrid_reason"] = ""
+        Plugin._hdr_argument_over()
+
+    @staticmethod
+    def _fresh_owned_props(names):
+        """A fresh read that our ownership session brackets on both sides, else None."""
+        if Plugin._ownership_session_current() is not True:
+            return None
+        props = Plugin._session_props(names, fresh=True)
+        return props if Plugin._ownership_session_current() is True else None
 
     @staticmethod
     def _cancel_hybrid_sdr_candidate(log=False) -> None:
@@ -2747,8 +2738,7 @@ class Plugin:
         # Re-asserted every pass: gamescope drops it on restart, and without it no
         # game started in gamma 2.2 could ever ask for HDR.
         if not _as_int(props.get(ATOM_FORCE_HDR_SUPPORT)):
-            if _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 1):
-                Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
+            if Plugin._set_force_hdr(1):
                 decky.logger.info(f"{LOG} hybrid: HDR advertised to games")
             else:
                 Plugin._state["hybrid_reason"] = "could not advertise HDR to games"
@@ -2822,11 +2812,10 @@ class Plugin:
         """Hand HDR control to an external display once, then leave it alone."""
         if not Plugin._hybrid_suspended_external:
             Plugin._reset_hybrid_timing()
-            if not _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
+            if not Plugin._set_force_hdr(0):
                 Plugin._state["hybrid_reason"] = \
                     "could not hand HDR control to the external display"
                 return
-            Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
             Plugin._hybrid_suspended_external = True
             output = _as_int(props.get(ATOM_HDR_OUT))
             if output is not None:
@@ -2855,9 +2844,7 @@ class Plugin:
             return session is False
         external = _as_int(props.get(ATOM_IS_EXTERNAL))
 
-        dropped = _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
-        if dropped:
-            Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
+        dropped = Plugin._set_force_hdr(0)
 
         if external != 0:
             # We can safely stop advertising synthetic HDR support, but without
@@ -2866,9 +2853,7 @@ class Plugin:
             # policy decides whether it should run HDR.
             if external == 1 and dropped:
                 Plugin._forget_hdr_baseline()
-                Plugin._hybrid_suspended_external = False
-                Plugin._state["hybrid_reason"] = ""
-                Plugin._hdr_argument_over()
+                Plugin._hybrid_handed_off()
                 decky.logger.info(
                     f"{LOG} hybrid: released control to the external display")
                 return True
@@ -2891,9 +2876,7 @@ class Plugin:
             # Nothing was captured or written in this ownership period. Clearing
             # our support flag is sufficient and makes repeated unloads idempotent.
             if dropped:
-                Plugin._hybrid_suspended_external = False
-                Plugin._state["hybrid_reason"] = ""
-                Plugin._hdr_argument_over()
+                Plugin._hybrid_handed_off()
                 return True
             Plugin._state["hybrid_reason"] = "could not hand HDR control back"
             return False
@@ -2907,9 +2890,7 @@ class Plugin:
             # Xwayland disappeared halfway through unload, a Decky reload in
             # the same gamescope session still has enough information to retry.
             Plugin._forget_hdr_baseline()
-            Plugin._hdr_argument_over()
-            Plugin._hybrid_suspended_external = False
-            Plugin._state["hybrid_reason"] = ""
+            Plugin._hybrid_handed_off()
             decky.logger.info(
                 f"{LOG} hybrid: released, panel back in "
                 f"{'PQ' if target else 'gamma 2.2'}")
@@ -3165,6 +3146,12 @@ class Plugin:
 
     # -- loop --
 
+    @staticmethod
+    def _adopt_backlight(bl_dir: str) -> None:
+        Plugin._state["backlight"] = os.path.basename(bl_dir) if bl_dir else ""
+        maximum = _read_int(os.path.join(bl_dir, "max_brightness")) if bl_dir else None
+        Plugin._state["max_nits"] = round(_millinits_to_nits(maximum), 2) if maximum else 0.0
+
     async def _loop(self, bl_dir: str):
         bl_path = os.path.join(bl_dir, "brightness") if bl_dir else ""
         notify = (await _offload(_open_notify, bl_dir)
@@ -3205,9 +3192,7 @@ class Plugin:
                                 bl_dir = await _offload(_find_backlight)
                                 bl_path = os.path.join(bl_dir, "brightness") if bl_dir else ""
                                 notify = await _offload(_open_notify, bl_dir) if bl_dir else None
-                                Plugin._state["backlight"] = os.path.basename(bl_dir) if bl_dir else ""
-                                maximum = _read_int(os.path.join(bl_dir, "max_brightness")) if bl_dir else None
-                                Plugin._state["max_nits"] = round(_millinits_to_nits(maximum), 2) if maximum else 0.0
+                                Plugin._adopt_backlight(bl_dir)
                                 Plugin._last_written = None
                         # Stamped first: a failing pass must not re-run the gate every tick.
                         gate_ts = now
@@ -3344,10 +3329,7 @@ class Plugin:
 
         bl_dir = (await _offload(_find_backlight)
                   if not Plugin.native_display_active() else "")
-        Plugin._state["backlight"] = os.path.basename(bl_dir) if bl_dir else ""
-        max_raw = _read_int(os.path.join(bl_dir, "max_brightness")) if bl_dir else None
-        Plugin._state["max_nits"] = (
-            round(_millinits_to_nits(max_raw), 2) if max_raw else 0.0)
+        Plugin._adopt_backlight(bl_dir)
 
         if Plugin.native_display_active():
             decky.logger.info(f"{LOG} native display support; maintaining the independent EDID fix")
@@ -3406,10 +3388,8 @@ class Plugin:
                     with Plugin._runtime_lock:
                         if Plugin.native_display_active():
                             return
-                        if Plugin._ownership_session_current() is not True:
-                            return
-                        props = Plugin._session_props([ATOM_IS_EXTERNAL], fresh=True)
-                        if Plugin._ownership_session_current() is not True:
+                        props = Plugin._fresh_owned_props([ATOM_IS_EXTERNAL])
+                        if props is None:
                             return
                         _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
                         # Only an HDR mode we chose can have left the panel in PQ;
