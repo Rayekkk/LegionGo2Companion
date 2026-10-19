@@ -214,6 +214,50 @@ class DisplayBaselineTests(unittest.TestCase):
         self.assertEqual(writes, [120.0, 120.0, 250.0])
         self.assertEqual(display._as_float(self.props[display.ATOM_SDR_NITS]), 250.0)
 
+    def test_gate_reasons_and_which_release_runs(self):
+        display.Plugin._baseline = 250.0
+        cases = (
+            ({}, {}, True, 'forwarding slider to gamescope', None, False),
+            ({'reset_in_progress': True}, {}, False, 'start', None, False),
+            ({'setup_done': False}, {}, False, 'waiting for the display script', '_release', False),
+            ({'active_mode': 'bogus'}, {}, False, 'waiting for gamescope to load a display mode',
+             '_release_locked', False),
+            ({'active_mode': display.MODE_G22}, {}, False,
+             'gamma 2.2 mode - the system slider drives the panel directly', '_release', False),
+            ({'active_mode': display.MODE_G22}, {display.ATOM_FORCE_HDR_SUPPORT: 1}, False,
+             'gamma 2.2 mode - the system slider drives the panel directly', '_release', True),
+            ({'active_mode': display.MODE_G22, 'fail_write': True}, {display.ATOM_FORCE_HDR_SUPPORT: 1},
+             False, 'could not clear stale hybrid HDR support', None, True),
+            ({'active_mode': display.MODE_HYBRID}, {display.ATOM_FORCE_HDR_SUPPORT: 1}, False,
+             'hybrid mode - the panel switches itself, nothing to forward', '_release', False),
+            ({'panel_ok': False, 'enabled': False}, {}, False, 'display not on the affected list',
+             '_release', False),
+            ({'enabled': False}, {}, False, 'turned off', '_release', False),
+            ({'empty_props': True}, {}, False, 'gamescope not reachable', None, False),
+            ({}, {display.ATOM_HDR_APP: 1}, False, 'HDR content on screen, Steam handles it',
+             '_release', False),
+        )
+        for state, props, allowed, reason, release, wrote in cases:
+            with self.subTest(state=state, props=props):
+                state = dict(state)
+                fail_write = state.pop('fail_write', False)
+                empty = state.pop('empty_props', False)
+                self.state.update({'setup_done': True, 'enabled': True, 'panel_ok': True,
+                                   'reset_in_progress': False, 'active_mode': 'pq', 'reason': 'start',
+                                   **state})
+                with patch.object(display.Plugin, '_session_props',
+                                  return_value={} if empty else dict(self.props, **props)), \
+                     patch.object(display.Plugin, '_session_note', ''), \
+                     patch.object(display.Plugin, '_edid_recheck_until', 0.0), \
+                     patch.object(display.Plugin, '_release') as plain, \
+                     patch.object(display.Plugin, '_release_locked') as locked, \
+                     patch.object(display, '_write_atom_int', return_value=not fail_write) as atom:
+                    self.assertIs(display.Plugin._refresh_gate_locked(), allowed)
+                self.assertEqual(self.state['reason'], reason)
+                self.assertEqual([name for name, mock in (('_release', plain), ('_release_locked', locked))
+                                  if mock.called], [release] if release else [])
+                self.assertEqual(atom.called, wrote)
+
     def test_hdr_commit_failure_blocks_force_and_mode_writes_then_retry_has_durable_baseline(self):
         self.store.replace({**display.DEFAULT_SETTINGS, 'panel_mode': 'hybrid', 'active_mode': 'hybrid'})
         self.state.update(active_mode='hybrid', panel_mode='hybrid')

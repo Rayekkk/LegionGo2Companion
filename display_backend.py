@@ -1398,6 +1398,25 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
         return "failed"
 
 
+def _gate_block_reason(mode: str, state: dict) -> str | None:
+    """Why a loaded display mode must not forward the slider right now, or None."""
+    if mode == MODE_G22:
+        # The panel honours its hardware brightness control in gamma 2.2, so
+        # there is nothing to forward and adding to it would dim twice.
+        return "gamma 2.2 mode - the system slider drives the panel directly"
+    if mode == MODE_HYBRID:
+        # Same story while it sits in gamma 2.2, and once it flips to PQ
+        # there is HDR content up and Steam owns the gain atoms.
+        return "hybrid mode - the panel switches itself, nothing to forward"
+    if not state["panel_ok"]:
+        # Forwarding the level on a panel that does honour its backlight
+        # would dim the image twice.
+        return "display not on the affected list"
+    if not state["enabled"]:
+        return "turned off"
+    return None
+
+
 class Plugin:
     # Everything the panel reports back to the UI.
     _state = {
@@ -2433,30 +2452,10 @@ class Plugin:
             else:
                 Plugin._state["reason"] = "could not clear stale hybrid HDR support"
                 return False
-        if mode == MODE_G22:
-            # The panel honours its hardware brightness control in gamma 2.2, so
-            # there is nothing to forward and adding to it would dim twice.
+        reason = _gate_block_reason(mode, Plugin._state)
+        if reason:
             Plugin._release()
-            Plugin._state["reason"] = \
-                "gamma 2.2 mode - the system slider drives the panel directly"
-            return False
-        if mode == MODE_HYBRID:
-            # Same story while it sits in gamma 2.2, and once it flips to PQ
-            # there is HDR content up and Steam owns the gain atoms.
-            Plugin._release()
-            Plugin._state["reason"] = \
-                "hybrid mode - the panel switches itself, nothing to forward"
-            return False
-
-        if not Plugin._state["panel_ok"]:
-            # Forwarding the level on a panel that does honour its backlight
-            # would dim the image twice.
-            Plugin._release()
-            Plugin._state["reason"] = "display not on the affected list"
-            return False
-        if not Plugin._state["enabled"]:
-            Plugin._release()
-            Plugin._state["reason"] = "turned off"
+            Plugin._state["reason"] = reason
             return False
 
         if not props:
