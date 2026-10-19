@@ -10,7 +10,8 @@ export const OFFSET_MAX = { sppt: 15, fppt: 15 };
 // Used until get_caps() answers; the backend reports the firmware's real ceilings and falls back to these
 // same numbers (FALLBACK_STD_W in main.py) if it cannot.
 export const FALLBACK_STD = { spl: 35, sppt: 37, fppt: 45 };
-export const FALLBACK_MAX = { spl: 50, sppt: 50, fppt: 50 };
+// With Extras only the boosts go higher; the firmware keeps sustained power (SPL) at its own ceiling.
+export const FALLBACK_MAX = { spl: 35, sppt: 50, fppt: 50 };
 export const FALLBACK_MIN = 5;
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -139,11 +140,11 @@ export const extrasShown = state => state.extrasAvailable || state.helperRetryAv
 /** A helper download only helps while TDP or the 50 W unlock is missing it. */
 export const helperRetryShown = (state, unlocked) => state.helperRetryAvailable && (!state.tdpAvailable || (!state.extrasAvailable && unlocked));
 
-export const extrasNote = (unlocked, state, stdSpl) => unlocked
-  ? `Custom goes up to ${FALLBACK_MAX.spl} W. Turning off lowers profiles above ${stdSpl} W.`
+export const extrasNote = (unlocked, state, std) => unlocked
+  ? `Boosts go up to ${FALLBACK_MAX.fppt} W; sustained power stays at ${std.spl} W, the firmware's limit. Turning off lowers boosts above ${std.sppt}/${std.fppt} W.`
   : state.extrasAvailable ? "Beyond Lenovo's limits. Hotter, louder, shorter battery." : "Downloads a verified helper from GitHub first.";
 
-export const extrasConfirm = state => ({ title: `Allow up to ${FALLBACK_MAX.spl} W?`, ok: `Allow ${FALLBACK_MAX.spl} W`,
+export const extrasConfirm = state => ({ title: `Allow up to ${FALLBACK_MAX.fppt} W?`, ok: `Allow ${FALLBACK_MAX.fppt} W`,
   text: "This goes beyond Lenovo's power limits. The console runs hotter and louder, and the battery drains faster."
     + (state.extrasAvailable ? "" : " Companion first downloads the verified RyzenAdj helper from GitHub.") });
 

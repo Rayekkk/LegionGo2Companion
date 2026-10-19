@@ -203,8 +203,9 @@ now (Global or the game, the preset, the power limit and the live APU power).
   CPU speed (left) or leaves more power for the GPU (right).
 
 > [!WARNING]
-> **Allow up to 50 W** (under **More**) goes beyond Lenovo's normal limits. The console gets
-> hotter and louder and the battery drains faster. It downloads and verifies the `ryzenadj`
+> **Allow up to 50 W** (under **More**) raises the boost limits beyond Lenovo's normal range.
+> Sustained power stays at the firmware's limit (35 W on the Legion Go 2); the processor does not
+> accept more. The console gets hotter and louder and the battery drains faster. It downloads and verifies the `ryzenadj`
 > helper from GitHub the first time you turn it on.
 
 <details>
@@ -233,7 +234,7 @@ Newer kernels show **CPU energy preference** as a 0–100% slider in 10% steps; 
 named preferences, including **System default** when available. CPU changes apply and save at
 once for the settings chosen above.
 
-Turning **Allow up to 50 W** off lowers saved settings above the standard limit. If the helper is
+Turning **Allow up to 50 W** off lowers saved boosts above the standard limits. If the helper is
 unavailable, the normal range and your profiles stay available; use **Retry helper download**
 when offered. If status or a profile could not load, use **Retry status** or **Retry profile**.
 

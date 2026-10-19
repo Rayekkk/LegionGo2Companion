@@ -169,7 +169,9 @@ def _standard_ceilings_mw() -> tuple[int, int, int]:
 def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     """Ceilings the current persisted mode is allowed to apply."""
     if state.get("extras_unlocked", False) and _ryzenadj_available:
-        return HARD_MAX_MW, HARD_MAX_MW, HARD_MAX_MW
+        # The SMU keeps sustained power (STAPM) at the firmware's SPL ceiling; only
+        # the boost limits go higher (Legion Go 2: STAPM stays 35 W, slow/fast take 50).
+        return _standard_ceilings_mw()[0], HARD_MAX_MW, HARD_MAX_MW
     return _standard_ceilings_mw()
 
 
@@ -900,8 +902,6 @@ def _rapl_watts() -> float | None:
 _last_source: str = ""
 
 # The triplet the hardware was last successfully asked for, in milliwatts.
-# Needed because one of the three is not readable back on the ryzenadj path -
-# see _adopt_unreadable_spl().
 _applied_mw: tuple = ()
 
 # When that happened, so the enforce pass can tell whether the info cache it is
@@ -952,9 +952,8 @@ _wmi_live_limits: tuple = ()
 def _wmi_limits_overridden(want_w: tuple) -> bool | None:
     """True when a live read disagrees with what the firmware claims is set.
 
-    Only SPPT and FPPT are compared. SPL cannot be read back through ryzenadj
-    on this hardware (see _adopt_unreadable_spl), and the firmware's own
-    reading of it is the thing under suspicion here.
+    Only SPPT and FPPT are compared: the firmware's own SPL reading is the
+    thing under suspicion here, and ryzenadj's STAPM limit never exceeds it.
     """
     # None means no fresh cross-check, not proof the hardware reached target.
     global _wmi_verified_at, _wmi_live_limits
@@ -1006,17 +1005,6 @@ def _invalidate_limits_cache() -> None:
         _limits_cache, _limits_cache_ts = {}, 0.0
 
 
-def _adopt_unreadable_spl(parsed: dict) -> dict:
-    """Report the applied SPL: ryzenadj's STAPM LIMIT follows the fast limit, not SPL.
-
-    Measured (Strix Point, ryzenadj 0.19.0): stapm=15 slow=18 fast=25 reads STAPM 25.0.
-    Slow and fast read back exactly, so drift (incl. a post-resume reset) is still caught.
-    """
-    if _applied_mw and "spl_limit" in parsed:
-        parsed["spl_limit"] = _applied_mw[0] / 1000
-    return parsed
-
-
 def _read_limits() -> dict:
     """Current limits in watts, read from whichever layer last applied them.
 
@@ -1041,7 +1029,7 @@ def _read_limits() -> dict:
     finally:
         _ryzenadj_lock.release()
 
-    parsed = _adopt_unreadable_spl(_parse_ryzenadj_output(out)) if rc == 0 else {}
+    parsed = _parse_ryzenadj_output(out) if rc == 0 else {}
     if parsed:
         with _limits_cache_lock:
             _limits_cache, _limits_cache_ts = dict(parsed), time.monotonic()
@@ -2686,7 +2674,7 @@ class Plugin:
                 "std": std,
                 # Until the helper is verified the two ranges are the same.
                 "max": dict(std) if not helper_available
-                       else {k: HARD_MAX_MW // 1000 for k in WMI_ATTRS},
+                       else dict(std, sppt=HARD_MAX_MW // 1000, fppt=HARD_MAX_MW // 1000),
                 "wmi": bool(caps),
                 "extras": helper_available,
                 "tdp_available": available,

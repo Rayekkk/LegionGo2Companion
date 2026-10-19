@@ -16,6 +16,7 @@ Not released yet.
 
 ### Changed
 
+- **TDP, Allow up to 50 W:** the Legion Go 2 keeps sustained power at its firmware limit (35 W) even when a higher value is requested; only the boost limits go to 50 W. The panel now shows that instead of the requested sustained value, and Custom offers sustained power up to 35 W with boosts up to 50 W.
 - **Fan Control** works and reads the same in the Decky panel and the Desktop app:
   - Dragging a curve point below the minimum running speed stops the fan only when dragged below half of that minimum; above it, the point snaps to the minimum. Stepping with the D-pad or keys is unchanged.
   - The Desktop app uses the panel's names and formats ("Maximum", "50.0%", "Save global curve", "Assign curve to …"), can save an unchanged curve to confirm a review or to give a preset its own copy, offers "Use global curve" only for a preset that has its own curve, and always lets you turn Fan Control off while connected.

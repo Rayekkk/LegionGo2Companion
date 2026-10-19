@@ -58,7 +58,7 @@ export function capsState(caps: Partial<CapsInfo> | null | undefined): CapsState
 export function tdpNotice(state: CapsState, unlocked: boolean): [string, string] | null;
 export function extrasShown(state: CapsState): boolean;
 export function helperRetryShown(state: CapsState, unlocked: boolean): boolean;
-export function extrasNote(unlocked: boolean, state: CapsState, stdSpl: number): string;
+export function extrasNote(unlocked: boolean, state: CapsState, std: Caps): string;
 export function extrasConfirm(state: CapsState): { title: string; ok: string; text: string };
 export function limitsText(info: TdpInfo | null | undefined): string;
 export function sourceText(info: TdpInfo | null | undefined): string;

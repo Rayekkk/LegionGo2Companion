@@ -197,8 +197,12 @@ class TdpCoreTests(unittest.TestCase):
         tdp._ryzenadj_available = True
         self.seed(extras_unlocked=True)
         self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])
+        # The SMU keeps sustained power at the firmware's SPL ceiling; only the boosts go higher.
+        spl_max = self.rpc('get_caps')['std']['spl']
         self.assertEqual(self.applies(), [[
-            '--stapm-limit=45000', '--slow-limit=48000', '--fast-limit=50000']])
+            f'--stapm-limit={spl_max * 1000}', '--slow-limit=48000', '--fast-limit=50000']])
+        caps = self.rpc('get_caps')
+        self.assertEqual(caps['max'], dict(caps['std'], sppt=50, fppt=50))
 
     def test_enabling_extras_downloads_the_helper_first(self):
         with patch.object(tdp, '_ensure_ryzenadj', side_effect=OSError('offline')):

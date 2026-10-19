@@ -1554,8 +1554,8 @@ export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         </PanelSectionRow>
         {extrasShown(capsNow) && <PanelSectionRow>
           <ToggleField
-            label={`Allow up to ${FALLBACK_MAX.spl} W`}
-            description={failureFor("extras") ?? extrasNote(extrasUnlocked, capsNow, stdCaps.spl)}
+            label={`Allow up to ${FALLBACK_MAX.fppt} W`}
+            description={failureFor("extras") ?? extrasNote(extrasUnlocked, capsNow, stdCaps)}
             checked={extrasUnlocked}
             disabled={loading || !tdpAvailable}
             onChange={checked => checked ? confirmAction(extrasConfirm(capsNow).title, extrasConfirm(capsNow).text,

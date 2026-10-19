@@ -397,7 +397,7 @@ RowLayout {
                 field("","list",profileRows,profileAction,{name:"Game profiles"})
             ]},{title:"More",column:1,barTitle:"Troubleshooting",fields:[
                 switcher("Separate boost limits",()=>s("get_settings").advanced_tdp_control,"set_advanced_tdp_control",null,{note:"Set slow and fast boost yourself in Custom."}),
-                field("Allow up to 50 W","toggle",unlocked,setExtras,{note:()=>Tdp.extrasNote(unlocked(),capsNow(),stdCaps().spl),visible:()=>Tdp.extrasShown(capsNow())}),
+                field("Allow up to 50 W","toggle",unlocked,setExtras,{note:()=>Tdp.extrasNote(unlocked(),capsNow(),stdCaps()),visible:()=>Tdp.extrasShown(capsNow())}),
                 action("Reapply saved settings","reapply",null,{bar:true}),
                 action("Retry helper download","retry_extras",null,{bar:true,visible:()=>Tdp.helperRetryShown(capsNow(),unlocked())}),
                 field("Delete profile for this game","button",()=>"Delete profile for this game",()=>confirm("delete_game_profile",[app()],"Its power, CPU Boost and energy settings are removed. This game will use Global settings.","Delete profile for this game?","Delete",true),
