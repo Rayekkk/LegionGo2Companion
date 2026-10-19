@@ -2324,6 +2324,8 @@ class Plugin:
             if _script_variant(legacy) != MODE_SCRIPT[mode]:
                 return
             with Plugin._runtime_lock:
+                if module_runtime.stop_requested("display"):
+                    return
                 _select_mode(mode)
                 ok, note = _install_script()
             if ok:
@@ -2640,7 +2642,8 @@ class Plugin:
     @staticmethod
     def _hybrid_pass() -> None:
         with Plugin._runtime_lock:
-            Plugin._hybrid_pass_locked()
+            if not module_runtime.stop_requested("display"):
+                Plugin._hybrid_pass_locked()
 
     @staticmethod
     def _remember_hdr_baseline(value: bool) -> None:
@@ -3020,7 +3023,8 @@ class Plugin:
     @staticmethod
     def _edid_pass() -> None:
         with Plugin._edid_lock:
-            Plugin._edid_pass_locked()
+            if not module_runtime.stop_requested("display"):
+                Plugin._edid_pass_locked()
 
     @staticmethod
     def _edid_pass_locked() -> None:
@@ -3306,7 +3310,9 @@ class Plugin:
         await _offload(Plugin._migrate_legacy_script)
         await _offload(Plugin._refresh_setup)
 
-        if Plugin._state["reset_in_progress"]:
+        # A stop that came during a slow step (see main.MODULE_START_LIMIT_S): apply nothing more.
+        stopped = functools.partial(module_runtime.stop_requested, "display")
+        if Plugin._state["reset_in_progress"] and not stopped():
             await self.reset_settings()
 
         # Before the slower startup work: a game that creates its surface before
@@ -3342,6 +3348,8 @@ class Plugin:
                 f"(max {Plugin._state['max_nits']} nits) on {desc}"
             )
 
+        if stopped():
+            return
         # The loop runs either way: the EDID half is not device specific, and the
         # setup gate needs re-checking so the panel updates itself after Setup.
         Plugin._prop_task = asyncio.create_task(_watch_properties())

@@ -2527,6 +2527,8 @@ class Plugin:
                 f"WiFi ready: device={info.get('device_label')}, "
                 f"family={info.get('device_family')}, driver={info.get('driver')}"
             )
+            if module_runtime.stop_requested("wifi"):
+                return {"success": True}  # A stop came during the recovery above: start nothing.
             self._high_band_monitor_ready = True
             self._start_high_band_monitor(settings)
             return {"success": True}

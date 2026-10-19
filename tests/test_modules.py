@@ -28,6 +28,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.guard.start()
         self.intent = patch.object(main, 'capture_intent', return_value={})
         self.intent.start()
+        self.addCleanup(module_runtime._stop_requested.clear)
         self.plugin = self.make_plugin()
 
     def make_plugin(self):
@@ -270,13 +271,13 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         for name in main.MODULE_NAMES[1:]:
             getattr(self.plugin, '_' + name)._main.assert_not_awaited()
 
-    async def start_with_hung_fan(self, outcome):
+    async def start_with_hung_fan(self, outcome, name='fan'):
         release = asyncio.Event()
         async def hung():
             await release.wait()
             if outcome is not None:
                 raise outcome
-        self.plugin._fan._main.side_effect = hung
+        getattr(self.plugin, '_' + name)._main.side_effect = hung
         self.plugin._start_desktop = AsyncMock()
         self.plugin._publish_modules = AsyncMock()
         await asyncio.wait_for(self.plugin._main(), 2)
@@ -297,7 +298,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((summary['starting'], summary['failed']), ('fan', None))
             self.assertNotIn('fan', summary['ready'])
             status = self.plugin._module_status()['fan']
-            self.assertEqual((status['ready'], status['starting'], status['error']), (False, True, 'Still starting…'))
+            self.assertEqual((status['enabled'], status['ready'], status['starting'], status['error']), (True, False, True, ''))
             with self.assertRaisesRegex(RuntimeError, 'still starting'):
                 await self.plugin.fan_get_state()
             with self.assertRaisesRegex(RuntimeError, 'still starting'):
@@ -325,16 +326,79 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main, 'STARTING_STOP_WAIT_S', 0.05), \
                 patch.object(main.diagnostics, 'event') as event:
             release = await self.start_with_hung_fan(None)
-            self.plugin._fan._unload.side_effect = release.wait  # Its unload waits on the hung start too.
             began = asyncio.get_running_loop().time()
             await asyncio.wait_for(self.plugin._unload(), 1)
             self.assertLess(asyncio.get_running_loop().time() - began, 1)
             self.assertIn((('plugin', 'module_stop_timeout'), {'level': 'warning', 'modules': 'fan'}), self.events(event))
-            for name in main.MODULE_NAMES:
+            self.assertTrue(module_runtime.stop_requested('fan'))
+            for name in (name for name in main.MODULE_NAMES if name != 'fan'):
                 getattr(self.plugin, '_' + name)._unload.assert_awaited_once()
+            self.plugin._fan._unload.assert_not_awaited()  # Never alongside its running start.
             release.set()
-            await asyncio.sleep(0.05)  # The late start sees the shutdown and does nothing more.
-            self.plugin._fan._unload.assert_awaited_once()
+            await asyncio.wait_for(self.plugin._late_stops['fan'], 1)
+            self.plugin._fan._unload.assert_awaited_once()  # Unloaded once the late start has finished.
+
+    async def test_turning_off_during_a_hung_start_saves_now_and_withdraws_when_it_succeeds(self):
+        await self.turn_off_during_hung_start(None)
+
+    async def test_turning_off_during_a_hung_start_withdraws_when_it_fails(self):
+        await self.turn_off_during_hung_start(RuntimeError('rgb probe failed'))
+        self.plugin._rgb._unload.assert_awaited_once()  # The failed start's cleanup, before the withdrawal.
+
+    async def turn_off_during_hung_start(self, outcome):
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05),                 patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as withdraw:
+            release = await self.start_with_hung_fan(outcome, 'rgb')
+            status = (await self.plugin.modules_set_enabled('rgb', False))['rgb']
+            self.assertEqual({key: status[key] for key in ('enabled', 'ready', 'starting', 'pending', 'error')},
+                             {'enabled': False, 'ready': False, 'starting': True, 'pending': True, 'error': ''})
+            saved = main.SettingsManager('module_settings', self.folder.name).getSetting('modules')['rgb']
+            self.assertEqual((saved['enabled'], saved['pending']), (False, True))
+            with self.assertRaisesRegex(RuntimeError, 'still starting'):
+                await self.plugin.modules_set_enabled('rgb', True)
+            withdraw.assert_not_awaited()
+            self.plugin._rgb._unload.assert_not_awaited()
+            fresh = self.make_plugin()  # The next plugin start skips it.
+            await fresh._run_stage('_main')
+            fresh._rgb._main.assert_not_awaited()
+            await fresh._unload()
+            release.set()
+            async def withdrawn():
+                while self.plugin._module_status()['rgb'].get('pending'):
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(withdrawn(), 1)
+            withdraw.assert_awaited_once_with('rgb', self.plugin._rgb)
+            status = self.plugin._module_status()['rgb']
+            self.assertEqual((status['enabled'], status['pending'], 'starting' in status), (False, False, False))
+
+    async def test_turning_off_fan_during_its_hung_start_stops_it_at_once(self):
+        self.plugin._fan.set_enabled = AsyncMock()
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05),                 patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as withdraw:
+            release = await self.start_with_hung_fan(None)
+            status = (await self.plugin.modules_set_enabled('fan', False))['fan']
+            self.plugin._fan.set_enabled.assert_awaited_once_with(False)
+            self.assertEqual((status['enabled'], status['starting']), (False, True))
+            withdraw.assert_not_awaited()
+            release.set()
+            async def withdrawn():
+                while not withdraw.await_count:
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(withdrawn(), 1)
+
+    async def test_shutdown_after_turning_off_during_a_hung_start_stays_within_budget(self):
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main, 'STARTING_STOP_WAIT_S', 0.05),                 patch.object(main, 'withdraw', new=AsyncMock(return_value='')) as withdraw:
+            release = await self.start_with_hung_fan(None, 'rgb')
+            await self.plugin.modules_set_enabled('rgb', False)
+            began = asyncio.get_running_loop().time()
+            await asyncio.wait_for(self.plugin._unload(), 1)
+            self.assertLess(asyncio.get_running_loop().time() - began, 1)
+            self.plugin._rgb._unload.assert_not_awaited()
+            release.set()
+            await asyncio.wait_for(self.plugin._late_stops['rgb'], 1)
+            await asyncio.sleep(0.02)  # _finish_late_start sees the shutdown.
+            self.plugin._rgb._unload.assert_awaited_once()
+            withdraw.assert_not_awaited()  # The next start retries the saved withdrawal.
+            saved = main.SettingsManager('module_settings', self.folder.name).getSetting('modules')['rgb']
+            self.assertEqual((saved['enabled'], saved['pending']), (False, True))
 
     async def test_shutdown_inside_the_start_time_limit_does_not_wait_for_it(self):
         entered, release = asyncio.Event(), asyncio.Event()

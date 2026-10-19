@@ -34,6 +34,22 @@ def is_paused(module):
     return module in CONTROLLER_MODULES and _controller_paused
 
 
+_stop_requested = set()
+
+
+def request_stop(module):
+    """A stop came while the module was still starting: its start must apply nothing more."""
+    _stop_requested.add(module)
+
+
+def stop_requested(module):
+    return module in _stop_requested
+
+
+def begin_start(module):
+    _stop_requested.discard(module)
+
+
 def require_available(module):
     generation = _operation_generation.get()
     if is_paused(module) or (module in CONTROLLER_MODULES and generation is not None

@@ -219,12 +219,15 @@ def _get_ac_online() -> bool:
         if _read_sysfs(os.path.join(path, "type")) != "Mains":
             continue
         mains_seen = True
-        if _read_sysfs(os.path.join(path, "online")) == "1":
+        with module_runtime.firmware_lock:  # reading online runs the ACPI _PSR method
+            online = _read_sysfs(os.path.join(path, "online"))
+        if online == "1":
             return True
     if mains_seen:
         return False
     # No Mains supply exposed at all - fall back to battery status.
-    status = _read_sysfs("/sys/class/power_supply/BAT0/status")
+    with module_runtime.firmware_lock:  # reading status runs the ACPI _BST method
+        status = _read_sysfs("/sys/class/power_supply/BAT0/status")
     return status not in ("", "Discharging", "Unknown")
 
 
@@ -2865,6 +2868,8 @@ class Plugin:
             def _apply_saved() -> dict:
                 global _current_game_id, _last_cpu_power_check
                 with _mutation_lock:
+                    if module_runtime.stop_requested("tdp"):
+                        return None  # A stop came during the slower steps above: apply nothing.
                     s = _load_settings()
                     # Runtime ceilings already account for unavailable RyzenAdj.
                     # Preserve user profiles so a later online start can restore them.
@@ -2886,6 +2891,8 @@ class Plugin:
                                else "global profile"))
                     return result
             startup_apply = await _offload(_apply_saved)
+            if startup_apply is None:
+                return
             if not startup_apply.get("success", False):
                 event('tdp','startup_limits_unconfirmed',level='warning',reason='hardware_unconfirmed',returncode=startup_apply.get('returncode'))
             if startup_apply.get('cpu_power_errors'):

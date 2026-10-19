@@ -58,12 +58,13 @@ GUARD_FAILURE_LIMIT = 3  # Consecutive failed scans (~15 s of periodic checks) b
 UPDATER_WAIT_S = len(INSTALL_ORDER) * INSTALL_SECONDS  # One fwupd time limit per controller component.
 UPDATER_POLL_S = 2.0
 SHUTDOWN_BUDGET_S = 4.0  # Of Decky's 5 s SIGTERM-to-SIGKILL window; _uninstall needs the rest.
-# All nine modules start in ~1.2 s on the console and the longest bounded command a
-# start may run is ~8 s (nmcli restore): past this a start is hung, so the next module goes.
+# All nine modules start in ~1.2 s on the console. A start can legitimately take much longer
+# (Wi-Fi rolling back an interrupted band-policy change: iwd restart up to 15 s, reconnect up
+# to 33 s, nmcli edits 8 s each): past this limit the next module goes, the slow one keeps running.
 MODULE_START_LIMIT_S = 15.0
-# A stop waits this long for a start still running past the limit, then as long again for
-# its unload: both fit SHUTDOWN_BUDGET_S next to the other modules' unload.
-STARTING_STOP_WAIT_S = 1.0
+# A stop gives a start still running past the limit this long to finish and be unloaded,
+# next to the other modules' unload; it fits SHUTDOWN_BUDGET_S.
+STARTING_STOP_WAIT_S = 2.0
 _ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_active_app'})  # Besides reads.
 # Preconditions the backend checks before changing anything; the reply already tells the user why.
 _REFUSALS = frozenset({'unsupported_backend', 'unsupported_device', 'preflight_failed', 'no_wifi',
@@ -343,6 +344,8 @@ class Plugin:
             for name, value in self._module_state.items() if name in MODULE_NAMES}
         self._module_health = {}
         self._starting = {}  # Module name -> its startup task; never cancelled mid firmware call.
+        self._late_stops = {}  # Module name -> its unload queued behind a start a stop found still running.
+        self._stop_deadline = 0.0  # End of the shutdown budget; _uninstall waits for late starts until then.
         self._shutdown_requested = asyncio.Event()  # wakes a startup wait so shutdown is not held for a module's time limit
         self._tdp = tdp_backend.Plugin()
         self._fan = fan_backend.Plugin()
@@ -413,9 +416,9 @@ class Plugin:
                        'note': self._module_state.get(name, {}).get('note', '')}
                 for name in MODULE_NAMES}
         for name, entry in result.items():
-            if entry['enabled'] and self._still_starting(name):
-                # In error, not note: a display note offers a Gaming Mode restart.
-                entry.update(ready=False, starting=True, error='Still starting…')
+            if self._still_starting(name):
+                # Also once turned off meanwhile (enabled False): it is withdrawn when the start ends.
+                entry.update(ready=False, starting=True, error='')
             if entry['enabled'] and module_runtime.is_paused(name):
                 entry.update(ready=False, maintenance=True,
                     note='Controller operations are paused for firmware maintenance.')
@@ -432,6 +435,7 @@ class Plugin:
 
     async def _start_module(self, name):
         component = getattr(self, '_' + name)
+        module_runtime.begin_start(name)
         try:
             if self._module_health.get(name, {}).get('ready') is False:
                 # A failed startup may have partially created workers. Finish
@@ -467,7 +471,7 @@ class Plugin:
         if name == 'fan' and not enabled:
             # Fan safety takes precedence even if module-choice persistence fails.
             await self._fan.set_enabled(False)
-        if self._still_starting(name):
+        if enabled and self._still_starting(name):
             raise RuntimeError('This module is still starting. Try again when it has finished.')
         previous = dict(self._module_state)
         component = getattr(self, '_' + name)
@@ -514,6 +518,9 @@ class Plugin:
                 self._module_state = previous
                 raise
             await self._publish_modules()
+            if self._still_starting(name):
+                # Never interrupt its hardware work: _finish_late_start withdraws it once the start ends.
+                return await asyncio.to_thread(self._module_status)
             try:
                 await self._withdraw_module(name, resume)
             except Exception as exc:
@@ -568,14 +575,21 @@ class Plugin:
         if started:
             diagnostics.event(name, 'module_started_late', seconds=round(time.monotonic() - began, 1))
         async with self._guard_lock:
-            if self._closing:
-                return
-            if not self._modules_started:
-                if started:  # Withdrawn by the conflict guard meanwhile: undo what the start began.
-                    await self._stop_component(name)
-                return
+            if self._closing or not self._modules_started:
+                return  # The stop that came meanwhile unloads it (_stop_after_start).
+            await self._recover_pending_module(name)  # Turned off while it was starting.
             await self._restore_resumed((name,))
         await self._publish_modules()
+
+    def _stop_after_start(self, name):
+        """Unload a module once its running start has finished, never alongside it."""
+        start = self._starting[name]
+        async def stop():
+            await asyncio.wait({start})
+            if not start.cancelled() and start.exception() is None:  # A failed start unloaded itself.
+                await self._stop_component(name)
+        task = self._late_stops[name] = module_runtime.background_task(stop())
+        return task
 
     def _guard_message(self):
         if self._guard_error:
@@ -664,21 +678,23 @@ class Plugin:
         self._withdraw_fan_lease()
         async def stop():
             await self._drain_rpc_jobs()
-            starting = [self._starting[name] for name in MODULE_NAMES if self._still_starting(name)]
-            if starting:
-                # Let a start past its time limit finish its firmware call before unloading it.
-                await asyncio.wait(starting, timeout=STARTING_STOP_WAIT_S)
-            hung = tuple(name for name in MODULE_NAMES if self._still_starting(name))
-            names = tuple(name for name in MODULE_NAMES if name not in hung)
-            await (self._run_stage("_unload", names) if hung else self._run_stage("_unload"))
+            began = time.monotonic()
+            starting = tuple(name for name in MODULE_NAMES if self._still_starting(name))
+            for name in starting:
+                module_runtime.request_stop(name)  # It skips its remaining steps and applies nothing more.
+            late = [self._stop_after_start(name) for name in starting]
+            names = tuple(name for name in MODULE_NAMES if name not in starting)
+            await (self._run_stage("_unload", names) if starting else self._run_stage("_unload"))
             # Both normal shutdown and conflict withdrawal must finish threads
             # that outlive the cancellation of their async monitor.
             await asyncio.gather(*(module_runtime.drain(name) for name in names))
-            if hung:
-                # Best effort within Decky's budget: a hung start's threads are never waited for.
-                unload = asyncio.ensure_future(self._run_stage("_unload", hung))
-                if not (await asyncio.wait({unload}, timeout=STARTING_STOP_WAIT_S))[0]:
-                    diagnostics.event('plugin', 'module_stop_timeout', level='warning', modules=','.join(hung))
+            # Within Decky's budget; past it the start's own stop check keeps it from applying more,
+            # and its unload still follows if the process outlives it (conflict withdrawal).
+            if late:
+                pending = (await asyncio.wait(late, timeout=max(began + STARTING_STOP_WAIT_S - time.monotonic(), 0)))[1]
+                if pending:
+                    diagnostics.event('plugin', 'module_stop_timeout', level='warning',
+                                      modules=','.join(name for name, task in zip(starting, late) if task in pending))
         try:
             await module_runtime.complete(stop())
         finally:
@@ -893,12 +909,15 @@ class Plugin:
         diagnostics.event('plugin', 'shutdown_started', source='backend')
         self._closing = True  # No new admissions; already admitted RPCs drain below.
         self._shutdown_requested.set()
+        for name in tuple(self._starting):
+            if self._still_starting(name):
+                module_runtime.request_stop(name)  # before draining RPCs: a slow start applies nothing more
         self._withdraw_fan_lease()
         # Wake a helper download now; it is an update job, not a drained module RPC.
         helper_cancel = getattr(self._tdp, '_helper_cancel', None)  # Tests stub the component.
         if helper_cancel is not None:
             helper_cancel.set()
-        deadline = time.monotonic() + SHUTDOWN_BUDGET_S
+        deadline = self._stop_deadline = time.monotonic() + SHUTDOWN_BUDGET_S
 
         async def hardware():
             for name in ('_guard_task', '_updater_wait'):
@@ -969,6 +988,19 @@ class Plugin:
         if callable(withdraw_lease):
             withdraw_lease()
 
+    async def _uninstall_after_start(self, names):
+        """Uninstall a module whose start outlived the unload only after that start and its unload end."""
+        async def uninstall(name):
+            await asyncio.wait({self._late_stops[name]})
+            await self._run_stage("_uninstall", (name,))
+            await self._recover_pending_module(name)
+        tasks = [module_runtime.background_task(uninstall(name)) for name in names]
+        if tasks:
+            pending = (await asyncio.wait(tasks, timeout=max(self._stop_deadline - time.monotonic(), 0)))[1]
+            if pending:
+                diagnostics.event('plugin', 'module_uninstall_timeout', level='warning',
+                                  modules=','.join(name for name, task in zip(names, tasks) if task in pending))
+
     async def _uninstall(self):
         # A blocked instance that never owned hardware must not run restoration
         # hooks against the standalone plugin's live state.
@@ -984,9 +1016,12 @@ class Plugin:
                 # Start every independent restoration immediately. A pending
                 # device/reconnect must not delay other modules before Decky's
                 # process shutdown deadline.
+                late = tuple(name for name, task in self._late_stops.items() if not task.done())
+                names = tuple(name for name in MODULE_NAMES if name not in late)
                 await asyncio.gather(
-                    self._run_stage("_uninstall"),
-                    *(self._recover_pending_module(name) for name in MODULE_NAMES),
+                    self._run_stage("_uninstall", names) if late else self._run_stage("_uninstall"),
+                    *(self._recover_pending_module(name) for name in names),
+                    self._uninstall_after_start(late),
                 )
         self._uninstalling = True
         diagnostics.ensure_fallback()

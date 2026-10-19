@@ -8,12 +8,16 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
+import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import support  # Decky/Linux doubles before importing the backend.
 import display_backend as display
 import display_native as native
+import module_runtime
 from safe_settings import AtomicSettingsManager, CorruptSettings
 
 
@@ -369,6 +373,74 @@ class DisplayDockCleanupTests(ResetFixture, unittest.TestCase):
         modes = [value for name, value in self.atoms if name == display.ATOM_HDR_ENABLED]
         self.assertNotIn(1, modes, 'a PQ round trip is two needless modesets')
         self.assertEqual(modes[-1], 0)
+
+
+class DisplayStopDuringStartTests(ResetFixture, unittest.TestCase):
+    """A display start still running past its time limit when the plugin stops applies nothing afterwards."""
+    def setUp(self):
+        super().setUp()
+        import main
+        self.main = main
+        self.edid.write_bytes(b'original-edid')  # What a completed restoration leaves behind.
+        self.gate = threading.Event()  # Holds the start in its first gamescope step.
+        self.addCleanup(self.gate.set)
+        self.addCleanup(module_runtime.begin_start, 'display')
+        self.uninstalled = []
+        self.edid_writes = []
+        self.patch(main.decky, DECKY_PLUGIN_SETTINGS_DIR=self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.patch(main, _installed_standalone_plugins=Mock(return_value=[]), MODULE_START_LIMIT_S=0.05,
+                   STARTING_STOP_WAIT_S=0.1, SHUTDOWN_BUDGET_S=0.3)
+        self.patch(display.Plugin, _task=None, _prop_task=None)
+        self.patch(display, _pick_display=lambda: self.gate.wait(5), _identify_panel=Mock(return_value=(True, 'fixture')),
+                   _find_backlight=Mock(return_value=''), _watch_properties=AsyncMock(),
+                   _uninstall_script=lambda: self.uninstalled.append(self.gate.is_set()) or 'removed the display script',
+                   # The published EDID carries the DisplayID block the EDID pass strips.
+                   _has_displayid=lambda data: data == b'original-edid', _cta_max_luminance=Mock(return_value=600.0),
+                   _rewrite_file_if_unchanged=lambda path, old, new, **_: self.edid_writes.append(new) or 'written')
+        self.patch(self.plugin, _loop=AsyncMock())
+
+    def test_the_same_start_without_a_stop_patches_the_edid_and_advertises_hdr(self):
+        self.gate.set()
+        asyncio.run(self.plugin._main())
+        self.assertEqual(self.edid_writes, [b'patched-edid'])
+        self.assertIn((display.ATOM_FORCE_HDR_SUPPORT, 1), self.atoms)
+
+    def stop_during_start(self, uninstall):
+        async def scenario():
+            loader = self.main.Plugin()
+            for name in self.main.MODULE_NAMES:
+                setattr(loader, '_' + name, SimpleNamespace(_main=AsyncMock(), _migration=AsyncMock(),
+                                                            _unload=AsyncMock(), _uninstall=AsyncMock()))
+            loader._display = self.plugin
+            loader._start_desktop = AsyncMock()
+            loader._publish_modules = AsyncMock()
+            await asyncio.wait_for(loader._main(), 2)
+            self.assertTrue(loader._module_status()['display']['starting'])
+            began = time.monotonic()
+            await loader._unload()
+            if uninstall:
+                await loader._uninstall()
+            self.assertLess(time.monotonic() - began, 1)
+            self.assertEqual(self.uninstalled, [])  # Never alongside the running start.
+            self.gate.set()
+            await asyncio.wait_for(loader._late_stops['display'], 5)
+            async def uninstalled():
+                while uninstall and not self.uninstalled:
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(uninstalled(), 5)
+        asyncio.run(scenario())
+        self.assertEqual(self.edid_writes, [])
+        self.assertNotIn((display.ATOM_FORCE_HDR_SUPPORT, 1), self.atoms)
+        self.assertIsNone(display.Plugin._task)
+        self.assertIsNone(display.Plugin._prop_task)
+
+    def test_unload_during_a_hung_start_leaves_the_edid_and_atoms_restored(self):
+        self.stop_during_start(uninstall=False)
+        self.assertEqual(self.uninstalled, [])
+
+    def test_uninstall_during_a_hung_start_removes_the_script_only_after_the_start(self):
+        self.stop_during_start(uninstall=True)
+        self.assertEqual(self.uninstalled, [True])
 
 
 class NativeDisplayMigrationTests(LegacyHybridFixture, unittest.TestCase):
