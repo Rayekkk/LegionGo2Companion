@@ -230,6 +230,23 @@ class ConnectionStateTests(unittest.TestCase):
             self.assertFalse(status["connected"])
             self.assertEqual(status["live"]["connection_state"], "unknown")
 
+    def test_status_reads_journal_once_and_offers_restore_only_for_recoverable_ownership(self):
+        plugin = wifi.Plugin()
+        settings = dict(wifi.DEFAULT_SETTINGS, band_policy=wifi.BAND_POLICY_HIGH_ONLY,
+                        device_family="legion_go_2", driver="mt7921e")
+        for strict, relaxed, available in (("", "", True), ("changed", "", True), ("changed", "changed", False)):
+            with self.subTest(strict=strict, relaxed=relaxed), \
+                 patch.object(wifi, "_load_settings", return_value=settings), \
+                 patch.object(plugin, "_get_current_backend", return_value="iwd"), \
+                 patch.object(plugin, "_get_wifi_interface", return_value=None), \
+                 patch.object(plugin, "_load_band_policy_journal", return_value=None) as journal, \
+                 patch.object(plugin, "_band_policy_ownership_error",
+                              side_effect=lambda _s, allow_restored=False: relaxed if allow_restored else strict):
+                status = plugin._get_status_sync()
+            journal.assert_called_once_with()
+            self.assertIs(status["live"]["band_policy_restore_available"], available)
+            self.assertEqual(status["live"].get("band_policy_error"), strict or None)
+
     def test_state_names_distinguish_activation_from_connection(self):
         plugin = wifi.Plugin()
         # Real nmcli -g output: a device without an active profile prints an empty CON-UUID line.

@@ -1523,9 +1523,11 @@ class Plugin:
         except FileNotFoundError:
             pass
 
-    def _get_network_recovery_issues(self) -> list[str]:
-        """Describe only durable recovery failures, without mutating state."""
-        journal = self._load_band_policy_journal()
+    def _get_network_recovery_issues(self, journal: dict | None | bool = False) -> list[str]:
+        """Describe only durable recovery failures, without mutating state.
+        `journal` is an already loaded journal (None: none); omitted, it is read here."""
+        if journal is False:
+            journal = self._load_band_policy_journal()
         if not journal:
             return []
         phase = str(journal.get("phase") or "")
@@ -2790,7 +2792,8 @@ class Plugin:
                 "drift": {},
             }
 
-            recovery_issues = self._get_network_recovery_issues()
+            journal = self._load_band_policy_journal()
+            recovery_issues = self._get_network_recovery_issues(journal)
             if recovery_issues:
                 status["live"]["recovery_required"] = True
                 status["live"]["recovery_errors"] = recovery_issues
@@ -2807,7 +2810,7 @@ class Plugin:
                 backend == "wpa_supplicant" and self._nm_supports_six_ghz_only())
             status["live"]["high_band_discovery_pending"] = bool(
                 backend == "iwd" and getattr(self, "_high_band_discovery_pending", False))
-            journal = self._load_band_policy_journal()
+            ownership_error = self._band_policy_ownership_error(settings)
             status["live"]["band_policy_restore_available"] = bool(
                 backend in ("iwd", "wpa_supplicant")
                 and settings.get("device_family") == "legion_go_2"
@@ -2815,11 +2818,11 @@ class Plugin:
                 and (saved_policy != BAND_POLICY_OFF or journal)
                 and (not journal or (journal.get("phase") == "rollback_failed"
                                      and self._band_policy_rollback_retryable(journal)))
-                and not self._band_policy_ownership_error(settings, allow_restored=True))
+                # The strict check passing implies the transition check passes.
+                and not (ownership_error and self._band_policy_ownership_error(settings, allow_restored=True)))
 
             # A strict policy can leave WiFi disconnected. Ownership and drift
             # must still be visible so the user can safely turn the policy off.
-            ownership_error = self._band_policy_ownership_error(settings)
             if ownership_error:
                 status["drift"]["band_policy"] = True
                 status["live"]["band_policy_error"] = ownership_error
@@ -2999,11 +3002,11 @@ class Plugin:
             != BAND_PREFERENCE_2_4_MODIFIER
         )
         ownership_error = self._band_policy_ownership_error(settings)
-        transition_ownership_error = self._band_policy_ownership_error(
+        # Passing the strict check implies passing the transition check.
+        transition_ownership_error = ownership_error and self._band_policy_ownership_error(
             settings, allow_restored=True)
         preference_needs_reapply = bool(ownership_error and not transition_ownership_error)
         if current_mode == mode and not preference_needs_upgrade and not preference_needs_reapply:
-            ownership_error = self._band_policy_ownership_error(settings)
             if ownership_error:
                 return refuse("ownership_conflict", ownership_error)
             return {
