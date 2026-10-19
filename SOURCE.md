@@ -8,7 +8,7 @@ generated directories are not part of the Git checkout.
 
 The source and build inputs for the combined frontend are included in the
 release archive as `src/`, `scripts/`, `rollup.config.js`, `tsconfig.json`,
-`package.json` and `package-lock.json`. With Node.js 18 or newer, rebuild the bundle with:
+`package.json` and `package-lock.json`. With Node.js 22.2 or newer (CI uses Node 24), rebuild the bundle with:
 
 ```bash
 npm ci --ignore-scripts
