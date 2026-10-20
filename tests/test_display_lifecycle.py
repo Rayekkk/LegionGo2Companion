@@ -465,17 +465,41 @@ class DisplayUpdateTests(ResetFixture, unittest.TestCase):
             await display.Plugin()._main()
         asyncio.run(scenario())
 
-    def test_update_reinstalls_the_set_up_script_and_asks_for_a_gaming_mode_restart(self):
+    def test_update_in_the_same_session_reinstalls_the_same_script_without_a_restart(self):
         removed = []
         self.update(lambda: removed.append(self.script.exists()))
         self.assertEqual(removed, [False], 'uninstall removes the script')
         self.assertIn((display.ATOM_HDR_ENABLED, 0), self.atoms, 'uninstall leaves the panel in gamma 2.2')
         self.assertEqual(self.script.read_bytes(), self.own_lua)
         self.assertTrue(self.state['setup_done'])
-        self.assertTrue(self.state['restart_pending'])
+        # Gaming Mode loaded these bytes at its start and still runs them.
+        self.assertFalse(self.state['restart_pending'])
+        self.assertNotEqual(self.state['setup_note'], 'installed, restart Game Mode to apply')
+        self.assertEqual(self.state['active_mode'], 'hybrid')
         self.assertEqual(self.state['setup_error'], '')
         self.assertEqual(self.persisted()['panel_mode'], 'hybrid')
         self.assertIs(self.persisted()['script_reinstall'], False, 'only once')
+        self.assertIsNone(self.persisted()['script_reinstall_loaded'])
+
+    def test_update_asks_for_a_gaming_mode_restart_unless_the_session_runs_the_same_script(self):
+        changed = self.root / 'changed.lua'
+        changed.write_bytes(self.own_lua + b'\n-- 2.3.1\n')
+        for case, before, between in (
+                ('a new Gaming Mode session', lambda: None, lambda: setattr(self, 'session', 200.0)),
+                ('a restart already pending', lambda: self.state.update(restart_pending=True), lambda: None),
+                ('a changed script', lambda: None, lambda: self.patch(  # last: the patch stays
+                    display, BUNDLED_SCRIPTS={**display.BUNDLED_SCRIPTS, display.MODE_PQ: str(changed)}))):
+            with self.subTest(case):
+                self.script.write_bytes(self.own_lua)
+                display.Plugin._task = display.Plugin._prop_task = None  # the previous start's, on its own loop
+                display.Plugin._gamescope_started_at, display.Plugin._loaded_script_variant = 100.0, display.MODE_PQ
+                self.session = 100.0
+                self.store.replace(self.saved)
+                before()
+                self.update(between)
+                self.assertTrue(self.state['setup_done'])
+                self.assertTrue(self.state['restart_pending'])
+                self.assertEqual(self.state['setup_note'], 'installed, restart Game Mode to apply')
 
     def test_update_never_replaces_a_script_found_in_its_place(self):
         self.update(lambda: self.script.write_bytes(b'-- hand tuned'))

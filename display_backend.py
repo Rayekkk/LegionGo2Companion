@@ -219,6 +219,8 @@ DEFAULT_SETTINGS = {
     "edid_write_pending": None,
     "edid_patched_identity": None,
     "script_reinstall": False,  # our uninstall removed the script; the next start puts it back
+    # What the running session had loaded when it was removed: {"session", "sha256", "restart_pending"}.
+    "script_reinstall_loaded": None,
 }
 
 settings = SettingsManager(
@@ -2263,15 +2265,24 @@ class Plugin:
             if not _bind_script_dir():
                 return False  # The Gaming Mode user is not known yet; the next start decides.
             marker = settings.getSetting("script_reinstall", None)
+            loaded = settings.getSetting("script_reinstall_loaded", None)
             if marker is None:
                 # shortcut: 2.2.x left no marker; only 2.2+ writes the EDID journal key, and 2.1.0
                 # users choose again in Setup. Drop once updates from 2.2.x are no longer expected.
                 marker = "edid_write_pending" in settings.settings
-            if settings.getSetting("script_reinstall", None) is not False:
-                Plugin._store_settings({"script_reinstall": False})
-            return (marker is True and Plugin._state.get("panel_mode") in MODES
+            if settings.getSetting("script_reinstall", None) is not False or loaded is not None:
+                Plugin._store_settings({"script_reinstall": False, "script_reinstall_loaded": None})
+            lost = (marker is True and Plugin._state.get("panel_mode") in MODES
                     and not Plugin._state.get("reset_in_progress")
                     and not Plugin.native_display_active() and not os.path.lexists(INSTALLED_SCRIPT))
+            bundled = _read_script_bytes(BUNDLED_SCRIPT)
+            if (lost and isinstance(loaded, dict) and loaded.get("restart_pending") is False
+                    and Plugin._same_session(loaded.get("session"), Plugin._gamescope_started_at)
+                    and bundled is not None and loaded.get("sha256") == hashlib.sha256(bundled).hexdigest()):
+                # This session loaded these very bytes before the update removed the file:
+                # putting them back needs no Gaming Mode restart.
+                Plugin._loaded_script_variant = _script_variant(bundled)
+            return lost
 
     @staticmethod
     def _refresh_setup() -> None:
@@ -3332,10 +3343,16 @@ class Plugin:
                 with Plugin._runtime_lock:
                     if Plugin.native_display_active():
                         return None
+                    _bind_script_dir()
+                    removed = _read_script_bytes(INSTALLED_SCRIPT)
                     note = _uninstall_script()
                     if note == "removed the display script":
-                        # Decky also uninstalls before every update; the next start puts it back.
-                        Plugin._store_settings({"script_reinstall": True})
+                        # Decky also uninstalls before every update; the next start puts it back,
+                        # without a restart if this session already runs the same script.
+                        Plugin._store_settings({"script_reinstall": True, "script_reinstall_loaded": {
+                            "session": Plugin._gamescope_started_at,
+                            "sha256": hashlib.sha256(removed).hexdigest() if removed is not None else None,
+                            "restart_pending": Plugin._state.get("restart_pending") is True}})
                     return note
             note = await _offload(uninstall_legacy_script)
             if note is None:

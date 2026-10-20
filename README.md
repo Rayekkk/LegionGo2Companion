@@ -132,7 +132,8 @@ check **Manage Modules** and **Display**, where setup or a Gaming Mode restart m
 
 Downloading does not install the update. Decky removes the old version first, so Companion
 hands the hardware back for a moment; the new version applies your settings again when it
-starts. Display reinstalls its script and asks for a Gaming Mode restart, and an open Desktop
+starts. Display reinstalls its script and asks for a Gaming Mode restart only when the script
+changed or a restart was already due (always after an update from 2.2.x), and an open Desktop
 app restarts in the new version. The update from 2.2.x or older still loses the gyro source,
 battery protection, lighting control and Wi-Fi band policy once; set them again afterwards.
 
