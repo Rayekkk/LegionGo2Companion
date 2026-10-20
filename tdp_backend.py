@@ -1144,16 +1144,13 @@ def _reapply_current_target(expected_generation: int | None = None) -> bool:
             _cancel_ac_settle()
             return True
         target = _ac_target or _active_triplet(s)
-        if _target_matches(target):
-            _best_effort_reapply_saved_cpu_power_locked(s)
-            _ac_target = ()
-            return True
-        _apply_and_record(*target, "TDP after a charger transition", "ac")
-        if _target_matches(target):
-            _best_effort_reapply_saved_cpu_power_locked(s)
-            _ac_target = ()
-            return True
-        return False
+        if not _target_matches(target):
+            _apply_and_record(*target, "TDP after a charger transition", "ac")
+            if not _target_matches(target):
+                return False
+        _best_effort_reapply_saved_cpu_power_locked(s)
+        _ac_target = ()
+        return True
 
 
 _transition_key = None
