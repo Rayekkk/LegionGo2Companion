@@ -899,6 +899,19 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (16, 25, 30))  # Balanced's values, but chosen as Custom
         self.assertTrue(self.rpc('apply_tdp', 12000, 18000, 22000)['success'])
         self.assertEqual(self.ppts(), (12, 18, 22))
+        tdp._current_ac_online = False
+        self.assertTrue(self.rpc('apply_tdp', 16000, 16000, 30000, preset_name='custom')['success'])
+        self.assertEqual(self.ppts(), (16, 16, 30))  # Balanced's battery values, chosen as Custom
+        self.assertEqual(self.rpc('get_settings')['battery_preset'], '')
+
+    def test_a_game_preset_on_battery_is_named_by_its_battery_values(self):
+        self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'}},
+                  separate_battery_presets=True)
+        self.app = '123'
+        tdp._check_and_enforce()
+        tdp._current_ac_online = False
+        self.assertEqual(self.ppts(), (8, 8, 20))
+        self.assertEqual(self.rpc('get_settings')['battery_preset'], 'silent')
 
     def test_game_profiles_follow_separate_battery_presets(self):
         self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'},

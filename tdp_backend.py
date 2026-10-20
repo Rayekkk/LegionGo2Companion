@@ -502,10 +502,18 @@ def _battery_target(state: dict, target: tuple[int, int, int], preset: str,
 
 
 def _running_battery_preset(state: dict) -> str:
-    """The preset whose battery values run now, else ""."""
+    """The preset whose battery values run now, else "" (also for Custom limits equal to them)."""
     if not state.get("separate_battery_presets", False) or _current_ac_online:
         return ""
-    active = _active_triplet(state)
+    app_id = _get_running_appid()
+    profile = _load_profiles().get(app_id) if app_id else None
+    preset = profile.get("preset", "") if profile is not None else state.get("active_preset", "")
+    values = (_pick_profile_values(profile, False) if profile is not None
+              else (state["spl"], state["sppt"], state["fppt"]))
+    requested = _target_for_preset(state, *values, preset)
+    active = _battery_target(state, requested, preset, False)
+    if active == requested or active != _active_triplet(state):
+        return ""
     return next((name for name, entry in _presets(battery=True)[0].items() if name in PRESET_LADDER
                  and _clamp_for_settings(state, *(entry[key] * 1000 for key in WMI_ATTRS)) == active), "")
 
