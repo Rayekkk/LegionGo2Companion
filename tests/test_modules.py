@@ -135,6 +135,31 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fresh._module_state['controller'],
                          {'enabled': False, 'note': 'restored', 'resume': resume})
 
+    async def test_uninstall_keeps_the_band_policy_for_the_updated_plugin(self):
+        # Decky runs _uninstall before every update; WiFi's own uninstall restores the network files.
+        self.plugin._ever_started = self.plugin._modules_started = True
+        captured = []
+        self.plugin._wifi._uninstall.side_effect = lambda: captured.append(tuple(intent.call_args_list))
+        with patch.object(main, 'capture_intent', return_value={'band_policy': 'five_six_only'}) as intent:
+            await self.plugin._uninstall()
+        self.assertEqual(captured, [(unittest.mock.call('wifi'),)], 'the choice is read before uninstall restores it')
+        updated = self.make_plugin()
+        updated._wifi.set_band_policy = AsyncMock(return_value={'success': True})
+        await updated._main()
+        updated._wifi.set_band_policy.assert_awaited_once_with('five_six_only')
+        self.assertEqual(updated._module_state['wifi'], {'enabled': True})
+        await updated._unload()
+
+    async def test_uninstall_leaves_a_turned_off_wifi_module_alone(self):
+        resume = {'band_policy': 'five_six_only'}
+        self.plugin._module_state['wifi'] = {'enabled': False, 'resume': resume}
+        self.plugin._save_modules()
+        self.plugin._ever_started = self.plugin._modules_started = True
+        with patch.object(main, 'capture_intent') as intent:
+            await self.plugin._uninstall()
+        intent.assert_not_called()
+        self.assertEqual(self.make_plugin()._module_state['wifi'], {'enabled': False, 'resume': resume})
+
     async def test_uninstall_keeps_failed_cleanup_pending_and_finishes_other_modules(self):
         self.plugin._module_state['rgb'] = {'enabled': False, 'pending': True, 'resume': {'control_enabled': True}}
         self.plugin._save_modules()

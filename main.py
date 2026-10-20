@@ -1005,6 +1005,17 @@ class Plugin:
                 diagnostics.event('plugin', 'module_uninstall_timeout', level='warning',
                                   modules=','.join(name for name, task in zip(names, tasks) if task in pending))
 
+    async def _keep_band_policy(self):
+        """Decky also uninstalls before every update, and WiFi's uninstall puts the system's
+        network files back. Keep its choice like a re-enable in progress: the next start restores it."""
+        if not self._module_enabled('wifi'):
+            return  # A turned-off module already holds its choice.
+        try:
+            self._module_state['wifi'] = {'enabled': True, 'resume': await asyncio.to_thread(capture_intent, 'wifi')}
+            await asyncio.to_thread(self._save_modules)
+        except Exception as exc:
+            diagnostics.event('wifi', 'band_policy_not_kept', level='warning', error=exc)
+
     async def _uninstall(self):
         # A blocked instance that never owned hardware must not run restoration
         # hooks against the standalone plugin's live state.
@@ -1017,6 +1028,7 @@ class Plugin:
                 except Exception as exc:
                     diagnostics.event('desktop', 'shortcut_cleanup_failed', level='warning', error=exc)
             if self._ever_started and not (self._guard_blocked or self._guard_error):
+                await self._keep_band_policy()
                 # Start every independent restoration immediately. A pending
                 # device/reconnect must not delay other modules before Decky's
                 # process shutdown deadline.

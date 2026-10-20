@@ -214,7 +214,7 @@ class BandEnforcementTests(unittest.TestCase):
         with patch.object(self.plugin, "set_band_policy", side_effect=self.plugin._set_band_policy_impl):
             asyncio.run(self.plugin._uninstall())
         self.assertFalse(self.iwd.exists(), "the pre-plugin iwd baseline is restored")
-        self.assertFalse(self.settings.exists(), "uninstall confirmed the restore")
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
 
 

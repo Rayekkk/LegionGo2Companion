@@ -2413,16 +2413,11 @@ class Plugin:
     async def _uninstall(self):
         try:
             decky.logger.info("WiFi uninstalling")
+            # Settings stay: Decky also uninstalls before every update, and main keeps
+            # the band policy for the next start to restore.
             results = await self._release_all()
             if not results["band_policy"].get("success"):
                 diagnostic_event('wifi', 'uninstall_restore_unconfirmed', level='error', stage='band_policy', pending=True)
-            else:
-                for path in (SETTINGS_FILE, SETTINGS_FILE + ".bak",
-                             BAND_POLICY_JOURNAL_FILE):
-                    try:
-                        os.remove(path)
-                    except FileNotFoundError:
-                        pass
         except Exception as e:
             diagnostic_event('wifi', 'uninstall_failed', level='error', error=e, repeat=60)
 
