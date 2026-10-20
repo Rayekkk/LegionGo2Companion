@@ -900,8 +900,6 @@ class Plugin:
             self._service_watch.clear()
 
     async def _uninstall(self) -> None:
+        # Decky also uninstalls before every update. Unload already restored the
+        # controller and keeps the choice with its ownership, which _main reapplies.
         await self._unload()
-        try:
-            await _offload(self._release, persist=True)
-        except Exception as exc:
-            event('controller','restore_failed',level='warning',error=exc,stage='uninstall',pending=True,restored=False)

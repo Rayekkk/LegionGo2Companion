@@ -447,6 +447,23 @@ class FilterTests(unittest.TestCase):
             await self.backend._unload()
         asyncio.run(lifecycle())
 
+    def test_uninstall_restores_baseline_and_the_updated_plugin_reapplies_the_choice(self):
+        # Decky runs _uninstall before every update: hardware goes back, the choice stays.
+        baseline = copy.deepcopy(self.current)
+        self.backend._select("left")
+        asyncio.run(self.backend._uninstall())
+        self.assertEqual(self.imu, {"left": False, "right": False})
+        self.assertEqual(module._imu_values(self.current, SOURCE), module._imu_values(baseline, SOURCE))
+        updated = module.Plugin()
+        async def lifecycle():
+            await updated._main()
+            self.assertEqual(updated._error, "")
+            self.assertEqual(self.imu, {"left": True, "right": False})
+            self.assertEqual(module._imu_values(self.current, SOURCE), list(FILTERS["left"]))
+            await updated._unload()
+        asyncio.run(lifecycle())
+        self.assertEqual(module._state()["gyro_source"], "left")
+
     def test_hotplug_rediscovers_changed_hidraw_and_preserves_other_devices(self):
         self.backend._select("left")
         new_physical = {**PHYSICAL, "path": "/dev/hidraw9", "sysfs": PHYSICAL["sysfs"] + "new"}
