@@ -8,7 +8,7 @@ Unreleased.
 
 ### Changed
 
-- **Display:** no longer carries settings over from 2.1.0. Updating from 2.1.0 through 2.2.x keeps them; updating straight from 2.1.0 to 2.3.0 starts Display with default settings, so choose the panel mode again in Setup.
+- **Display:** no longer moves the display script installed by 2.1.0. Updating from 2.1.0 through 2.2.x is unaffected; after updating straight from 2.1.0, Display opens Setup with the saved panel mode, which needs to be confirmed once, followed by a Gaming Mode restart.
 
 # 2.2.1
 
