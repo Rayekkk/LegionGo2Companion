@@ -78,6 +78,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         stack.enter_context(patch.object(module, "SETTLE_S", 0.02))
         stack.enter_context(patch.object(module, "CONFIRM_S", 0.02))
         stack.enter_context(patch.object(module, "RESUME_POLL_S", 0.02))
+        stack.enter_context(patch.object(module, "HELD_RETRY_S", 0.02))
         stack.enter_context(patch.object(module, "BUSCTL", sys.executable))
         stack.enter_context(patch.object(module, "run", side_effect=lambda *a, **k: self.console.run(*a, **k)))
         stack.enter_context(patch.object(module, "_hid_monitor", return_value=None))
@@ -134,6 +135,47 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                 self.assertEqual(self.console.restarts(), [RESTART] if restarted else [])
+
+    async def test_a_check_held_by_fwupd_is_retried_and_restarts_once_fwupd_is_done(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        self.console.fwupd = "u 6"  # writing a device
+        self.task = asyncio.create_task(self.recovery.run())
+        await self.until(lambda: self.checks.call_count >= 6)  # three held checks, no new trigger
+        self.assertEqual(self.console.restarts(), [])
+        self.console.fwupd = "u 1"
+        await self.until(lambda: "controller_recovered_after_restart" in self.names())
+        self.assertEqual(self.console.restarts(), [RESTART])
+
+    async def test_a_hold_longer_than_the_limit_stops_retrying_until_the_next_event(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        self.updating = True
+        with patch.object(module, "HELD_RETRIES", 2):
+            self.task = asyncio.create_task(self.recovery.run())
+            await self.until(lambda: "recovery_held_too_long" in self.names())
+            checks = self.checks.call_count
+            self.assertEqual(checks, 6)  # the first check and two retries, each confirmed once
+            await asyncio.sleep(0.15)
+            self.assertEqual(self.checks.call_count, checks)
+            self.assertEqual(self.console.restarts(), [])
+            self.updating = False
+            self.recovery._wake.set()  # a controller event re-arms the check
+            await self.until(lambda: self.console.restarts())
+        self.assertEqual(self.console.restarts(), [RESTART])
+
+    async def test_cancel_ends_held_retries(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        self.blocked = True
+        self.task = asyncio.create_task(self.recovery.run())
+        await asyncio.sleep(0.1)
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        self.blocked = False
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.console.restarts(), [])
+        self.assertEqual(self.checks.call_count, 0)
 
     async def test_a_loss_inputplumber_repairs_itself_is_left_alone(self):
         self.console.composite = [False, True]

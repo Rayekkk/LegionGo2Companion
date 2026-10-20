@@ -153,6 +153,8 @@ CONFIRM_S = 5.0  # the lost state must still hold this much later
 RESUME_POLL_S = 30.0  # a clock read only (ResumeWatch); the controller's own udev events usually come first
 RESTART_SPACING_S = 600.0
 RESTARTS_PER_RUN = 3
+HELD_RETRY_S = 60.0  # a check held by maintenance, fwupd or an updater is tried again this often
+HELD_RETRIES = 30  # per trigger: half an hour, then the next controller event or wake re-arms it
 FWUPD = "org.freedesktop.fwupd"
 # FwupdStatus values that mean a device is being touched (2.0.x enum). An idle fwupd 2.0.18 keeps
 # reporting a stale earlier value (measured: 3, DECOMPRESSING), so only these hold the restart.
@@ -203,7 +205,8 @@ def fwupd_busy() -> bool:
 
 class LostControllerRecovery:
     """Event-driven: one check SETTLE_S after start, a wake or the controller's last udev event;
-    a restart needs the lost state twice, CONFIRM_S apart, and stays within the limits."""
+    a restart needs the lost state twice, CONFIRM_S apart, and stays within the limits. A check
+    held by maintenance is repeated every HELD_RETRY_S, at most HELD_RETRIES times."""
 
     def __init__(self, blocked: Callable[[], bool], updating: Callable[[], bool]) -> None:
         self._blocked = blocked  # On the loop: closing, conflict guard, controller maintenance.
@@ -226,6 +229,7 @@ class LostControllerRecovery:
         resume = module_runtime.ResumeWatch()
         resume.mark()
         trigger, due = "start", loop.time() + SETTLE_S
+        held = 0
         try:
             while True:
                 wait = RESUME_POLL_S if due is None else min(max(due - loop.time(), 0), RESUME_POLL_S)
@@ -233,16 +237,26 @@ class LostControllerRecovery:
                     await asyncio.wait_for(self._wake.wait(), wait)
                     self._wake.clear()
                     trigger, due = "controller", loop.time() + SETTLE_S  # every event restarts the window
+                    held = 0
                     continue
                 except asyncio.TimeoutError:
                     pass
                 if resume():
                     trigger, due = "resume", loop.time() + SETTLE_S
+                    held = 0
                 elif due is not None and loop.time() >= due:
                     due = None
                     try:
-                        if await self._check(trigger):
+                        result = await self._check(trigger)
+                        if result == "restarted":
                             trigger, due = "verify", loop.time() + SETTLE_S
+                        if result != "held":
+                            held = 0
+                        elif held < HELD_RETRIES:
+                            held += 1
+                            due = loop.time() + HELD_RETRY_S
+                        else:
+                            event("inputplumber", "recovery_held_too_long", level="warning", reason=trigger)
                     except Exception as exc:
                         event("inputplumber", "recovery_check_failed", level="warning", error=exc, repeat=600)
         finally:
@@ -250,33 +264,33 @@ class LostControllerRecovery:
                 loop.remove_reader(monitor.fileno())
                 monitor = None  # The last reference: libudev unrefs the monitor and closes its socket.
 
-    async def _check(self, trigger: str) -> bool:
-        """True after a restart was requested."""
+    async def _check(self, trigger: str) -> str | None:
+        """"restarted" after a restart was requested, "held" when maintenance prevented the check."""
         if self._blocked():
-            return False
+            return "held"
         state = await asyncio.to_thread(lost_controller)
         if state is not None:
             await asyncio.sleep(CONFIRM_S)
             if self._blocked():
-                return False
+                return "held"
             state = await asyncio.to_thread(lost_controller)
         if state is None:
             if self._verify:
                 event("inputplumber", "controller_recovered_after_restart")
             self._verify = False
-            return False
+            return None
         if self._verify:
             # A restart that brought no CompositeDevice back will not on the next try either.
             event("inputplumber", "restart_did_not_recover_controller", level="warning", repeat=600, **state)
-            return False
+            return None
         if (await asyncio.to_thread(self._updating) or await asyncio.to_thread(fwupd_busy)
                 or self._blocked()):
-            return False
+            return "held"
         now = asyncio.get_running_loop().time()
         if len(self._restarts) >= RESTARTS_PER_RUN or (self._restarts and now - self._restarts[-1] < RESTART_SPACING_S):
             event("inputplumber", "restart_limited", level="warning", repeat=600, reason=trigger,
                   count=len(self._restarts), **state)
-            return False
+            return None
         self._restarts.append(now)
         self._verify = True
         event("inputplumber", "restart_for_lost_controller", level="warning", reason=trigger,
@@ -286,7 +300,7 @@ class LostControllerRecovery:
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if result.returncode != 0:
             event("inputplumber", "restart_failed", level="warning", returncode=result.returncode)
-        return True
+        return "restarted"
 
 
 def _hid_monitor(loop, drain):
