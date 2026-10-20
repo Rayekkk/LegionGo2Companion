@@ -74,7 +74,7 @@ class FutureWorkflowTests(unittest.TestCase):
         pinned=MappingProxyType({c:replace(r,sha256=hashlib.sha256(known[c]).hexdigest()) for c,r in fw.RELEASES.items()})
         fresh={c:data[:-1]+b'\x7f' for c,data in known.items()}  # bytes no pinned release has
         for images,phase in ((known,'failed'),(fresh,'downloaded')):
-            job=fw.FirmwarePreparation(reader=lambda:dict.fromkeys(fw.RELEASES,'261001A'))
+            job=fw.FirmwarePreparation(reader=lambda:dict.fromkeys(fw.RELEASES,'261001A'),model=lambda:'Legion Go 8ASP2')
             with self.subTest(phase=phase),patch.object(fw,'RELEASES',pinned),\
                     patch.object(fw,'_verify_signature'),patch.object(fw,'_check_structure'),\
                     patch.object(catalog,'check_catalog',return_value=future_feed()),\

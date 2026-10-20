@@ -12,7 +12,8 @@ reason instead of Install).
 
 - **Feed:** Lenovo's Legion Space service, `https://gms.service.lenovo.com/game`.
   `/api/getBaseUrls` must name that same domain, a two-letter region and the
-  model "Legion Go 8ASP2"; then `/api/queryPackageInfo` is asked once per component
+  console's model ("Legion Go 8ASP2" on the 83N0, "Legion Go 8AHP2" on the 83N1; on
+  2026-10-20 both answered with the same packages); then `/api/queryPackageInfo` is asked once per component
   (left terminal 62 `com.lenovo.legionspace.lhandle.sanyi`, right 63
   `…rhandle.sanyi`, receiver 58 `com.lenovo.legionspace.rx`) with the query version
   `v00.00.00.00`, so the answer is always Lenovo's current release, not one chosen
@@ -49,7 +50,7 @@ and the confirmation `token`.
 
 1. **Check** (read-only). Installed versions come from the `hid-lenovo-go`
    sysfs attributes: root `firmware_version` (receiver), `left_handle/` and
-   `right_handle/`. Gates: DMI LENOVO / 83N0 / Legion Go 8ASP2, exactly one
+   `right_handle/`. Gates: DMI LENOVO / 83N0 / Legion Go 8ASP2 or 83N1 / Legion Go 8AHP2, exactly one
    17EF:61EB USB device with one HID child bound to `hid-lenovo-go`, hardware
    generation 2, a valid `YYMMDD`+hex version, and two equal reads (the driver
    returns a cached value after a query timeout). Versions are read before and

@@ -56,7 +56,9 @@ class Service:
     def __init__(self, readings=None):
         self.readings = readings or []
         self.pads = {'left': 100, 'right': 100, 'connection_left': 'attached', 'connection_right': 'attached'}
-        self.service = fw.FirmwarePreparation(reader=self.read, pads=lambda: self.pads, sleep=lambda _seconds: None)
+        self.model = 'Legion Go 8ASP2'
+        self.service = fw.FirmwarePreparation(reader=self.read, model=lambda: self.model, pads=lambda: self.pads,
+                                              sleep=lambda _seconds: None)
 
     def read(self):
         if self.readings:
@@ -108,6 +110,33 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(status['phase'], 'failed')
             self.assertTrue(status['error'])
             self.assertEqual(status['checked_at'], '')
+
+    def test_check_asks_the_feed_for_this_console_and_nothing_off_the_model_gate(self):
+        state = Service()
+        state.model = 'Legion Go 8AHP2'
+        with patch.object(catalog, 'check_catalog', return_value=result()) as check:
+            _, status = state.run('check')
+        self.assertEqual((status['phase'], check.call_args.args[1]), ('up_to_date', 'Legion Go 8AHP2'))
+        state.model = None
+        with patch.object(catalog, 'check_catalog') as check:
+            _, status = state.run('check')
+        check.assert_not_called()
+        self.assertEqual(status['phase'], 'failed')
+
+    def test_model_gate_admits_the_two_go_2_machine_types_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dmi = Path(raw) / 'class/dmi/id'
+            dmi.mkdir(parents=True)
+            for vendor, model, version, expected in (
+                    ('LENOVO', '83N0', 'Legion Go 8ASP2', 'Legion Go 8ASP2'),
+                    ('LENOVO', '83N1', 'Legion Go 8AHP2', 'Legion Go 8AHP2'),
+                    ('LENOVO', '83N1', 'Legion Go 8ASP2', None), ('LENOVO', '83E1', 'Legion Go 8APU1', None),
+                    ('OTHER', '83N0', 'Legion Go 8ASP2', None)):
+                for name, value in (('sys_vendor', vendor), ('product_name', model), ('product_version', version)):
+                    (dmi / name).write_text(value + '\n')
+                with self.subTest(model=model, version=version):
+                    self.assertEqual(fw.machine_name(Path(raw)), expected)
+                    self.assertIs(fw.applies(Path(raw)), expected is not None)
 
     def test_download_needs_a_fresh_available_check_and_fetches_all_three_once(self):
         state = Service()

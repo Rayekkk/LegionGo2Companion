@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Explicit official-feed discovery. No image download or device access.
 
-Only the reviewed Go 2 8ASP2 feed is queried. Discovery uses an all-zero query
+Only the reviewed Go 2 feeds (8ASP2, 8AHP2) are queried. Discovery uses an all-zero query
 version, not an observation of installed firmware. Feed metadata is not image
 authentication; every selected image is authenticated before device access.
 """
@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 BASE = 'https://gms.service.lenovo.com/game'
-MODEL = 'Legion Go 8ASP2'
+MODELS = ('Legion Go 8ASP2', 'Legion Go 8AHP2')  # controller_firmware.GO2_MODELS; the helper cannot import it.
 TARGETS = (
     ('left', 62, 'com.lenovo.legionspace.lhandle.sanyi'),
     ('right', 63, 'com.lenovo.legionspace.rhandle.sanyi'),
@@ -139,7 +139,9 @@ def valid_image_url(url):
         r'https://s3\.service\.lenovo\.com/legion/cms/package/[A-Za-z0-9_-]{1,128}\.bin', url) is not None
 
 
-def _check_http():
+def _check_http(model):
+    if model not in MODELS:
+        raise CatalogError('This console is not a reviewed Legion Go 2 model.')
     deadline = time.monotonic() + HELPER_SECONDS  # Inside the parent's WALL_SECONDS.
     bootstrap = _fetch_retrying('/api/getBaseUrls', {'source': '1', 'language': 'en', 'modelName': 'Legion Go 2'}, deadline)
     if (not isinstance(bootstrap, dict) or type(bootstrap.get('code')) is not int or
@@ -154,25 +156,25 @@ def _check_http():
     extension = data.get('extend')
     machines = extension.get('MachineAdaption') if isinstance(extension, dict) else None
     if not isinstance(machines, list) or not any(isinstance(m, dict) and
-            m.get('MachineName') == MODEL and m.get('MachineType') == 'Legion Go 2' for m in machines):
+            m.get('MachineName') == model and m.get('MachineType') == 'Legion Go 2' for m in machines):
         raise CatalogError('The reviewed Legion Go 2 model is absent from the catalog.')
     candidates = {}
     for component, terminal, package in TARGETS:
-        body = _fetch_retrying('/api/queryPackageInfo', {'modelName': MODEL, 'sn': '',
+        body = _fetch_retrying('/api/queryPackageInfo', {'modelName': model, 'sn': '',
             'countryCode': area, 'packageCode': package, 'terminalId': str(terminal),
             'packageVer': 'v00.00.00.00'}, deadline)
         candidates[component] = _candidate(body, terminal, package)
-    return {'checked_at': datetime.now(timezone.utc).isoformat(), 'model': MODEL,
+    return {'checked_at': datetime.now(timezone.utc).isoformat(), 'model': model,
         'region': area, 'candidates': candidates}
 
 
-def check_catalog(cancelled):
+def check_catalog(cancelled, model):
     """Parent wall deadline also covers DNS, TLS, headers and JSON parsing."""
     from system_process import run_helper
     from diagnostics import event
     if cancelled.is_set():
         raise CatalogError('Lenovo catalog check stopped.')
-    returncode, data = run_helper([str(Path(__file__).resolve()), '--catalog-data'], cancelled,
+    returncode, data = run_helper([str(Path(__file__).resolve()), '--catalog-data', model], cancelled,
         WALL_SECONDS, CatalogError('Lenovo catalog check stopped or timed out.'))
     if returncode != 0 or len(data) > 16384:
         event('firmware','catalog_helper_failed',stage='catalog',returncode=returncode,
@@ -182,9 +184,9 @@ def check_catalog(cancelled):
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] != ['--catalog-data']:
+    if len(sys.argv) != 3 or sys.argv[1] != '--catalog-data' or sys.argv[2] not in MODELS:
         raise SystemExit(2)
     try:
-        sys.stdout.buffer.write(json.dumps(_check_http(), ensure_ascii=True).encode('utf-8'))
+        sys.stdout.buffer.write(json.dumps(_check_http(sys.argv[2]), ensure_ascii=True).encode('utf-8'))
     except Exception:
         raise SystemExit(1)

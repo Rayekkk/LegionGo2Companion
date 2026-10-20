@@ -322,11 +322,19 @@ def _read_versions_once(root):
     return versions
 
 
+# Machine type -> product_version, also the console's name in Lenovo's feed. Lenovo ships one
+# controller package for both (LVFS legion-hid; the feed answered the same for both on 2026-10-20).
+GO2_MODELS = MappingProxyType({'83N0': 'Legion Go 8ASP2', '83N1': 'Legion Go 8AHP2'})
+
+
+def machine_name(sysfs=Path('/sys')):
+    """The model gate (DMI only): this Go 2's feed name, or None, and the firmware page stays hidden."""
+    vendor, model, name = (_text(sysfs / 'class/dmi/id' / key) for key in ('sys_vendor', 'product_name', 'product_version'))
+    return name if vendor == 'LENOVO' and GO2_MODELS.get(model) == name else None
+
+
 def applies(sysfs=Path('/sys')):
-    """The model gate (DMI only); elsewhere the firmware page stays hidden."""
-    dmi = sysfs / 'class/dmi/id'
-    return tuple(_text(dmi / name) for name in ('sys_vendor', 'product_name', 'product_version')) == (
-        'LENOVO', '83N0', 'Legion Go 8ASP2')
+    return machine_name(sysfs) is not None
 
 
 def read_installed_versions(sysfs=Path('/sys')):
@@ -336,7 +344,7 @@ def read_installed_versions(sysfs=Path('/sys')):
     timeout it returns a cached value, so two equal reads are required.
     """
     if not applies(sysfs):
-        raise FirmwareError('Controller updates are available only on the Legion Go 2 (83N0).')
+        raise FirmwareError('Controller updates are available only on the Legion Go 2 (83N0 / 83N1).')
     usb = [path for path in (sysfs / 'bus/usb/devices').glob('*')
         if _text(path / 'idVendor') == '17ef' and _text(path / 'idProduct') == '61eb']
     roots = [path for path in (sysfs / 'bus/hid/devices').glob('0003:17EF:61EB.*')
@@ -489,11 +497,12 @@ class FirmwarePreparation:
     selected them. Nothing is persisted, so a failed step never locks retries.
     """
 
-    def __init__(self, *, reader=None, pads=None, sleep=time.sleep):
+    def __init__(self, *, reader=None, model=machine_name, pads=None, sleep=time.sleep):
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
         self._thread = None
         self._reader = reader or read_installed_versions
+        self._model = model  # The console's name in Lenovo's feed.
         self._pads = pads  # Returns controller attach/battery levels; None refuses every pad install.
         self._sleep = sleep
         self._phase, self._component, self._error = 'idle', '', ''
@@ -622,7 +631,10 @@ class FirmwarePreparation:
             if updater_running():
                 raise FirmwareError('Another firmware update is running. Try again when it finishes.')
             before = self._reader()
-            catalog = check_catalog(self._cancelled)
+            model = self._model()
+            if model is None:
+                raise FirmwareError('Controller updates are available only on the Legion Go 2 (83N0 / 83N1).')
+            catalog = check_catalog(self._cancelled, model)
             if self._reader() != before:
                 raise FirmwareError('Controller versions changed during the check. Check again.')
             candidates = catalog.get('candidates') if isinstance(catalog, dict) else None

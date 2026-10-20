@@ -12,10 +12,12 @@ import controller_firmware as fw
 import controller_firmware_catalog as catalog
 import system_process
 
+GO2 = 'Legion Go 8ASP2'
+
 
 def bootstrap():
     return {'code': 200, 'data': {'gameDomain': catalog.BASE, 'areaCode': 'PL',
-        'extend': {'MachineAdaption': [{'MachineName': catalog.MODEL, 'MachineType': 'Legion Go 2'}]}}}
+        'extend': {'MachineAdaption': [{'MachineName': GO2, 'MachineType': 'Legion Go 2'}]}}}
 
 
 def entry(component='left'):
@@ -29,7 +31,7 @@ def entry(component='left'):
 def result():
     candidates = {component: catalog._candidate(entry(component), terminal, package)
         for component, terminal, package in catalog.TARGETS}
-    return {'checked_at': '2026-10-13T12:00:00+00:00', 'model': catalog.MODEL,
+    return {'checked_at': '2026-10-13T12:00:00+00:00', 'model': GO2,
         'region': 'PL', 'candidates': candidates}
 
 
@@ -76,10 +78,10 @@ class CatalogTests(unittest.TestCase):
                 {'extend': {'MachineAdaption': [{'MachineName': 'Legion Go S', 'MachineType': 'Legion Go S'}]}}):
             body = bootstrap(); body['data'].update(bad)
             with patch.object(catalog, '_fetch', return_value=body) as fetch:
-                with self.assertRaises(catalog.CatalogError): catalog._check_http()
+                with self.assertRaises(catalog.CatalogError): catalog._check_http(GO2)
                 self.assertEqual(fetch.call_count, 1)
         with patch.object(catalog, '_fetch', side_effect=[bootstrap(), entry(), entry('right'), entry('receiver')]) as fetch:
-            response = catalog._check_http()
+            response = catalog._check_http(GO2)
             self.assertEqual(response['region'], 'PL')
             self.assertEqual(set(response['candidates']), set(fw.RELEASES))
             for call in fetch.call_args_list[1:]:
@@ -87,23 +89,37 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(call.args[1]['packageVer'], 'v00.00.00.00')
             self.assertEqual(response['candidates']['left']['version'], '260310A')
 
+    def test_each_go_2_asks_for_its_own_feed_and_nothing_else_is_asked(self):
+        z2 = 'Legion Go 8AHP2'
+        body = bootstrap(); body['data']['extend']['MachineAdaption'].append({'MachineName': z2, 'MachineType': 'Legion Go 2'})
+        with patch.object(catalog, '_fetch', side_effect=[body, entry(), entry('right'), entry('receiver')]) as fetch:
+            self.assertEqual(catalog._check_http(z2)['model'], z2)
+        self.assertEqual({call.args[1]['modelName'] for call in fetch.call_args_list[1:]}, {z2})
+        with patch.object(catalog, '_fetch', return_value=bootstrap()) as fetch:  # The feed does not list the 8AHP2.
+            with self.assertRaises(catalog.CatalogError): catalog._check_http(z2)
+        for model in ('Legion Go 8APU1', 'Legion Go S 8ARP1', ''):
+            with self.subTest(model=model), patch.object(catalog, '_fetch') as fetch:
+                with self.assertRaises(catalog.CatalogError): catalog._check_http(model)
+                fetch.assert_not_called()
+        self.assertEqual(set(catalog.MODELS), set(fw.GO2_MODELS.values()))
+
     def test_server_errors_and_timeouts_are_retried_other_answers_are_final(self):
         error = lambda code: catalog.urllib.error.HTTPError('https://x', code, 'error', {}, None)
         with patch.object(catalog.time, 'sleep'), patch.object(catalog, '_fetch', side_effect=[
                 error(500), bootstrap(), entry(), TimeoutError(), entry('right'),
                 catalog.urllib.error.URLError(ConnectionResetError()), entry('receiver')]) as fetch:
-            self.assertEqual(set(catalog._check_http()['candidates']), set(fw.RELEASES))
+            self.assertEqual(set(catalog._check_http(GO2)['candidates']), set(fw.RELEASES))
             self.assertEqual(fetch.call_count, 7)
         for final in (error(404), catalog.CatalogError('redirected'), ValueError('bad')):
             with self.subTest(final=final), patch.object(catalog.time, 'sleep'), \
                     patch.object(catalog, '_fetch', side_effect=[final, bootstrap()]) as fetch:
-                with self.assertRaises(type(final)): catalog._check_http()
+                with self.assertRaises(type(final)): catalog._check_http(GO2)
                 self.assertEqual(fetch.call_count, 1)
         # Several bad replies in a row are retried; the shared budget ends the check.
         clock = iter(range(0, 1000, 10))
         with patch.object(catalog.time, 'sleep'), patch.object(catalog.time, 'monotonic', side_effect=lambda: float(next(clock))), \
                 patch.object(catalog, '_fetch', side_effect=error(503)) as fetch:
-            with self.assertRaises(catalog.urllib.error.HTTPError): catalog._check_http()
+            with self.assertRaises(catalog.urllib.error.HTTPError): catalog._check_http(GO2)
             self.assertEqual(fetch.call_count, 9)  # Retried after failures at 10..80 s; at 90 s no attempt fits.
 
     def test_json_rejects_duplicates_invalid_types_and_nonfinite(self):
@@ -134,19 +150,19 @@ class CatalogTests(unittest.TestCase):
         worker = Mock(returncode=0); worker.poll.return_value = 0
         worker.communicate.return_value = (json.dumps(result()).encode(), None)
         with patch.object(system_process.subprocess, 'Popen', return_value=worker) as spawn:
-            self.assertEqual(catalog.check_catalog(threading.Event()), result())
-            self.assertEqual(spawn.call_args.args[0][-1], '--catalog-data')
+            self.assertEqual(catalog.check_catalog(threading.Event(), GO2), result())
+            self.assertEqual(spawn.call_args.args[0][-2:], ['--catalog-data', GO2])
             self.assertIn('-I', spawn.call_args.args[0])
             self.assertNotIn('shell', spawn.call_args.kwargs)
         worker = Mock(returncode=None); worker.poll.return_value = None
         worker.communicate.side_effect = [subprocess.TimeoutExpired('helper', .2), (b'', None)]
         with patch.object(system_process.subprocess, 'Popen', return_value=worker), patch.object(
                 system_process.time, 'monotonic', side_effect=[0., 0., catalog.WALL_SECONDS + 1.]):
-            with self.assertRaises(catalog.CatalogError): catalog.check_catalog(threading.Event())
+            with self.assertRaises(catalog.CatalogError): catalog.check_catalog(threading.Event(), GO2)
         worker.kill.assert_called_once()
         cancelled = threading.Event(); cancelled.set()
         with patch.object(system_process.subprocess, 'Popen') as spawn:
-            with self.assertRaises(catalog.CatalogError): catalog.check_catalog(cancelled)
+            with self.assertRaises(catalog.CatalogError): catalog.check_catalog(cancelled, GO2)
             spawn.assert_not_called()
 
     def test_close_reaps_real_stalled_network_helper(self):
@@ -155,7 +171,7 @@ class CatalogTests(unittest.TestCase):
             timer = threading.Timer(.3, cancelled.set); timer.start()
             try:
                 with patch.object(system_process.subprocess, 'Popen', return_value=child):
-                    with self.assertRaises(catalog.CatalogError): catalog.check_catalog(cancelled)
+                    with self.assertRaises(catalog.CatalogError): catalog.check_catalog(cancelled, GO2)
                 self.assertIsNotNone(child.poll())
             finally:
                 timer.cancel(); timer.join(2)
