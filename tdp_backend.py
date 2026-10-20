@@ -65,11 +65,23 @@ PRESETS_DEFAULT = {
     "max":         {"spl": 35, "sppt": 37, "fppt": 45},
 }
 PRESET_LADDER = ("silent", "balanced", "performance")
-# Measured ladders per DMI machine type. A machine type without a row gets the 83N0
-# ladder scaled to its own firmware ceilings, reported as estimated.
-# shortcut: AC values only; give a row separate battery values once a BIOS is shown to differ.
+_GO_S_LADDER = {
+    "silent":      {"spl": 10, "sppt": 15, "fppt": 20},
+    "balanced":    {"spl": 15, "sppt": 25, "fppt": 30},
+    "performance": {"spl": 30, "sppt": 35, "fppt": 40},
+}
+# The BIOS's own modes on AC per DMI machine type, in watts. A limit missing from a row
+# (or a machine type without one) is the 83N0 value scaled to that console's firmware
+# ceiling, and the ladder is reported as estimated.
+# shortcut: AC values only; the BIOSes switch to a battery table on an EC bit not yet
+# understood. Add battery values beside these once it is.
 PRESET_TABLE = {
-    "83N0": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},
+    "83N0": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # measured
+    "83N1": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # BIOS: same as 83N0
+    "83L3": _GO_S_LADDER,
+    "83N6": _GO_S_LADDER,
+    # shortcut: only SPPT is certain in the Go's BIOS; SPL and FPPT are scaled until confirmed.
+    "83E1": {"silent": {"sppt": 15}, "balanced": {"sppt": 25}, "performance": {"sppt": 32}},
 }
 
 # Lenovo firmware attributes. Writing these goes through the EC instead of poking the
@@ -225,21 +237,22 @@ def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
 def _presets() -> tuple[dict, bool]:
     """(ladder in watts, estimated) inside the firmware range of the last read.
 
-    Max is the firmware ceiling. A machine type without measured values gets the
-    83N0 ladder scaled per limit to its own ceilings (SPL 8/35 of its SPL max, ...).
+    Max is the firmware ceiling. A limit without a BIOS value is the 83N0 one scaled
+    to this console's ceiling for that limit (SPL 8/35 of its SPL max, ...).
     """
     std = _ceilings_mw(_firmware_caps)
-    row = PRESET_TABLE.get(_machine_type())
+    row = PRESET_TABLE.get(_machine_type(), {})
     reference = PRESETS_DEFAULT["max"]
-    table = {}
+    table, estimated = {}, False
     for name in PRESET_LADDER:
-        watts = row[name] if row else {
-            key: round(PRESETS_DEFAULT[name][key] * limit / 1000 / reference[key])
-            for key, limit in zip(WMI_ATTRS, std)}
+        known = row.get(name, {})
+        estimated = estimated or len(known) < len(WMI_ATTRS)
+        watts = {key: known.get(key, round(PRESETS_DEFAULT[name][key] * limit / 1000 / reference[key]))
+                 for key, limit in zip(WMI_ATTRS, std)}
         triplet = _clamp_triplet(*(watts[key] * 1000 for key in WMI_ATTRS), std)
         table[name] = {key: value // 1000 for key, value in zip(WMI_ATTRS, triplet)}
     table["max"] = {key: value // 1000 for key, value in zip(WMI_ATTRS, std)}
-    return table, row is None
+    return table, estimated
 
 
 # Plugging the charger in makes the firmware apply its own profile after ours, so the

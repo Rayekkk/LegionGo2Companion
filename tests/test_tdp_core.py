@@ -601,8 +601,20 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual((caps['min'], caps['std'], caps['max']),
                          (5, {'spl': 35, 'sppt': 37, 'fppt': 45}, {'spl': 35, 'sppt': 37, 'fppt': 45}))
 
-    def test_go_1_scales_the_presets_to_its_firmware_and_max_is_its_ceiling(self):
-        self.machine = '83E1'
+    def test_go_s_uses_its_bios_presets(self):
+        self.machine = '83N6'
+        self.firmware_range((40, 43, 53))
+        caps = self.rpc('get_caps')
+        self.assertFalse(caps['presets_estimated'])
+        self.assertEqual(caps['presets'], {
+            'silent': {'spl': 10, 'sppt': 15, 'fppt': 20},
+            'balanced': {'spl': 15, 'sppt': 25, 'fppt': 30},
+            'performance': {'spl': 30, 'sppt': 35, 'fppt': 40},
+            'max': {'spl': 40, 'sppt': 43, 'fppt': 53},
+        })
+
+    def test_unknown_machine_type_scales_the_presets_to_its_firmware(self):
+        self.machine = '83Q2'
         self.firmware_range((30, 32, 41))
         caps = self.rpc('get_caps')
         self.assertTrue(caps['presets_estimated'])
@@ -610,6 +622,18 @@ class TdpCoreTests(unittest.TestCase):
             'silent': {'spl': 7, 'sppt': 13, 'fppt': 18},
             'balanced': {'spl': 14, 'sppt': 22, 'fppt': 27},
             'performance': {'spl': 17, 'sppt': 28, 'fppt': 32},
+            'max': {'spl': 30, 'sppt': 32, 'fppt': 41},
+        })
+
+    def test_go_1_takes_sppt_from_its_bios_scales_the_rest_and_max_is_its_ceiling(self):
+        self.machine = '83E1'
+        self.firmware_range((30, 32, 41))
+        caps = self.rpc('get_caps')
+        self.assertTrue(caps['presets_estimated'])
+        self.assertEqual(caps['presets'], {
+            'silent': {'spl': 7, 'sppt': 15, 'fppt': 18},
+            'balanced': {'spl': 14, 'sppt': 25, 'fppt': 27},
+            'performance': {'spl': 17, 'sppt': 32, 'fppt': 32},
             'max': {'spl': 30, 'sppt': 32, 'fppt': 41},
         })
         self.assertTrue(self.rpc('apply_tdp', 30000, 32000, 41000, preset_name='max')['success'])
