@@ -137,6 +137,9 @@ class FlowTests(unittest.TestCase):
                 with self.subTest(model=model, version=version):
                     self.assertEqual(fw.machine_name(Path(raw)), expected)
                     self.assertIs(fw.applies(Path(raw)), expected is not None)
+            # DMI that is not UTF-8 (a foreign PC): no console, and no crash at plugin start.
+            with patch.object(fw.Path, 'read_text', side_effect=UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid')):
+                self.assertFalse(fw.applies(Path(raw)))
 
     def test_download_needs_a_fresh_available_check_and_fetches_all_three_once(self):
         state = Service()

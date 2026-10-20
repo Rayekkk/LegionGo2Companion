@@ -150,6 +150,15 @@ class ApplicabilityTests(unittest.TestCase):
             with patch.object(module_runtime, "DMI_ROOT", str(identity / "missing")):
                 self.assertFalse(fan_backend.Plugin.applicable())  # No DMI at all
 
+    def test_a_failing_device_read_does_not_stop_the_start(self):
+        plugin = main.Plugin()
+        with patch.object(main, "firmware_applies", side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")), \
+                patch.object(main.diagnostics, "event") as event:
+            applicable, device = plugin._detect_device()
+        self.assertEqual(set(applicable), set(main.MODULE_NAMES))
+        self.assertEqual((device["firmware"], device["power_led"]), (False, False))
+        self.assertEqual(event.call_args.args[:2], ("plugin", "device_unknown"))
+
     def test_a_failing_rule_hides_its_module_and_is_logged(self):
         plugin = main.Plugin()
         plugin._display = types.SimpleNamespace(applicable=lambda: 1 / 0)

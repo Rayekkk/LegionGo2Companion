@@ -307,7 +307,7 @@ UPDATER_PROCESSES = frozenset({'fwupdtool', 'fwupdmgr', 'steamos-firmwar'})  # c
 def _text(path):
     try:
         return path.read_text().strip()
-    except OSError:
+    except (OSError, ValueError):  # ValueError: not UTF-8 (DMI of a foreign PC)
         return None
 
 

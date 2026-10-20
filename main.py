@@ -433,10 +433,14 @@ class Plugin:
             except Exception as exc:
                 diagnostics.event(name, 'applicability_unknown', level='warning', error=exc)
                 applicable[name] = False
-        console, model = module_runtime.legion_device()
-        # Options inside modules that keep their own model gate (Fan's is the module itself).
-        device = {'console': console, 'model': model or None,
-                  'firmware': firmware_applies(), 'power_led': rgb_backend.power_led_model()}
+        try:
+            console, model = module_runtime.legion_device()
+            # Options inside modules that keep their own model gate (Fan's is the module itself).
+            device = {'console': console, 'model': model or None,
+                      'firmware': firmware_applies(), 'power_led': rgb_backend.power_led_model()}
+        except Exception as exc:  # An unknown console must not stop the plugin from starting.
+            diagnostics.event('plugin', 'device_unknown', level='warning', error=exc)
+            device = {'console': None, 'model': None, 'firmware': False, 'power_led': False}
         return applicable, device
 
     async def _ensure_device(self):
