@@ -1087,12 +1087,7 @@ class Plugin:
         The manual action needs a BSSID, not merely a band count; stop after
         the first successful scan that finds a high-band BSS.
         """
-        result = {
-            "scan_ok": False,
-            "scan_source": "",
-            "ssid": "",
-            "candidates": [],
-        }
+        result = {"scan_ok": False, "scan_source": "", "ssid": "", "candidates": []}
         ssid = self._get_profile_ssid(uuid) if iface and uuid else None
         if ssid is None:
             return result
@@ -1131,14 +1126,9 @@ class Plugin:
                                          rescan=not broad_ok, timeout=5 if broad_ok else 10)
             self._record_scan(result, sources, "nmcli", found, add_candidates)
 
-        result["candidates"] = sorted(
-            candidates.values(),
-            key=lambda item: (
-                item["signal_dbm"],
-                1 if item["frequency"] >= 5925 else 0,
-            ),
-            reverse=True,
-        )
+        # Strongest first; a 6 GHz BSS wins a tie.
+        result["candidates"] = sorted(candidates.values(), reverse=True,
+                                      key=lambda item: (item["signal_dbm"], item["frequency"] >= 5925))
         result["scan_source"] = "+".join(sources)
         return result
 
@@ -1151,14 +1141,8 @@ class Plugin:
         six_ghz_frequencies: list[int] | None = None,
         need_five: bool = True,
     ) -> dict:
-        bands = {
-            "two_ghz": 0,
-            "five_ghz": 0,
-            "six_ghz": 0,
-            "scan_ok": False,
-            "scan_source": "",
-            "fresh_high_band": False,
-        }
+        bands = {"two_ghz": 0, "five_ghz": 0, "six_ghz": 0,
+                 "scan_ok": False, "scan_source": "", "fresh_high_band": False}
         ssid = self._get_profile_ssid(uuid) if iface and uuid else None
         if ssid is None:
             return bands
@@ -1168,18 +1152,11 @@ class Plugin:
         # and an AP can be omitted from either one, especially on DFS/6 GHz.
         # Keep only a short, connection-scoped copy of a successful high-band
         # observation so the apply call can use the result it just presented.
-        cache_ttl_seconds = 60.0
         now = time.monotonic()
-        cached = getattr(self, "_visible_band_cache", None)
-        cached_bands = None
-        if (
-            isinstance(cached, dict)
-            and cached.get("iface") == iface
-            and cached.get("uuid") == uuid
-            and cached.get("ssid") == ssid
-            and 0 <= now - float(cached.get("checked_at", 0)) <= cache_ttl_seconds
-        ):
-            cached_bands = cached.get("bands")
+        cached = getattr(self, "_visible_band_cache", None) or {}
+        cached_bands = cached.get("bands") if (
+            (cached.get("iface"), cached.get("uuid"), cached.get("ssid")) == (iface, uuid, ssid)
+            and 0 <= now - float(cached.get("checked_at", 0)) <= 60.0) else None
 
         sources = []
 
@@ -1241,13 +1218,8 @@ class Plugin:
 
         fresh_high_band = bands["five_ghz"] > 0 or bands["six_ghz"] > 0
         if bands["scan_ok"] and fresh_high_band:
-            self._visible_band_cache = {
-                "iface": iface,
-                "uuid": uuid,
-                "ssid": ssid,
-                "checked_at": now,
-                "bands": {key: bands[key] for key in ("two_ghz", "five_ghz", "six_ghz")},
-            }
+            self._visible_band_cache = {"iface": iface, "uuid": uuid, "ssid": ssid, "checked_at": now,
+                                        "bands": {key: bands[key] for key in ("two_ghz", "five_ghz", "six_ghz")}}
         elif isinstance(cached_bands, dict):
             for key in ("two_ghz", "five_ghz", "six_ghz"):
                 bands[key] = max(bands[key], int(cached_bands.get(key, 0)))
@@ -2403,14 +2375,9 @@ class Plugin:
             try:
                 with open(path, "r") as f:
                     for line in f:
-                        line = line.strip()
-                        if not line or line.startswith("#") or line.startswith(";"):
-                            continue
-                        if line.startswith("wifi.backend"):
-                            _, _, val = line.partition("=")
-                            val = val.strip()
-                            if val in ("iwd", "wpa_supplicant"):
-                                return val
+                        key, _, val = line.strip().partition("=")
+                        if key.startswith("wifi.backend") and val.strip() in ("iwd", "wpa_supplicant"):
+                            return val.strip()
             except Exception:
                 continue
         # With no authoritative config, competing managers are ambiguous.
@@ -2526,17 +2493,11 @@ class Plugin:
         }
 
     def _unexpected_response(self, e: Exception) -> dict:
-        """Standard error dict for the catch-all exception handler in every
-        setter. Callers log the error separately with the setter name."""
+        """The reply of a catch-all exception handler; callers log the error themselves."""
         return {"success": False, "error": "unexpected", "message": str(e)}
 
     def _nmcli_modify(self, uuid: str, key: str, value: str, timeout: int = 5) -> dict:
-        """Run `nmcli con mod uuid <uuid> <key> <value>`. Returns the
-        _run_cmd dict so callers can handle success/failure themselves."""
-        return self._run_cmd(
-            ["/usr/bin/nmcli", "con", "mod", "uuid", uuid, key, value],
-            timeout=timeout,
-        )
+        return self._run_cmd(["/usr/bin/nmcli", "con", "mod", "uuid", uuid, key, value], timeout=timeout)
 
     # ---- Status ----
 
@@ -2547,23 +2508,15 @@ class Plugin:
         return await asyncio.to_thread(self._get_status_sync)
 
     def _get_status_sync(self) -> dict:
-        # Short read-only timeouts plus a 10-second UI interval keep background
-        # work bounded while the panel is open.
-        T = 2
-
+        # Short (2 s) read-only timeouts plus a 10-second UI interval keep
+        # background work bounded while the panel is open.
         try:
             settings = _load_settings()
             iface = self._get_wifi_interface()
             connection = self._get_connection_state(iface)
             connected = connection["connection_state"] == "connected"
-
-            status = {
-                "success": True,
-                "connected": connected,
-                "settings": settings,
-                "live": connection,
-                "drift": {},
-            }
+            status = {"success": True, "connected": connected, "settings": settings,
+                      "live": connection, "drift": {}}
 
             journal = self._load_band_policy_journal()
             recovery_issues = self._get_network_recovery_issues(journal)
@@ -2603,10 +2556,7 @@ class Plugin:
             if not connected:
                 return status
 
-            # Link info
-            link_result = self._run_cmd(
-                ["/usr/bin/iw", "dev", iface, "link"], timeout=T
-            )
+            link_result = self._run_cmd(["/usr/bin/iw", "dev", iface, "link"], timeout=2)
             link_out = link_result.get("stdout", "")
             ssid = re.search(r"(?m)^[ \t]*SSID: ?(.*)$", link_out)
             if ssid:
@@ -2631,16 +2581,12 @@ class Plugin:
                     linked_frequency = float(status["live"].get("frequency", ""))
                 except (TypeError, ValueError):
                     linked_frequency = None
-                if (linked_frequency is not None
-                        and 2400 <= linked_frequency < 2500):
+                if linked_frequency is not None and 2400 <= linked_frequency < 2500:
                     status["drift"]["band_policy"] = True
-                    status["live"].setdefault("band_policy_error", (
-                        "Only 5/6 GHz is selected, but the live WiFi link uses 2.4 GHz."
-                    ))
+                    status["live"].setdefault(
+                        "band_policy_error", "Only 5/6 GHz is selected, but the live WiFi link uses 2.4 GHz.")
 
-            info_result = self._run_cmd(
-                ["/usr/bin/iw", "dev", iface, "info"], timeout=T
-            )
+            info_result = self._run_cmd(["/usr/bin/iw", "dev", iface, "info"], timeout=2)
             channel = _iw_channel_label(info_result.get("stdout", ""))
             if channel is not None:
                 status["live"]["channel"] = channel
