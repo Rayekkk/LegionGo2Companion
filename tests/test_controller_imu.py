@@ -96,8 +96,15 @@ class ImuTests(unittest.TestCase):
         self.put(self.dmi / "product_name", "83N1")
         self.assertTrue(imu.read_status()["available"])
 
+    def test_go_1_on_the_2025_controller_firmware_is_supported(self):
+        # Same driver and switch; the Go 2's generation value is not required there.
+        self.put(self.dmi / "product_name", "83E1")
+        self.put(self.device / "hardware_generation", "1")
+        self.assertTrue(imu.read_status()["available"])
+        self.assertEqual(self.writes, [])
+
     def test_wrong_dmi_is_rejected_without_writing(self):
-        for attr, value in (("sys_vendor", "OTHER"), ("product_name", "83E1")):
+        for attr, value in (("sys_vendor", "OTHER"), ("product_name", "83L3"), ("product_name", "82XA")):
             with self.subTest(attribute=attr):
                 original = (self.dmi / attr).read_text()
                 self.put(self.dmi / attr, value)

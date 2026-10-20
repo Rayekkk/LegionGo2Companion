@@ -44,6 +44,11 @@ RGB_SUPPORTED_MODELS = frozenset({
     ("Legion Go 8ASP2", "83N0"),
     ("Legion Go 8AHP2", "83N1"),
 })
+# The same multicolor LED ABI on the other consoles (kernel hid-lenovo-go / hid-lenovo-go-s).
+GO1_RGB_HID_IDS = ("17EF:61EB", "17EF:61EC", "17EF:61ED", "17EF:61EE")  # 2025 controller firmware
+GO_S_RGB_LED_PATH = "/sys/class/leds/go_s:rgb:joystick_rings"
+GO_S_RGB_HID_IDS = ("1A86:E310", "1A86:E311")
+GO_S_RGB_DRIVER = "hid-lenovo-go-s"
 
 # Power-button MMIO is independently restricted to this model (any BIOS version
 # whose DSDT passes _power_led_layout_ok).
@@ -125,26 +130,40 @@ def _read_identity() -> dict[str, str]:
     values: dict[str, str] = {}
     for key in ("product_family", "product_name", "board_name", "bios_version"):
         try:
-            values[key] = _read_small(f"/sys/class/dmi/id/{key}", 128)
+            values[key] = _read_small(os.path.join(module_runtime.DMI_ROOT, key), 128)
         except (OSError, UnicodeError):
             values[key] = ""
     return values
 
 
-def _rgb_capability() -> tuple[str | None, str]:
+def _rgb_interface() -> tuple[str, tuple[str, ...], str] | None:
+    """(LED class path, accepted HID ids, driver) of this console's joystick rings, or None."""
     identity = _read_identity()
-    if (identity["product_family"], identity["product_name"]) not in RGB_SUPPORTED_MODELS:
-        return None, "RGB control requires a Lenovo Legion Go 2 (8ASP2/83N0 or 8AHP2/83N1)."
+    if (identity["product_family"], identity["product_name"]) in RGB_SUPPORTED_MODELS:
+        return RGB_LED_PATH, (RGB_HID_ID,), RGB_DRIVER
+    console = module_runtime.legion_device()[0]
+    if console == "go1":
+        return RGB_LED_PATH, GO1_RGB_HID_IDS, RGB_DRIVER
+    if console == "gos":
+        return GO_S_RGB_LED_PATH, GO_S_RGB_HID_IDS, GO_S_RGB_DRIVER
+    return None  # Also a Go 2 whose DMI family and machine type disagree.
 
-    if not os.path.lexists(RGB_LED_PATH):
-        return None, "The hid-lenovo-go joystick-ring interface is not available."
-    real = os.path.realpath(RGB_LED_PATH)
-    if not real.startswith("/sys/devices/") or f":{RGB_HID_ID}." not in real.upper():
+
+def _rgb_capability() -> tuple[str | None, str]:
+    interface = _rgb_interface()
+    if interface is None:
+        return None, "RGB control requires a Lenovo Legion Go console."
+    led, hid_ids, expected_driver = interface
+
+    if not os.path.lexists(led):
+        return None, f"The {expected_driver} joystick-ring interface is not available."
+    real = os.path.realpath(led)
+    if not real.startswith("/sys/devices/") or not any(f":{hid}." in real.upper() for hid in hid_ids):
         return None, "The joystick-ring interface does not belong to the expected controller."
     hid_root = real.split("/leds/", 1)[0]
     driver = os.path.basename(os.path.realpath(os.path.join(hid_root, "driver")))
-    if driver != RGB_DRIVER:
-        return None, f"The controller is bound to {driver or 'an unknown driver'}, not {RGB_DRIVER}."
+    if driver != expected_driver:
+        return None, f"The controller is bound to {driver or 'an unknown driver'}, not {expected_driver}."
 
     required_rw = (
         "enabled", "profile", "mode", "effect", "brightness",
@@ -614,6 +633,13 @@ def _power_led_layout_ok(data: bytes) -> bool:
         return False
 
 
+def power_led_model(identity: dict[str, str] | None = None) -> bool:
+    """The power-button light's model gate (DMI only); each use still proves the DSDT layout."""
+    identity = identity if identity is not None else _read_identity()
+    return (identity.get("product_family"), identity.get("product_name"), identity.get("board_name")) == (
+        EXPECTED_FAMILY, EXPECTED_PRODUCT, EXPECTED_BOARD)
+
+
 def _power_capability() -> tuple[bool, str]:
     global _power_capability_cache, _power_capability_retry_at, _power_bios
     if _power_capability_cache is not None and (
@@ -624,12 +650,7 @@ def _power_capability() -> tuple[bool, str]:
     # Every retry still proves the model and the DSDT layout before MMIO access.
     _power_capability_retry_at = time.monotonic() + POWER_CAPABILITY_RETRY_S
     identity = _read_identity()
-    expected = {
-        "product_family": EXPECTED_FAMILY,
-        "product_name": EXPECTED_PRODUCT,
-        "board_name": EXPECTED_BOARD,
-    }
-    if any(identity.get(key) != value for key, value in expected.items()):
+    if not power_led_model(identity):
         _power_capability_cache = (
             False, "Power-button light control supports only the Legion Go 2 (83N0 / 8ASP2).")
         return _power_capability_cache
@@ -947,6 +968,15 @@ _offload = functools.partial(module_runtime.offload, 'rgb')
 
 
 class Plugin:
+    @staticmethod
+    def applicable() -> bool:
+        """The Go 2 as before; the Go S and a Go 1 once the kernel offers their joystick rings (read-only)."""
+        console = module_runtime.legion_device()[0]
+        if console in (None, "go2"):
+            return console == "go2"
+        interface = _rgb_interface()
+        return interface is not None and os.path.lexists(interface[0])
+
     async def _drift_loop(self) -> None:
         last_check = time.monotonic()
         retry_pending = False

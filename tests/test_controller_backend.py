@@ -542,7 +542,7 @@ class CaptureTests(unittest.TestCase):
     def test_verified_hidraw_opens_only_readonly_nonblocking(self):
         physical = {**PHYSICAL, "devnum": "240:1"}
         info = types.SimpleNamespace(st_mode=module.stat.S_IFCHR, st_rdev=1234)
-        with patch.object(module, "_is_go2", return_value=True), \
+        with patch.object(module, "_console", return_value="go2"), \
                 patch.object(module, "_hid_inventory", return_value=(physical, None)), \
                 patch.object(module.os, "open", return_value=8) as opener, \
                 patch.object(module.os, "fstat", return_value=info), \
@@ -552,7 +552,7 @@ class CaptureTests(unittest.TestCase):
         flags = opener.call_args.args[1]
         self.assertEqual(flags & (module.os.O_WRONLY | module.os.O_RDWR), 0)
         self.assertTrue(flags & 2048)
-        with patch.object(module, "_is_go2", return_value=False), patch.object(module.os, "open") as opener:
+        with patch.object(module, "_console", return_value=None), patch.object(module.os, "open") as opener:
             with self.assertRaises(module.ControllerError):
                 module._open_reader(PHYSICAL)
         opener.assert_not_called()

@@ -759,6 +759,8 @@ async def _watch_loop() -> None:
 
 
 class Plugin:
+    applicable = staticmethod(module_runtime.is_legion_go_2)
+
     async def _main(self):
         global _watch_task
         _resume_detected.mark()

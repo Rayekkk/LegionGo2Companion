@@ -378,6 +378,15 @@ def release_orphan():
 
 class Plugin:
     RETRY_LIMIT, RETRY_WINDOW_S = 3, 600
+
+    @staticmethod
+    def applicable() -> bool:
+        """The model gate itself (DMI only): elsewhere the module stays hidden and never opens the EC."""
+        try:
+            platform_check(module_runtime.DMI_ROOT)
+        except (OSError, RuntimeError, UnicodeError):
+            return False
+        return True
     BACKOFF_S, POLL_S = (1, 2, 5, 10, 30), 0.5
 
     def __init__(self):

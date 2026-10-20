@@ -84,8 +84,8 @@ def _parse_modes(value: str) -> tuple[list[str], str]:
 
 
 def _detect() -> dict[str, Any]:
-    if not module_runtime.is_legion_go_2(SYS_ROOT / "class/dmi/id"):
-        raise BatteryError("Battery protection is supported only on Lenovo Legion Go 2.")
+    if module_runtime.legion_device(SYS_ROOT / "class/dmi/id")[0] is None:
+        raise BatteryError("Battery protection is supported only on the Lenovo Legion Go consoles.")
     batteries = []
     for candidate in (SYS_ROOT / "class/power_supply").iterdir():
         if not candidate.resolve(strict=True).is_relative_to(SYS_ROOT.resolve(strict=True)):
@@ -132,6 +132,18 @@ def _write_mode(path: Path, mode: str) -> None:
 
 
 class Plugin:
+    @staticmethod
+    def applicable() -> bool:
+        """Read-only: the Go 2 as before; another Legion Go once its kernel offers the protection modes."""
+        console = module_runtime.legion_device(SYS_ROOT / "class/dmi/id")[0]
+        if console in (None, "go2"):
+            return console == "go2"
+        try:
+            _detect()
+        except (BatteryError, OSError, UnicodeError):
+            return False
+        return True
+
     def __init__(self):
         self._lock = threading.RLock()
         self._task: asyncio.Task | None = None

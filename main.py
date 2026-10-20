@@ -33,7 +33,7 @@ import wifi_backend
 import module_runtime
 import diagnostics
 from companion_updates import CompanionUpdates
-from controller_firmware import FirmwarePreparation, INSTALL_SECONDS, updater_running
+from controller_firmware import FirmwarePreparation, INSTALL_SECONDS, updater_running, applies as firmware_applies
 from safe_settings import SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 from desktop_bridge import DesktopBridge
@@ -264,6 +264,8 @@ def _guard_component_calls(cls):
                         # consumers or mutate module choices during a handoff.
                         raise module_runtime.ControllerPaused('Controller operations are paused for firmware maintenance.')
                     module_runtime.require_available(resource)
+                    if module and not self._applies(module):
+                        raise RuntimeError('This module does not apply to this console.')
                     if module and not self._module_enabled(module):
                         raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
                     if module and self._still_starting(module):
@@ -353,6 +355,8 @@ class Plugin:
             else {'enabled': False, 'error': 'Invalid module settings. Review before enabling.'}
             for name, value in self._module_state.items() if name in MODULE_NAMES}
         self._module_health = {}
+        self._applicable = {}  # Module name -> it applies to this console (_ensure_device); empty until read.
+        self._device = {}
         self._starting = {}  # Module name -> its startup task; never cancelled mid firmware call.
         self._late_stops = {}  # Module name -> its unload queued behind a start a stop found still running.
         self._stop_deadline = 0.0  # End of the shutdown budget; _uninstall waits for late starts until then.
@@ -415,8 +419,33 @@ class Plugin:
         self._module_store.setSetting('modules', self._module_state)
         self._module_store.commit()
 
+    def _applies(self, name):
+        return self._applicable.get(name, True)
+
+    def _detect_device(self):
+        """Read-only, once per load: which modules apply to this console. One that does not never
+        starts or touches hardware, is refused, and both interfaces hide it with its options."""
+        applicable = {}
+        for name in MODULE_NAMES:
+            check = getattr(getattr(self, '_' + name), 'applicable', None)  # None: applies everywhere (WiFi).
+            try:
+                applicable[name] = bool(check()) if callable(check) else True
+            except Exception as exc:
+                diagnostics.event(name, 'applicability_unknown', level='warning', error=exc)
+                applicable[name] = False
+        console, model = module_runtime.legion_device()
+        # Options inside modules that keep their own model gate (Fan's is the module itself).
+        device = {'console': console, 'model': model or None,
+                  'firmware': firmware_applies(), 'power_led': rgb_backend.power_led_model()}
+        return applicable, device
+
+    async def _ensure_device(self):
+        if not self._applicable:
+            self._applicable, self._device = await asyncio.to_thread(self._detect_device)
+
     def _module_status(self):
         result = {name: {'enabled': self._module_enabled(name),
+                       'applicable': self._applies(name),
                        'ready': self._module_health.get(name, {}).get('ready', True),
                        'pending': bool(self._module_state.get(name, {}).get('pending')),
                        # A startup error no longer applies once the module is turned off.
@@ -482,6 +511,8 @@ class Plugin:
     async def modules_set_enabled(self, name, enabled):
         if name not in MODULE_NAMES or type(enabled) is not bool:
             raise ValueError('Invalid module or enabled value.')
+        if not self._applies(name):
+            raise RuntimeError('This module does not apply to this console.')
         if name == 'fan' and not enabled:
             # Fan safety takes precedence even if module-choice persistence fails.
             await self._fan.set_enabled(False)
@@ -549,7 +580,7 @@ class Plugin:
             (name, component)
             for name, component in ((name, getattr(self, '_' + name)) for name in names)
             if (self._module_enabled(name) or (stage == '_unload' and self._module_state.get(name, {}).get('pending')))
-            and (stage == '_unload' or not module_runtime.is_paused(name))
+            and (stage == '_unload' or not module_runtime.is_paused(name)) and self._applies(name)
             and callable(getattr(component, stage, None))
         )
         if stage == '_main':
@@ -618,6 +649,7 @@ class Plugin:
     def _guard_status(self):
         return {"version": _plugin_version(),
                 "modules": self._module_status(),
+                "device": dict(self._device),
                 "standalone_plugins": list(self._guard_conflicts),
                 "blocked": self._guard_blocked or bool(self._guard_error),
                 # Only this latch survives a later clean scan; guard_error alone is transient.
@@ -722,7 +754,7 @@ class Plugin:
 
     async def _recover_pending_module(self, name):
         entry = self._module_state.get(name, {})
-        if not entry.get('pending'):
+        if not entry.get('pending') or not self._applies(name):
             return
         resume = entry.get('resume', {})
         try:
@@ -743,6 +775,7 @@ class Plugin:
         await module_runtime.complete(asyncio.to_thread(self._save_modules))
 
     async def _migration(self):
+        await self._ensure_device()
         await self._check_guard()
         if self._guard_blocked or self._guard_error:
             return  # _main scans again before any module starts.
@@ -764,6 +797,7 @@ class Plugin:
         diagnostics.event('plugin', 'runtime', source='backend', kernel=platform.release(),
                           python=platform.python_version(), architecture=platform.machine(),
                           **await asyncio.to_thread(_runtime_identity))
+        await self._ensure_device()
         decky.logger.info(f"[legiongo2companion] startup v{_plugin_version()}")
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._watch_conflicts())
@@ -793,8 +827,9 @@ class Plugin:
             # A shutdown during startup skipped the remaining modules, so there is nothing to summarise.
             if not self._closing:
                 diagnostics.event('plugin', 'startup_complete', source='backend',
-                    ready=','.join(name for name in MODULE_NAMES if self._module_enabled(name)
+                    ready=','.join(name for name in MODULE_NAMES if self._module_enabled(name) and self._applies(name)
                                    and self._module_health.get(name, {}).get('ready', True)) or None,
+                    not_applicable=','.join(name for name in MODULE_NAMES if not self._applies(name)) or None,
                     failed=','.join(name for name in MODULE_NAMES
                                     if (self._module_health.get(name, {}).get('ready') is False
                                         and not self._still_starting(name))
@@ -818,7 +853,7 @@ class Plugin:
         for name in names:
             entry = self._module_state.get(name, {})
             if (self._module_enabled(name) and self._module_health.get(name, {}).get('ready', True)
-                    and not module_runtime.is_paused(name)
+                    and not module_runtime.is_paused(name) and self._applies(name)
                     and entry.get('resume')):
                 try:
                     await restore_intent(name, getattr(self, '_' + name), entry['resume'])

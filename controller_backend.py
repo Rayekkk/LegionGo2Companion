@@ -47,7 +47,10 @@ _offload = functools.partial(module_runtime.offload, 'controller')
 settings = SettingsManager("controller_settings", decky.DECKY_PLUGIN_SETTINGS_DIR)
 HID_CLASS = Path("/sys/class/hidraw")
 DMI_ROOT = Path("/sys/class/dmi/id")
-GO2_PIDS = {0x61EB, 0x61EC, 0x61ED, 0x61EE}
+GO2_PIDS = {0x61EB, 0x61EC, 0x61ED, 0x61EE}  # Also a Go 1 on the 2025 controller firmware.
+# InputPlumber's name for the controller. It already flips the Go 1's yaw sign by DMI (83E1),
+# and Companion only chooses which IMU it forwards, so no axis is changed here.
+INPUTPLUMBER_NAMES = {"go1": "Lenovo Legion Go", "go2": "Lenovo Legion Go 2"}
 SOURCES = {"system", "combined", "left", "right"}
 IMU_KEYS = frozenset(f"{kind}:{side}" for kind in ("Gyroscope", "Accelerometer")
                      for side in ("Left", "Right", "Center"))
@@ -71,12 +74,19 @@ def _text(path: Path) -> str | None:
         return None
 
 
-def _is_go2() -> bool:
-    return module_runtime.is_legion_go_2(DMI_ROOT)
+def _console() -> str | None:
+    """go1 or go2, the consoles whose controllers this module serves; otherwise None."""
+    console = module_runtime.legion_device(DMI_ROOT)[0]
+    return console if console in INPUTPLUMBER_NAMES else None
+
+
+def _supported() -> bool:
+    console = _console()
+    return console == "go2" or (console == "go1" and module_runtime.kernel_controller())
 
 
 def _hid_inventory() -> tuple[dict | None, dict | None]:
-    if not _is_go2():
+    if not _console():
         return None, None
     physical, virtual = [], []
     for entry in list(HID_CLASS.glob("hidraw*"))[:128]:
@@ -156,7 +166,7 @@ def parse_virtual_report(packet: bytes) -> dict | None:
 
 
 def _open_reader(record: dict) -> int:
-    if not _is_go2() or not re.fullmatch(r"/dev/hidraw[0-9]+", record.get("path", "")):
+    if not _console() or not re.fullmatch(r"/dev/hidraw[0-9]+", record.get("path", "")):
         raise ControllerError("The controller identity could not be verified.")
     # Revalidate immediately before open, including the kernel device number.
     candidates = _hid_inventory()
@@ -214,7 +224,7 @@ def _discover(physical: dict, *, require_exclusive: bool = True) -> dict:
         if not isinstance(raw, list) or len(raw) != 1 or not isinstance(raw[0], dict):
             raise ControllerError("InputPlumber returned invalid controller properties.")
         props = {key: value.get("data") for key, value in raw[0].items() if isinstance(value, dict)}
-        if props.get("Name") != "Lenovo Legion Go 2":
+        if props.get("Name") != INPUTPLUMBER_NAMES.get(_console()):
             continue
         filterable = _filter_map(props.get("FilterableEvents"))
         if not IMU_KEYS.issubset(filterable.get(source, [])):
@@ -322,6 +332,11 @@ def _capture_time() -> float:
 
 
 class Plugin:
+    @staticmethod
+    def applicable() -> bool:
+        """The Go 2, and a Go 1 on the controller firmware hid-lenovo-go serves (same reports and IMU switch)."""
+        return _supported()
+
     def __init__(self) -> None:
         self._operation = threading.RLock()
         self._capture_lock = threading.RLock()

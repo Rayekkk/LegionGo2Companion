@@ -732,6 +732,12 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
 
 class Plugin:
 
+    @staticmethod
+    def applicable() -> bool:
+        """The Go 2, and a Go 1 on the controller firmware hid-lenovo-go serves; the Go S driver has no rumble."""
+        console = module_runtime.legion_device()[0]
+        return console == "go2" or (console == "go1" and module_runtime.kernel_controller())
+
     # Surfaced through is_ready() so a failed start shows up in the panel
     # instead of leaving the user with sliders that silently do nothing.
     _setup_error: str | None = None

@@ -404,10 +404,10 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         result = await self.plugin.set_enabled(True)
         self.assertFalse(result["success"])
         self.externally_select("Fast")
-        (self.root / "class/dmi/id/product_name").write_text("83N6")
+        (self.root / "class/dmi/id/product_name").write_text("82XA")  # A Lenovo outside the Legion Go family
         result = await self.plugin.set_enabled(True)
         self.assertFalse(result["success"])
-        self.assertIn("only on Lenovo Legion Go 2", result["error"])
+        self.assertIn("only on the Lenovo Legion Go consoles", result["error"])
         self.assertEqual(self.writes, [])
 
     @unittest.skipUnless(os.name == "posix", "sysfs Unix mode permissions")

@@ -382,7 +382,7 @@ class DisplayStopDuringStartTests(ResetFixture, unittest.TestCase):
         self.patch(main.decky, DECKY_PLUGIN_SETTINGS_DIR=self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.patch(main, _installed_standalone_plugins=Mock(return_value=[]), MODULE_START_LIMIT_S=0.05,
                    STARTING_STOP_WAIT_S=0.1, SHUTDOWN_BUDGET_S=0.3)
-        self.patch(display.Plugin, _task=None, _prop_task=None)
+        self.patch(display.Plugin, _task=None, _prop_task=None, applicable=staticmethod(lambda: True))  # A Go 2
         self.patch(display, _pick_display=lambda: self.gate.wait(5), _identify_panel=Mock(return_value=(True, 'fixture')),
                    _find_backlight=Mock(return_value=''), _watch_properties=AsyncMock(),
                    _uninstall_script=lambda: self.uninstalled.append(self.gate.is_set()) or 'removed the display script',

@@ -322,15 +322,20 @@ def _read_versions_once(root):
     return versions
 
 
+def applies(sysfs=Path('/sys')):
+    """The model gate (DMI only); elsewhere the firmware page stays hidden."""
+    dmi = sysfs / 'class/dmi/id'
+    return tuple(_text(dmi / name) for name in ('sys_vendor', 'product_name', 'product_version')) == (
+        'LENOVO', '83N0', 'Legion Go 8ASP2')
+
+
 def read_installed_versions(sysfs=Path('/sys')):
     """Versions reported by the in-tree hid-lenovo-go driver; read-only.
 
     Each read makes the driver send its own version query. After a 50 ms
     timeout it returns a cached value, so two equal reads are required.
     """
-    dmi = sysfs / 'class/dmi/id'
-    if tuple(_text(dmi / name) for name in ('sys_vendor', 'product_name', 'product_version')) != (
-            'LENOVO', '83N0', 'Legion Go 8ASP2'):
+    if not applies(sysfs):
         raise FirmwareError('Controller updates are available only on the Legion Go 2 (83N0).')
     usb = [path for path in (sysfs / 'bus/usb/devices').glob('*')
         if _text(path / 'idVendor') == '17ef' and _text(path / 'idProduct') == '61eb']

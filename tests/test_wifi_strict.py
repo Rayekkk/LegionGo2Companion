@@ -503,7 +503,7 @@ class BandPolicyCapabilityReasonTests(unittest.TestCase):
     """Each blocker wins in a fixed order; pins all four reasons the UI shows."""
     R = {
         "connect": "Connect to WiFi first.",
-        "target": "Band changes are enabled only on a Legion Go 2 with the "
+        "target": "Band changes are enabled only on a Legion Go with the "
                   "MediaTek MT7922 (mt7921e) driver.",
         "bssid": "Clear the fixed BSSID before changing band policy.",
         "channel": "Clear the fixed WiFi channel before changing band policy.",

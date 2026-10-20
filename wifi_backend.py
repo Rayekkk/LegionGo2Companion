@@ -95,7 +95,11 @@ HIGH_BAND_MONITOR_SECONDS = 5
 HIGH_BAND_RETRY_SECONDS = 30
 HIGH_BAND_IDLE_SECONDS = 45  # Poll cadence once there is nothing left to try.
 
-LEGION_GO_2_PRODUCTS = ("83N0", "83N1")
+# Console (module_runtime.legion_device) -> (device_family, device_label). Every Legion Go
+# carries the MediaTek MT7922; band policy also requires its mt7921e driver.
+LEGION_GO_FAMILIES = {"go1": ("legion_go", "Legion Go"), "gos": ("legion_go_s", "Legion Go S"),
+                      "go2": ("legion_go_2", "Legion Go 2")}
+BAND_POLICY_FAMILIES = frozenset(family for family, _ in LEGION_GO_FAMILIES.values())
 
 SETTINGS_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "wifi_settings.json")
 
@@ -268,7 +272,7 @@ class Plugin:
     @staticmethod
     def _high_band_discovery_enabled(settings: dict) -> bool:
         state = settings.get("band_policy_state") or {}
-        return bool(settings.get("device_family") == "legion_go_2"
+        return bool(settings.get("device_family") in BAND_POLICY_FAMILIES
                     and settings.get("driver") == "mt7921e"
                     and settings.get("band_policy") == BAND_POLICY_HIGH_ONLY
                     and state.get("mode") == BAND_POLICY_HIGH_ONLY
@@ -1274,7 +1278,7 @@ class Plugin:
         common_reason = _first_reason(
             (not iface or not uuid, "Connect to WiFi first."),
             (not target_supported, (
-                "Band changes are enabled only on a Legion Go 2 with the "
+                "Band changes are enabled only on a Legion Go with the "
                 "MediaTek MT7922 (mt7921e) driver."
             )),
             (bssid, "Clear the fixed BSSID before changing band policy."),
@@ -1816,7 +1820,7 @@ class Plugin:
 
         if not self._target_supported():
             return _refusal("unsupported_device", "Manual high-band reconnect is enabled only on a "
-                                                  "Legion Go 2 with the MediaTek MT7922 driver.")
+                                                  "Legion Go with the MediaTek MT7922 driver.")
         if not self._service_active(backend):
             return _refusal("backend_inactive", "The selected WiFi backend is not active.")
 
@@ -2424,16 +2428,10 @@ class Plugin:
     # ---- Hardware detection ----
 
     def _detect_device_family(self) -> tuple[str, str, str]:
-        """Read DMI product_name and return (raw_product, family_id, display_label)."""
-        try:
-            with open("/sys/devices/virtual/dmi/id/product_name", "r") as f:
-                product = f.read().strip()
-        except Exception:
-            return ("unknown", "unknown", "Unknown Device")
-
-        if product in LEGION_GO_2_PRODUCTS:
-            return (product, "legion_go_2", "Legion Go 2")
-        return (product, "unknown", "Unknown Device")
+        """Return (raw_product, family_id, display_label) from DMI."""
+        console, product = module_runtime.legion_device()
+        family, label = LEGION_GO_FAMILIES.get(console, ("unknown", "Unknown Device"))
+        return (product or "unknown", family, label)
 
     def _detect_wifi_driver(self, iface: str | None = None) -> str:
         """Kernel driver (module name) of the active WiFi interface via sysfs."""
@@ -2450,10 +2448,10 @@ class Plugin:
         return await self._worker_complete(self._get_device_info_sync)
 
     def _target_supported(self, iface: str | None = None) -> bool:
-        """Band changes are enabled only on a Legion Go 2 with the MT7922 (mt7921e) driver."""
+        """Band changes are enabled only on a Legion Go with the MT7922 (mt7921e) driver."""
         _, device_family, _ = self._detect_device_family()
         driver = self._detect_wifi_driver(iface)
-        return device_family == "legion_go_2" and driver == "mt7921e"
+        return device_family in BAND_POLICY_FAMILIES and driver == "mt7921e"
 
     def _get_device_info_sync(self) -> dict:
         _, device_family, device_label = self._detect_device_family()
@@ -2511,7 +2509,7 @@ class Plugin:
             ownership_error = self._band_policy_ownership_error(settings)
             status["live"]["band_policy_restore_available"] = bool(
                 backend in ("iwd", "wpa_supplicant")
-                and settings.get("device_family") == "legion_go_2"
+                and settings.get("device_family") in BAND_POLICY_FAMILIES
                 and settings.get("driver") == "mt7921e"
                 and (saved_policy != BAND_POLICY_OFF or journal)
                 and (not journal or (journal.get("phase") == "rollback_failed"
@@ -2707,7 +2705,7 @@ class Plugin:
         elif mode in IWD_BAND_POLICIES:
             if not self._target_supported():
                 return refuse("unsupported_device", "High-band preference is enabled only on a "
-                                                    "Legion Go 2 with the MediaTek MT7922 driver.")
+                                                    "Legion Go with the MediaTek MT7922 driver.")
             if self._get_current_backend() != "iwd":
                 return refuse("unsupported_backend", "High-band preference requires the iwd WiFi backend.")
             if not self._service_active("iwd"):

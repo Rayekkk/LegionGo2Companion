@@ -71,8 +71,9 @@ def _values(device: Path) -> dict[str, bool]:
 
 
 def _discover() -> Path:
-    if not module_runtime.is_legion_go_2(SYS_ROOT / "class/dmi/id"):
-        raise ImuError("IMU control is available only on Lenovo Legion Go 2.")
+    console = module_runtime.legion_device(SYS_ROOT / "class/dmi/id")[0]
+    if console not in ("go1", "go2"):
+        raise ImuError("IMU control is available only on the Lenovo Legion Go and Legion Go 2.")
     matches = []
     for entry in HID_DEVICES.iterdir():
         if not re.fullmatch(r"0003:17EF:61E[B-E]\.[0-9A-F]+", entry.name, re.IGNORECASE):
@@ -83,7 +84,9 @@ def _discover() -> Path:
         if (_driver_name(device) != "hid-lenovo-go"
                 or _read(device.parent / "bInterfaceNumber") != "02"):
             continue
-        if _read(device / "hardware_generation", device) != "2":
+        # A Go 1 on the 2025 firmware uses the same driver and switch; its generation value is not
+        # documented, so only the Go 2 checks it (controller firmware keeps its own "2" gate).
+        if console == "go2" and _read(device / "hardware_generation", device) != "2":
             continue
         matches.append(device)
     if len(matches) != 1:

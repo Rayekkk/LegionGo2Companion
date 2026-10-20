@@ -1390,6 +1390,9 @@ def _hybrid_reading(props: dict) -> tuple[bool, bool, bool]:
 
 
 class Plugin:
+    # The panel logic (KNOWN_PANELS, Lua scripts) is the Go 2's OLED.
+    applicable = staticmethod(module_runtime.is_legion_go_2)
+
     # Everything the panel reports back to the UI.
     _state = {
         # Setup gate - nothing else is shown until a mode is chosen and its

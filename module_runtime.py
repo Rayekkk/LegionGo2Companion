@@ -5,6 +5,7 @@ import contextlib
 import contextvars
 import functools
 import os
+import re
 import stat
 import threading
 import time
@@ -219,18 +220,50 @@ def read_sysfs_text(path, limit=512, *, error=OSError, subject=None):
     return raw.decode("ascii", errors="strict").strip()
 
 
-def is_legion_go_2(dmi_root=DMI_ROOT):
-    """LENOVO 83N0/83N1, the identity the Legion Go 2 modules share.
+# Machine type (DMI product_name) -> console: go1 Legion Go, gos Legion Go S, go2 Legion Go 2.
+LEGION_GO_MODELS = {"83E1": "go1", "83L3": "gos", "83N6": "gos", "83Q2": "gos", "83Q3": "gos",
+                    "83N0": "go2", "83N1": "go2"}
+HID_DEVICES = "/sys/bus/hid/devices"
 
-    Fan, RGB and controller firmware keep their own stricter gates.
+
+def legion_device(dmi_root=None):
+    """(console, machine type) of a Lenovo Legion Go; console is None outside the family.
+
+    A machine type not in the table is placed by product_version, never as a Go 2:
+    the Go 2 modules stay with the two types they were tested on. Fan, the power
+    light and controller firmware keep their own stricter gates.
     """
     def read(name):
         try:
-            with open(os.path.join(dmi_root, name), encoding="ascii") as handle:
+            with open(os.path.join(dmi_root or DMI_ROOT, name), encoding="ascii") as handle:
                 return handle.read(128).strip()
         except (OSError, UnicodeError):
             return ""
-    return read("sys_vendor") == "LENOVO" and read("product_name") in ("83N0", "83N1")
+    if read("sys_vendor") != "LENOVO":
+        return None, ""
+    model = read("product_name")
+    console = LEGION_GO_MODELS.get(model)
+    if console is None:
+        version = read("product_version")
+        console = "gos" if version.startswith("Legion Go S ") else "go1" if version == "Legion Go 8APU1" else None
+    return console, model
+
+
+def is_legion_go_2(dmi_root=None):
+    """LENOVO 83N0/83N1, the identity the Legion Go 2 modules share."""
+    return legion_device(dmi_root)[0] == "go2"
+
+
+def kernel_controller(hid_root=HID_DEVICES):
+    """A controller served by hid-lenovo-go: the Go 2's, or a Go 1's on the 2025 controller firmware
+    (61EB-61EE). The Go 1's older firmware (6182-6185) has no kernel driver for vibration, lights or gyro."""
+    try:
+        names = os.listdir(hid_root)
+    except OSError:
+        return False
+    return any(re.fullmatch(r"0003:17EF:61E[B-E]\.[0-9A-F]+", name, re.IGNORECASE)
+               and os.path.basename(os.path.realpath(os.path.join(hid_root, name, "driver"))) == "hid-lenovo-go"
+               for name in names)
 
 
 def suspend_offset():
