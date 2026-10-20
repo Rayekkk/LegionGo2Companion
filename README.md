@@ -41,12 +41,30 @@ same controls are also available as a native [Desktop app](#desktop-app).
 
 | Requirement | Details |
 |---|---|
-| Device | Lenovo Legion Go 2 (best supported: **8ASP2 / 83N0**) |
+| Device | Lenovo Legion Go 2 (best supported: **8ASP2 / 83N0**); Legion Go and Legion Go S in [early beta](#other-legion-go-consoles-early-beta) |
 | System | SteamOS **Stable** (tested on 3.8.16 and 3.8.28) with [Decky Loader](https://decky.xyz) |
 | Desktop app (optional) | Nothing extra: it uses the Qt 6.9+ that comes with SteamOS 3.8 and newer |
 
 Compatibility was also checked on SteamOS 3.9.3 Beta. Each page explains when a control
 is unavailable on your console.
+
+### Other Legion Go consoles (early beta)
+
+Companion also runs on the **Legion Go** (83E1) and the **Legion Go S** (83L3, 83N6, 83Q2,
+83Q3). It shows only the modules and options that apply to the console it runs on, also in
+Manage Modules. None of this has been tested on these consoles yet.
+
+| Module | Legion Go | Legion Go S |
+|---|---|---|
+| Battery | When SteamOS offers the Long Life charge mode | Same |
+| Lighting (stick lights) | With the 2025 controller firmware | Yes |
+| Vibration, Gyro & touchpad | With the 2025 controller firmware | Hidden |
+| Wi-Fi (band policy with the MT7922 `mt7921e` driver) | Yes | Yes |
+| Fan Control, power-button light, Button mapping, Display, Controller firmware | Hidden | Hidden |
+
+The Legion Go's controllers on older firmware have no Linux driver for lighting, vibration or
+gyro, so Companion hides those modules there. On a Legion Go 2 83N1, Fan Control, the
+power-button light and controller firmware are hidden as well: they need the 83N0.
 
 <details>
 <summary><b>Model compatibility and hardware checks</b></summary>
@@ -516,7 +534,7 @@ If you lose Wi-Fi with a strict option, choose **Automatic** or **Prefer 5/6 GHz
 <summary><b>Wi-Fi details by backend</b></summary>
 
 The options depend on SteamOS's Wi-Fi backend (**iwd** or **WPA supplicant**, shown under
-**Show details**) and need the Legion Go 2's MT7922 adapter (`mt7921e` driver).
+**Show details**) and need the Legion Go's MT7922 adapter (`mt7921e` driver).
 
 | Backend | Option | Behaviour |
 |---|---|---|

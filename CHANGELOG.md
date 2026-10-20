@@ -2,6 +2,10 @@
 
 Unreleased.
 
+### Added
+
+- **Legion Go and Legion Go S (early beta):** Companion now also runs on the first Legion Go and the Legion Go S. Each console shows only the modules and options that apply to it, in the panel, the Desktop app and Manage Modules: Battery, the stick lights and Wi-Fi on all of them, and Vibration and Gyro & touchpad on a Legion Go whose controllers have the 2025 firmware. The Wi-Fi band policy works with the MT7922 adapter of every Legion Go. Button mapping and Display remain Legion Go 2 only, and Fan Control, the power-button light and controller firmware Legion Go 2 83N0 only; elsewhere they are hidden, also on a Legion Go 2 83N1. Nothing changes on a Legion Go 2 83N0.
+
 ### Fixed
 
 - **Controller firmware:** Install no longer stops fwupd after a fixed 10 minutes while it is still writing a controller. It is stopped only after 10 minutes without any progress, or after 30 minutes in total, and is asked to exit cleanly first.
