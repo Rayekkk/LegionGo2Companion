@@ -473,7 +473,7 @@ class Plugin:
             value, result = self._nmcli_get(link["uuid"], field, timeout=1)
             if not result.get("success") or value or stop.is_set():
                 return fallback
-        saved =self._band_settings_fields(settings)
+        saved = self._band_settings_fields(settings)
         journal = self._new_journal(
             f"discovery-{os.getpid()}-{time.time_ns()}", "automatic_high_band_reconnect",
             settings_before=saved, settings_after=saved,
@@ -1403,13 +1403,10 @@ class Plugin:
 
     def _write_band_settings_fields(self, path: str, fields: dict):
         """Merge only the supplied owned fields, preserving concurrent settings."""
-        if os.path.abspath(path) == os.path.abspath(SETTINGS_FILE):
-            data = _load_settings()
-        else:
-            data = load_json_object(path, missing_ok=True) or {}
-        data.update(fields)
-        data["last_applied"] = int(time.time())
-        if os.path.abspath(path) == os.path.abspath(SETTINGS_FILE):
+        own_store = os.path.abspath(path) == os.path.abspath(SETTINGS_FILE)
+        data = _load_settings() if own_store else (load_json_object(path, missing_ok=True) or {})
+        data.update(fields, last_applied=int(time.time()))
+        if own_store:
             _save_settings(data)
         else:
             atomic_write_json(path, data)
@@ -1422,10 +1419,7 @@ class Plugin:
         }
 
     def _schedule_band_policy_rollback(self, journal: dict) -> dict:
-        unit = (
-            f"{BAND_POLICY_ROLLBACK_UNIT_PREFIX}-{os.getpid()}-"
-            f"{int(time.time() * 1000)}"
-        )
+        unit = f"{BAND_POLICY_ROLLBACK_UNIT_PREFIX}-{os.getpid()}-{int(time.time() * 1000)}"
         journal["rollback_unit"] = unit
         self._save_band_policy_journal(journal)
         main_path = os.path.join(DECKY_PLUGIN_DIR, "wifi_backend.py")
@@ -1434,22 +1428,11 @@ class Plugin:
         except (TypeError, ValueError, OverflowError):
             rollback_seconds = BAND_POLICY_ROLLBACK_SECONDS
         rollback_seconds = min(BAND_POLICY_ROLLBACK_SECONDS, max(30, rollback_seconds))
-        result = self._run_cmd(
-            [
-                "/usr/bin/systemd-run",
-                "--quiet",
-                "--collect",
-                f"--unit={unit}",
-                f"--on-active={rollback_seconds}s",
-                "--timer-property=AccuracySec=1s",
-                PYTHON,
-                main_path,
-                "--rollback-band-policy",
-                BAND_POLICY_JOURNAL_FILE,
-            ],
-            timeout=8,
-        )
-        return result
+        return self._run_cmd([
+            "/usr/bin/systemd-run", "--quiet", "--collect", f"--unit={unit}",
+            f"--on-active={rollback_seconds}s", "--timer-property=AccuracySec=1s",
+            PYTHON, main_path, "--rollback-band-policy", BAND_POLICY_JOURNAL_FILE,
+        ], timeout=8)
 
     def _arm_band_transaction(self, journal: dict, **refusal_extra) -> dict | None:
         """Save the journal and arm its rollback timer; without a timer, drop it and return the refusal."""
@@ -2210,24 +2193,18 @@ class Plugin:
             return {"success": True, "recovered": False}
         phase = journal.get("phase")
         if phase in ("pending", "applying", "rolling_back"):
-            result = self._restore_band_policy_transaction(
-                journal, "interrupted operation"
-            )
+            result = self._restore_band_policy_transaction(journal, "interrupted operation")
             if not result.get("success"):
                 return deferred('interrupted', result.get("conflicts", []))
         elif phase == "verified":
-            self._write_band_settings_fields(
-                str(journal.get("settings_file") or SETTINGS_FILE),
-                journal.get("settings_after", {}),
-            )
+            self._write_band_settings_fields(str(journal.get("settings_file") or SETTINGS_FILE),
+                                             journal.get("settings_after", {}))
             journal["phase"] = "committed"
             self._save_band_policy_journal(journal)
         elif phase == "rollback_failed":
             if not self._band_policy_rollback_retryable(journal):
                 return deferred('incomplete', journal.get("rollback_conflicts", []), counted=False)
-            result = self._restore_band_policy_transaction(
-                journal, "retrying incomplete rollback"
-            )
+            result = self._restore_band_policy_transaction(journal, "retrying incomplete rollback")
             if not result.get("success"):
                 return deferred('retry', result.get("conflicts", []))
         elif phase not in ("committed", "rolled_back"):
@@ -3018,7 +2995,7 @@ def _run_band_policy_rollback_cli_impl(journal_path: str) -> int:
         if os.name == "posix":
             if journal_stat.st_mode & 0o022 or parent_stat.st_mode & 0o022:
                 return 2
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
+            if os.geteuid() == 0:
                 if journal_stat.st_uid != 0 or parent_stat.st_uid != 0:
                     return 2
     except FileNotFoundError:
@@ -3040,9 +3017,7 @@ def _run_band_policy_rollback_cli_impl(journal_path: str) -> int:
             return 0
         if journal.get("schema") != 1:
             return 2
-        settings_path = os.path.realpath(
-            os.path.abspath(str(journal.get("settings_file") or ""))
-        )
+        settings_path = os.path.realpath(os.path.abspath(str(journal.get("settings_file") or "")))
         if os.path.basename(settings_path) != os.path.basename(SETTINGS_FILE):
             return 2
         # A verified/committed transaction must remain committed even if
@@ -3052,9 +3027,7 @@ def _run_band_policy_rollback_cli_impl(journal_path: str) -> int:
                 return 1
         elif journal.get("phase") not in ("pending", "applying", "rolling_back"):
             return 0
-        result = plugin._restore_band_policy_transaction(
-            journal, "automatic watchdog timeout", journal_path=path
-        )
+        result = plugin._restore_band_policy_transaction(journal, "automatic watchdog timeout", journal_path=path)
         return 0 if result.get("success") else 1
     finally:
         plugin._release_band_policy_file_lock(file_lock)
