@@ -221,8 +221,9 @@ def read_sysfs_text(path, limit=512, *, error=OSError, subject=None):
 
 
 # Machine type (DMI product_name) -> console: go1 Legion Go, gos Legion Go S, go2 Legion Go 2.
-LEGION_GO_MODELS = {"83E1": "go1", "83L3": "gos", "83N6": "gos", "83Q2": "gos", "83Q3": "gos",
-                    "83N0": "go2", "83N1": "go2"}
+LEGION_GO_MODELS = {"83E1": "go1", "83L3": "gos", "83N6": "gos", "83N0": "go2", "83N1": "go2"}
+# Left out on purpose (owner's decision), so product_version does not place them either.
+EXCLUDED_MODELS = frozenset({"83Q2", "83Q3"})
 HID_DEVICES = "/sys/bus/hid/devices"
 
 
@@ -243,7 +244,7 @@ def legion_device(dmi_root=None):
         return None, ""
     model = read("product_name")
     console = LEGION_GO_MODELS.get(model)
-    if console is None:
+    if console is None and model not in EXCLUDED_MODELS:
         version = read("product_version")
         console = "gos" if version.startswith("Legion Go S ") else "go1" if version == "Legion Go 8APU1" else None
     return console, model

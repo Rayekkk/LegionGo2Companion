@@ -57,8 +57,8 @@ class IdentityTests(unittest.TestCase):
         return folder.name
 
     def test_machine_type_names_the_console(self):
-        for model, console in (("83E1", "go1"), ("83L3", "gos"), ("83N6", "gos"), ("83Q2", "gos"),
-                               ("83Q3", "gos"), ("83N0", "go2"), ("83N1", "go2")):
+        for model, console in (("83E1", "go1"), ("83L3", "gos"), ("83N6", "gos"), ("83N0", "go2"),
+                               ("83N1", "go2")):
             with self.subTest(model=model):
                 root = self.dmi(sys_vendor="LENOVO", product_name=model)
                 self.assertEqual(module_runtime.legion_device(root), (console, model))
@@ -70,6 +70,12 @@ class IdentityTests(unittest.TestCase):
             with self.subTest(version=version):
                 root = self.dmi(sys_vendor="LENOVO", product_name="83ZZ", product_version=version)
                 self.assertEqual(module_runtime.legion_device(root), (console, "83ZZ"))
+
+    def test_excluded_machine_types_are_outside_the_family_whatever_product_version_says(self):
+        for model in ("83Q2", "83Q3"):
+            with self.subTest(model=model):
+                root = self.dmi(sys_vendor="LENOVO", product_name=model, product_version="Legion Go S 8XXX1")
+                self.assertEqual(module_runtime.legion_device(root), (None, model))
 
     def test_another_vendor_or_unreadable_dmi_is_no_console(self):
         self.assertEqual(module_runtime.legion_device(self.dmi(sys_vendor="OTHER", product_name="83N0")), (None, ""))

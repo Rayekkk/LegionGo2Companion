@@ -50,8 +50,7 @@ is unavailable on your console.
 
 ### Other Legion Go consoles (early beta)
 
-Companion also runs on the **Legion Go** (83E1) and the **Legion Go S** (83L3, 83N6, 83Q2,
-83Q3). It shows only the modules and options that apply to the console it runs on, also in
+Companion also runs on the **Legion Go** (83E1) and the **Legion Go S** (83L3, 83N6). It shows only the modules and options that apply to the console it runs on, also in
 Manage Modules. None of this has been tested on these consoles yet.
 
 | Module | Legion Go | Legion Go S |
