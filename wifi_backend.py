@@ -40,13 +40,11 @@ except ImportError:  # pragma: no cover - available on the Linux target
 try:
     import decky
 except ImportError:
-    # Local fallback when decky isn't importable (e.g., running outside
-    # plugin_loader for static analysis or ad-hoc testing). All runtime
-    # paths on a Deck have the real module.
+    # The systemd rollback watchdog runs this file outside plugin_loader; it
+    # takes the settings path from the journal, never from these values.
     class decky:  # type: ignore
         DECKY_PLUGIN_SETTINGS_DIR = "/tmp/wifi-optimizer"
         DECKY_PLUGIN_DIR = "/tmp/wifi-optimizer"
-        DECKY_PLUGIN_VERSION = "0.0.0"
         class logger:
             @staticmethod
             def info(msg): print(f"[INFO] {msg}")
@@ -99,12 +97,7 @@ HIGH_BAND_IDLE_SECONDS = 45  # Poll cadence once there is nothing left to try.
 
 LEGION_GO_2_PRODUCTS = ("83N0", "83N1")
 
-try:
-    SETTINGS_FILE = os.path.join(
-        decky.DECKY_PLUGIN_SETTINGS_DIR, "wifi_settings.json"
-    )
-except Exception:
-    SETTINGS_FILE = "/tmp/legiongo2companion/wifi_settings.json"
+SETTINGS_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "wifi_settings.json")
 
 BAND_POLICY_RUNTIME_DIR = "/run/wifi-optimizer-go2"
 BAND_POLICY_STATE_DIR = "/var/lib/legiongo2companion-wifi"
@@ -134,24 +127,13 @@ _SETTINGS_MANAGER_LOCK = threading.Lock()
 
 
 def _get_settings_manager() -> AtomicSettingsManager:
-    """Return a store bound to the current settings path.
-
-    Keeping this path-aware is useful for both Decky's runtime directory and
-    the isolated paths used by the recovery tests.
-    """
+    """Return a store bound to the current SETTINGS_FILE (tests repoint it)."""
     global _SETTINGS_MANAGER, _SETTINGS_MANAGER_PATH
     path = os.path.abspath(SETTINGS_FILE)
     with _SETTINGS_MANAGER_LOCK:
         if _SETTINGS_MANAGER is None or _SETTINGS_MANAGER_PATH != path:
-            filename = os.path.basename(path)
-            name, extension = os.path.splitext(filename)
-            if extension.lower() != ".json" or not name:
-                raise UnsafeSettingsPath(
-                    "settings file must have a simple .json filename"
-                )
-            _SETTINGS_MANAGER = AtomicSettingsManager(
-                name, os.path.dirname(path)
-            )
+            name = os.path.splitext(os.path.basename(path))[0]
+            _SETTINGS_MANAGER = AtomicSettingsManager(name, os.path.dirname(path))
             _SETTINGS_MANAGER_PATH = path
         return _SETTINGS_MANAGER
 
@@ -683,9 +665,6 @@ class Plugin:
         finally:
             handle.close()
 
-    def _atomic_write_json(self, path: str, data: dict):
-        self._atomic_write_text(path, json.dumps(data, indent=2) + "\n", 0o600)
-
     @staticmethod
     def _atomic_write_text(path: str, text: str, mode: int = 0o644):
         """Replace a root-owned file without following links; a file that
@@ -985,27 +964,17 @@ class Plugin:
                 except FileNotFoundError:
                     pass
 
-    def _get_link_frequency(self, iface: str | None = None) -> int | None:
+    def _iw_link(self, iface: str | None) -> str:
+        """`iw dev <iface> link` output ("" without a WiFi interface)."""
         iface = iface or self._get_wifi_interface()
-        if not iface:
-            return None
-        result = self._run_cmd(["/usr/bin/iw", "dev", iface, "link"], timeout=3)
-        for line in result.get("stdout", "").splitlines():
-            match = re.match(r"\s*freq:\s*(\d+)", line)
-            if match:
-                return int(match.group(1))
-        return None
+        return self._run_cmd(["/usr/bin/iw", "dev", iface, "link"], timeout=3).get("stdout", "") if iface else ""
+
+    def _get_link_frequency(self, iface: str | None = None) -> int | None:
+        match = re.search(r"(?m)^\s*freq:\s*(\d+)", self._iw_link(iface))
+        return int(match.group(1)) if match else None
 
     def _get_link_bssid(self, iface: str | None = None) -> str:
-        iface = iface or self._get_wifi_interface()
-        if not iface:
-            return ""
-        result = self._run_cmd(["/usr/bin/iw", "dev", iface, "link"], timeout=3)
-        match = re.search(
-            r"^Connected to\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})\b",
-            result.get("stdout", ""),
-            re.IGNORECASE | re.MULTILINE,
-        )
+        match = re.search(r"(?mi)^Connected to\s+([0-9a-f]{2}(?::[0-9a-f]{2}){5})\b", self._iw_link(iface))
         return match.group(1).lower() if match else ""
 
     def _get_enabled_high_band_frequencies(self) -> tuple[list[int], list[int]]:
@@ -1419,15 +1388,15 @@ class Plugin:
         if os.name == "posix" and info.st_uid != os.geteuid():
             raise UnsafeSettingsPath("Recovery directory has an unexpected owner")
         os.chmod(directory, 0o700)
-        self._atomic_write_json(target, journal)
+        self._atomic_write_text(target, json.dumps(journal, indent=2) + "\n", 0o600)
         phase = journal.get('phase')
         phase = phase if isinstance(phase, str) and phase in JOURNAL_PHASES else 'unknown'
-        store = 'band_policy'
         operation = journal.get('operation')
-        operation = operation if isinstance(operation, str) and operation in {'manual_high_band_reconnect', 'automatic_high_band_reconnect'} else store
+        if operation not in ('manual_high_band_reconnect', 'automatic_high_band_reconnect'):
+            operation = 'band_policy'
         diagnostic_transition('wifi', 'transaction', operation + ':' + phase,
                               level='warning' if phase == 'rollback_failed' else 'info',
-                              operation=operation, phase=phase, store=store,
+                              operation=operation, phase=phase, store='band_policy',
                               pending=phase not in {'committed', 'rolled_back'},
                               restored=phase == 'rolled_back')
 
@@ -1754,6 +1723,9 @@ class Plugin:
             return self._profile_is_active(uuid, bound_iface)
         def frequency():
             return self._get_link_frequency(bound_iface)
+        def linked(autoconnected: bool) -> dict:
+            return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
+                    "reconnected": True, "autoconnected": autoconnected}
 
         if not cycle and active() and frequency() is not None:
             return {"success": True, "reconnected": True, "autoconnected": True}
@@ -1771,17 +1743,11 @@ class Plugin:
         # autoconnect a short chance first, then wait for the real WiFi device
         # to become usable and bind any explicit activation to that interface.
         if cycle:
-            down_result = self._run_cmd(
-                ["/usr/bin/nmcli", "con", "down", "uuid", uuid], timeout=8
-            )
+            down_result = self._run_cmd(["/usr/bin/nmcli", "con", "down", "uuid", uuid], timeout=8)
             # `con down` fails on a profile that is not active (the state after
             # a failed activation); only a profile that stays up is an error.
             if not down_result.get("success") and active():
-                return {
-                    **down_result,
-                    "reconnected": False,
-                    "connection_active": True,
-                }
+                return {**down_result, "reconnected": False, "connection_active": True}
 
         started = time.monotonic()
         deadline = started + max(15.0, min(25.0, float(activation_timeout)))
@@ -1795,18 +1761,10 @@ class Plugin:
         while time.monotonic() < deadline:
             if active():
                 if (not cycle or saw_inactive) and frequency() is not None:
-                    return {
-                        "success": True,
-                        "stdout": "",
-                        "stderr": "",
-                        "returncode": 0,
-                        "reconnected": True,
-                        "autoconnected": cycle,
-                    }
+                    return linked(cycle)
                 time.sleep(0.25)
                 continue
-            else:
-                saw_inactive = True
+            saw_inactive = True
 
             if time.monotonic() < next_manual_activation:
                 time.sleep(0.25)
@@ -1816,9 +1774,7 @@ class Plugin:
             if iface:
                 state_result = self._run_cmd(
                     ["/usr/bin/nmcli", "-g", "GENERAL.STATE", "device", "show", iface], timeout=3)
-                state_match = re.match(
-                    r"\s*(\d+)", str(state_result.get("stdout") or "")
-                )
+                state_match = re.match(r"\s*(\d+)", str(state_result.get("stdout") or ""))
                 state = int(state_match.group(1)) if state_match else None
                 # 30 is disconnected and 100 is connected. Intermediate
                 # states mean an automatic activation is already underway, so
@@ -1853,26 +1809,15 @@ class Plugin:
 
             time.sleep(0.25)
 
-        verified = bool(active() and frequency() is not None)
-        if verified:
-            return {"success": True, "stdout": "", "stderr": "", "returncode": 0,
-                    "reconnected": True, "autoconnected": True}
+        if active() and frequency() is not None:
+            return linked(True)
         if last_result is None:
-            last_result = {
-                "success": False,
-                "stdout": "",
-                "stderr": "WiFi device did not become ready before timeout.",
-                "returncode": 1,
-            }
+            last_result = {"success": False, "stdout": "", "returncode": 1,
+                           "stderr": "WiFi device did not become ready before timeout."}
         elif last_result.get("success"):
-            last_result = {
-                **last_result,
-                "success": False,
-                "stderr": "The requested WiFi profile did not obtain a radio link before timeout.",
-                "returncode": 1,
-            }
-        last_result["reconnected"] = False
-        return last_result
+            last_result = {**last_result, "success": False, "returncode": 1,
+                           "stderr": "The requested WiFi profile did not obtain a radio link before timeout."}
+        return {**last_result, "reconnected": False}
 
     def _wait_for_profile_frequency(
         self, uuid: str, timeout: float = 8.0, accepted: tuple = (-math.inf, math.inf), step: float = 0.25
