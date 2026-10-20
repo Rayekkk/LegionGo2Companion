@@ -6,6 +6,10 @@ Unreleased.
 
 - **Controller firmware:** Install no longer stops fwupd after a fixed 10 minutes while it is still writing a controller. It is stopped only after 10 minutes without any progress, or after 30 minutes in total, and is asked to exit cleanly first.
 
+### Changed
+
+- **Display:** no longer carries settings over from 2.1.0. Updating from 2.1.0 through 2.2.x keeps them; updating straight from 2.1.0 to 2.3.0 starts Display with default settings, so choose the panel mode again in Setup.
+
 # 2.2.1
 
 Released 2026-10-20.

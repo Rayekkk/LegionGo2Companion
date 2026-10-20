@@ -483,8 +483,6 @@ screen mode at first setup (it asks before installing), or later with **Change d
 When SteamOS ships its own Legion Go 2 display profile, Companion retires its older fix,
 removes its own display script and hides PQ, Gamma 2.2, Hybrid and brightness forwarding.
 Cleanup retries automatically; use **Restart Gaming Mode** when asked to finish the handover.
-A display script installed by 2.1.0 moves automatically to the folder gamescope reads; restart
-Gaming Mode once to apply it.
 
 **Brightness slider in HDR** forwards Steam's brightness slider while the panel is in PQ and
 Steam does not already handle HDR brightness; its description says when it is not needed.

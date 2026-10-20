@@ -2305,37 +2305,6 @@ class Plugin:
             return ok
 
     @staticmethod
-    def _migrate_legacy_script() -> None:
-        """Move a 2.1.0 install out of /root, where gamescope never loaded it.
-
-        Reinstalls through the same path as Setup, so foreign-script handling
-        and legacy cleanup are Setup's. Any failure leaves the user at Setup.
-        """
-        try:
-            mode = Plugin._state.get("panel_mode")
-            if mode not in MODES or Plugin._state.get("reset_in_progress"):
-                return
-            Plugin._refresh_native_support()
-            if Plugin.native_display_active() or not _bind_script_dir():
-                return
-            if os.path.lexists(INSTALLED_SCRIPT):
-                return
-            legacy = _read_bytes(os.path.join(LEGACY_SCRIPT_DIR, SCRIPT_NAME))
-            if _script_variant(legacy) != MODE_SCRIPT[mode]:
-                return
-            with Plugin._runtime_lock:
-                if module_runtime.stop_requested("display"):
-                    return
-                _select_mode(mode)
-                ok, note = _install_script()
-            if ok:
-                decky.logger.info(f"{LOG} moved the {mode} display script to the Gaming Mode user")
-            else:
-                diagnostic_event('display', 'script_migration_failed', level='warning', error=note)
-        except Exception as error:
-            diagnostic_event('display', 'script_migration_failed', level='warning', error=error)
-
-    @staticmethod
     def _refresh_setup() -> None:
         """Re-check the display script; someone may have replaced it behind us."""
         with Plugin._runtime_lock:
@@ -3307,7 +3276,6 @@ class Plugin:
             decky.logger.info(
                 f"{LOG} recovered the original EDID from a previous run")
 
-        await _offload(Plugin._migrate_legacy_script)
         await _offload(Plugin._refresh_setup)
 
         # A stop that came during a slow step (see main.MODULE_START_LIMIT_S): apply nothing more.
