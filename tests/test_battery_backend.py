@@ -277,6 +277,25 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._uninstall()
         self.assertEqual(self.current(), "Fast")
 
+    async def test_uninstall_keeps_the_choice_for_the_updated_plugin(self):
+        # Decky runs _uninstall before every update: hardware goes back, the choice stays.
+        await self.plugin.set_enabled(True)
+        await self.plugin._main()
+        await self.plugin._unload()
+        await self.plugin._uninstall()
+        self.assertEqual(self.current(), "Fast")
+        self.store.read()
+        updated = battery.Plugin()
+        try:
+            await updated._main()
+            self.assertEqual(self.current(), "Long_Life")
+            status = await updated.get_status()
+            self.assertTrue(status["managed"])
+            self.assertTrue(status["requested_enabled"])
+            self.assertEqual(updated._load()["baseline"], "Fast")
+        finally:
+            await updated._unload()
+
     async def test_restart_reapplies_saved_choice_with_baseline_intact(self):
         await self.plugin.set_enabled(True)
         self.externally_select("Standard")

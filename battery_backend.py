@@ -335,7 +335,7 @@ class Plugin:
             self._error = ""
             return self._status()
 
-    def _release(self) -> dict[str, Any]:
+    def _release(self, keep_choice: bool = False) -> dict[str, Any]:
         with self._lock:
             self._recover_pending()
             state = self._load()
@@ -344,7 +344,7 @@ class Plugin:
                 return self._status()
             device = _detect()
             target = state["baseline"] if device["current"] == state["last_applied"] else None
-            self._transact(device, target, copy.deepcopy(DEFAULT_STATE))
+            self._transact(device, target, state if keep_choice else copy.deepcopy(DEFAULT_STATE))
             self._error = ""
             return self._status()
 
@@ -426,8 +426,11 @@ class Plugin:
 
     async def _uninstall(self):
         await self._unload()
-        result = await self.release_control()
-        if not result["success"]:
+        try:
+            # Decky also uninstalls before every update: keep the choice for the next _main.
+            await self._thread(self._release, True)
+        except Exception as exc:
+            self._error = str(exc)
             event('battery','restore_failed',level='warning',stage='uninstall',reason='operation_unconfirmed',pending=True,restored=False)
 
     async def get_status(self):
