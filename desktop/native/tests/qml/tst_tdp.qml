@@ -116,6 +116,26 @@ TestCase {
         verify(field("Slow boost").visible());verify(field("Fast boost").visible());
         compare(limits(),[20,21,22],"Separate boost limits starts from the saved values");
     }
+    function test_separateBatteryPresetsSwitchAndBatteryValues() {
+        start(true,16,25,30);
+        const caps=fake.data.get_caps;
+        caps.battery_presets=Object.assign({},caps.presets,{balanced:{spl:16,sppt:16,fppt:30}});
+        fake.data=Object.assign({},fake.data,{get_power_source:{ac:false},
+            get_settings:Object.assign(settings(true,16,25,30),{active_preset:"balanced",separate_battery_presets:true})});
+        fake.changed("get_settings");
+        compare(panel.powerPreset,"balanced");
+        compare(field("Preset").note(),"Balanced · 16 W (boost 16/30 W)");
+        const toggle=field("Separate battery presets");
+        verify(toggle.visible());compare(toggle.get(),true);
+        compare(toggle.note,"Silent, Balanced and Performance use the lower limits the firmware sets on battery.");
+        toggle.set(false);
+        const call=fake.calls[fake.calls.length-1];
+        compare([call.method].concat(call.args),["set_separate_battery_presets",false]);
+        fake.data=Object.assign({},fake.data,{get_power_source:{ac:true}});
+        compare(field("Preset").note(),"Balanced · 16 W (boost 25/30 W)");
+        fake.data=Object.assign({},fake.data,{get_caps:Object.assign({},caps,{tdp_available:false})});
+        verify(!toggle.visible());
+    }
     function test_boostSlidersAreHeadroomThatDragEachOther() {
         start(true,20,21,22);
         const slow=field("Slow boost"),fast=field("Fast boost");

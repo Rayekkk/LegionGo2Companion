@@ -253,6 +253,10 @@ Newer kernels show **CPU energy preference** as a 0–100% slider in 10% steps; 
 named preferences, including **System default** when available. CPU changes apply and save at
 once for the settings chosen above.
 
+**Separate battery presets** (under **More**, off by default) makes Silent, Balanced and
+Performance use the lower limits the firmware sets on battery, and their usual values on the
+charger; Maximum and Custom are unchanged. Off, the presets use the charger values on battery too.
+
 Turning **Allow up to 50 W** off lowers saved boosts above the standard limits. If the helper is
 unavailable, the normal range and your profiles stay available; use **Retry helper download**
 when offered. If status or a profile could not load, use **Retry status** or **Retry profile**.

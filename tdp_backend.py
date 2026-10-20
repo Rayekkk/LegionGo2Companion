@@ -73,8 +73,6 @@ _GO_S_LADDER = {
 # The BIOS's own modes on AC per DMI machine type, in watts. A limit missing from a row
 # (or a machine type without one) is the 83N0 value scaled to that console's firmware
 # ceiling, and the ladder is reported as estimated.
-# shortcut: AC values only; the BIOSes switch to a battery table on an EC bit not yet
-# understood. Add battery values beside these once it is.
 PRESET_TABLE = {
     "83N0": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # measured
     "83N1": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # BIOS: same as 83N0
@@ -84,6 +82,29 @@ PRESET_TABLE = {
         "silent":      {"spl": 8,  "sppt": 15, "fppt": 20},
         "balanced":    {"spl": 15, "sppt": 25, "fppt": 30},
         "performance": {"spl": 20, "sppt": 32, "fppt": 35},
+    },
+}
+# The BIOS's modes on battery, used only with "Separate battery presets". A console
+# without a row runs its AC values on battery too.
+_GO_2_BATTERY = {  # measured on the 83N0; the 83N1 BIOS has the same table
+    "silent":      {"spl": 8,  "sppt": 8,  "fppt": 20},
+    "balanced":    {"spl": 16, "sppt": 16, "fppt": 30},
+    "performance": {"spl": 20, "sppt": 20, "fppt": 35},
+}
+_GO_S_BATTERY = {  # BIOS, not measured
+    "silent":      {"spl": 10, "sppt": 10, "fppt": 20},
+    "balanced":    {"spl": 15, "sppt": 15, "fppt": 30},
+    "performance": {"spl": 25, "sppt": 25, "fppt": 35},
+}
+BATTERY_PRESET_TABLE = {
+    "83N0": _GO_2_BATTERY,
+    "83N1": _GO_2_BATTERY,
+    "83L3": _GO_S_BATTERY,
+    "83N6": _GO_S_BATTERY,
+    "83E1": {  # BIOS SSFM table
+        "silent":      {"spl": 8,  "sppt": 8,  "fppt": 20},
+        "balanced":    {"spl": 15, "sppt": 15, "fppt": 30},
+        "performance": {"spl": 20, "sppt": 20, "fppt": 35},
     },
 }
 
@@ -243,14 +264,17 @@ def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     return _standard_ceilings_mw()
 
 
-def _presets() -> tuple[dict, bool]:
+def _presets(battery: bool = False) -> tuple[dict, bool]:
     """(ladder in watts, estimated) inside the firmware range of the last read.
 
     Max is the firmware ceiling. A limit without a BIOS value is the 83N0 one scaled
     to this console's ceiling for that limit (SPL 8/35 of its SPL max, ...).
+    `battery` takes the BIOS's battery values where it has them.
     """
     std = _ceilings_mw(_firmware_caps)
     row = PRESET_TABLE.get(_machine_type(), {})
+    if battery:
+        row = BATTERY_PRESET_TABLE.get(_machine_type(), row)
     reference = PRESETS_DEFAULT["max"]
     table, estimated = {}, False
     for name in PRESET_LADDER:
@@ -460,10 +484,37 @@ def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, 
     return _clamp_triplet(spl, spl + 10000, spl + 15000, ceilings)
 
 
+def _battery_target(state: dict, target: tuple[int, int, int], preset: str,
+                    ac_online: bool | None = None) -> tuple[int, int, int]:
+    """With "Separate battery presets" on battery, Silent/Balanced/Performance run the
+    firmware's battery values. The preset is named as both UIs name it: the saved name
+    while the values still match, else the preset these values are."""
+    if not state.get("separate_battery_presets", False) or preset == "custom":
+        return target
+    ladder = {name: tuple(entry[key] * 1000 for key in WMI_ATTRS)
+              for name, entry in _presets()[0].items()}
+    name = preset if ladder.get(preset) == tuple(target) else next(
+        (key for key, values in ladder.items() if values == tuple(target)), "")
+    if name not in PRESET_LADDER or (_get_ac_online() if ac_online is None else ac_online):
+        return target
+    battery = _presets(battery=True)[0][name]
+    return _clamp_for_settings(state, *(battery[key] * 1000 for key in WMI_ATTRS))
+
+
+def _running_battery_preset(state: dict) -> str:
+    """The preset whose battery values run now, else ""."""
+    if not state.get("separate_battery_presets", False) or _current_ac_online:
+        return ""
+    active = _active_triplet(state)
+    return next((name for name, entry in _presets(battery=True)[0].items() if name in PRESET_LADDER
+                 and _clamp_for_settings(state, *(entry[key] * 1000 for key in WMI_ATTRS)) == active), "")
+
+
 def _profile_target(state: dict, profile: dict, ac_online: bool) -> tuple[int, int, int]:
     preset_key = "ac_preset" if ac_online and profile.get("ac_separate") else "preset"
-    return _target_for_preset(state, *_pick_profile_values(profile, ac_online),
-                              profile.get(preset_key, ""))
+    preset = profile.get(preset_key, "")
+    target = _target_for_preset(state, *_pick_profile_values(profile, ac_online), preset)
+    return _battery_target(state, target, preset, ac_online)
 
 
 def _canonical_epp_syntax(value) -> str | None:
@@ -479,7 +530,8 @@ def _canonical_epp_syntax(value) -> str | None:
 def _load_settings() -> dict:
     s = _read_key(SETTINGS_KEY_SETTINGS, _defaults())
     for key, default in (("enabled", True), ("extras_unlocked", False),
-                         ("advanced_tdp_control", True), (SETTINGS_FIELD_CPU_BOOST_ENABLED, None)):
+                         ("advanced_tdp_control", True), ("separate_battery_presets", False),
+                         (SETTINGS_FIELD_CPU_BOOST_ENABLED, None)):
         if type(s.get(key)) is not bool:
             s[key] = default
     s[SETTINGS_FIELD_EPP] = _canonical_epp_syntax(
@@ -610,7 +662,9 @@ def _prepare_cpu_profile(
         elif field == required_field:
             raise ValueError("cannot safely read the global CPU baseline; game setting was not saved")
     if creating:
-        existing = dict(zip(("spl", "sppt", "fppt"), _global_triplet(state)))
+        # The saved global values, not their battery variant: the copy keeps the preset's name.
+        existing = dict(zip(("spl", "sppt", "fppt"), _target_for_preset(
+            state, state["spl"], state["sppt"], state["fppt"], state.get("active_preset", ""))))
         existing["preset"] = _safe_label(state.get("active_preset"))
         existing.update(_effective_cpu_values(state))
         profiles[app_id] = existing
@@ -1214,8 +1268,10 @@ def _get_running_appid() -> str:
 
 # ── TDP enforce ────────────────────────────────────────────────────────────────
 
-def _global_triplet(s: dict) -> tuple[int, int, int]:
-    return _target_for_preset(s, s["spl"], s["sppt"], s["fppt"], s.get("active_preset", ""))
+def _global_triplet(s: dict, ac_online: bool | None = None) -> tuple[int, int, int]:
+    preset = s.get("active_preset", "")
+    return _battery_target(s, _target_for_preset(s, s["spl"], s["sppt"], s["fppt"], preset),
+                           preset, ac_online)
 
 
 def _active_triplet(s: dict) -> tuple[int, int, int]:
@@ -1382,7 +1438,7 @@ def _check_and_enforce_locked() -> dict:
                 why = "global TDP, game exited"
             else:
                 why = f"global TDP on AC change (ac={ac_now})"
-            kind, target = "global", _global_triplet(s)
+            kind, target = "global", _global_triplet(s, ac_now)
         if resettle:
             events["_resettle_generation"] = _arm_ac_settle(target)
         else:
@@ -2254,12 +2310,15 @@ def _apply_tdp_locked(s: dict, app_id: str, spl: int, sppt: int, fppt: int,
             existing = _prepare_cpu_profile(s, profiles, app_id)
         effective_preset = preset_name or (
             existing.get("preset", "") if app_id else s.get("active_preset", ""))
-        requested = want = _target_for_preset(s, spl, sppt, fppt, effective_preset)
+        requested = _target_for_preset(s, spl, sppt, fppt, effective_preset)
+        ac_online = _get_ac_online()
         # On AC with a separate AC profile, the sliders describe the
         # battery values but the hardware should run the AC ones.
-        if (app_id and _get_ac_online() and existing.get("ac_separate")
+        if (app_id and ac_online and existing.get("ac_separate")
                 and existing.get("ac_spl") is not None):
             want = _profile_target(s, existing, True)
+        else:
+            want = _battery_target(s, requested, effective_preset, ac_online)
 
         # Global is applied only while no game profile is in use, so "" resolves to Global.
         result = _apply_limits_with_saved_cpu_power(
@@ -2304,7 +2363,12 @@ class Plugin:
         return {"ready": self._ready, "error": self._setup_error or ""}
 
     async def get_settings(self) -> dict:
-        return await _offload(_load_settings)
+        def _do() -> dict:
+            state = _load_settings()
+            # Both UIs name the limits that run by their values; battery values need the name.
+            state["battery_preset"] = _running_battery_preset(state)
+            return state
+        return await _offload(_do)
 
     async def get_cpu_power_controls(self, app_id: str = "", ac_profile: bool = False) -> dict:
         def _do() -> dict:
@@ -2429,6 +2493,30 @@ class Plugin:
                             return restore_failed(result)
                 _save_settings(state)
                 return {"success": True}
+        return await _offload(_do)
+
+    async def set_separate_battery_presets(self, enabled: bool) -> dict:
+        """Silent/Balanced/Performance on battery: the firmware's battery values, or the AC ones."""
+        if type(enabled) is not bool:
+            return _fail("enabled must be a boolean")
+        def _do() -> dict:
+            with _tdp_user_transaction() as restore_failed:
+                state = _load_settings()
+                state["separate_battery_presets"] = enabled
+                if state.get("enabled", True):
+                    app_id = _get_running_appid()
+                    profiles = _load_profiles()
+                    profile = profiles.get(app_id) if app_id else None
+                    ac_online = _get_ac_online()
+                    target = (_profile_target(state, profile, ac_online) if profile
+                              else _global_triplet(state, ac_online))
+                    if target != _active_triplet(state):
+                        result = _apply_active_target(
+                            state, _effective_cpu_state(state, profiles, app_id, ac_online), target)
+                        if not result["success"]:
+                            return restore_failed(result)
+                _save_settings(state)
+                return _ok()
         return await _offload(_do)
 
     async def set_extras_unlocked(self, enabled: bool) -> dict:
@@ -2689,6 +2777,8 @@ class Plugin:
                     error += f": {self._helper_error}"
             presets, estimated = _presets()
             return {
+                # What Silent/Balanced/Performance run on battery with "Separate battery presets".
+                "battery_presets": _presets(battery=True)[0],
                 "min": min(caps[k]["min"] for k in WMI_ATTRS) if caps else HARD_MIN_MW // 1000,
                 "std": std,
                 # Until the helper is verified the two ranges are the same.

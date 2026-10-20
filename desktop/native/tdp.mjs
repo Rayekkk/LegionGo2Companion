@@ -88,12 +88,23 @@ export function activeLimits(settings, table = PRESETS) {
   const spl = settings?.active_spl ?? settings?.spl, sppt = settings?.active_sppt ?? settings?.sppt;
   const fppt = settings?.active_fppt ?? settings?.fppt;
   if (spl == null || sppt == null || fppt == null) return null;
+  // Battery values (Separate battery presets) are named by the backend, as their values are not the preset's.
+  const battery = PRESET_LABELS[settings.battery_preset] ? settings.battery_preset : "";
+  const toW = value => Math.round(value / 1000);
   // The saved name is Global's; a game's limits are named by their values.
-  const global = spl === settings.spl && sppt === settings.sppt && fppt === settings.fppt;
-  const w = Math.round(spl / 1000), sw = Math.round(sppt / 1000), fw = Math.round(fppt / 1000);
+  const global = (spl === settings.spl && sppt === settings.sppt && fppt === settings.fppt) || (!!battery
+    && resolvedPreset(toW(settings.spl), toW(settings.sppt), toW(settings.fppt), settings.active_preset, table) === battery);
+  const w = toW(spl), sw = toW(sppt), fw = toW(fppt);
   return { spl: w, sppt: sw, fppt: fw, global,
-    label: PRESET_LABELS[resolvedPreset(w, sw, fw, global ? settings.active_preset : undefined, table)] };
+    label: PRESET_LABELS[battery || resolvedPreset(w, sw, fw, global ? settings.active_preset : undefined, table)] };
 }
+
+// ── Separate battery presets ──────────────────────────────────────────────────
+export const BATTERY_PRESETS_LABEL = "Separate battery presets";
+export const BATTERY_PRESETS_NOTE = "Silent, Balanced and Performance use the lower limits the firmware sets on battery.";
+/** The preset values for settings that run on battery (`onBattery`) or on the charger. */
+export const shownPresets = (table, batteryTable, separate, onBattery) =>
+  separate && onBattery && batteryTable ? batteryTable : table;
 
 /** The TDP summary on the overview (Decky's All Controls row and the Desktop badge). */
 export function overviewSummary(settings, table = PRESETS) {

@@ -60,6 +60,7 @@
   "set_game_profile_active",
   "set_panel_active",
   "set_plugin_enabled",
+  "set_separate_battery_presets",
   "updates_check",
   "updates_download",
   "vibe_get_capabilities",

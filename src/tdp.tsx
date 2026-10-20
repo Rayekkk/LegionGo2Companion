@@ -21,11 +21,11 @@ import {
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { confirmAction, detailsRows, errorText, infoRow, runningApp, watchRunningApp, type RunningApp } from "./shared";
 import {
-  absolute, boostNote, boostUsable, capsState, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote,
+  absolute, BATTERY_PRESETS_LABEL, BATTERY_PRESETS_NOTE, boostNote, boostUsable, capsState, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote,
   eppPercent, eppTitle, eppUnavailable, eppValue, extrasConfirm, extrasNote, extrasShown, FALLBACK_MAX, FALLBACK_MIN,
   FALLBACK_STD, fromAbsolute, helperRetryShown, limitsText, normalise, offsetMax, powerSummary,
   PRESET_LABELS, PRESET_ORDER, PRESETS, presetNote, resolvedPreset, scopeNote, simpleCaps, simpleTuning, sourceNote,
-  sourceText, tdpNotice, boostRoomNote, withFppt, withSpl, withSppt,
+  shownPresets, sourceText, tdpNotice, boostRoomNote, withFppt, withSpl, withSppt,
   type Caps, type CapsInfo, type CpuPowerControls, type PresetKey, type PresetTable, type TdpInfo, type Tuning,
 } from "../desktop/native/tdp.mjs";
 
@@ -45,7 +45,7 @@ function savedTuning(limits: { spl: number; sppt: number; fppt: number }, stored
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface Settings   { spl: number; sppt: number; fppt: number; enabled: boolean;
-                       active_preset?: string; advanced_tdp_control?: boolean }
+                       active_preset?: string; advanced_tdp_control?: boolean; separate_battery_presets?: boolean }
 interface TdpResult  { success: boolean; stderr?: string; skipped?: boolean; returncode?: number }
 interface PowerSource { ac: boolean }
 interface GameProfile {
@@ -79,6 +79,7 @@ const retryExtras = callable<[], { success: boolean; error?: string }>("retry_ex
 const getExtrasUnlocked = callable<[], boolean>("get_extras_unlocked");
 const setExtrasUnlockedCall = callable<[boolean], TdpResult>("set_extras_unlocked");
 const setAdvancedTdpControlCall = callable<[boolean], TdpResult>("set_advanced_tdp_control");
+const setSeparateBatteryPresetsCall = callable<[boolean], TdpResult>("set_separate_battery_presets");
 const getCpuPowerControls = callable<[string, boolean], CpuPowerControls>("get_cpu_power_controls");
 const setCpuBoost       = callable<[boolean, string, boolean, string], CpuPowerControls>("set_cpu_boost");
 const setEpp            = callable<[string, string, boolean, string], CpuPowerControls>("set_epp");
@@ -664,6 +665,7 @@ const useTdpState = (tabShown: boolean) => {
   const [helperRetryAvailable, setHelperRetryAvailable] = useState(false);
   // Presets come from the backend alongside the hardware ceilings.
   const [presets, setPresets] = useState<PresetTable>(PRESETS);
+  const [batteryPresets, setBatteryPresets] = useState<PresetTable | undefined>(undefined);
   const [minW,    setMinW]    = useState(FALLBACK_MIN);
 
   const [enabled,       setEnabled]       = useState(true);
@@ -679,6 +681,7 @@ const useTdpState = (tabShown: boolean) => {
   const [globalProfile, setGlobalProfile] = useState<{ spl: number; sppt: number; fppt: number; preset: string | undefined }>({ spl: 16, sppt: 25, fppt: 30, preset: undefined });
   const [extrasUnlocked, setExtrasUnlocked] = useState(false);
   const [advancedTdpControl, setAdvancedTdpControl] = useState(true);
+  const [separateBattery, setSeparateBattery] = useState(false);
 
   const [savedPreset,   setSavedPreset]   = useState<string | undefined>(undefined);
   const [savedAcPreset, setSavedAcPreset] = useState<string | undefined>(undefined);
@@ -760,6 +763,7 @@ const useTdpState = (tabShown: boolean) => {
     if (c?.std && c?.max) {
       setStdCaps(c.std); setMaxCaps(c.max); setMinW(c.min);
       setPresets(c.presets ?? PRESETS);
+      setBatteryPresets(c.battery_presets);
     }
     const state = capsState(c);
     setExtrasAvailable(state.extrasAvailable);
@@ -870,6 +874,7 @@ const useTdpState = (tabShown: boolean) => {
           setPreset(selected);
           setEnabled(s.enabled !== false);
           setAdvancedTdpControl(s.advanced_tdp_control !== false);
+          setSeparateBattery(s.separate_battery_presets === true);
           if (powerRevision === powerSourceRevisionRef.current) setAcOnline(ps.ac);
           initialPowerReadRef.current = true;
           noGameSyncedRef.current = AppWatcher.currentGame() === null;
@@ -1085,7 +1090,7 @@ const useTdpState = (tabShown: boolean) => {
     stdCaps, extrasAvailable, tdpAvailable, presets, minW, enabled, setEnabled, game, perGame, setPerGame,
     profileExists, setProfileExists, acOnline, acSeparate, setAcSeparate, editingAc, setEditingAc, globalProfile,
     setGlobalProfile, extrasUnlocked, setExtrasUnlocked, advancedTdpControl, setAdvancedTdpControl, savedPreset,
-    setSavedPreset, savedAcPreset, setSavedAcPreset, operationLoading, profilePending, setProfilePending,
+    separateBattery, setSeparateBattery, batteryPresets, setSavedPreset, savedAcPreset, setSavedAcPreset, operationLoading, profilePending, setProfilePending,
     profileError, setProfileError, setProfileAttempt, loading, cpuBusy, setDirty, dirty, dirtyRef, draftBaseRef,
     setFailure, details, setDetails, cpuNote, setCpuNote, info, cpuBusyOwnersRef, onCpuBusyChange, beginOperation,
     operationCurrent, finishOperation, readCaps, adoptCaps, caps, customCaps, active, setActive, clearDraft, done,
@@ -1120,7 +1125,7 @@ const powerSection = (s: TdpState) => {
     acSeparate, setAcSeparate, acOnline, tdpAvailable, enabled, setEnabled, setSavedPreset, savedPreset,
     setSavedAcPreset, savedAcPreset, globalProfile, setGlobalProfile, adoptGlobalSettings, showGameProfile,
     setProfileAttempt, profilePending, profileError, info, extrasUnlocked, stdCaps, cpuBusy, loading,
-    cpuBusyOwnersRef } = s;
+    cpuBusyOwnersRef, separateBattery, batteryPresets } = s;
   /** Run `proceed` now, or after confirming that the unsaved Custom limits are dropped. */
   const askDiscard = (proceed: () => void) => {
     if (!dirtyRef.current) return proceed();
@@ -1251,12 +1256,16 @@ const powerSection = (s: TdpState) => {
   // What runs now: the game's charger values on AC when it has them, else its battery or the global values.
   const running = perGame && acSeparate && acOnline ? acTuning : tuning;
   const runningStored = !perGame ? globalProfile.preset : acSeparate && acOnline ? savedAcPreset : savedPreset;
-  const now = absolute(running);
-  const nowLabel = PRESET_LABELS[resolvedPreset(now.spl, now.sppt, now.fppt, runningStored, presets)];
+  const stored = absolute(running);
+  const nowKey = resolvedPreset(stored.spl, stored.sppt, stored.fppt, runningStored, presets);
+  const nowLabel = PRESET_LABELS[nowKey];
+  // A preset runs its battery values on battery with Separate battery presets; Custom runs as saved.
+  const now = nowKey === "custom" ? stored : shownPresets(presets, batteryPresets, separateBattery, !acOnline)[nowKey];
   const enableDescription = failureFor("enabled") ?? (enabled && (profilePending || profileError) ? "Reading profile…"
     : powerSummary(enabled, perGame && game ? game.name : "Global", nowLabel, now,
       info?.success ? info.values?.package_draw : null, extrasUnlocked, stdCaps));
-  const presetDescription = failureFor("preset") ?? presetNote(preset, presets);
+  const presetDescription = failureFor("preset") ?? presetNote(preset, shownPresets(presets, batteryPresets,
+    separateBattery, !editingAc && ((perGame && acSeparate) || !acOnline)));
   const scopeDescription = !game ? "" : failureFor("scope") ?? scopeNote(scope === "game_ac" ? "charger" : scope, game.name);
   const sourceDescription = sourceNote(acOnline, editingAc);
 
@@ -1413,7 +1422,8 @@ const moreSection = (s: TdpState) => {
     extrasAvailable, caps, stdCaps, minW, presets, tuning, setTuning, acTuning, setAcTuning, setPreset, perGame,
     setPerGame, setProfileExists, profileExists, setAcSeparate, acSeparate, setEditingAc, game, enabled,
     savedPreset, setSavedPreset, savedAcPreset, setSavedAcPreset, globalProfile, setGlobalProfile,
-    adoptGlobalSettings, loading, tdpAvailable, operationLoading, details, setDetails, info, cpuNote } = s;
+    adoptGlobalSettings, loading, tdpAvailable, operationLoading, details, setDetails, info, cpuNote,
+    separateBattery, setSeparateBattery } = s;
   const deleteProfile = async () => {
     if (!game) return;
     const op = beginOperation();
@@ -1545,6 +1555,20 @@ const moreSection = (s: TdpState) => {
     } finally { finishOperation(op); }
   };
 
+  const handleSeparateBatteryToggle = async (checked: boolean) => {
+    const op = beginOperation();
+    if (!op) return;
+    try {
+      const result = await setSeparateBatteryPresetsCall(checked);
+      if (!operationCurrent(op)) return;
+      if (!result.success) throw new Error(result.stderr || `Could not change ${BATTERY_PRESETS_LABEL}.`);
+      setSeparateBattery(checked);
+      setFailure(null);
+    } catch (error) {
+      if (operationCurrent(op)) showError("battery", error);
+    } finally { finishOperation(op); }
+  };
+
   const handleHelperRetry = async () => {
     const op = beginOperation(false, false);
     if (!op) return;
@@ -1579,6 +1603,15 @@ const moreSection = (s: TdpState) => {
           onChange={checked => checked ? confirmAction(extrasConfirm(capsNow).title, extrasConfirm(capsNow).text,
             extrasConfirm(capsNow).ok, () => void handleExtrasUnlockedToggle(true))
             : void handleExtrasUnlockedToggle(false)}
+        />
+      </PanelSectionRow>}
+      {tdpAvailable && <PanelSectionRow>
+        <ToggleField
+          label={BATTERY_PRESETS_LABEL}
+          description={failureFor("battery") ?? BATTERY_PRESETS_NOTE}
+          checked={separateBattery}
+          disabled={loading}
+          onChange={checked => void handleSeparateBatteryToggle(checked)}
         />
       </PanelSectionRow>}
       {enabled && game && profileExists && <PanelSectionRow>

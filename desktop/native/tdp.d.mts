@@ -5,7 +5,7 @@ export interface Caps { spl: number; sppt: number; fppt: number }
 export type PresetKey = "silent" | "balanced" | "performance" | "max" | "custom";
 export type PresetTable = Record<Exclude<PresetKey, "custom">, Caps>;
 export interface CapsInfo {
-  min: number; std: Caps; max: Caps; wmi?: boolean; extras?: boolean; presets?: PresetTable;
+  min: number; std: Caps; max: Caps; wmi?: boolean; extras?: boolean; presets?: PresetTable; battery_presets?: PresetTable;
   tdp_available?: boolean; tdp_error?: string; helper_retry_available?: boolean;
 }
 export interface CapsState { tdpAvailable: boolean; extrasAvailable: boolean; helperRetryAvailable: boolean; tdpError: string }
@@ -13,6 +13,7 @@ export interface TdpValues { spl_limit?: number; sppt_limit?: number; fppt_limit
 export interface TdpInfo { success: boolean; values: TdpValues; error?: string }
 export interface SettingsLimits {
   spl?: number; sppt?: number; fppt?: number; active_spl?: number; active_sppt?: number; active_fppt?: number; active_preset?: string;
+  battery_preset?: string;
 }
 export interface CpuBoostControl { available: boolean; enabled: boolean | null; error: string }
 export interface EppControl {
@@ -49,6 +50,10 @@ export function activeLimits(settings: SettingsLimits | null | undefined, table?
   { spl: number; sppt: number; fppt: number; global: boolean; label: string } | null;
 export function overviewSummary(settings: (SettingsLimits & { enabled?: boolean }) | null | undefined, table?: PresetTable): string;
 export function presetNote(key: PresetKey, table: PresetTable): string;
+export const BATTERY_PRESETS_LABEL: string;
+export const BATTERY_PRESETS_NOTE: string;
+export function shownPresets(table: PresetTable, batteryTable: PresetTable | null | undefined, separate: boolean,
+  onBattery: boolean): PresetTable;
 
 export function powerSummary(enabled: boolean, owner: string, label: string, now: Caps, draw: number | null | undefined,
   unlocked: boolean, std: Caps): string;

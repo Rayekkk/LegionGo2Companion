@@ -797,6 +797,98 @@ class TdpCoreTests(unittest.TestCase):
         tdp._check_and_enforce()
         self.assertEqual(self.ppts(), (25, 28, 35))
 
+    # Separate battery presets -----------------------------------------------
+
+    def choose(self, preset, app_id=''):
+        """Press a preset as both UIs do: its charger values and its name."""
+        values = self.rpc('get_caps')['presets'][preset]
+        result = self.rpc('apply_tdp', *(values[key] * 1000 for key in ('spl', 'sppt', 'fppt')),
+                          app_id, preset_name=preset)
+        self.assertTrue(result['success'], result)
+
+    def test_presets_run_the_charger_values_on_battery_unless_separate_battery_presets_is_on(self):
+        for machine, maxes, preset, ac, battery in (
+                ('83N0', (35, 37, 45), 'balanced', (16, 25, 30), (16, 16, 30)),
+                ('83N1', (35, 37, 45), 'silent', (8, 15, 20), (8, 8, 20)),
+                ('83E1', (30, 32, 41), 'balanced', (15, 25, 30), (15, 15, 30)),
+                ('83N6', (40, 43, 53), 'performance', (30, 35, 40), (25, 25, 35)),
+                ('83L3', (40, 43, 53), 'silent', (10, 15, 20), (10, 10, 20))):
+            with self.subTest(machine=machine):
+                self.machine, self.ac = machine, False
+                self.firmware_range(maxes)
+                self.seed()
+                tdp._current_ac_online = False
+                self.choose(preset)
+                self.assertEqual(self.ppts(), ac)  # off (the default): as before, on battery too
+                self.assertTrue(self.rpc('set_separate_battery_presets', True)['success'])
+                self.assertEqual(self.ppts(), battery)
+                self.assertTrue(self.saved()['separate_battery_presets'])
+                self.assertEqual(self.rpc('get_settings')['battery_preset'], preset)
+                self.ac = True
+                events = tdp._check_and_enforce()
+                self.assertIn('_resettle_generation', events)  # the charger ladder re-asserts it
+                self.assertEqual(self.ppts(), ac)
+                self.assertEqual(self.rpc('get_settings')['battery_preset'], '')
+                self.ac = False
+                tdp._check_and_enforce()
+                self.assertEqual(self.ppts(), battery)
+                self.assertTrue(self.rpc('set_separate_battery_presets', False)['success'])
+                self.assertEqual(self.ppts(), ac)
+                # The saved preset keeps its charger values and name either way.
+                saved = self.saved()
+                self.assertEqual((saved['spl'] // 1000, saved['sppt'] // 1000, saved['fppt'] // 1000,
+                                  saved['active_preset']), (*ac, preset))
+
+    def test_pressing_a_preset_on_battery_runs_its_battery_values_at_once(self):
+        self.seed(separate_battery_presets=True)
+        self.choose('performance')
+        self.assertEqual(self.ppts(), (20, 20, 35))
+        self.ac = True
+        self.choose('silent')
+        self.assertEqual(self.ppts(), (8, 15, 20))
+
+    def test_separate_battery_presets_leave_max_and_custom_alone(self):
+        self.seed(separate_battery_presets=True)
+        self.choose('max')
+        self.assertEqual(self.ppts(), (35, 37, 45))
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['success'])
+        self.assertEqual(self.ppts(), (16, 25, 30))  # Balanced's values, but chosen as Custom
+        self.assertTrue(self.rpc('apply_tdp', 12000, 18000, 22000)['success'])
+        self.assertEqual(self.ppts(), (12, 18, 22))
+
+    def test_game_profiles_follow_separate_battery_presets(self):
+        self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'},
+                   '456': {'spl': 16000, 'sppt': 25000, 'fppt': 30000, 'preset': 'balanced',
+                           'ac_separate': True, 'ac_spl': 20000, 'ac_sppt': 32000, 'ac_fppt': 35000,
+                           'ac_preset': 'performance'}},
+                  separate_battery_presets=True)
+        self.app = '123'
+        tdp._check_and_enforce()
+        self.assertEqual(self.ppts(), (8, 8, 20))
+        self.app = '456'
+        tdp._check_and_enforce()
+        self.assertEqual(self.ppts(), (16, 16, 30))
+        self.ac = True
+        tdp._check_and_enforce()
+        self.assertEqual(self.ppts(), (20, 32, 35))  # its charger preset, with charger values
+        self.app, self.ac = '123', False
+        tdp._check_and_enforce()
+        self.choose('balanced', '123')
+        self.assertEqual(self.ppts(), (16, 16, 30))
+        self.assertEqual(self.saved('game_profiles')['123']['sppt'], 25000)
+
+    def test_battery_presets_stay_inside_the_firmware_range(self):
+        self.firmware_range((35, 37, 45), mins=(10, 12, 18))
+        self.assertEqual(self.rpc('get_caps')['battery_presets'], {
+            'silent': {'spl': 10, 'sppt': 12, 'fppt': 20},
+            'balanced': {'spl': 16, 'sppt': 16, 'fppt': 30},
+            'performance': {'spl': 20, 'sppt': 20, 'fppt': 35},
+            'max': {'spl': 35, 'sppt': 37, 'fppt': 45},
+        })
+        self.seed(separate_battery_presets=True)
+        self.choose('silent')
+        self.assertEqual(self.ppts(), (10, 12, 20))
+
     def test_game_ac_profile_follows_the_charger(self):
         self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000, 'ac_separate': True,
                            'ac_spl': 30000, 'ac_sppt': 32000, 'ac_fppt': 40000}})

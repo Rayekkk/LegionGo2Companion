@@ -436,6 +436,27 @@ run(async () => {
     assert.equal(count(h, 'apply_tdp'), 1); assert.equal(presetButton(h.render(), 'custom').props.description, 'Set your own limits below.');
     assert.ok(button(h.render(), 'Apply')); h.unmount();
   });
+  await test('Separate battery presets: a switch where TDP works, and battery values on battery', async () => {
+    const batteryCaps = { ...caps, presets: { silent: { spl: 8, sppt: 15, fppt: 20 }, balanced: { spl: 16, sppt: 25, fppt: 30 },
+      performance: { spl: 20, sppt: 32, fppt: 35 }, max: { spl: 35, sppt: 37, fppt: 45 } } };
+    batteryCaps.battery_presets = { ...batteryCaps.presets, balanced: { spl: 16, sppt: 16, fppt: 30 } };
+    const settings = { enabled: true, spl: 16000, sppt: 25000, fppt: 30000, active_preset: 'balanced' };
+    for (const [separate, ac, note] of [[false, false, '(boost 25/30 W)'], [true, false, '(boost 16/30 W)'], [true, true, '(boost 25/30 W)']]) {
+      const h = mount({ responses: { get_caps: batteryCaps, get_power_source: { ac },
+        get_settings: { ...settings, separate_battery_presets: separate } } });
+      const view = await ready(h);
+      assert.ok(JSON.stringify(view).includes(`Balanced · 16 W ${note}`), `separate=${separate} ac=${ac}`);
+      const toggle = field(view, 'Separate battery presets');
+      assert.equal(toggle.props.checked, separate);
+      assert.equal(toggle.props.description, 'Silent, Balanced and Performance use the lower limits the firmware sets on battery.');
+      toggle.props.onChange(!separate); await settle();
+      assert.deepEqual(h.calls.filter(c => c.name === 'set_separate_battery_presets').map(c => c.args), [[!separate]]);
+      assert.equal(count(h, 'apply_tdp'), 0, 'the backend applies the values itself');
+      h.unmount();
+    }
+    const h = mount({ responses: { get_caps: { ...caps, wmi: false, extras: false, tdp_available: false } } });
+    assert.equal(field(await ready(h), 'Separate battery presets'), undefined); h.unmount();
+  });
   await test('every page ends with Show details', async () => {
     const h = mount({ game: 111 }); await ready(h);
     const last = () => { const rows = nodes(h.render()).filter(n => ['ButtonItem', 'ToggleField', 'SliderField', 'DropdownItem', 'Field'].includes(n.type)); return rows.at(-1); };
@@ -468,6 +489,15 @@ run(async () => {
       { spl: 16, sppt: 25, fppt: 30, global: true, label: 'Balanced' });
     assert.equal(T.activeLimits({ spl: 15000, sppt: 20000, fppt: 25000, active_spl: 35000, active_sppt: 37000, active_fppt: 45000, active_preset: 'custom' }).label, 'Maximum');
     assert.equal(T.activeLimits({}), null);
+    // Separate battery presets: Balanced on battery runs 16/16/30 and is still named (and owned by Global).
+    assert.deepEqual(T.activeLimits({ spl: 16000, sppt: 25000, fppt: 30000, active_spl: 16000, active_sppt: 16000,
+      active_fppt: 30000, active_preset: 'balanced', battery_preset: 'balanced' }),
+      { spl: 16, sppt: 16, fppt: 30, global: true, label: 'Balanced' });
+    const battery = { ...T.PRESETS, balanced: { spl: 16, sppt: 16, fppt: 30 } };
+    assert.equal(T.shownPresets(T.PRESETS, battery, true, true), battery);
+    assert.equal(T.shownPresets(T.PRESETS, battery, false, true), T.PRESETS);
+    assert.equal(T.shownPresets(T.PRESETS, battery, true, false), T.PRESETS);
+    assert.equal(T.shownPresets(T.PRESETS, undefined, true, true), T.PRESETS);
     // Retry helper download only while TDP or the 50 W unlock is missing the helper.
     const ok = T.capsState({ ...caps, helper_retry_available: true });
     assert.equal(T.helperRetryShown(ok, true), false);

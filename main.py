@@ -1233,6 +1233,9 @@ class Plugin:
     async def set_advanced_tdp_control(self, enabled):
         return await self._tdp.set_advanced_tdp_control(enabled)
 
+    async def set_separate_battery_presets(self, enabled):
+        return await self._tdp.set_separate_battery_presets(enabled)
+
     async def get_game_profile(self, app_id):
         return await self._tdp.get_game_profile(app_id)
 

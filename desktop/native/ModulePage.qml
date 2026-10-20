@@ -213,6 +213,9 @@ RowLayout {
         if(next!==tdpScope)guardDraft(()=>{ tdpScope=next; scopeChanged(); });
     }
     function editTargetNote() { return Tdp.sourceNote(acOnline(),tdpScope==="ac"); }
+    // As in Decky: the values the edited settings run, battery ones with Separate battery presets.
+    function notePresets() { return Tdp.shownPresets(presetTable(),s("get_caps").battery_presets,s("get_settings").separate_battery_presets===true,
+        tdpScope!=="ac" && (gameUse()==="charger" || !acOnline())); }
     function choosePreset(value) {
         if(value==="custom") { customPicked=true; powerPreset="custom"; if(!tdpAdvanced())powerDraft=Tdp.simpleTuning(powerDraft.spl,customCaps(),tdpMin()); return; }
         const preset=presetTable()[value];
@@ -378,7 +381,7 @@ RowLayout {
                     {kind:"options",scope:true,visible:()=>!!app() && s("get_settings").enabled===true && gameUse()==="charger",available:gameProfileFresh,note:editTargetNote}),
                 notice("",()=>powerLoaded?"":"Loading power limits…"),
                 choices("Preset",()=>powerPreset,choosePreset,powerOptions,{kind:"options",visible:()=>powerLoaded,available:()=>!!s("get_caps").tdp_available && !!s("get_settings").enabled,
-                    note:()=>Tdp.presetNote(powerPreset,presetTable())}),
+                    note:()=>Tdp.presetNote(powerPreset,notePresets())}),
                 number("Sustained power",()=>powerDraft.spl,v=>editPower("spl",v),tdpMin,()=>customCaps().spl,{kind:"range",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom",
                     note:()=>tdpAdvanced()?"":"Boost follows automatically."}),
                 number("Slow boost",()=>powerDraft.spptOff,v=>editPower("sppt",v),0,()=>boostRoom().sppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom" && tdpAdvanced(),
@@ -408,6 +411,7 @@ RowLayout {
             ]},{title:"More",column:1,barTitle:"Troubleshooting",fields:[
                 switcher("Separate boost limits",()=>s("get_settings").advanced_tdp_control,"set_advanced_tdp_control",null,{note:"Set slow and fast boost yourself in Custom."}),
                 field("Allow up to 50 W","toggle",unlocked,setExtras,{note:()=>Tdp.extrasNote(unlocked(),capsNow(),stdCaps()),visible:()=>Tdp.extrasShown(capsNow())}),
+                switcher(Tdp.BATTERY_PRESETS_LABEL,()=>s("get_settings").separate_battery_presets,"set_separate_battery_presets",null,{note:Tdp.BATTERY_PRESETS_NOTE,visible:()=>!!s("get_caps").tdp_available}),
                 action("Reapply saved settings","reapply",null,{bar:true}),
                 action("Retry helper download","retry_extras",null,{bar:true,visible:()=>Tdp.helperRetryShown(capsNow(),unlocked())}),
                 field("Delete profile for this game","button",()=>"Delete profile for this game",()=>confirm("delete_game_profile",[app()],"Its power, CPU Boost and energy settings are removed. This game will use Global settings.","Delete profile for this game?","Delete",true),
