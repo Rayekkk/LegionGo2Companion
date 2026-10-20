@@ -253,7 +253,7 @@ class ControllerEventTests(Events, unittest.IsolatedAsyncioTestCase):
         with patch.object(controller.decky, 'logger', logger):
             await self.plugin._uninstall()
         rows = self.events('controller', 'restore_failed')
-        self.assertEqual([row['context']['stage'] for row in rows], ['unload', 'uninstall'])
+        self.assertEqual([row['context']['stage'] for row in rows], ['unload'])  # uninstall is that unload
         self.assertTrue(all(row['context']['pending'] and row['error']['errno'] == errno.EIO for row in rows))
         self.assertNotLogged(MARKER, logger)
 
