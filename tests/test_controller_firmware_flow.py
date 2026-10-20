@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import threading
 import unittest
@@ -432,19 +433,28 @@ class EngineTests(unittest.TestCase):
         with patch.object(fw, '_run_tool', return_value=Mock(returncode=0, stdout=b'not json')), self.assertRaises(fw.FirmwareError):
             fw.fwupd_devices()
 
-    def test_install_blob_is_bounded_and_keeps_the_output_tail(self):
+    def test_install_blob_never_stops_a_writing_fwupdtool_and_stops_a_silent_one(self):
+        popen = fw.subprocess.Popen
+        def tool(script):
+            def start(argv, **kwargs):
+                self.assertEqual(argv[:2], [fw.FWUPDTOOL, 'install-blob'])
+                return popen([sys.executable, '-c', 'import sys, time\n' + script], **kwargs)
+            return start
+        writing = "for _ in range(12):\n sys.stdout.write('x' * 600); sys.stdout.flush(); time.sleep(.3)\nprint('Done')"
         with tempfile.TemporaryDirectory() as raw:
-            log = Path(raw) / 'fwupdtool.log'
-            def run(argv, timeout, stdout, stderr):
-                stdout.write(b'x' * 5000 + b'Done')
-                return Mock(returncode=0)
-            with patch.object(fw, '_run_tool', side_effect=run) as tool:
-                returncode, _, tail = fw.install_blob(Path(raw) / 'c.bin', 'a' * 40, log)
-            self.assertEqual(returncode, 0); self.assertTrue(tail.endswith('Done')); self.assertLessEqual(len(tail), 4096)
-            self.assertEqual(tool.call_args.args[0][:4], [fw.FWUPDTOOL, 'install-blob', str(Path(raw) / 'c.bin'), 'a' * 40])
-            self.assertEqual(tool.call_args.args[1], fw.INSTALL_SECONDS)
-            with patch.object(fw, '_run_tool', side_effect=fw.subprocess.TimeoutExpired('fwupdtool', 1)):
-                self.assertIsNone(fw.install_blob(Path(raw) / 'c.bin', 'a' * 40, log)[0])
+            log, blob = Path(raw) / 'fwupdtool.log', Path(raw) / 'c.bin'
+            with patch.object(fw, 'INSTALL_STALL_SECONDS', 2), patch.object(fw.subprocess, 'Popen', tool(writing)):
+                returncode, seconds, tail = fw.install_blob(blob, 'a' * 40, log)
+            self.assertEqual(returncode, 0); self.assertGreater(seconds, 2)  # Ran past the stall limit.
+            self.assertTrue(tail.rstrip().endswith('Done')); self.assertLessEqual(len(tail), 4096)
+            with patch.object(fw, 'INSTALL_STALL_SECONDS', 2), patch.object(fw.subprocess, 'Popen', tool(
+                    "print('start', flush=True); time.sleep(60)")):
+                returncode, seconds, tail = fw.install_blob(blob, 'a' * 40, log)
+            self.assertIsNone(returncode); self.assertLess(seconds, 30); self.assertIn('start', tail)
+            with patch.object(fw, 'INSTALL_SECONDS', 1), patch.object(fw.subprocess, 'Popen', tool(
+                    "while True:\n print('x', flush=True); time.sleep(.1)")):
+                returncode, seconds, _ = fw.install_blob(blob, 'a' * 40, log)
+            self.assertIsNone(returncode); self.assertLess(seconds, 30)
 
     def test_updater_running_detects_fwupd_clients_and_steam_updater(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -72,8 +72,9 @@ and the confirmation `token`.
    versions, matches the fwupd device by instance id and version, refuses while
    `fwupdtool`, `fwupdmgr` or Steam's `steamos-firmware-update` runs, and runs
    `fwupdtool install-blob <container> <device-id> --no-reboot-check --verbose`
-   (600 s limit). It re-reads the versions up to 10 × 2 s afterwards. The exit
-   code and the end of the fwupd output go to the diagnostics log.
+   (stopped only after 600 s without new output or 30 minutes in total). It
+   re-reads the versions up to 10 × 2 s afterwards. The exit code and the end
+   of the fwupd output go to the diagnostics log.
 
 fwupd keeps running if Companion or Decky restarts during a write. A new
 Companion process that finds an updater running keeps RGB, vibration, remap and

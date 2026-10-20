@@ -291,7 +291,10 @@ INSTALL_ENABLED = True
 INSTALL_DISABLED_REASON = ('Installation is turned off in this build. '
     'Use Legion Space on Windows to update the controllers.')
 CHECK_MAX_AGE = 15 * 60
-INSTALL_SECONDS = 600  # Per device; LVFS states 300 s for all three components.
+# Per device. Writes take 37-70 s and LVFS states 300 s for all three components. fwupdtool is stopped
+# only after INSTALL_STALL_SECONDS without new log output (the former 600 s total limit, so never earlier
+# than before) or at the absolute INSTALL_SECONDS cap; a run that is still writing is never cut short.
+INSTALL_STALL_SECONDS, INSTALL_SECONDS = 600, 1800
 VERIFY_ATTEMPTS, VERIFY_DELAY = 10, 2  # The same version re-read budget fwupd legion-hid uses.
 CONTAINER_ORDER = ('receiver', 'left', 'right')
 INSTALL_ORDER = ('left', 'right', 'receiver')  # Pads are written through the MCU, so it restarts last.
@@ -429,13 +432,30 @@ def updater_running(proc=Path('/proc')):
 
 def install_blob(container, device_id, log_path):
     """One fwupd write. As root, fwupdtool stops the daemon and runs its own engine."""
-    started = time.monotonic()
+    from system_process import NO_WINDOW, system_env
+    started = progress = time.monotonic()
+    size = 0
     with open(log_path, 'wb') as log:
-        try:
-            returncode = _run_tool([FWUPDTOOL, 'install-blob', str(container), device_id,
-                '--no-reboot-check', '--verbose'], INSTALL_SECONDS, stdout=log, stderr=subprocess.STDOUT).returncode
-        except subprocess.TimeoutExpired:
-            returncode = None
+        tool = subprocess.Popen([FWUPDTOOL, 'install-blob', str(container), device_id, '--no-reboot-check', '--verbose'],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=system_env(), **NO_WINDOW)
+        while True:
+            try:
+                returncode = tool.wait(timeout=.5)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now, grown = time.monotonic(), os.fstat(log.fileno()).st_size
+            if grown != size:
+                size, progress = grown, now
+            if now - progress > INSTALL_STALL_SECONDS or now - started > INSTALL_SECONDS:
+                tool.terminate()  # Let fwupdtool exit on SIGTERM first; SIGKILL only if it does not.
+                try:
+                    tool.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    tool.kill()
+                    tool.wait()
+                returncode = None
+                break
     with open(log_path, 'rb') as log:
         log.seek(max(0, os.path.getsize(log_path) - 4096))
         tail = log.read().decode('utf-8', 'replace')

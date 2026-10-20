@@ -33,7 +33,7 @@ import wifi_backend
 import module_runtime
 import diagnostics
 from companion_updates import CompanionUpdates
-from controller_firmware import FirmwarePreparation, INSTALL_ORDER, INSTALL_SECONDS, updater_running
+from controller_firmware import FirmwarePreparation, INSTALL_SECONDS, updater_running
 from safe_settings import SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 from desktop_bridge import DesktopBridge
@@ -55,7 +55,7 @@ _PAUSE_EXEMPT_MODULE_CHANGES = tuple(name for name in MODULE_NAMES if name not i
 _BACKGROUND_RPCS = UPDATE_RPCS | {'retry_extras', 'set_extras_unlocked'}  # May download (Extras: RyzenAdj).
 _UPDATER_RPCS = UPDATE_RPCS - FIRMWARE_RPCS  # Need the companion updater started.
 GUARD_FAILURE_LIMIT = 3  # Consecutive failed scans (~15 s of periodic checks) before modules are withdrawn.
-UPDATER_WAIT_S = len(INSTALL_ORDER) * INSTALL_SECONDS  # One fwupd time limit per controller component.
+UPDATER_WAIT_S = INSTALL_SECONDS  # A write that outlives its Companion is one fwupdtool run.
 UPDATER_POLL_S = 2.0
 SHUTDOWN_BUDGET_S = 4.0  # Of Decky's 5 s SIGTERM-to-SIGKILL window; _uninstall needs the rest.
 # All nine modules start in ~1.2 s on the console. A start can legitimately take much longer
