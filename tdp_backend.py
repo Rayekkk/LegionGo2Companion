@@ -160,9 +160,9 @@ _FRONTEND_APPID_TTL = 12.0
 
 # ── Device identity ────────────────────────────────────────────────────────────
 
-# The Legion Go family by DMI machine type: Go and Go S (83E1, 83L3, 83N6, 83Q2, 83Q3)
-# and Go 2 (83N0, 83N1). Nothing is written to power controls on any other model.
-LEGION_GO_FAMILY = frozenset({"83E1", "83L3", "83N6", "83Q2", "83Q3", "83N0", "83N1"})
+# The Legion Go family by DMI machine type: Go (83E1), Go S (83L3, 83N6) and Go 2
+# (83N0, 83N1). Nothing is written to power controls on any other model.
+LEGION_GO_FAMILY = frozenset({"83E1", "83L3", "83N6", "83N0", "83N1"})
 UNSUPPORTED_MODEL = "TDP control is available only on Lenovo Legion Go consoles."
 NO_FIRMWARE_TDP = "This console's firmware does not expose TDP controls."
 

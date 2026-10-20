@@ -562,7 +562,7 @@ class TdpCoreTests(unittest.TestCase):
         boost.write_text('0')
         self.helper_ready()
         self.seed(cpu_boost_enabled=True)
-        self.machine = '82XX'  # a Lenovo outside the Legion Go family
+        self.machine = '83Q2'  # a Lenovo outside the supported Legion Go family
         with patch.object(tdp.Plugin, '_ready', False), \
                 patch.object(tdp.Plugin, '_setup_error', None):
             self.assertEqual(tdp._apply_limits(15000, 20000, 25000)['stderr'], tdp.UNSUPPORTED_MODEL)
@@ -613,8 +613,9 @@ class TdpCoreTests(unittest.TestCase):
             'max': {'spl': 40, 'sppt': 43, 'fppt': 53},
         })
 
-    def test_unknown_machine_type_scales_the_presets_to_its_firmware(self):
-        self.machine = '83Q2'
+    def test_machine_type_without_bios_values_scales_the_presets_to_its_firmware(self):
+        self.machine = '83N6'
+        self.stack.enter_context(patch.dict(tdp.PRESET_TABLE, clear=True))
         self.firmware_range((30, 32, 41))
         caps = self.rpc('get_caps')
         self.assertTrue(caps['presets_estimated'])
