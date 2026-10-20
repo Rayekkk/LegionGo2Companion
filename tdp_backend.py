@@ -1063,7 +1063,6 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
         elif caps:
             # Above the firmware range (Extras): first the firmware's custom mode with the
             # nearest limits it accepts, so its own mode cannot override ours, then the SMU.
-            # The kernel refuses "custom" in platform_profile; a ppt_* write selects it.
             source, result = "ryzenadj", (
                 _apply_wmi(*(min(v, caps[k]["max"]) for k, v in triple_w))
                 if _ryzenadj_available else _fail("verified ryzenadj is unavailable"))
