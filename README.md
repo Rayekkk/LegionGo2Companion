@@ -607,6 +607,7 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
 | A curve point will not move further | Temperatures stay in order and speeds cannot drop between points; the last point stays at 100°C and at least 2000 RPM. |
 | The gyro test works but the game does not react | Check that game's Steam Input layout. |
+| The controllers stopped working, often after sleep | Companion restarts SteamOS's InputPlumber by itself when it has lost the controllers (at most once per 10 minutes); if they still do not respond, restart the console. |
 | Battery stays above 80% with protection on | Normal: protection stops charging, it does not discharge the battery. |
 | A game still reads old HDR values | Turn on **Fix HDR brightness in games** and restart the game. |
 | Wi-Fi stays on 2.4 GHz | Check the live band; use **Reconnect to 5/6 GHz** when offered. A setting cannot create a missing 5/6 GHz network. |
