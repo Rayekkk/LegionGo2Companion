@@ -272,13 +272,33 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(tdp._apply_limits(20000, 10000, 15000)['success'])
         self.assertEqual(self.ppts(), (20, 20, 20))
 
-    def test_out_of_firmware_range_uses_verified_ryzenadj_clamped_to_50w(self):
+    def test_extras_select_the_firmware_custom_mode_before_ryzenadj(self):
         self.helper_ready()
+        self.profile.write_text('performance')  # measured: Extras used to leave a firmware mode on
         result = tdp._apply_limits(60000, 70000, 80000)
         self.assertTrue(result['success'], result)
+        self.assertEqual(self.profile.read_text(), 'custom')
+        self.assertEqual(self.ppts(), (35, 37, 45))  # the nearest limits the firmware accepts
         self.assertEqual(self.applies(), [[
             '--stapm-limit=50000', '--slow-limit=50000', '--fast-limit=50000']])
-        self.assertEqual(self.profile_writes, [])
+
+    def test_extras_never_run_ryzenadj_when_custom_mode_is_not_confirmed(self):
+        self.helper_ready()
+        with self.firmware_ignores_writes():
+            result = tdp._apply_limits(35000, 45000, 50000)
+        self.assertFalse(result['success'])
+        self.assertEqual(self.applies(), [])
+
+    def test_extras_on_a_go_1_keep_spl_at_its_firmware_ceiling_and_boosts_at_50w(self):
+        self.machine = '83E1'
+        self.firmware_range((30, 32, 41))
+        self.helper_ready()
+        self.seed(extras_unlocked=True)
+        self.assertEqual(self.rpc('get_caps')['max'], {'spl': 30, 'sppt': 50, 'fppt': 50})
+        self.assertTrue(self.rpc('apply_tdp', 45000, 60000, 60000)['success'])
+        self.assertEqual(self.ppts(), (30, 32, 41))
+        self.assertEqual(self.applies(), [[
+            '--stapm-limit=30000', '--slow-limit=50000', '--fast-limit=50000']])
 
     def test_out_of_range_without_verified_helper_writes_nothing(self):
         result = tdp._apply_limits(40000, 45000, 50000)

@@ -1059,7 +1059,16 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
         # No SMU fallback inside the firmware range: a refusal is reported as is.
         if caps and all(caps[k]["min"] <= v <= caps[k]["max"] for k, v in triple_w):
             source, result = "wmi", _apply_wmi(*(v for _, v in triple_w))
-        elif caps or _legion_go_2():
+        elif caps:
+            # Above the firmware range (Extras): first the firmware's custom mode with the
+            # nearest limits it accepts, so its own mode cannot override ours, then the SMU.
+            # The kernel refuses "custom" in platform_profile; a ppt_* write selects it.
+            source, result = "ryzenadj", (
+                _apply_wmi(*(min(v, caps[k]["max"]) for k, v in triple_w))
+                if _ryzenadj_available else _fail("verified ryzenadj is unavailable"))
+            if result["success"]:
+                result = _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
+        elif _legion_go_2():
             source, result = "ryzenadj", _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
         else:
             source, result = "", _fail(NO_FIRMWARE_TDP)
