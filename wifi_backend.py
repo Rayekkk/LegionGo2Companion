@@ -531,17 +531,14 @@ class Plugin:
         except OSError:
             return ""
 
-    @staticmethod
-    def _suspend_offset() -> float:
-        return module_runtime.suspend_offset() or 0.0
-
     async def _high_band_monitor(self, stop: threading.Event):
         episode = None
         attempts = 0
         probe_limit = 2
         reconnects = 0
         next_scan = 0.0
-        suspend_offset = self._suspend_offset()
+        resume = module_runtime.ResumeWatch()
+        resume.mark()
         was_six = False
         own_reselection = None
         while not stop.is_set():
@@ -555,9 +552,7 @@ class Plugin:
                 own_reselection, was_six = None, False
                 await asyncio.sleep(HIGH_BAND_MONITOR_SECONDS)
                 continue
-            offset = self._suspend_offset()
-            resumed = offset - suspend_offset > 1
-            suspend_offset = offset
+            resumed = resume()
             link = await self._worker_complete(self._get_high_band_link, stop)
             if not link:
                 if own_reselection is None:

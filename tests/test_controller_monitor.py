@@ -23,7 +23,7 @@ class ControllerMonitorResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         # End immediately after one scheduled reconciliation tick; no hardware
         # discovery or actual settings writes are involved in this test.
         with patch.object(controller, '_state', side_effect=slow_state), \
-                patch.object(controller, '_suspend_offset', return_value=0), \
+                patch.object(controller.module_runtime, 'suspend_offset', return_value=0), \
                 patch.object(controller, 'time', types.SimpleNamespace(monotonic=iter([0, 61]).__next__)), \
                 patch.object(controller.asyncio, 'sleep', new=AsyncMock(side_effect=[None, asyncio.CancelledError()])):
             with self.assertRaises(asyncio.CancelledError):

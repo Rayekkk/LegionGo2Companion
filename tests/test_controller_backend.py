@@ -397,7 +397,7 @@ class FilterTests(unittest.TestCase):
                 await self.backend._watch()
 
         with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
-                patch.object(module, "_suspend_offset", return_value=0), \
+                patch.object(module.module_runtime, "suspend_offset", return_value=0), \
                 patch.object(module.asyncio, "sleep", side_effect=sleep), \
                 patch.object(self.backend._service_watch, "consume_exit", return_value=True):
             asyncio.run(watch())
@@ -484,7 +484,7 @@ class FilterTests(unittest.TestCase):
                 await self.backend._watch()
 
         with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
-                patch.object(module, "_suspend_offset", side_effect=lambda: 2.0 if clock[0] >= 5 else 0.0), \
+                patch.object(module.module_runtime, "suspend_offset", side_effect=lambda: 2.0 if clock[0] >= 5 else 0.0), \
                 patch.object(module.asyncio, "sleep", side_effect=sleep), \
                 patch.object(module, "_hid_inventory", side_effect=lambda: (None, None) if clock[0] < 10 else (new_physical, None)), \
                 patch.object(self.backend, "_select", side_effect=observed_select):

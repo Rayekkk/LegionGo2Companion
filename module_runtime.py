@@ -208,8 +208,7 @@ def suspend_offset():
 
 class ResumeWatch:
     """Calling it reports whether at least a second of suspend passed since the
-    last reading; an unreadable clock (None) keeps that baseline. Battery (None
-    drops the baseline) and controller/WiFi (None as 0, strictly > 1 s) differ."""
+    last reading; an unreadable clock (None) keeps that baseline."""
     last = None
 
     def mark(self):

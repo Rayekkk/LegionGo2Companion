@@ -131,9 +131,6 @@ def _write_mode(path: Path, mode: str) -> None:
             os.close(fd)
 
 
-_suspend_offset = module_runtime.suspend_offset
-
-
 class Plugin:
     def __init__(self):
         self._lock = threading.RLock()
@@ -376,14 +373,12 @@ class Plugin:
         last_check = time.monotonic()
         interval = RESUME_CHECK_S if self._error else CHECK_INTERVAL_S
         retry_delay = RESUME_CHECK_S
-        offset = _suspend_offset()
+        resume = module_runtime.ResumeWatch()
+        resume.mark()
         while True:
             await asyncio.sleep(RESUME_CHECK_S)
             now = time.monotonic()
-            current_offset = _suspend_offset()
-            resumed = (offset is not None and current_offset is not None
-                       and current_offset - offset >= 1.0)
-            offset = current_offset
+            resumed = resume()
             if resumed or now - last_check >= interval:
                 if resumed:
                     retry_delay = RESUME_CHECK_S

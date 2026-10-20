@@ -321,10 +321,6 @@ def _capture_time() -> float:
         return time.monotonic()
 
 
-def _suspend_offset() -> float:
-    return module_runtime.suspend_offset() or 0.0
-
-
 class Plugin:
     def __init__(self) -> None:
         self._operation = threading.RLock()
@@ -824,7 +820,9 @@ class Plugin:
             await _offload(self._select, source, reconcile=True)
 
     async def _watch(self) -> None:
-        now, offset = time.monotonic(), _suspend_offset()
+        now = time.monotonic()
+        resume = module_runtime.ResumeWatch()
+        resume.mark()
         # A first startup/resume probe can precede HID/InputPlumber discovery.
         # Retry after 5/10/20/40 seconds, then at the normal minute interval.
         # Healthy devices and externally changed ownership stay at one minute.
@@ -834,9 +832,7 @@ class Plugin:
             await asyncio.sleep(5)
             if module_runtime.is_paused('controller'):
                 continue
-            now, new_offset = time.monotonic(), _suspend_offset()
-            resumed = new_offset - offset > 1
-            offset = new_offset
+            now, resumed = time.monotonic(), resume()
             service_exited = self._service_watch.consume_exit()
             if service_exited:
                 # Only advance the schedule. _select still verifies the actual

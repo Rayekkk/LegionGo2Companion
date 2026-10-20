@@ -457,7 +457,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(wifi.asyncio, "sleep", side_effect=sleep), \
              patch.object(plugin, "_worker_complete", side_effect=worker), \
              patch.object(plugin, "_run_cmd", side_effect=command), \
-             patch.object(plugin, "_suspend_offset", return_value=0.0), \
+             patch.object(wifi.module_runtime, "suspend_offset", return_value=0.0), \
              patch.object(plugin, "_discover_high_bands", side_effect=discover):
             await plugin._high_band_monitor(stop)
         offline = [t for t in spawns if t < carrier_at]
@@ -484,7 +484,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(wifi.asyncio, "sleep", side_effect=sleep), \
              patch.object(plugin, "_worker_complete", side_effect=worker), \
              patch.object(plugin, "_get_high_band_link", side_effect=observations), \
-             patch.object(plugin, "_suspend_offset", side_effect=offsets or [0.0] * (len(observations) + 1)), \
+             patch.object(wifi.module_runtime, "suspend_offset", side_effect=offsets or [0.0] * (len(observations) + 1)), \
              patch.object(plugin, "_discover_high_bands", side_effect=results or (
                  lambda *_args: {"success": True, "frequency": 2412})) as scan:
             await plugin._high_band_monitor(stop)

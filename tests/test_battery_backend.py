@@ -287,7 +287,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             return fn()
         with patch.object(battery.time, 'monotonic', side_effect=lambda: clock['now']), \
              patch.object(battery.asyncio, 'sleep', side_effect=tick), \
-             patch.object(battery, '_suspend_offset', side_effect=lambda: 15 if wake and clock['now'] >= 5 else 0), \
+             patch.object(battery.module_runtime, 'suspend_offset', side_effect=lambda: 15 if wake and clock['now'] >= 5 else 0), \
              patch.object(self.plugin, '_thread', side_effect=inline):
             self.plugin._running = True
             with self.assertRaises(asyncio.CancelledError):
