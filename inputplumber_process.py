@@ -2,10 +2,12 @@
 """InputPlumber D-Bus access (busctl) shared by remap and gyro, plus cheap process-exit hints.
 
 D-Bus/device ownership still authorizes every repair; ProcessWatch only speeds it up.
+LostControllerRecovery restarts an InputPlumber that dropped the controller.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -14,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Any
 
+import module_runtime
+from diagnostics import event
 from system_process import run
 
 
@@ -134,3 +138,144 @@ class ProcessWatch:
             self._revision += 1
             self._token = None
             return True
+
+
+# InputPlumber 0.78 (SteamOS 3.8) can lose the controller for good when it re-enumerates twice in a
+# row (an MCU reset 61EB -> 61ED -> 61EB, or a wake): the second add fails with EBUSY, the
+# CompositeDevice stops and the controller stays hidden until the service restarts. Fixed upstream
+# in 0.79.1. Remap and gyro already recover from a restart through ProcessWatch.
+SYSTEMCTL = "/usr/bin/systemctl"
+UNIT = "inputplumber.service"
+USER_OFF = frozenset({"disabled", "masked", "masked-runtime"})
+CONTROLLER_HID = re.compile(r"0003:17EF:61E[B-E]\.[0-9A-F]+", re.IGNORECASE)
+SETTLE_S = 12.0  # after the last controller event, wake or start: InputPlumber's own time to recover
+CONFIRM_S = 5.0  # the lost state must still hold this much later
+RESUME_POLL_S = 30.0  # a clock read only (ResumeWatch); the controller's own udev events usually come first
+RESTART_SPACING_S = 600.0
+RESTARTS_PER_RUN = 3
+
+
+def lost_controller() -> dict | None:
+    """The unit state when a hid-lenovo-go controller is present and InputPlumber, enabled and
+    running, holds no CompositeDevice; None when anything differs or cannot be read."""
+    if not module_runtime.kernel_controller():
+        return None
+    try:
+        result = run([SYSTEMCTL, "show", "--property=LoadState,ActiveState,UnitFileState", UNIT], 3.0,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                     encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    state = dict(line.partition("=")[::2] for line in result.stdout.splitlines())
+    # Stopped, disabled or masked by the user (or by another controller daemon): never touch it.
+    if (result.returncode != 0 or state.get("LoadState") != "loaded" or state.get("ActiveState") != "active"
+            or state.get("UnitFileState", "") in USER_OFF):
+        return None
+    try:
+        tree = run_busctl(["--auto-start=no", "tree", SERVICE, "--list", "--no-pager"], timeout=3.0)
+    except InputPlumberError:
+        return None  # An unanswered query proves nothing.
+    if any(DEVICE_PATH_RE.fullmatch(line.strip()) for line in tree.splitlines()):
+        return None
+    return {"status": state.get("UnitFileState") or None}  # the unit-file state, for the log
+
+
+class LostControllerRecovery:
+    """Event-driven: one check SETTLE_S after start, a wake or the controller's last udev event;
+    a restart needs the lost state twice, CONFIRM_S apart, and stays within the limits."""
+
+    def __init__(self, blocked: Callable[[], bool], updating: Callable[[], bool]) -> None:
+        self._blocked = blocked  # On the loop: closing, conflict guard, controller maintenance.
+        self._updating = updating  # In a thread: a firmware updater process.
+        self._wake = asyncio.Event()
+        self._restarts: list[float] = []
+        self._verify = False  # A restart was requested and InputPlumber has not shown the controller since.
+
+    def _drain(self, monitor) -> None:
+        try:
+            for device in iter(lambda: monitor.poll(0), None):
+                if CONTROLLER_HID.fullmatch(device.sys_name):
+                    self._wake.set()
+        except Exception:
+            self._wake.set()  # A lost or unreadable event may have been the controller's.
+
+    async def run(self) -> None:
+        loop = asyncio.get_running_loop()
+        monitor = _hid_monitor()
+        if monitor is not None:
+            loop.add_reader(monitor.fileno(), self._drain, monitor)
+        resume = module_runtime.ResumeWatch()
+        resume.mark()
+        trigger, due = "start", loop.time() + SETTLE_S
+        try:
+            while True:
+                wait = RESUME_POLL_S if due is None else min(max(due - loop.time(), 0), RESUME_POLL_S)
+                try:
+                    await asyncio.wait_for(self._wake.wait(), wait)
+                    self._wake.clear()
+                    trigger, due = "controller", loop.time() + SETTLE_S  # every event restarts the window
+                    continue
+                except asyncio.TimeoutError:
+                    pass
+                if resume():
+                    trigger, due = "resume", loop.time() + SETTLE_S
+                elif due is not None and loop.time() >= due:
+                    due = None
+                    try:
+                        if await self._check(trigger):
+                            trigger, due = "verify", loop.time() + SETTLE_S
+                    except Exception as exc:
+                        event("inputplumber", "recovery_check_failed", level="warning", error=exc, repeat=600)
+        finally:
+            if monitor is not None:
+                loop.remove_reader(monitor.fileno())
+
+    async def _check(self, trigger: str) -> bool:
+        """True after a restart was requested."""
+        if self._blocked():
+            return False
+        state = await asyncio.to_thread(lost_controller)
+        if state is not None:
+            await asyncio.sleep(CONFIRM_S)
+            if self._blocked():
+                return False
+            state = await asyncio.to_thread(lost_controller)
+        if state is None:
+            if self._verify:
+                event("inputplumber", "controller_recovered_after_restart")
+            self._verify = False
+            return False
+        if self._verify:
+            # A restart that brought no CompositeDevice back will not on the next try either.
+            event("inputplumber", "restart_did_not_recover_controller", level="warning", repeat=600, **state)
+            return False
+        if await asyncio.to_thread(self._updating) or self._blocked():
+            return False
+        now = asyncio.get_running_loop().time()
+        if len(self._restarts) >= RESTARTS_PER_RUN or (self._restarts and now - self._restarts[-1] < RESTART_SPACING_S):
+            event("inputplumber", "restart_limited", level="warning", repeat=600, reason=trigger,
+                  count=len(self._restarts), **state)
+            return False
+        self._restarts.append(now)
+        self._verify = True
+        event("inputplumber", "restart_for_lost_controller", level="warning", reason=trigger,
+              count=len(self._restarts), **state)
+        # try-restart: a service stopped meanwhile stays stopped. --no-block: no wait on the job.
+        result = await asyncio.to_thread(run, [SYSTEMCTL, "--no-block", "try-restart", UNIT], 5.0,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode != 0:
+            event("inputplumber", "restart_failed", level="warning", returncode=result.returncode)
+        return True
+
+
+def _hid_monitor():
+    """A netlink socket the kernel filters to HID events, read by the event loop (no thread)."""
+    try:
+        import pyudev
+        monitor = pyudev.Monitor.from_netlink(pyudev.Context())
+        monitor.filter_by("hid")
+        monitor.start()
+        return monitor
+    except Exception as exc:
+        event("inputplumber", "hotplug_watch_unavailable", level="warning", error=exc)
+        return None

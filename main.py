@@ -38,6 +38,7 @@ from safe_settings import SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
 from desktop_bridge import DesktopBridge
 from desktop_install import DesktopInstall
+from inputplumber_process import LostControllerRecovery
 from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 
 MODULE_NAMES = ('tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
@@ -320,6 +321,7 @@ class Plugin:
         self._guard_task = None
         self._updater_wait = None
         self._band_restore = None
+        self._inputplumber = None  # Restarts an InputPlumber that lost the controller (Legion Go family).
         self._guard_blocked = False
         self._guard_conflicts = []
         self._guard_error = ""
@@ -804,6 +806,11 @@ class Plugin:
                           **await asyncio.to_thread(_runtime_identity))
         await self._ensure_device()
         decky.logger.info(f"[legiongo2companion] startup v{_plugin_version()}")
+        if self._device.get('console') and self._inputplumber is None and not self._closing:
+            # A system repair, independent of the modules; it never runs during controller maintenance.
+            self._inputplumber = module_runtime.background_task(LostControllerRecovery(
+                lambda: self._closing or self._guard_blocked or module_runtime.is_paused('controller'),
+                updater_running).run())
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._watch_conflicts())
         await self._check_guard()
@@ -1020,7 +1027,7 @@ class Plugin:
         deadline = self._stop_deadline = time.monotonic() + SHUTDOWN_BUDGET_S
 
         async def hardware():
-            for name in ('_guard_task', '_updater_wait', '_band_restore'):
+            for name in ('_guard_task', '_updater_wait', '_band_restore', '_inputplumber'):
                 task = getattr(self, name)
                 setattr(self, name, None)
                 if task is not None:
