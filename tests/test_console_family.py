@@ -125,9 +125,10 @@ class ApplicabilityTests(unittest.TestCase):
                 applicable, device = self.detect(*setup)
                 self.assertEqual({name for name, value in applicable.items() if value} - {"tdp"},
                                  EXPECTED[console])
-                # Fan, the power light and controller firmware keep the 83N0 model gate.
+                # Fan, the power light and controller firmware keep their own Go 2 model gates.
                 go2_83n0 = console == "Go 2 83N0"
-                self.assertEqual((applicable["fan"], device["firmware"], device["power_led"]), (go2_83n0,) * 3)
+                self.assertEqual((applicable["fan"], device["firmware"]), (go2_83n0,) * 2)
+                self.assertIs(device["power_led"], console.startswith("Go 2"))
 
     def test_a_failing_rule_hides_its_module_and_is_logged(self):
         plugin = main.Plugin()

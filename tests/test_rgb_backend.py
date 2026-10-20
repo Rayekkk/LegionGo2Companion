@@ -673,7 +673,7 @@ class RgbBackendTests(unittest.TestCase):
             self.assertEqual(register.value & ~(1 << 6), preserved)
             self.assertTrue(register.value & (1 << 6))
 
-    def test_power_capability_needs_the_model_and_live_dsdt_layout_not_a_bios_version(self):
+    def test_power_capability_needs_a_go_2_model_and_live_dsdt_layout_not_a_bios_version(self):
         with tempfile.TemporaryDirectory(prefix="lego-dsdt-") as raw:
             root = Path(raw)
             dsdt = root / "DSDT"
@@ -698,6 +698,18 @@ class RgbBackendTests(unittest.TestCase):
                 self.assertEqual(rgb_backend._power_capability(), (True, ""))
                 rgb_backend._power_capability_cache = None
                 identity["board_name"] = "LNVNB161217"
+                self.assertFalse(rgb_backend._power_capability()[0])
+                # The Go 2 Z2 (83N1): its board name is unknown, the DSDT check still decides.
+                for family, product, works in (("Legion Go 8AHP2", "83N1", True), ("Legion Go 8AHP2", "83N0", False),
+                                               ("Legion Go 8ASP2", "83N1", False), ("Legion Go S 8ARP1", "83L3", False),
+                                               ("Legion Go 8APU1", "83E1", False)):
+                    with self.subTest(product=product, family=family):
+                        identity.update(product_family=family, product_name=product, bios_version="RQCN17WW")
+                        rgb_backend._power_capability_cache = None
+                        self.assertIs(rgb_backend._power_capability()[0], works)
+                identity.update(product_family="Legion Go 8AHP2", product_name="83N1")
+                dsdt.write_bytes(power_led_dsdt(base=0xFE0B0300))  # The Go S's ERAM base
+                rgb_backend._power_capability_cache = None
                 self.assertFalse(rgb_backend._power_capability()[0])
 
     def test_power_led_layout_accepts_only_lpbl_at_eram_byte_0x10_bit_6(self):

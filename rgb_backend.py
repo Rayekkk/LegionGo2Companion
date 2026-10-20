@@ -50,8 +50,8 @@ GO_S_RGB_LED_PATH = "/sys/class/leds/go_s:rgb:joystick_rings"
 GO_S_RGB_HID_IDS = ("1A86:E310", "1A86:E311")
 GO_S_RGB_DRIVER = "hid-lenovo-go-s"
 
-# Power-button MMIO is independently restricted to this model (any BIOS version
-# whose DSDT passes _power_led_layout_ok).
+# Power-button MMIO is independently restricted to this model and the 83N1 (power_led_model;
+# any BIOS version whose DSDT passes _power_led_layout_ok).
 EXPECTED_FAMILY = "Legion Go 8ASP2"
 EXPECTED_PRODUCT = "83N0"
 EXPECTED_BOARD = "LNVNB161216"
@@ -636,8 +636,10 @@ def _power_led_layout_ok(data: bytes) -> bool:
 def power_led_model(identity: dict[str, str] | None = None) -> bool:
     """The power-button light's model gate (DMI only); each use still proves the DSDT layout."""
     identity = identity if identity is not None else _read_identity()
-    return (identity.get("product_family"), identity.get("product_name"), identity.get("board_name")) == (
-        EXPECTED_FAMILY, EXPECTED_PRODUCT, EXPECTED_BOARD)
+    family, product = identity.get("product_family"), identity.get("product_name")
+    # The 83N1's board name is unknown; its BIOS (RQCN17WW) has the 83N0's ERAM and LPBL bit for bit.
+    return ((family, product, identity.get("board_name")) == (EXPECTED_FAMILY, EXPECTED_PRODUCT, EXPECTED_BOARD)
+            or (family, product) == ("Legion Go 8AHP2", "83N1"))
 
 
 def _power_capability() -> tuple[bool, str]:
@@ -652,7 +654,7 @@ def _power_capability() -> tuple[bool, str]:
     identity = _read_identity()
     if not power_led_model(identity):
         _power_capability_cache = (
-            False, "Power-button light control supports only the Legion Go 2 (83N0 / 8ASP2).")
+            False, "Power-button light control supports only the Legion Go 2 (83N0 / 83N1).")
         return _power_capability_cache
     try:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
