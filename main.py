@@ -65,6 +65,10 @@ MODULE_START_LIMIT_S = 15.0
 # A stop gives a start still running past the limit this long to finish and be unloaded,
 # next to the other modules' unload; it fits SHUTDOWN_BUDGET_S.
 STARTING_STOP_WAIT_S = 2.0
+# An update's band policy waits for WiFi to reconnect after uninstall restored the network files:
+# about two minutes of retries, then the next start tries again.
+BAND_RESTORE_RETRY_S = 20.0
+BAND_RESTORE_ATTEMPTS = 6
 _ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_active_app'})  # Besides reads.
 # Preconditions the backend checks before changing anything; the reply already tells the user why.
 _REFUSALS = frozenset({'unsupported_backend', 'unsupported_device', 'preflight_failed', 'no_wifi',
@@ -308,6 +312,7 @@ class Plugin:
         self._guard_scan = None
         self._guard_task = None
         self._updater_wait = None
+        self._band_restore = None
         self._guard_blocked = False
         self._guard_conflicts = []
         self._guard_error = ""
@@ -513,7 +518,8 @@ class Plugin:
                 return await asyncio.to_thread(self._module_status)
             # Persist the gate before cleanup. An interrupted withdrawal never starts
             # the module on next boot; it retries cleanup with the saved ownership.
-            if not self._module_state.get(name, {}).get('pending'):
+            # An update still restoring keeps its choice; the live one is only the baseline.
+            if not (self._module_state.get(name, {}).get('pending') or self._module_state.get(name, {}).get('update')):
                 resume = await asyncio.to_thread(capture_intent, name)
             self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume}
             try:
@@ -814,6 +820,12 @@ class Plugin:
                     self._module_state[name] = {'enabled': True}
                     await module_runtime.complete(asyncio.to_thread(self._save_modules))
                 except Exception as exc:
+                    if entry.get('update'):
+                        # WiFi is still reconnecting: keep the module running on Automatic and retry.
+                        diagnostics.event(name, 'band_policy_restore_deferred', level='warning', error=exc)
+                        if self._band_restore is None or self._band_restore.done():
+                            self._band_restore = module_runtime.background_task(self._retry_band_policy(entry))
+                        continue
                     self._module_state[name] = {'enabled': False, 'pending': True,
                                                 'resume': entry['resume'], 'error': str(exc)}
                     try:
@@ -824,6 +836,35 @@ class Plugin:
                         await self._stop_component(name)
                     except Exception as stop_error:
                         diagnostics.event(name, 'module_recovery_stop_failed', level='error', error=stop_error)
+
+    async def _retry_band_policy(self, entry):
+        """Retry an update's band policy as a WiFi RPC: a module change or a new user choice ends it."""
+        async def attempt(plugin):
+            if plugin._module_state.get('wifi') is not entry:
+                return False  # The user chose a band policy while this attempt waited.
+            await restore_intent('wifi', plugin._wifi, entry['resume'])
+            plugin._module_state['wifi'] = {'enabled': True}
+            await module_runtime.complete(asyncio.to_thread(plugin._save_modules))
+            return True
+        error = None
+        for count in range(1, BAND_RESTORE_ATTEMPTS + 1):
+            await asyncio.sleep(BAND_RESTORE_RETRY_S)
+            async with self._guard_lock:
+                if (self._closing or self._guard_blocked or self._guard_error
+                        or self._module_state.get('wifi') is not entry
+                        or self._module_health.get('wifi', {}).get('ready') is False):
+                    return  # Stopping, or the module was changed; a kept entry waits for the next start.
+                job = asyncio.create_task(self._run_rpc('wifi', attempt, (), {}))
+                self._rpc_jobs.add(job)
+                job.add_done_callback(self._rpc_jobs.discard)
+            try:
+                if await module_runtime.complete(job):
+                    diagnostics.event('wifi', 'band_policy_restored', attempts=count)
+                return
+            except Exception as exc:
+                error = exc
+        diagnostics.event('wifi', 'band_policy_restore_postponed', level='warning',
+                          attempts=BAND_RESTORE_ATTEMPTS, error=error)
 
     async def _start_controllers_after_updater(self):
         deadline = time.monotonic() + UPDATER_WAIT_S
@@ -924,7 +965,7 @@ class Plugin:
         deadline = self._stop_deadline = time.monotonic() + SHUTDOWN_BUDGET_S
 
         async def hardware():
-            for name in ('_guard_task', '_updater_wait'):
+            for name in ('_guard_task', '_updater_wait', '_band_restore'):
                 task = getattr(self, name)
                 setattr(self, name, None)
                 if task is not None:
@@ -1008,10 +1049,11 @@ class Plugin:
     async def _keep_band_policy(self):
         """Decky also uninstalls before every update, and WiFi's uninstall puts the system's
         network files back. Keep its choice like a re-enable in progress: the next start restores it."""
-        if not self._module_enabled('wifi'):
-            return  # A turned-off module already holds its choice.
+        if not self._module_enabled('wifi') or self._module_state.get('wifi', {}).get('update'):
+            return  # A turned-off module, or one still restoring an earlier update, already holds its choice.
         try:
-            self._module_state['wifi'] = {'enabled': True, 'resume': await asyncio.to_thread(capture_intent, 'wifi')}
+            self._module_state['wifi'] = {'enabled': True, 'update': True,
+                                          'resume': await asyncio.to_thread(capture_intent, 'wifi')}
             await asyncio.to_thread(self._save_modules)
         except Exception as exc:
             diagnostics.event('wifi', 'band_policy_not_kept', level='warning', error=exc)
@@ -1273,7 +1315,12 @@ class Plugin:
         return await self._wifi.get_status()
 
     async def wifi_set_band_policy(self, mode, allow_unverified_scan=False):
-        return await self._wifi.set_band_policy(mode, allow_unverified_scan)
+        result = await self._wifi.set_band_policy(mode, allow_unverified_scan)
+        if result.get('success') and self._module_state.get('wifi', {}).get('update'):
+            # The user's new choice replaces the one an update is still restoring.
+            self._module_state['wifi'] = {'enabled': True}
+            await module_runtime.complete(asyncio.to_thread(self._save_modules))
+        return result
 
     async def wifi_rescan_and_reconnect(self, target_band="high"):
         return await self._wifi.rescan_and_reconnect(target_band)

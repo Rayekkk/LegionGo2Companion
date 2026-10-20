@@ -150,6 +150,67 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated._module_state['wifi'], {'enabled': True})
         await updated._unload()
 
+    def updated_with_band_policy(self, *results):
+        """The plugin an update starts, holding the band policy _uninstall kept for it."""
+        self.plugin._module_state['wifi'] = {'enabled': True, 'update': True, 'resume': {'band_policy': 'five_six_only'}}
+        self.plugin._save_modules()
+        updated = self.make_plugin()
+        seen = []
+        def answer(mode, *args):
+            seen.append(updated._module_status()['wifi'])
+            return results[min(len(seen), len(results)) - 1]
+        updated._wifi.set_band_policy = AsyncMock(side_effect=answer)
+        return updated, seen
+
+    async def test_update_band_policy_is_retried_while_wifi_reconnects(self):
+        refused = {'success': False, 'error': 'no_wifi', 'message': 'Connect to WiFi first.'}
+        no_scan = {'success': False, 'error': 'preflight_failed',
+                   'message': 'No fresh 5 or 6 GHz scan result for the active SSID was verified.'}
+        updated, seen = self.updated_with_band_policy(refused, no_scan, {'success': True})
+        with patch.object(main, 'BAND_RESTORE_RETRY_S', 0):
+            await updated._main()
+            await updated._band_restore
+        self.assertEqual(updated._wifi.set_band_policy.await_args_list, [unittest.mock.call('five_six_only')] * 3)
+        running = {'enabled': True, 'ready': True, 'pending': False, 'error': ''}
+        self.assertEqual([{key: status[key] for key in running} for status in seen], [running] * 3)
+        updated._wifi._unload.assert_not_awaited()
+        self.assertEqual(self.make_plugin()._module_state['wifi'], {'enabled': True})
+        await updated._unload()
+
+    async def test_update_band_policy_refused_for_good_waits_for_the_next_start(self):
+        import diagnostics
+        refused = {'success': False, 'error': 'no_wifi', 'message': 'Connect to WiFi first.'}
+        updated, _ = self.updated_with_band_policy(refused)
+        with patch.object(main, 'BAND_RESTORE_RETRY_S', 0), patch.object(diagnostics, 'event') as event:
+            await updated._main()
+            await updated._band_restore
+        self.assertEqual(updated._wifi.set_band_policy.await_count, 1 + main.BAND_RESTORE_ATTEMPTS)
+        self.assertEqual([c.args[1] for c in event.call_args_list if c.args[0] == 'wifi'],
+                         ['band_policy_restore_deferred', 'band_policy_restore_postponed'])
+        status = updated._module_status()['wifi']
+        self.assertEqual((status['enabled'], status['pending'], status['error']), (True, False, ''))
+        updated._wifi._unload.assert_not_awaited()
+        kept = {'enabled': True, 'update': True, 'resume': {'band_policy': 'five_six_only'}}
+        self.assertEqual(self.make_plugin()._module_state['wifi'], kept)
+        # A further update, or turning the module off, keeps that choice too.
+        await updated._keep_band_policy()
+        self.assertEqual(updated._module_state['wifi'], kept)
+        with patch.object(main, 'withdraw', new=AsyncMock(return_value='')):
+            await updated.modules_set_enabled('wifi', False)
+        self.assertEqual(updated._module_state['wifi']['resume'], {'band_policy': 'five_six_only'})
+        await updated._unload()
+
+    async def test_user_band_choice_replaces_the_one_an_update_is_restoring(self):
+        updated, _ = self.updated_with_band_policy({'success': False, 'error': 'no_wifi'}, {'success': True})
+        with patch.object(main, 'BAND_RESTORE_RETRY_S', 0.5):  # The user chooses before the next attempt.
+            await updated._main()
+            await updated.wifi_set_band_policy('off')
+            self.assertEqual(self.make_plugin()._module_state['wifi'], {'enabled': True})
+            await updated._band_restore
+        self.assertEqual(updated._wifi.set_band_policy.await_args_list,
+                         [unittest.mock.call('five_six_only'), unittest.mock.call('off', False)])
+        await updated._unload()
+
     async def test_uninstall_leaves_a_turned_off_wifi_module_alone(self):
         resume = {'band_policy': 'five_six_only'}
         self.plugin._module_state['wifi'] = {'enabled': False, 'resume': resume}
