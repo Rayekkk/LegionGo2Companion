@@ -612,6 +612,27 @@ class XpropIdentityTests(unittest.TestCase):
         self.assertNotIn('runuser', spawned['argv'][0])
         self.assertEqual({k: spawned['kwargs'].get(k) for k in identity}, identity)
 
+    def test_watcher_shutdown_kills_an_xprop_that_ignores_terminate(self):
+        sent = []
+
+        class Process:
+            pid, returncode = 4242, None
+
+            def terminate(self):
+                sent.append('TERM')
+
+            def kill(self):
+                sent.append('KILL')
+
+            async def wait(self):
+                if sent[-1:] != ['KILL']:
+                    await asyncio.sleep(5)
+
+        killpg = lambda _pid, sig: sent.append('TERM' if sig == display.signal.SIGTERM else 'KILL')
+        with patch.object(display.os, 'killpg', killpg, create=True):
+            asyncio.run(display._terminate_prop_process(Process()))
+        self.assertEqual(sent, ['TERM', 'KILL'])
+
     def test_watcher_warns_only_when_it_does_not_reconnect(self):
         import collections, json, diagnostics
 

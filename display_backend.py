@@ -407,19 +407,24 @@ def _display_owner(display=None):
         return None
 
 
+def _account(uid):
+    """The passwd entry for `uid`, or None when there is none."""
+    if pwd is None or uid is None:
+        return None
+    try:
+        return pwd.getpwuid(uid)
+    except KeyError:
+        return None
+
+
 def _xprop_env(display=None) -> dict:
     env = _system_env(DISPLAY=display or DISPLAY)
     owner = _display_owner(display)
-    if pwd is not None and owner is not None:
-        try:
-            account = pwd.getpwuid(owner)
-            env["HOME"] = account.pw_dir
-            env["USER"] = account.pw_name
-            env["LOGNAME"] = account.pw_name
-            env["XDG_RUNTIME_DIR"] = f"/run/user/{owner}"
-            env.pop("XAUTHORITY", None)
-        except KeyError:
-            pass
+    account = _account(owner)
+    if account is not None:
+        env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name,
+                   XDG_RUNTIME_DIR=f"/run/user/{owner}")
+        env.pop("XAUTHORITY", None)
     return env
 
 
@@ -441,12 +446,8 @@ def _run_xprop(args, display, timeout, check=False, text=True):
 def _xprop_user(display=None) -> dict:
     """Spawn kwargs that drop root to the display owner (no PAM session, unlike runuser)."""
     owner = _display_owner(display)
-    if not _is_root() or owner in (None, 0) or pwd is None:
-        return {}
-    try:
-        return {"user": owner, "group": pwd.getpwuid(owner).pw_gid, "extra_groups": []}
-    except KeyError:
-        return {}
+    account = _account(owner) if _is_root() and owner != 0 else None
+    return {} if account is None else {"user": owner, "group": account.pw_gid, "extra_groups": []}
 
 
 def _parse_prop_line(line: str) -> tuple[str, str | None] | None:
@@ -540,31 +541,22 @@ def _read_props(names, *, fresh=False) -> dict:
 
 
 async def _terminate_prop_process(process) -> None:
+    """Stop the xprop watcher's process group: SIGTERM, then SIGKILL after a second."""
     if process is None or process.returncode is not None:
         return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:  # pragma: no cover - Windows is only a unit-test host
-            process.terminate()
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        await asyncio.wait_for(process.wait(), timeout=1.0)
-        return
-    except asyncio.TimeoutError:
-        pass
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:  # pragma: no cover
-            process.kill()
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        await asyncio.wait_for(process.wait(), timeout=1.0)
-    except asyncio.TimeoutError:
-        pass
+    for signame, fallback in (("SIGTERM", process.terminate), ("SIGKILL", process.kill)):
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, getattr(signal, signame))
+            else:  # Windows is only a unit-test host
+                fallback()
+        except OSError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+            return
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _watch_properties() -> None:
@@ -1108,12 +1100,7 @@ def _restart_session() -> tuple:
     """
     env = _system_env()
     owner = _display_owner()
-    account = None
-    if pwd is not None and owner is not None:
-        try:
-            account = pwd.getpwuid(owner)
-        except KeyError:
-            pass
+    account = _account(owner)
     if account is None and pwd is not None:
         try:
             candidate = pwd.getpwnam("deck")
