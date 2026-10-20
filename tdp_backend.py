@@ -10,6 +10,7 @@ from active_app import normalise_app_id, resolve_running_app, scan_proc_for_appi
 import asyncio
 import copy
 import functools
+from contextlib import contextmanager
 import glob
 import hashlib
 import json
@@ -309,10 +310,6 @@ def _write_keys(values: dict[str, dict]) -> None:
         settings.commit()
 
 
-def _write_key(key: str, value: dict) -> None:
-    _write_keys({key: value})
-
-
 def _clamp_triplet(spl, sppt, fppt,
                    ceilings: tuple[int, int, int] | None = None) -> tuple[int, int, int]:
     """Enforce 5 W <= spl <= sppt <= fppt <= 50 W (milliwatts).
@@ -422,7 +419,7 @@ def _load_settings() -> dict:
 
 
 def _save_settings(s: dict) -> None:
-    _write_key(SETTINGS_KEY_SETTINGS, s)
+    _write_keys({SETTINGS_KEY_SETTINGS: s})
 
 
 # ── Per-game profiles ──────────────────────────────────────────────────────────
@@ -454,13 +451,7 @@ def _normalised_profiles(raw_profiles: dict) -> dict:
                 p[boost_key] = boost if type(boost) is bool else None
             if epp_key in p:
                 p[epp_key] = _canonical_epp_syntax(p[epp_key])
-        if p.get("spl") is not None:
-            p["spl"], p["sppt"], p["fppt"] = _clamp_triplet(
-                p["spl"], p.get("sppt", p["spl"]), p.get("fppt", p["spl"]), ceilings)
-        if p.get("ac_spl") is not None:
-            p["ac_spl"], p["ac_sppt"], p["ac_fppt"] = _clamp_triplet(
-                p["ac_spl"], p.get("ac_sppt", p["ac_spl"]), p.get("ac_fppt", p["ac_spl"]),
-                ceilings)
+        _clamp_profile_triplets(p, ceilings, mark_custom=False)
         profiles[app_id] = p
     # MAX_GAME_PROFILES limits only new profiles: a store already above it keeps every valid one.
     return profiles
@@ -1081,14 +1072,7 @@ def _get_running_appid() -> str:
     misses games running inside pressure-vessel/gamescope. Falls back to the scan when
     the frontend has gone quiet (panel closed)."""
     return resolve_running_app(_frontend_appid, _frontend_appid_ts,
-                               time.monotonic(), _scan_proc_for_appid, _FRONTEND_APPID_TTL)
-
-
-def _scan_proc_for_appid() -> str:
-    # The Steam "reaper" wrapper (reaper SteamLaunch AppId=NNNN -- ...) runs outside
-    # the game's pressure-vessel/gamescope sandbox, so its cmdline is the most reliable
-    # background signal. Fall back to SteamAppId in the environ.
-    return scan_proc_for_appid()
+                               time.monotonic(), scan_proc_for_appid, _FRONTEND_APPID_TTL)
 
 
 # ── TDP enforce ────────────────────────────────────────────────────────────────
@@ -1457,46 +1441,30 @@ def _release_controls_locked() -> dict:
     return {"success": not errors, "error": "; ".join(errors)}
 
 
-def _clamp_profile(profile: dict, ceilings: tuple[int, int, int]) -> None:
-    if profile.get("spl") is not None:
-        before = (profile["spl"], profile.get("sppt", profile["spl"]),
-                  profile.get("fppt", profile["spl"]))
-        after = _clamp_triplet(
-            profile["spl"], profile.get("sppt", profile["spl"]),
-            profile.get("fppt", profile["spl"]), ceilings)
-        profile["spl"], profile["sppt"], profile["fppt"] = after
-        if after != before:
-            profile["preset"] = "custom"
-    if profile.get("ac_spl") is not None:
-        before = (profile["ac_spl"], profile.get("ac_sppt", profile["ac_spl"]),
-                  profile.get("ac_fppt", profile["ac_spl"]))
-        after = _clamp_triplet(
-            profile["ac_spl"], profile.get("ac_sppt", profile["ac_spl"]),
-            profile.get("ac_fppt", profile["ac_spl"]), ceilings)
-        profile["ac_spl"], profile["ac_sppt"], profile["ac_fppt"] = after
-        if after != before:
-            profile["ac_preset"] = "custom"
+def _clamp_profile_triplets(profile: dict, ceilings: tuple[int, int, int],
+                            mark_custom: bool) -> None:
+    """Clamp a profile's battery and AC triplets; mark_custom relabels a changed one."""
+    for prefix in ("", "ac_"):
+        spl = profile.get(prefix + "spl")
+        if spl is None:
+            continue
+        keys = [prefix + key for key in ("spl", "sppt", "fppt")]
+        before = (spl, profile.get(keys[1], spl), profile.get(keys[2], spl))
+        after = _clamp_triplet(*before, ceilings)
+        profile.update(zip(keys, after))
+        if mark_custom and after != before:
+            profile[prefix + "preset"] = "custom"
 
 
-def _lock_extras_state(state: dict, profiles: dict) -> tuple:
-    """Clamp every persisted target to firmware limits and return the active one."""
+def _lock_extras_state(state: dict, profiles: dict) -> None:
+    """Clamp every persisted target to the firmware limits."""
     ceilings = _standard_ceilings_mw()
     global_before = (state["spl"], state["sppt"], state["fppt"])
     state["spl"], state["sppt"], state["fppt"] = _clamp_triplet(*global_before, ceilings)
     if (state["spl"], state["sppt"], state["fppt"]) != global_before:
         state["active_preset"] = "custom"
-    if any(key in state for key in ("active_spl", "active_sppt", "active_fppt")):
-        active = _clamp_triplet(
-            state.get("active_spl", state["spl"]),
-            state.get("active_sppt", state["sppt"]),
-            state.get("active_fppt", state["fppt"]), ceilings)
-    else:
-        active = (state["spl"], state["sppt"], state["fppt"])
-    state["active_spl"], state["active_sppt"], state["active_fppt"] = active
     for profile in profiles.values():
-        if isinstance(profile, dict):
-            _clamp_profile(profile, ceilings)
-    return active
+        _clamp_profile_triplets(profile, ceilings, mark_custom=True)
 
 
 # ── CPU Boost / Energy Performance Preference ────────────────────────────────
@@ -1942,24 +1910,20 @@ def _cpu_power_controls_error_status(
     }
 
 
-def _stored_edit_refusal(app_id: str, current_app_id: str) -> str | None:
-    """A saved profile is edited without hardware writes, so never the running game's."""
-    if not app_id:
-        return "invalid profile request"
-    if current_app_id == app_id:
-        return "game is running; change its settings as the running game"
-    if app_id not in _load_profiles():
-        return "this game has no profile in use"
-    return None
-
-
 def _scope_refusal(app_id: str, current_app_id: str, expected_app_id: str | None,
                    stored: bool) -> str | None:
     """Why an edit for app_id ("" = Global) no longer fits the foreground game."""
     if expected_app_id is not None and current_app_id != expected_app_id:
         return "foreground game changed"
     if stored:
-        return _stored_edit_refusal(app_id, current_app_id)
+        # A saved profile is edited without hardware writes, so never the running game's.
+        if not app_id:
+            return "invalid profile request"
+        if current_app_id == app_id:
+            return "game is running; change its settings as the running game"
+        if app_id not in _load_profiles():
+            return "this game has no profile in use"
+        return None
     if app_id and current_app_id != app_id:
         return "game is no longer active"
     return None
@@ -2057,9 +2021,6 @@ def _apply_active_target(state: dict, cpu_state: dict, target: tuple) -> dict:
 
 # ── Plugin class ───────────────────────────────────────────────────────────────
 
-from contextlib import contextmanager
-
-
 @contextmanager
 def _tdp_user_transaction():
     """Restore the prior target after a failed hardware apply or durable commit.
@@ -2088,20 +2049,19 @@ def _tdp_user_transaction():
                       restored=False, stage="hardware", repeat=60)
                 return False
 
-        def failure_detail(restored: bool) -> str:
-            return ("previous target restored" if restored
+        def restore_detail() -> str:
+            return ("previous target restored" if restore_previous()
                     else "hardware rollback failed; check limits")
 
         def restore_failed(result: dict) -> dict:
             if not result.get("success", False):
-                detail = failure_detail(restore_previous())
-                result["stderr"] = f"{result.get('stderr') or 'TDP apply failed'}; {detail}"
+                result["stderr"] = f"{result.get('stderr') or 'TDP apply failed'}; {restore_detail()}"
             return result
 
         try:
             yield restore_failed
         except Exception as exc:
-            detail = failure_detail(restore_previous())
+            detail = restore_detail()
             raise RuntimeError(f"TDP operation failed: {exc}; {detail}") from exc
 
 
@@ -2597,7 +2557,7 @@ class Plugin:
                     if app_id not in profiles:
                         # 50 W may have been turned off while this profile was unused.
                         if not state.get("extras_unlocked", False):
-                            _clamp_profile(profile, _standard_ceilings_mw())
+                            _clamp_profile_triplets(profile, _standard_ceilings_mw(), mark_custom=True)
                         profiles[app_id] = profile
                 else:
                     _prepare_cpu_profile(state, profiles, app_id)

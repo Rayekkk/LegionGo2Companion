@@ -494,14 +494,20 @@ class TdpCoreTests(unittest.TestCase):
 
     def test_locking_extras_clamps_saved_profiles_and_reapplies(self):
         tdp._ryzenadj_available = True
-        self.seed({'123': {'spl': 45000, 'sppt': 48000, 'fppt': 50000, 'preset': 'max'}},
-                  extras_unlocked=True, spl=40000, sppt=45000, fppt=50000)
+        self.seed({'123': {'spl': 45000, 'sppt': 48000, 'fppt': 50000, 'preset': 'max',
+                           'ac_separate': True, 'ac_spl': 30000, 'ac_sppt': 40000,
+                           'ac_fppt': 50000, 'ac_preset': 'fast'}},
+                  extras_unlocked=True, spl=40000, sppt=45000, fppt=50000,
+                  active_preset='mine')
         self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
         saved = self.saved()
-        self.assertEqual((saved['spl'], saved['sppt'], saved['fppt']), (35000, 37000, 45000))
+        self.assertEqual((saved['spl'], saved['sppt'], saved['fppt'], saved['active_preset']),
+                         (35000, 37000, 45000, 'custom'))
         game = self.saved('game_profiles')['123']
         self.assertEqual((game['spl'], game['sppt'], game['fppt'], game['preset']),
                          (35000, 37000, 45000, 'custom'))
+        self.assertEqual((game['ac_spl'], game['ac_sppt'], game['ac_fppt'], game['ac_preset']),
+                         (30000, 37000, 45000, 'custom'))
         self.assertEqual(self.ppts(), (35, 37, 45))
 
     # Rollback when a change cannot be saved --------------------------------
@@ -676,7 +682,7 @@ class TdpCoreTests(unittest.TestCase):
     def report_games_from_frontend(self):
         """Resolve the game from set_active_app reports, as on the device."""
         for name, value in {'_get_running_appid': REAL_RUNNING_APPID,
-                            '_scan_proc_for_appid': lambda: '',
+                            'scan_proc_for_appid': lambda: '',
                             '_frontend_appid': '', '_frontend_appid_ts': None}.items():
             self.stack.enter_context(patch.object(tdp, name, value))
 
