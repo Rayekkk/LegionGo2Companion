@@ -17,7 +17,7 @@ from diagnostics import event as diagnostic_event, transition as diagnostic_tran
 import module_runtime
 from system_process import PYTHON, system_env
 from safe_settings import SettingsManager
-from fan_ec import platform_check
+from fan_ec import BETA_MODELS, platform_check
 from fan_guardian import secure_root, check_owners, Sensors, outcome_of
 from fan_ec import Ports, EC
 from fan_sleep import Pause, Retry
@@ -394,6 +394,7 @@ class Plugin:
         self._task = None
         self._mutation = asyncio.Lock()
         self._supported = False
+        self._beta = False  # A model admitted before it was tested (fan_ec.BETA_MODELS).
         self._error = ''
         self._applied = None
         self._preset = None
@@ -558,7 +559,8 @@ class Plugin:
         self._closing = False
         self._load()
         try:
-            await module_runtime.offload('fan', platform_check)
+            identity = await module_runtime.offload('fan', platform_check)
+            self._beta = identity.get('product_name') in BETA_MODELS
             self._supported = True
             diagnostic_transition('fan', 'availability', 'supported', supported=True)
             # Malformed/newer settings stay OFF and untouched until an explicit user edit.
@@ -666,7 +668,7 @@ class Plugin:
                 # RPC; enable must not race the underlying raw-port thread.
                 readings = await module_runtime.complete(module_runtime.offload('fan', read_automatic))
                 telemetry = self._client.snapshot() if self._client else None
-        return dict(success=True, supported=self._supported, settings=copy.deepcopy(self._state), readings=readings,
+        return dict(success=True, supported=self._supported, beta=self._beta, settings=copy.deepcopy(self._state), readings=readings,
                     ownership=(dict(blocked=False, state='companion', reason='') if readings.get('valid') and telemetry and telemetry.get('active')
                         else readings.get('ownership', dict(blocked=True, state='unavailable', reason=readings.get('error', 'Ownership has not been verified.')))),
                     needs_curve_review=not self._settings_valid,

@@ -85,6 +85,17 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         start.assert_not_awaited()
         self.assertIsNone(fresh._task);self.assertIsNone(fresh._client)
 
+    async def test_fan_control_on_the_go_2_z2_is_reported_as_beta(self):
+        for identity, beta in (({'product_name': '83N0'}, False), ({'product_name': '83N1'}, True),
+                               (RuntimeError('Fan Control supports only the Legion Go 2 (83N0 / 83N1).'), False)):
+            plugin = fan.Plugin()
+            with self.subTest(identity=identity), patch.object(fan, 'platform_check', side_effect=[identity]), \
+                    patch.object(plugin, '_release_leftover_override', new=AsyncMock()):
+                await plugin._main()
+                state = await plugin.get_state()
+                self.assertEqual((state['supported'], state['beta']), (isinstance(identity, dict), beta))
+            await plugin._unload()
+
     async def test_tdp_assignment_reparses_tdp_settings_only_after_they_change(self):
         import tdp_backend as tdp
         with patch.object(tdp,'settings',SettingsManager('tdp_settings',self.tmp.name)),patch.object(tdp,'_current_game_id',None):

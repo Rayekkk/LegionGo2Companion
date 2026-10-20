@@ -3,6 +3,7 @@ import copy
 import os
 import unittest
 from unittest.mock import patch
+import fan_ec
 from fan_ec import EC, platform_check, transition_bytes
 from fan_policy import MIN_RPM, MAX_RPM, STOP_OVERRIDE, encode_target
 
@@ -119,6 +120,24 @@ class FanTransportTests(unittest.TestCase):
                 value=dmi[name]; dmi[name]=value+'-unknown'
                 with self.assertRaises(RuntimeError): platform_check()
                 dmi[name]=value
+            dmi.update(board_name='LNVNB000000')
+            with self.assertRaises(RuntimeError): platform_check()  # Only the 83N1 stands in its BIOS line.
+
+    def test_the_go_2_z2_is_admitted_as_beta_on_its_own_bios_line_only(self):
+        dmi={'sys_vendor':'LENOVO','product_name':'83N1','product_version':'Legion Go 8AHP2',
+             'bios_version':'RQCN17WW','board_name':'LNVNB000000'}  # Its board name is unknown: any.
+        with patch('fan_ec.platform.system',return_value='Linux'), patch('fan_ec.platform.machine',return_value='x86_64'), \
+                patch('fan_ec.pathlib.Path.read_text',lambda p:dmi[p.name]):
+            identity=platform_check()
+            self.assertEqual((identity['product_name'],identity['bios_version']),('83N1','RQCN17WW'))
+            self.assertIn(identity['product_name'],fan_ec.BETA_MODELS)
+            self.assertNotIn('83N0',fan_ec.BETA_MODELS)
+            for name,value in (('product_version','Legion Go 8ASP2'),('bios_version','RRCN16WW'),
+                               ('bios_version','XRQCN17WW'),('sys_vendor','OTHER'),('product_name','83E1')):
+                with self.subTest(name=name,value=value):
+                    original=dmi[name]; dmi[name]=value
+                    with self.assertRaises(RuntimeError): platform_check()
+                    dmi[name]=original
 
     def test_any_ec_version_reads_but_a_change_within_the_session_fails(self):
         p=ModelPorts();p.mem.update({0xC300:2,0xC301:3});e=EC(p)

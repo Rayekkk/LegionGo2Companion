@@ -63,8 +63,7 @@ Manage Modules. None of this has been tested on these consoles yet.
 | Fan Control, power-button light, Button mapping, Display, Controller firmware | Hidden | Hidden |
 
 The Legion Go's controllers on older firmware have no Linux driver for lighting, vibration or
-gyro, so Companion hides those modules there. On a Legion Go 2 83N1, Fan Control, the
-power-button light and controller firmware are hidden as well: they need the 83N0.
+gyro, so Companion hides those modules there.
 
 <details>
 <summary><b>Model compatibility and hardware checks</b></summary>
@@ -74,16 +73,16 @@ when the expected Lenovo controller and the complete `hid-lenovo-go` lighting in
 present. An 8AHP2 owner confirmed RGB and sleep/wake recovery on SteamOS 3.9.1 Preview
 (build 20260914.100). This covers controller RGB; not every feature has been verified on 8AHP2.
 
-The **power-button light** and **Fan Control** require the **83N0 / Legion Go 8ASP2** model.
-They do not depend on an exact BIOS or EC version:
+The **power-button light**, **Fan Control** and **controller firmware** require a Legion Go 2:
+**83N0 / Legion Go 8ASP2** or **83N1 / Legion Go 8AHP2** (Fan Control on the 83N1 is a beta:
+its BIOS describes the same EC fields, but the fan registers have not been tested on it, and it
+needs the 83N1's own RQCN BIOS line). They do not depend on an exact BIOS or EC version:
 
 - The power-button light checks that the BIOS's ACPI table still describes the light the same way.
-- Fan Control checks the EC fan interface's readings at every start. After a BIOS or EC update
-  it also runs a one-time fan check: a short raise of the fan speed that Companion watches. If
+- Fan Control checks the EC fan interface's readings at every start. On its first start with a
+  BIOS/EC version it has not seen (on an 83N1 always the first start) it also runs a one-time fan check: a short raise of the fan speed that Companion watches. If
   that check fails, Fan Control returns to firmware automatic, turns off and the page says
   why; turning it on again repeats the check.
-
-83N1 joystick RGB support does not extend either firmware control.
 
 Use only one fan controller at a time. Stop another EC fan-control tool and let it return
 control to firmware before enabling Companion's curve. Detected raw-port owners, an existing

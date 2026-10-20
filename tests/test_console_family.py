@@ -23,7 +23,8 @@ GO1 = dict(product_name="83E1", product_version="Legion Go 8APU1", product_famil
 GO_S = dict(product_name="83L3", product_version="Legion Go S 8ARP1", product_family="Legion Go S 8ARP1")
 GO2 = dict(product_name="83N0", product_version="Legion Go 8ASP2", product_family="Legion Go 8ASP2",
            board_name="LNVNB161216")
-GO2_Z2 = dict(product_name="83N1", product_version="Legion Go 8AHP2", product_family="Legion Go 8AHP2")
+GO2_Z2 = dict(product_name="83N1", product_version="Legion Go 8AHP2", product_family="Legion Go 8AHP2",
+              bios_version="RQCN17WW")
 FOREIGN = dict(product_name="82XA", product_version="Yoga Slim 7", product_family="Yoga Slim 7")
 # console -> (DMI, controller on the kernel driver, joystick-ring LED class, kernel charge modes)
 CONSOLES = {
@@ -42,7 +43,7 @@ EXPECTED = {  # TDP reports its own applicability (tdp_backend).
     "Go S": {"wifi", "rgb", "battery"},
     "Go S without charge modes": {"wifi", "rgb"},
     "Go 2 83N0": EVERYTHING,
-    "Go 2 83N1": EVERYTHING - {"fan"},
+    "Go 2 83N1": EVERYTHING,
     "Lenovo outside the family": {"wifi"},
 }
 
@@ -126,9 +127,8 @@ class ApplicabilityTests(unittest.TestCase):
                 self.assertEqual({name for name, value in applicable.items() if value} - {"tdp"},
                                  EXPECTED[console])
                 # Fan, the power light and controller firmware keep their own Go 2 model gates.
-                go2_83n0 = console == "Go 2 83N0"
-                self.assertIs(applicable["fan"], go2_83n0)
-                self.assertEqual((device["firmware"], device["power_led"]), (console.startswith("Go 2"),) * 2)
+                go2 = console.startswith("Go 2")
+                self.assertEqual((applicable["fan"], device["firmware"], device["power_led"]), (go2,) * 3)
 
     def test_a_failing_rule_hides_its_module_and_is_logged(self):
         plugin = main.Plugin()

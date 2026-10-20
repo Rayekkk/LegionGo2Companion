@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Independent EC implementation. Hardware protocol facts are attributed in SOURCE.md.
 
-    ONLY the 83N0 / 8ASP2 model is admitted. BIOS/EC versions are not pinned:
+    ONLY the Go 2 models in MODELS are admitted. BIOS/EC versions are not pinned:
     the guardian verifies the interface's behaviour instead (plausible(), self-test).
     No WMI fan controls, MMIO writes or arbitrary register API.
 """
@@ -53,16 +53,28 @@ WHITELIST = frozenset((0xC300, 0xC301, 0xC307, 0xC683,
                       0xC6C0, 0xC6C1, 0xC6C2, 0xC6C3, 0xC6C8, 0xC6C9))
 
 
+MODELS = {  # DMI values each must match exactly; bios_version is a prefix.
+    '83N0': {'sys_vendor': 'LENOVO', 'product_name': '83N0',
+             'product_version': 'Legion Go 8ASP2', 'board_name': 'LNVNB161216'},
+    # Beta: the same ERAM/SMA2 fields in its BIOS, the fan registers unconfirmed; its board name is
+    # unknown, so its BIOS line stands in. The self-test proves each new BIOS/EC pair before control.
+    '83N1': {'sys_vendor': 'LENOVO', 'product_name': '83N1',
+             'product_version': 'Legion Go 8AHP2', 'bios_version': 'RQCN'},
+}
+BETA_MODELS = frozenset({'83N1'})
+
+
 def platform_check(root='/sys/class/dmi/id'):
     """Model identity only; returns it with the BIOS version that keys the guardian's self-test."""
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
-        raise RuntimeError('Fan Control requires the validated Legion Go 8ASP2 platform.')
-    expected = {'sys_vendor': 'LENOVO', 'product_name': '83N0',
-                'product_version': 'Legion Go 8ASP2', 'board_name': 'LNVNB161216'}
-    for name, value in expected.items():
-        if (pathlib.Path(root)/name).read_text().strip() != value:
-            raise RuntimeError('Fan Control supports only the Legion Go 2 (83N0 / 8ASP2).')
-    return dict(expected, bios_version=(pathlib.Path(root)/'bios_version').read_text().strip())
+        raise RuntimeError('Fan Control requires the validated Legion Go 2 platform.')
+    read = lambda name: (pathlib.Path(root)/name).read_text().strip()
+    expected = MODELS.get(read('product_name'), MODELS['83N0'])
+    bios = read('bios_version')
+    if any(read(name) != value for name, value in expected.items() if name != 'bios_version') \
+            or not bios.startswith(expected.get('bios_version', '')):
+        raise RuntimeError('Fan Control supports only the Legion Go 2 (83N0 / 83N1).')
+    return dict(expected, bios_version=bios)
 
 
 class Ports:
