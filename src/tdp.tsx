@@ -927,6 +927,22 @@ const useTdpState = (tabShown: boolean) => {
     return () => { active = false; clearInterval(timer); };
   }, [ready, visible, extrasAvailable, helperRetryAvailable]);
 
+  // The Desktop app may change Separate battery presets meanwhile: re-read it on every
+  // later opening (initialization has just read it for the first one).
+  const batteryReadRef = useRef(false);
+  useEffect(() => {
+    if (!ready || !visible) return;
+    if (!batteryReadRef.current) { batteryReadRef.current = true; return; }
+    let active = true;
+    const operation = operationRef.current;
+    getSettings().then((s) => {
+      // A toggle from this page since the read has the newer answer.
+      if (active && !operationBusyRef.current && operation === operationRef.current)
+        setSeparateBattery(s.separate_battery_presets === true);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [ready, visible]);
+
   // ── Game detection ────────────────────────────────────────────────────────────
   // AppWatcher owns this and runs for the whole session, so the backend keeps
   // getting the authoritative appid while the panel is closed. Here we only

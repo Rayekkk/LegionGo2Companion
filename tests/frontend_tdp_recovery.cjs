@@ -454,6 +454,16 @@ run(async () => {
       assert.equal(count(h, 'apply_tdp'), 0, 'the backend applies the values itself');
       h.unmount();
     }
+    // Switched in the Desktop app while the panel was closed: the next opening shows it.
+    const reopened = mount({ responses: { get_caps: batteryCaps, get_settings: settings } });
+    assert.equal(field(await ready(reopened), 'Separate battery presets').props.checked, false);
+    reopened.visible(false); await settle();
+    reopened.responses.get_settings = { ...settings, separate_battery_presets: true };
+    reopened.visible(true); await settle();
+    const shown = reopened.render();
+    assert.equal(field(shown, 'Separate battery presets').props.checked, true);
+    assert.ok(JSON.stringify(shown).includes('Balanced · 16 W (boost 16/30 W)'));
+    reopened.unmount();
     const h = mount({ responses: { get_caps: { ...caps, wmi: false, extras: false, tdp_available: false } } });
     assert.equal(field(await ready(h), 'Separate battery presets'), undefined); h.unmount();
   });

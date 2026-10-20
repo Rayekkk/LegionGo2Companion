@@ -85,10 +85,11 @@ run(async()=>{
    assert.equal(count(base,read),1,`No-game TDP initialization reads ${read} once.`);
  base.hide();base.show();await settle();
  assert.equal(count(base,'get_power_source'),2,'Reopening still refreshes power source.');
+ assert.equal(count(base,'get_settings'),2,'Reopening rereads settings the Desktop app may have changed.');
  await base.setGame(111);base.render();await settle();base.render();
  assert.equal(count(base,'get_game_profile'),1);
  await base.setGame(null);base.render();await settle();base.render();
- assert.equal(count(base,'get_settings'),2,'Leaving a game still reloads global settings.');
+ assert.equal(count(base,'get_settings'),3,'Leaving a game still reloads global settings.');
  assert.equal(count(base,'apply_tdp'),0,'The backend, not the panel, applies game and global limits.');
  base.unmount();
  const simple=mount('tdp.tsx','TdpPage',{
