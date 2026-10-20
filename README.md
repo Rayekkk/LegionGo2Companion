@@ -100,9 +100,8 @@ copies of those plugins still count. An unreadable manifest of an unrelated plug
 logged and does not pause Companion; failure to inspect the plugin directory itself still
 blocks controls.
 
-Companion's own settings live outside its plugin folder, so replacing the plugin files
-keeps them. After installation, check **Manage Modules** and **Display**, where setup or a
-Gaming Mode restart may be requested.
+Companion keeps its own settings when it is installed again or updated. After installation,
+check **Manage Modules** and **Display**, where setup or a Gaming Mode restart may be requested.
 
 </details>
 
@@ -111,10 +110,13 @@ Gaming Mode restart may be requested.
 1. Open **About → Check for updates**.
 2. Choose **Download &lt;version&gt;** and wait until the page shows the file in your Downloads folder.
 3. Install that ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
-4. Afterwards, check your settings, especially Fan Control, gyro, battery protection and Wi-Fi.
+4. If Display asks for it, restart Gaming Mode.
 
-Downloading does not install the update. If Fan Control was on, it resumes your curve after
-the update, and an open Desktop app restarts in the new version.
+Downloading does not install the update. Decky removes the old version first, so Companion
+hands the hardware back for a moment; the new version applies your settings again when it
+starts. Display reinstalls its script and asks for a Gaming Mode restart, and an open Desktop
+app restarts in the new version. The update from 2.2.x or older still loses the gyro source,
+battery protection, lighting control and Wi-Fi band policy once; set them again afterwards.
 
 <details>
 <summary><b>How updates are checked</b></summary>
@@ -122,8 +124,7 @@ the update, and an open Desktop app restarts in the new version.
 Opening About alone does not contact GitHub. Only stable releases with a plugin ZIP are
 offered. Companion verifies the ZIP's version, size, SHA-256 digest and contents before it
 offers the file; if checking or downloading fails, the page shows the reason and you can try
-again. A failed download never replaces an existing ZIP. Decky's installation can reset some
-hardware preferences, which is why step 4 is there.
+again. A failed download never replaces an existing ZIP.
 
 </details>
 
