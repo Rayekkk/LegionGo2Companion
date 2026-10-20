@@ -398,6 +398,23 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual((saved['extras_unlocked'], saved['spl'], saved['fppt']), (True, 35000, 50000))
         self.assertEqual(self.saved('game_profiles')['123']['spl'], 40000)
 
+    def test_loaded_spl_is_bounded_by_the_last_sane_firmware_ceiling(self):
+        self.seed(spl=33000, sppt=40000, fppt=45000)
+        spl_max = self.firmware / tdp.WMI_ATTRS['spl'] / 'max_value'
+        self.assertEqual(tdp._load_settings()['spl'], 33000)  # 35 W before any firmware read
+        spl_max.write_text('30')
+        self.rpc('get_caps')
+        self.assertEqual(tdp._load_settings()['spl'], 30000)
+        for broken in ('500', '0', None):
+            with self.subTest(firmware_spl_max=broken):
+                tdp._firmware_spl_max_mw = None
+                if broken is None:
+                    spl_max.unlink()
+                else:
+                    spl_max.write_text(broken)
+                self.rpc('get_caps')
+                self.assertEqual(tdp._load_settings()['spl'], 33000)
+
     def test_start_without_firmware_or_helper_is_ready_but_reports_tdp_unavailable(self):
         shutil.rmtree(self.firmware)
         self.bin.unlink()

@@ -344,10 +344,9 @@ def _clamp_triplet(spl, sppt, fppt,
 def _load_ceilings_mw() -> tuple[int, int, int]:
     """Bounds for saved values: no mode runs SPL above the firmware ceiling, so a
     higher SPL saved by 2.2.0 or earlier reads as what actually runs."""
-    # The Legion Go 2 ceiling as a constant: loads are frequent and every firmware read
-    # is a WMI call; applying still clamps to the live firmware ceiling.
-    # shortcut: assumes the firmware SPL max is 35 W, use a cached live ceiling if a BIOS reports otherwise.
-    return FALLBACK_STD_W["spl"] * 1000, HARD_MAX_MW, HARD_MAX_MW
+    # Loads are frequent and every firmware read is a WMI call, so this takes the SPL max
+    # the last firmware read reported (35 W until one has); applying clamps to the live one.
+    return _firmware_spl_max_mw or FALLBACK_STD_W["spl"] * 1000, HARD_MAX_MW, HARD_MAX_MW
 
 
 def _clamp_for_settings(state: dict, spl, sppt, fppt) -> tuple[int, int, int]:
@@ -775,6 +774,10 @@ def _wmi_read(key: str, leaf: str) -> int | None:
         return None
 
 
+# SPL max from the last firmware read that looked sane; the ceiling for loaded values.
+_firmware_spl_max_mw: int | None = None
+
+
 def _wmi_caps() -> dict:
     """Firmware-reported {min,max} in watts per parameter, or {} when unavailable."""
     caps = {}
@@ -783,6 +786,9 @@ def _wmi_caps() -> dict:
         if lo is None or hi is None:
             return {}
         caps[key] = {"min": lo, "max": hi}
+    global _firmware_spl_max_mw
+    if HARD_MIN_MW <= caps["spl"]["max"] * 1000 <= HARD_MAX_MW:
+        _firmware_spl_max_mw = caps["spl"]["max"] * 1000
     return caps
 
 
