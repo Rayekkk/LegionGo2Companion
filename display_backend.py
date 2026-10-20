@@ -1448,6 +1448,7 @@ class Plugin:
     _hybrid_pq_hold_until = 0.0
     _hybrid_sdr_since = None
     _edid_recheck_until = 0.0
+    # Re-entrant on purpose: methods that take these locks also call each other while holding them.
     _runtime_lock = threading.RLock()
     _edid_lock = threading.RLock()
     _mode_lock = asyncio.Lock()
