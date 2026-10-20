@@ -28,9 +28,8 @@ class SystemProcessTests(unittest.TestCase):
             environments = [call.kwargs['env'] for call in run.call_args_list]
             proc = Mock(returncode=0)
             proc.communicate.return_value = (b'ok', b'')
-            with patch.object(subprocess, 'Popen', return_value=proc) as popen, \
-                 patch.object(tdp, '_ryzenadj_available', True):
-                self.assertEqual(tdp._run_ryzenadj(['-i'])[0], 0)
+            with patch.object(subprocess, 'Popen', return_value=proc) as popen:
+                self.assertEqual(tdp._spawn_ryzenadj(['-i'], 5.0)[0], 0)
                 environments.append(popen.call_args.kwargs['env'])
             environments.append(display._system_env(LC_ALL='C'))
             for actual in environments:

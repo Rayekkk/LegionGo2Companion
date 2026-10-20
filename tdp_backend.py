@@ -33,7 +33,9 @@ if PLUGIN_DIR not in sys.path:
 # name before we are imported, and sys.modules wins over sys.path.
 from tdp_updater import Updater  # noqa: E402 - needs the sys.path line above
 
-BIN_DIR       = os.path.join(PLUGIN_DIR, "bin")
+# Root's own directory outside Decky's tree: Decky deletes the plugin directory on
+# every update (it uninstalls first), and the helper has to outlive that.
+BIN_DIR       = "/var/lib/legiongo2companion-tdp"
 BIN_PATH      = os.path.join(BIN_DIR, "ryzenadj")
 RYZENADJ_URL  = (
     "https://github.com/FlyGoat/RyzenAdj/releases/download/v0.19.0/"
@@ -109,6 +111,10 @@ _apply_lock = threading.Lock()
 # when the user asks for Extras, and the Extras range is not advertised until
 # the executable actually exists and passed its integrity check.
 _ryzenadj_available: bool = False
+# The verified helper ran and could not read this CPU: Extras are not offered, as
+# downloading it again would not help.
+_ryzenadj_unsupported: bool = False
+RYZENADJ_UNSUPPORTED_CPU = "RyzenAdj does not support this console's processor."
 
 # Cache of last successful --info parse - keeps UI responsive when lock is held
 _info_cache: dict = {}
@@ -660,9 +666,36 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def _root_only(path: str, kind) -> bool:
+    """`path` is a `kind` (S_ISDIR/S_ISREG), not a symlink, that only we (root) can change."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    # Windows (the test suite) has no POSIX owners; the console is Linux.
+    return kind(info.st_mode) and (os.name != "posix" or (
+        info.st_uid == os.geteuid() and not info.st_mode & 0o022))
+
+
+def _helper_dir() -> None:
+    """Create the helper directory, or refuse one that is not root's own."""
+    try:
+        os.mkdir(BIN_DIR, 0o700)
+    except FileExistsError:
+        pass
+    if not _root_only(BIN_DIR, stat.S_ISDIR):
+        raise RuntimeError(f"unsafe RyzenAdj directory {BIN_DIR}")
+
+
+def _helper_verified() -> bool:
+    """Checked before every run, not only at install: the pinned binary in root's directory."""
+    return (_root_only(BIN_DIR, stat.S_ISDIR) and _root_only(BIN_PATH, stat.S_ISREG)
+            and _sha256_file(BIN_PATH) == RYZENADJ_BINARY_SHA256)
+
+
 def _download_ryzenadj(cancel=None) -> None:
     decky.logger.info(f"[legotdp] Downloading ryzenadj from {RYZENADJ_URL}")
-    os.makedirs(BIN_DIR, exist_ok=True)
+    _helper_dir()
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
     os.close(tmp_fd)
     bin_tmp = ""
@@ -713,12 +746,15 @@ def _download_ryzenadj(cancel=None) -> None:
 
 
 def _ensure_ryzenadj(cancel=None, download=True) -> bool:
+    """True once the verified helper is installed and can read this CPU."""
+    global _ryzenadj_unsupported
     if cancel is not None and cancel():
         raise InterruptedError("RyzenAdj download was cancelled")
-    if not os.path.isfile(BIN_PATH) or _sha256_file(BIN_PATH) != RYZENADJ_BINARY_SHA256:
+    if not _helper_verified():
         if not download:
             return False
-        if os.path.isfile(BIN_PATH):
+        _helper_dir()  # before the unlink: never through a planted symlink
+        if os.path.lexists(BIN_PATH):
             decky.logger.warning(
                 "[legotdp] existing ryzenadj failed integrity verification; replacing it")
             os.unlink(BIN_PATH)
@@ -726,16 +762,26 @@ def _ensure_ryzenadj(cancel=None, download=True) -> bool:
     mode = os.stat(BIN_PATH).st_mode
     if not (mode & stat.S_IXUSR):
         os.chmod(BIN_PATH, mode | 0o111)
+    # Only a definite answer counts: on a CPU it does not know, ryzenadj exits at once
+    # without a power table. A timeout or a kill proves nothing.
+    rc, out, _ = _spawn_ryzenadj(["--info"], timeout=3.0)
+    _ryzenadj_unsupported = rc > 0 and not _parse_ryzenadj_output(out)
+    if _ryzenadj_unsupported:
+        raise RuntimeError(RYZENADJ_UNSUPPORTED_CPU)
     return True
 
 
 # ── ryzenadj helpers ───────────────────────────────────────────────────────────
 
 def _run_ryzenadj(args: list, timeout: float = 5.0) -> tuple[int, str, str]:
-    """Run ryzenadj, return (returncode, stdout, stderr).
-    Uses Popen so kill() after timeout never calls communicate() and blocks."""
-    if not _ryzenadj_available or not os.path.isfile(BIN_PATH):
+    """Run the verified ryzenadj, return (returncode, stdout, stderr)."""
+    if not _ryzenadj_available or not _helper_verified():
         return -1, "", "verified ryzenadj is unavailable"
+    return _spawn_ryzenadj(args, timeout)
+
+
+def _spawn_ryzenadj(args: list, timeout: float) -> tuple[int, str, str]:
+    """Uses Popen so kill() after timeout never calls communicate() and blocks."""
     proc = subprocess.Popen([BIN_PATH] + args,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=system_env(LC_ALL="C"))
@@ -2616,7 +2662,8 @@ class Plugin:
                 "tdp_available": available,
                 "tdp_error": error,
                 # Enabling Extras (or this retry) downloads the verified helper.
-                "helper_retry_available": helper_usable and not helper_available,
+                "helper_retry_available": (helper_usable and not helper_available
+                                           and not _ryzenadj_unsupported),
                 "presets": presets,
                 # No measured ladder for this machine type: scaled from the firmware ceilings.
                 "presets_estimated": estimated,

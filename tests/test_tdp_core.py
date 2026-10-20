@@ -10,6 +10,7 @@ import copy
 from contextlib import ExitStack
 import hashlib
 import io
+import os
 from pathlib import Path
 import shutil
 import tarfile
@@ -24,6 +25,7 @@ from safe_settings import AtomicSettingsManager
 import module_control
 
 REAL_RUNNING_APPID = tdp._get_running_appid
+REAL_BIN_DIR, REAL_PLUGIN_DIR = tdp.BIN_DIR, tdp.PLUGIN_DIR
 # The module's runtime state as imported (before any test ran): plain values, no locks or functions.
 PRISTINE_STATE = {name: copy.copy(value) for name, value in vars(tdp).items()
                   if name.startswith('_') and not name.startswith('__')
@@ -63,7 +65,7 @@ class TdpCoreTests(unittest.TestCase):
         self.tmp.mkdir()
         self.store = AtomicSettingsManager('tdp_settings', str(self.root / 'settings'))
         self.seed()
-        self.app, self.ac, self.machine = '', False, '83N0'
+        self.app, self.ac, self.machine, self.cpu_unknown = '', False, '83N0', False
         self.ryzenadj = []
         self.smu = {}  # limits written through ryzenadj; otherwise it reads the firmware's
         self.profile_writes = []
@@ -85,11 +87,14 @@ class TdpCoreTests(unittest.TestCase):
                 for flag, _, value in (arg.partition('=') for arg in argv[1:]):
                     if flag in LIMIT_FLAGS:
                         test.smu[LIMIT_FLAGS[flag]] = int(value) / 1000
-                self.returncode = 0
+                self.returncode = 1 if test.cpu_unknown else 0
 
             def communicate(self, timeout=None):
+                if test.cpu_unknown:
+                    return b'', b'Unable to init ryzenadj'
                 if test.ryzenadj[-1] == ['--info']:
-                    live = {key: test.smu.get(key, test.ppt(key)) for key in LIMIT_FLAGS.values()}
+                    live = {key: test.smu.get(key, 0) if key in test.smu or not test.firmware.exists()
+                            else test.ppt(key) for key in LIMIT_FLAGS.values()}
                     return INFO.format(**live).encode(), b''
                 return b'', b''
 
@@ -174,6 +179,12 @@ class TdpCoreTests(unittest.TestCase):
                              ('RYZENADJ_BINARY_SHA256', hashlib.sha256(HELPER).hexdigest()
                               if binary_ok else wrong)):
             self.stack.enter_context(patch.object(tdp, name, digest))
+
+    def helper_ready(self):
+        """The verified helper is installed and in use."""
+        self.bin.write_bytes(HELPER)
+        self.stack.enter_context(patch.object(tdp, 'RYZENADJ_BINARY_SHA256', hashlib.sha256(HELPER).hexdigest()))
+        tdp._ryzenadj_available = True
 
     def start(self):
         """Run the module's startup; the two background loops are not started."""
@@ -262,7 +273,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (20, 20, 20))
 
     def test_out_of_firmware_range_uses_verified_ryzenadj_clamped_to_50w(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         result = tdp._apply_limits(60000, 70000, 80000)
         self.assertTrue(result['success'], result)
         self.assertEqual(self.applies(), [[
@@ -276,21 +287,21 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (10, 10, 10))
 
     def test_firmware_failure_inside_range_never_falls_back_to_ryzenadj(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         with self.firmware_ignores_writes():
             result = tdp._apply_limits(18000, 22000, 30000)
         self.assertFalse(result['success'])
         self.assertEqual(self.applies(), [])
 
     def test_rpc_without_extras_is_clamped_to_firmware_ceilings(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         result = self.rpc('apply_tdp', 45000, 48000, 50000)
         self.assertTrue(result['success'], result)
         self.assertEqual(self.ppts(), (35, 37, 45))
         self.assertEqual(self.applies(), [])
 
     def test_rpc_with_extras_reaches_ryzenadj(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         self.seed(extras_unlocked=True)
         self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])
         # The SMU keeps sustained power at the firmware's SPL ceiling; only the boosts go higher.
@@ -302,7 +313,7 @@ class TdpCoreTests(unittest.TestCase):
 
     def test_extras_low_sustained_limit_is_shown_as_set_and_not_reapplied(self):
         # Legion Go 2 (2026-10-19): ryzenadj 15/40/50 W reads back STAPM 15, slow 40, fast 50.
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         self.seed(extras_unlocked=True)
         self.assertTrue(self.rpc('apply_tdp', 15000, 40000, 50000)['success'])
         tdp._refresh_info_cache()  # one info-loop tick
@@ -406,6 +417,56 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(len(self.downloads), 1)
         self.assertFalse(self.saved()['extras_unlocked'])
 
+    def test_helper_lives_outside_the_plugin_directory_and_survives_an_update(self):
+        self.assertTrue(REAL_BIN_DIR.startswith('/var/lib/'))  # root's, not Decky's tree
+        self.assertFalse(REAL_BIN_DIR.startswith(REAL_PLUGIN_DIR))
+        self.bin.unlink()
+        self.publish_helper()
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        # Decky's update: unload, uninstall, a new plugin directory, a fresh start.
+        asyncio.run(self.plugin._uninstall())
+        tdp._ryzenadj_available = False
+        plugin = self.start()
+        self.assertTrue(asyncio.run(plugin.get_caps())['extras'])  # no Retry, no new download
+        self.assertEqual(len(self.downloads), 1)
+        self.assertTrue(self.rpc('apply_tdp', 30000, 45000, 50000)['success'])
+        self.assertEqual(self.applies()[-1],
+                         ['--stapm-limit=30000', '--slow-limit=45000', '--fast-limit=50000'])
+
+    def test_helper_is_verified_before_every_run(self):
+        self.bin.unlink()
+        self.publish_helper()
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.bin.write_bytes(HELPER + b'tampered')
+        self.assertFalse(tdp._apply_limits(30000, 45000, 50000)['success'])
+        self.assertEqual(self.applies(), [])
+        self.start()
+        self.assertFalse(tdp._ryzenadj_available)  # nor does a restart
+
+    def test_helper_that_cannot_read_the_cpu_hides_extras(self):
+        self.bin.unlink()
+        self.publish_helper()
+        self.cpu_unknown = True
+        result = self.rpc('set_extras_unlocked', True)
+        self.assertFalse(result['success'])
+        self.assertIn(tdp.RYZENADJ_UNSUPPORTED_CPU, result['stderr'])
+        caps = self.rpc('get_caps')
+        self.assertEqual((caps['extras'], caps['helper_retry_available'], caps['tdp_available']),
+                         (False, False, True))
+        self.assertFalse(self.saved()['extras_unlocked'])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlinks')
+    def test_helper_directory_that_is_a_symlink_is_refused(self):
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir()
+        shutil.rmtree(self.bin.parent)
+        self.bin.parent.symlink_to(elsewhere)
+        self.publish_helper()
+        result = self.rpc('set_extras_unlocked', True)
+        self.assertFalse(result['success'])
+        self.assertIn('unsafe RyzenAdj directory', result['stderr'])
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
     # Startup and capabilities ----------------------------------------------
 
     def test_offline_start_never_downloads_and_keeps_saved_extras_intent(self):
@@ -461,7 +522,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(caps['helper_retry_available'])
         self.assertFalse(caps['extras'])
         self.assertIn('unavailable', caps['tdp_error'])
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         caps = self.rpc('get_caps')
         self.assertEqual((caps['tdp_available'], caps['extras'], caps['helper_retry_available']),
                          (True, True, False))
@@ -470,7 +531,7 @@ class TdpCoreTests(unittest.TestCase):
         boost = self.cpu / 'cpufreq/boost'
         boost.parent.mkdir(parents=True)
         boost.write_text('0')
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         self.seed(cpu_boost_enabled=True)
         self.machine = '82XX'  # a Lenovo outside the Legion Go family
         with patch.object(tdp.Plugin, '_ready', False), \
@@ -538,7 +599,7 @@ class TdpCoreTests(unittest.TestCase):
         presets = self.rpc('get_caps')['presets']
         self.assertEqual(presets['silent'], {'spl': 10, 'sppt': 16, 'fppt': 20})
         self.assertEqual(presets['balanced'], {'spl': 16, 'sppt': 25, 'fppt': 30})
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         self.assertTrue(tdp._apply_limits(6000, 7000, 8000)['success'])
         self.assertEqual(self.ppts(), (10, 16, 18))  # raised to the firmware's floor, not ryzenadj
         self.assertEqual(self.applies(), [])
@@ -546,7 +607,7 @@ class TdpCoreTests(unittest.TestCase):
     def test_console_without_firmware_attributes_has_no_tdp_and_never_runs_ryzenadj(self):
         self.machine = '83E1'
         shutil.rmtree(self.firmware)
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         caps = self.rpc('get_caps')
         self.assertEqual((caps['tdp_available'], caps['extras'], caps['helper_retry_available'],
                           caps['tdp_error']), (False, False, False, tdp.NO_FIRMWARE_TDP))
@@ -581,7 +642,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual((instance / tdp.WMI_ATTRS['fppt'] / 'current_value').read_text(), '30')
 
     def test_locking_extras_clamps_saved_profiles_and_reapplies(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         self.seed({'123': {'spl': 45000, 'sppt': 48000, 'fppt': 50000, 'preset': 'max',
                            'ac_separate': True, 'ac_spl': 30000, 'ac_sppt': 40000,
                            'ac_fppt': 50000, 'ac_preset': 'fast'}},
@@ -734,7 +795,7 @@ class TdpCoreTests(unittest.TestCase):
 
     def test_unreachable_target_with_a_persistent_live_mismatch_stays_bounded(self):
         self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
-        tdp._ryzenadj_available = True  # enables the live cross-check
+        self.helper_ready()  # enables the live cross-check
         self.profile_writes.clear()
         clock = [100.0]
         with patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]), \
@@ -853,7 +914,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.applies(), [])
 
     def test_release_uses_balanced_without_the_helper_when_a_ppt_cap_is_missing(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         (self.firmware / tdp.WMI_ATTRS['fppt'] / 'max_value').unlink()
         for operation in ('uninstall', 'module_disable'):
             with self.subTest(operation=operation):
@@ -866,7 +927,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ryzenadj, [])
 
     def test_release_is_not_a_success_until_balanced_reads_back(self):
-        tdp._ryzenadj_available = True
+        self.helper_ready()
         self.profile_sticks = False
         for case in ('firmware attributes present', 'firmware attributes missing'):
             with self.subTest(case):
