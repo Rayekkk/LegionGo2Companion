@@ -80,8 +80,11 @@ PRESET_TABLE = {
     "83N1": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # BIOS: same as 83N0
     "83L3": _GO_S_LADDER,
     "83N6": _GO_S_LADDER,
-    # shortcut: only SPPT is certain in the Go's BIOS; SPL and FPPT are scaled until confirmed.
-    "83E1": {"silent": {"sppt": 15}, "balanced": {"sppt": 25}, "performance": {"sppt": 32}},
+    "83E1": {  # BIOS SSFM table
+        "silent":      {"spl": 8,  "sppt": 15, "fppt": 20},
+        "balanced":    {"spl": 15, "sppt": 25, "fppt": 30},
+        "performance": {"spl": 20, "sppt": 32, "fppt": 35},
+    },
 }
 
 # Lenovo firmware attributes. Writing these goes through the EC instead of poking the
