@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
-"""Legion Go 2 controller diagnostics and reversible InputPlumber IMU selection.
+"""Legion Go controller diagnostics and reversible InputPlumber IMU selection.
 
 The packet decoders below are independent implementations of protocol layouts
 documented by InputPlumber, not copies of its GPL driver implementation:
@@ -389,7 +389,7 @@ class Plugin:
 
             physical, _virtual = _hid_inventory()
             if physical is None:
-                result = self._battery_result(reason="The supported Legion Go 2 controller is unavailable.")
+                result = self._battery_result(reason="The supported Legion Go controller is unavailable.")
                 self._battery_cache = (now, copy.deepcopy(result))
                 return result
 
@@ -438,7 +438,7 @@ class Plugin:
             else:
                 state = _state()
                 physical, virtual = _hid_inventory()
-                reason = "" if physical else "The supported Legion Go 2 controller is unavailable."
+                reason = "" if physical else "The supported Legion Go controller is unavailable."
                 applied = None
                 available = False
                 controlled = False
@@ -486,7 +486,7 @@ class Plugin:
                 return
             physical, _ = _hid_inventory()
             if physical is None:
-                raise ControllerError("The supported Legion Go 2 controller is unavailable.")
+                raise ControllerError("The supported Legion Go controller is unavailable.")
             release_pending = bool(old["ownership"] and old["ownership"].get("release_pending"))
             device = _discover(physical, require_exclusive=not release_pending)
             if release_pending:
@@ -792,7 +792,7 @@ class Plugin:
             self._stop_capture()
             records = _hid_inventory()
             if records[0] is None:
-                raise ControllerError("The supported Legion Go 2 controller is unavailable.")
+                raise ControllerError("The supported Legion Go controller is unavailable.")
             now = _capture_time()
             stream = {"reports": 0, "invalid_reports": 0, "sample": None, "last": None, "error": "",
                       "times": deque(maxlen=4096)}

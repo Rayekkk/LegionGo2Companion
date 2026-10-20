@@ -102,6 +102,8 @@ class ImuTests(unittest.TestCase):
         self.put(self.device / "hardware_generation", "1")
         self.assertTrue(imu.read_status()["available"])
         self.assertEqual(self.writes, [])
+        self.driver.return_value = "hid-generic"  # Its reason names no other console.
+        self.assertNotIn("Go 2", imu.read_status()["reason"])
 
     def test_wrong_dmi_is_rejected_without_writing(self):
         for attr, value in (("sys_vendor", "OTHER"), ("product_name", "83L3"), ("product_name", "82XA")):

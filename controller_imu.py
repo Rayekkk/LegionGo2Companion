@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
-"""Checked Go 2 IMU bypass access for the controller's common transaction.
+"""Checked Legion Go controller IMU bypass access for the controller's common transaction.
 
 This module has no settings, worker, or startup writes. The caller must prepare
 its durable journal (including baseline/expected/desired) before apply(), then
@@ -90,8 +90,8 @@ def _discover() -> Path:
             continue
         matches.append(device)
     if len(matches) != 1:
-        raise ImuError("A compatible Go 2 IMU interface was not found." if not matches else
-                       "More than one Go 2 IMU interface was found; none was selected.")
+        raise ImuError("A compatible Legion Go controller IMU was not found." if not matches else
+                       "More than one Legion Go controller IMU was found; none was selected.")
     device = matches[0]
     for side in SIDES:
         attribute = _attribute(device, side)
