@@ -443,6 +443,74 @@ class DisplayStopDuringStartTests(ResetFixture, unittest.TestCase):
         self.assertEqual(self.uninstalled, [True])
 
 
+class DisplayUpdateTests(ResetFixture, unittest.TestCase):
+    """Decky runs _uninstall before every update, then starts the new version in the same session."""
+    def setUp(self):
+        super().setUp()
+        self.patch(display, SCRIPT_DIR=str(self.root), BUNDLED_SCRIPT=display.BUNDLED_SCRIPT,
+                   _bind_script_dir=Mock(return_value=True), _pick_display=Mock(return_value=True),
+                   _identify_panel=Mock(return_value=(True, 'fixture')), _find_backlight=Mock(return_value=''),
+                   _watch_properties=AsyncMock())
+        self.patch(display.Plugin, _task=None, _prop_task=None, _edid_pass=Mock(), _hybrid_pass=Mock(),
+                   _hybrid_release=Mock(return_value=True), _edid_restore=Mock(return_value=True))
+        self.patch(self.plugin, _loop=AsyncMock())
+
+    def update(self, between=lambda: None):
+        async def scenario():
+            await self.plugin._uninstall()
+            between()
+            # The new process knows nothing about the running session yet.
+            display.Plugin._gamescope_started_at = display.Plugin._loaded_script_variant = None
+            self.state.update(setup_done=False, restart_pending=False, setup_note='', setup_error='')
+            await display.Plugin()._main()
+        asyncio.run(scenario())
+
+    def test_update_reinstalls_the_set_up_script_and_asks_for_a_gaming_mode_restart(self):
+        removed = []
+        self.update(lambda: removed.append(self.script.exists()))
+        self.assertEqual(removed, [False], 'uninstall removes the script')
+        self.assertIn((display.ATOM_HDR_ENABLED, 0), self.atoms, 'uninstall leaves the panel in gamma 2.2')
+        self.assertEqual(self.script.read_bytes(), self.own_lua)
+        self.assertTrue(self.state['setup_done'])
+        self.assertTrue(self.state['restart_pending'])
+        self.assertEqual(self.state['setup_error'], '')
+        self.assertEqual(self.persisted()['panel_mode'], 'hybrid')
+        self.assertIs(self.persisted()['script_reinstall'], False, 'only once')
+
+    def test_update_never_replaces_a_script_found_in_its_place(self):
+        self.update(lambda: self.script.write_bytes(b'-- hand tuned'))
+        self.assertEqual(self.script.read_bytes(), b'-- hand tuned')
+        self.assertFalse(self.state['setup_done'])
+        self.assertFalse(self.state['restart_pending'])
+
+    def test_update_installs_nothing_while_the_native_profile_runs(self):
+        def native():
+            self.patch(display.Plugin, native_display_active=Mock(return_value=True))
+        self.update(native)
+        self.assertFalse(self.script.exists())
+
+    def test_a_script_deleted_by_hand_is_not_reinstalled_at_a_plain_restart(self):
+        self.script.unlink()
+        self.state.update(setup_done=False)
+        asyncio.run(self.plugin._main())
+        self.assertFalse(self.script.exists())
+        self.assertFalse(self.state['setup_done'])
+
+    def test_update_from_2_2_reinstalls_but_from_2_1_0_leaves_setup(self):
+        # 2.2.x wrote no marker but always has the EDID journal key; 2.1.0 never wrote it.
+        for version, edid_keys, installed in (('2.2', True, True), ('2.1.0', False, False)):
+            with self.subTest(version=version):
+                self.store.replace({key: value for key, value in self.saved.items()
+                                    if key != 'script_reinstall' and (edid_keys or not key.startswith('edid_write'))})
+                if self.script.exists():
+                    self.script.unlink()
+                display.Plugin._gamescope_started_at = display.Plugin._loaded_script_variant = None
+                self.state.update(setup_done=False, restart_pending=False)
+                asyncio.run(display.Plugin()._main())
+                self.assertEqual(self.script.exists(), installed)
+                self.assertEqual(self.state['restart_pending'], installed)
+
+
 class NativeDisplayMigrationTests(LegacyHybridFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()

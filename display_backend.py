@@ -218,6 +218,7 @@ DEFAULT_SETTINGS = {
     "native_cleanup_note": "",
     "edid_write_pending": None,
     "edid_patched_identity": None,
+    "script_reinstall": False,  # our uninstall removed the script; the next start puts it back
 }
 
 settings = SettingsManager(
@@ -2248,6 +2249,23 @@ class Plugin:
             return ok
 
     @staticmethod
+    def _script_lost_to_update() -> bool:
+        """True once after our uninstall removed the script of a mode set up earlier, if nothing took its place."""
+        with Plugin._runtime_lock:
+            if not _bind_script_dir():
+                return False  # The Gaming Mode user is not known yet; the next start decides.
+            marker = settings.getSetting("script_reinstall", None)
+            if marker is None:
+                # shortcut: 2.2.x left no marker; only 2.2+ writes the EDID journal key, and 2.1.0
+                # users choose again in Setup. Drop once updates from 2.2.x are no longer expected.
+                marker = "edid_write_pending" in settings.settings
+            if settings.getSetting("script_reinstall", None) is not False:
+                Plugin._store_settings({"script_reinstall": False})
+            return (marker is True and Plugin._state.get("panel_mode") in MODES
+                    and not Plugin._state.get("reset_in_progress")
+                    and not Plugin.native_display_active() and not os.path.lexists(INSTALLED_SCRIPT))
+
+    @staticmethod
     def _refresh_setup() -> None:
         """Re-check the display script; someone may have replaced it behind us."""
         with Plugin._runtime_lock:
@@ -3198,6 +3216,9 @@ class Plugin:
         stopped = functools.partial(module_runtime.stop_requested, "display")
         if Plugin._state["reset_in_progress"] and not stopped():
             await self.reset_settings()
+        if not stopped() and await _offload(Plugin._script_lost_to_update):
+            diagnostic_event('display', 'script_reinstalled', mode=Plugin._state["panel_mode"])
+            await Plugin._apply_mode(Plugin._state["panel_mode"])
 
         # Before the slower startup work: a game that creates its surface before
         # the forced-support flag is back loses HDR for its whole run.
@@ -3303,7 +3324,11 @@ class Plugin:
                 with Plugin._runtime_lock:
                     if Plugin.native_display_active():
                         return None
-                    return _uninstall_script()
+                    note = _uninstall_script()
+                    if note == "removed the display script":
+                        # Decky also uninstalls before every update; the next start puts it back.
+                        Plugin._store_settings({"script_reinstall": True})
+                    return note
             note = await _offload(uninstall_legacy_script)
             if note is None:
                 await self.cleanup_native_display()
