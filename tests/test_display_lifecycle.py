@@ -479,7 +479,24 @@ class DisplayUpdateTests(ResetFixture, unittest.TestCase):
         self.assertEqual(self.state['setup_error'], '')
         self.assertEqual(self.persisted()['panel_mode'], 'hybrid')
         self.assertIs(self.persisted()['script_reinstall'], False, 'only once')
-        self.assertIsNone(self.persisted()['script_reinstall_loaded'])
+
+    def test_a_reload_after_a_silent_reinstall_asks_only_in_another_session(self):
+        self.update()
+        self.assertFalse(self.state['restart_pending'])
+        for case, session, asks in (('the same Gaming Mode session', 100.0, False),
+                                    ('a new Gaming Mode session', 200.0, True)):
+            with self.subTest(case):
+                async def reload():
+                    # A new process: the previous start's tasks ran on their own loop.
+                    display.Plugin._task = display.Plugin._prop_task = None
+                    display.Plugin._gamescope_started_at = display.Plugin._loaded_script_variant = None
+                    self.state.update(setup_done=False, restart_pending=False, setup_note='')
+                    self.session = session
+                    await display.Plugin()._main()
+                asyncio.run(reload())
+                self.assertEqual(self.script.read_bytes(), self.own_lua)
+                self.assertTrue(self.state['setup_done'])
+                self.assertIs(self.state['restart_pending'], asks)
 
     def test_update_asks_for_a_gaming_mode_restart_unless_the_session_runs_the_same_script(self):
         changed = self.root / 'changed.lua'

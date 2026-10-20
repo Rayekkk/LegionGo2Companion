@@ -219,7 +219,8 @@ DEFAULT_SETTINGS = {
     "edid_write_pending": None,
     "edid_patched_identity": None,
     "script_reinstall": False,  # our uninstall removed the script; the next start puts it back
-    # What the running session had loaded when it was removed: {"session", "sha256", "restart_pending"}.
+    # What the running session had loaded when it was removed: {"session", "sha256", "restart_pending"};
+    # after a silent reinstall, {"session", "sha256"} of the bytes that session still runs.
     "script_reinstall_loaded": None,
 }
 
@@ -1778,6 +1779,14 @@ class Plugin:
 
         Plugin._gamescope_started_at = started
         Plugin._loaded_script_variant = _loaded_script_variant(started)
+        if Plugin._loaded_script_variant is None:
+            # Written after this session started, but by a silent reinstall of the bytes it runs.
+            kept = settings.getSetting("script_reinstall_loaded", None)
+            data = _read_script_bytes(INSTALLED_SCRIPT)
+            if (isinstance(kept, dict) and kept.get("restart_pending") is not True and data is not None
+                    and Plugin._same_session(kept.get("session"), started)
+                    and kept.get("sha256") == hashlib.sha256(data).hexdigest()):
+                Plugin._loaded_script_variant = _script_variant(data)
         # Atoms belong to the gamescope process. Never carry ownership of a
         # value written to the previous process into this fresh session.
         Plugin._last_written = None
@@ -2270,18 +2279,23 @@ class Plugin:
                 # shortcut: 2.2.x left no marker; only 2.2+ writes the EDID journal key, and 2.1.0
                 # users choose again in Setup. Drop once updates from 2.2.x are no longer expected.
                 marker = "edid_write_pending" in settings.settings
-            if settings.getSetting("script_reinstall", None) is not False or loaded is not None:
-                Plugin._store_settings({"script_reinstall": False, "script_reinstall_loaded": None})
             lost = (marker is True and Plugin._state.get("panel_mode") in MODES
                     and not Plugin._state.get("reset_in_progress")
                     and not Plugin.native_display_active() and not os.path.lexists(INSTALLED_SCRIPT))
             bundled = _read_script_bytes(BUNDLED_SCRIPT)
-            if (lost and isinstance(loaded, dict) and loaded.get("restart_pending") is False
-                    and Plugin._same_session(loaded.get("session"), Plugin._gamescope_started_at)
-                    and bundled is not None and loaded.get("sha256") == hashlib.sha256(bundled).hexdigest()):
+            sha = hashlib.sha256(bundled).hexdigest() if bundled is not None else None
+            silent = (lost and isinstance(loaded, dict) and loaded.get("restart_pending") is False
+                      and Plugin._same_session(loaded.get("session"), Plugin._gamescope_started_at)
+                      and sha is not None and loaded.get("sha256") == sha)
+            if silent:
                 # This session loaded these very bytes before the update removed the file:
                 # putting them back needs no Gaming Mode restart.
                 Plugin._loaded_script_variant = _script_variant(bundled)
+            if settings.getSetting("script_reinstall", None) is not False:
+                # Kept after a silent reinstall: a later plugin reload in this session finds the file
+                # newer than the session's start and must still know the session runs these bytes.
+                Plugin._store_settings({"script_reinstall": False, "script_reinstall_loaded": {
+                    "session": Plugin._gamescope_started_at, "sha256": sha} if silent else None})
             return lost
 
     @staticmethod
