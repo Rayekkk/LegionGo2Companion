@@ -985,10 +985,10 @@ class DisplayDiscoveryTests(unittest.TestCase):
         self._enter(patch.object(display, "INSTALLED_SCRIPT", str(script)))
         self._enter(patch.object(display, "BUNDLED_SCRIPT", str(bundled)))
         self._fake_session_proc("5e474f00")
-        self.assertTrue(display._restart_needed(), "a script written after the session needs a restart")
+        self.assertTrue(display._restart_needed(None), "a script written after the session needs a restart")
         old = display.time.time() - 5000
         os.utime(script, (old, old))
-        self.assertFalse(display._restart_needed())
+        self.assertFalse(display._restart_needed(None))
 
     def test_session_stamps_saved_by_2_1_still_match_the_running_session(self):
         # 2.1 saved the epoch mtime of /proc/<pid>; the session below began ~994 s ago.

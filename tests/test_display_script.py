@@ -2,6 +2,7 @@
 """The Lua display script: where it goes and who writes it."""
 import asyncio
 from contextlib import ExitStack
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -106,6 +107,20 @@ class ScriptTargetTests(unittest.TestCase):
         self.assertEqual((kwargs['user'], kwargs['group'], kwargs['extra_groups']), (1000, 1001, []))
         self.assertEqual(kwargs['input'], b'lua')
         self.assertNotIn('LD_LIBRARY_PATH', kwargs['env'])
+
+    def test_scripts_we_shipped_stay_ours_with_either_line_ending_but_edits_do_not(self):
+        # Ours is never backed up over the user's own script, and only ours is removed on uninstall.
+        lf = lambda data: data.replace(b'\r\n', b'\n')
+        crlf = lambda data: lf(data).replace(b'\n', b'\r\n')
+        gamma = Path(display.BUNDLED_SCRIPTS[display.MODE_G22]).read_bytes()
+        for data in (lf(gamma), crlf(gamma)):
+            self.assertEqual(display._script_variant(data), display.MODE_G22)
+        released = b'-- PQ script of an earlier release\n'
+        with patch.dict(display.LEGACY_SCRIPT_SHA256, {hashlib.sha256(released).hexdigest(): display.MODE_PQ}):
+            for data in (released, crlf(released)):
+                self.assertEqual(display._script_variant(data), display.MODE_PQ)
+            for data in (released + b'-- edited\n', lf(gamma) + b'-- edited\n'):
+                self.assertIsNone(display._script_variant(data))
 
     def test_user_dir_files_the_user_does_not_own_are_not_read(self):
         display.SCRIPT_DIR = str(self.root)

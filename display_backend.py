@@ -779,20 +779,12 @@ def _script_variant(data):
     normalised = data.replace(b"\r\n", b"\n")
     for mode, path in BUNDLED_SCRIPTS.items():
         bundled = _read_script_bytes(path)
-        if bundled is not None and (
-                data == bundled
-                or normalised == bundled.replace(b"\r\n", b"\n")):
+        if bundled is not None and normalised == bundled.replace(b"\r\n", b"\n"):
             return mode
-    digest = hashlib.sha256(data).hexdigest()
-    variant = LEGACY_SCRIPT_SHA256.get(digest)
-    if variant is None and b"\r\n" in data:
-        # Release zips can be built from a Windows checkout or Linux CI. The Lua
-        # is identical either way, but an exact hash is not. Normalising only
-        # line endings keeps the legacy allowlist exact without treating a
-        # substantively edited script as ours.
-        digest = hashlib.sha256(normalised).hexdigest()
-        variant = LEGACY_SCRIPT_SHA256.get(digest)
-    return variant
+    # Release zips come from a Windows checkout or Linux CI: only line endings may
+    # differ, so an edited script never matches the legacy allowlist.
+    return (LEGACY_SCRIPT_SHA256.get(hashlib.sha256(data).hexdigest())
+            or LEGACY_SCRIPT_SHA256.get(hashlib.sha256(normalised).hexdigest()))
 
 
 def _is_our_script(data) -> bool:
@@ -1040,17 +1032,12 @@ def _remove_legacy_scripts() -> None:
                 pass
 
 
-_UNKNOWN_VARIANT = object()
-
-
-def _restart_needed(loaded_variant=_UNKNOWN_VARIANT) -> bool:
+def _restart_needed(loaded_variant) -> bool:
     """True when the running gamescope did not load the selected script."""
     started = _gamescope_start_time()
     if started is None:
         # Cannot tell, so do not nag.
         return False
-    if loaded_variant is _UNKNOWN_VARIANT:
-        loaded_variant = _loaded_script_variant(started)
     wanted = _script_variant(_read_script_bytes(BUNDLED_SCRIPT))
     if wanted is not None:
         return loaded_variant != wanted
@@ -1721,7 +1708,7 @@ class Plugin:
                                       stage='handoff', pending=True)
                 # Native ownership withdrawal must never stop the independent
                 # EDID pass or permit legacy writers to resume after a failure.
-                if Plugin.native_display_active() or settings.getSetting("native_cleanup", None) is not None:
+                if Plugin.native_display_active():
                     Plugin._state["native_cleanup_pending"] = True
                     Plugin._state["native_cleanup_error"] = str(error)
                     Plugin._state["native_restart_pending"] = settings.getSetting("native_restart_session", None) is not None
@@ -2313,10 +2300,11 @@ class Plugin:
         # Safety-critical writes bypass the watcher without destroying its
         # complete snapshot. Incremental notifications still need that cache.
         props = _read_props(wanted, fresh=True) if fresh else _read_props(wanted)
-        needs_control_root = ATOM_IS_EXTERNAL in wanted
-        complete = props and (
-            not needs_control_root or ATOM_IS_EXTERNAL in props)
-        if not complete:
+
+        def complete(props):
+            return props and (ATOM_IS_EXTERNAL not in wanted or ATOM_IS_EXTERNAL in props)
+
+        if not complete(props):
             Plugin._state["gamescope_reachable"] = False
             # A non-empty reply is not enough: feedback and EDID_PATH are copied
             # to every Xwayland, while the safety/control atoms live only on the
@@ -2338,11 +2326,8 @@ class Plugin:
             # Retry live, but keep the watcher's snapshot: a running xprop -spy
             # only reports later changes, so clearing it leaves a partial cache.
             props = _read_props(wanted, fresh=True)
-            complete = props and (
-                not needs_control_root or ATOM_IS_EXTERNAL in props)
-            if not complete:
-                Plugin._session_note = \
-                    "gamescope is up but its control root is not ready"
+            if not complete(props):
+                Plugin._session_note = "gamescope is up but its control root is not ready"
                 return {}
         Plugin._session_note = ""
         Plugin._session_retry_delay = GATE_INTERVAL_S
