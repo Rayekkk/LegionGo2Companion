@@ -3024,7 +3024,7 @@ class Plugin:
                     return result
             startup_apply = await _offload(_apply_saved)
             if startup_apply is None:
-                return
+                raise module_runtime.StartStopped('Stopped while starting; the saved limits were not applied.')
             if not startup_apply.get("success", False):
                 event('tdp','startup_limits_unconfirmed',level='warning',reason='hardware_unconfirmed',returncode=startup_apply.get('returncode'))
             if startup_apply.get('cpu_power_errors'):
@@ -3048,7 +3048,7 @@ class Plugin:
                 f"[legotdp] ready (wmi={'yes' if wmi else 'no'}, "
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")
         except module_runtime.StartStopped:
-            return  # Like the stop check in _apply_saved: the stop ends the start, not an error.
+            raise  # The stop ends the start, not an error: main reports the module as not ready.
         except Exception as e:
             Plugin._setup_error = str(e)
             event('tdp','startup_failed',level='error',error=e)

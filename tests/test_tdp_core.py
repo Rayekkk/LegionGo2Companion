@@ -242,6 +242,24 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.profile_writes, ['low-power', 'custom'])
         self.assertEqual(self.ppts(), (18, 22, 30))
 
+    def test_stop_before_the_startup_apply_is_a_stopped_start_not_a_ready_one(self):
+        real_caps = tdp._wmi_caps
+        def stop_after_caps():
+            caps = real_caps()
+            tdp.module_runtime.request_stop('tdp')  # Decky's stop lands before the saved limits apply.
+            return caps
+        self.addCleanup(tdp.module_runtime._stop_requested.discard, 'tdp')
+        self.stack.enter_context(patch.object(tdp, '_wmi_caps', side_effect=stop_after_caps))
+        self.stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
+        self.stack.enter_context(patch.object(tdp.Plugin, '_setup_error', None))
+        before, plugin = self.ppts(), tdp.Plugin()
+        with self.assertRaises(tdp.module_runtime.StartStopped):
+            asyncio.run(plugin._main())
+        self.assertEqual(self.ppts(), before)
+        self.assertFalse(tdp.Plugin._ready)
+        self.assertIsNone(tdp.Plugin._setup_error)
+        self.assertEqual(plugin._tasks, [])
+
     def test_firmware_readback_mismatch_is_a_failure_naming_the_attribute(self):
         with self.firmware_ignores_writes():
             result = tdp._apply_limits(18000, 22000, 30000)
@@ -262,7 +280,7 @@ class TdpCoreTests(unittest.TestCase):
         async def start():
             with tdp.module_runtime.starting('tdp'):
                 await plugin._main()
-        with patch.object(tdp, 'event') as event:
+        with patch.object(tdp, 'event') as event, self.assertRaises(tdp.module_runtime.StartStopped):
             asyncio.run(start())
         self.assertEqual(self.profile.read_text(), 'low-power')  # The write in flight finished...
         self.assertEqual(self.ppts(), before)  # ...and no other began.
