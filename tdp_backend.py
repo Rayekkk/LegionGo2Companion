@@ -167,6 +167,9 @@ _FRONTEND_APPID_TTL = 12.0
 # (83N0, 83N1). Nothing is written to power controls on any other model.
 LEGION_GO_FAMILY = frozenset({"83E1", "83L3", "83N6", "83N0", "83N1"})
 UNSUPPORTED_MODEL = "TDP control is available only on Lenovo Legion Go consoles."
+# Extras (boosts up to 50 W through ryzenadj) on the Go and the Go 2; the Go S has none.
+EXTRAS_MODELS = frozenset({"83E1", "83N0", "83N1"})
+EXTRAS_UNAVAILABLE = "Allow up to 50 W is not available on this console."
 NO_FIRMWARE_TDP = "This console's firmware does not expose TDP controls."
 
 
@@ -184,6 +187,10 @@ def _machine_type() -> str:
 
 def _supported_model() -> bool:
     return _machine_type() in LEGION_GO_FAMILY
+
+
+def _extras_supported() -> bool:
+    return _machine_type() in EXTRAS_MODELS
 
 
 def _legion_go_2() -> bool:
@@ -225,14 +232,13 @@ def _standard_ceilings_mw() -> tuple[int, int, int]:
 
 def _extras_ceilings_mw(std: tuple[int, int, int]) -> tuple[int, int, int]:
     """The SMU keeps sustained power (STAPM) at the firmware's SPL ceiling; only the
-    boosts go higher (Legion Go 2: STAPM stays 35 W, slow/fast take 50), never below
-    a firmware ceiling that is already higher."""
-    return std[0], max(HARD_MAX_MW, std[1]), max(HARD_MAX_MW, std[2])
+    boosts go higher (Legion Go 2: STAPM stays 35 W, slow/fast take 50)."""
+    return std[0], HARD_MAX_MW, HARD_MAX_MW
 
 
 def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     """Ceilings the current persisted mode is allowed to apply."""
-    if state.get("extras_unlocked", False) and _ryzenadj_available:
+    if state.get("extras_unlocked", False) and _ryzenadj_available and _extras_supported():
         return _extras_ceilings_mw(_standard_ceilings_mw())
     return _standard_ceilings_mw()
 
@@ -419,7 +425,8 @@ def _load_ceilings_mw() -> tuple[int, int, int]:
     higher SPL saved by 2.2.0 or earlier reads as what actually runs."""
     # Loads are frequent and every firmware read is a WMI call, so this takes the
     # ceilings the last firmware read reported; applying clamps to the live ones.
-    return _extras_ceilings_mw(_ceilings_mw(_firmware_caps))
+    std = _ceilings_mw(_firmware_caps)
+    return _extras_ceilings_mw(std) if _extras_supported() else std
 
 
 def _clamp_for_settings(state: dict, spl, sppt, fppt) -> tuple[int, int, int]:
@@ -1069,9 +1076,10 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
         return _fail("apply busy")
     try:
         caps = _wmi_caps()
-        # After the read, so the firmware's minimums are the floors. Callers bound SPL.
+        # After the read, so the firmware's minimums are the floors. Callers bound SPL;
+        # the boosts never pass 50 W (Extras), nor the firmware's own range on a Go S.
         spl_mw, sppt_mw, fppt_mw = _clamp_triplet(
-            spl_mw, sppt_mw, fppt_mw, tuple(max(HARD_MAX_MW, limit) for limit in _ceilings_mw(caps)))
+            spl_mw, sppt_mw, fppt_mw, None if _extras_supported() else _ceilings_mw(caps))
         triple_w = (("spl", spl_mw // 1000), ("sppt", sppt_mw // 1000), ("fppt", fppt_mw // 1000))
         # No SMU fallback inside the firmware range: a refusal is reported as is.
         if caps and all(caps[k]["min"] <= v <= caps[k]["max"] for k, v in triple_w):
@@ -2362,6 +2370,8 @@ class Plugin:
     async def _retry_extras(self) -> dict:
         if not _supported_model():
             return {"success": False, "error": UNSUPPORTED_MODEL}
+        if not _extras_supported():
+            return {"success": False, "error": EXTRAS_UNAVAILABLE}
         if _ryzenadj_available:
             return {"success": True}  # queued behind the retry that verified it
         cancellation = self._helper_cancel
@@ -2391,7 +2401,7 @@ class Plugin:
 
     async def get_extras_unlocked(self) -> bool:
         s = await _offload(_load_settings)
-        return s.get("extras_unlocked", False)
+        return s.get("extras_unlocked", False) and _extras_supported()
 
     async def set_advanced_tdp_control(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
@@ -2428,6 +2438,8 @@ class Plugin:
     async def _set_extras_unlocked(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
             return _fail("enabled must be a boolean")
+        if enabled and not _extras_supported():
+            return _fail(EXTRAS_UNAVAILABLE)
         if enabled and not _ryzenadj_available:
             helper = await self._retry_extras()
             if not helper["success"]:
@@ -2661,15 +2673,15 @@ class Plugin:
             std_mw = _ceilings_mw(caps)
             std = {k: v // 1000 for k, v in zip(WMI_ATTRS, std_mw)}
             firmware_available = bool(caps) and _profile_path() is not None
-            # Only a Go 2 runs ryzenadj without the firmware attributes.
-            helper_usable = supported and (bool(caps) or _legion_go_2())
+            # Only a Go 2 runs ryzenadj without the firmware attributes; the Go S never does.
+            helper_usable = supported and _extras_supported() and (bool(caps) or _legion_go_2())
             helper_available = (helper_usable and _ryzenadj_available
                                 and os.path.isfile(BIN_PATH))
             available = firmware_available or helper_available
             error = ""
             if not supported:
                 error = UNSUPPORTED_MODEL
-            elif not helper_usable:
+            elif not available and not helper_usable:
                 error = NO_FIRMWARE_TDP
             elif not available:
                 error = "Firmware TDP controls are unavailable and verified RyzenAdj is unavailable"
@@ -2868,7 +2880,8 @@ class Plugin:
             wmi = await _offload(_wmi_caps)
             try:
                 # Verify a helper left by an earlier Extras opt-in; never download here.
-                _ryzenadj_available = bool(await _offload(lambda: _ensure_ryzenadj(download=False)))
+                _ryzenadj_available = _extras_supported() and bool(
+                    await _offload(lambda: _ensure_ryzenadj(download=False)))
             except Exception as e:
                 _ryzenadj_available = False
                 self._helper_error = str(e)

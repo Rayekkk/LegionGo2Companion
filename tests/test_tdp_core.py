@@ -613,6 +613,40 @@ class TdpCoreTests(unittest.TestCase):
             'max': {'spl': 40, 'sppt': 43, 'fppt': 53},
         })
 
+    def test_go_s_has_no_extras_and_keeps_its_firmware_boosts_above_50w(self):
+        for machine in ('83L3', '83N6'):
+            with self.subTest(machine=machine):
+                self.machine = machine
+                self.firmware_range((40, 43, 53))
+                self.bin.unlink(missing_ok=True)
+                self.seed(extras_unlocked=True)  # saved before, or by hand: never honoured
+                caps = self.rpc('get_caps')
+                self.assertEqual((caps['extras'], caps['helper_retry_available'], caps['tdp_available']),
+                                 (False, False, True))
+                self.assertEqual(caps['max'], {'spl': 40, 'sppt': 43, 'fppt': 53})
+                self.assertFalse(self.rpc('get_extras_unlocked'))
+                result = self.rpc('set_extras_unlocked', True)
+                self.assertFalse(result['success'])
+                self.assertIn(tdp.EXTRAS_UNAVAILABLE, result['stderr'])
+                self.assertFalse(self.rpc('retry_extras')['success'])
+                self.assertEqual(self.downloads, [])
+                self.helper_ready()  # even a verified helper left on disk is not used
+                self.assertTrue(self.rpc('apply_tdp', 45000, 60000, 60000)['success'])
+                self.assertEqual(self.ppts(), (40, 43, 53))
+                self.assertEqual(self.applies(), [])
+
+    def test_extras_range_is_50w_boosts_on_the_go_and_go_2(self):
+        for machine, std, extras in (('83N0', (35, 37, 45), {'spl': 35, 'sppt': 50, 'fppt': 50}),
+                                     ('83N1', (35, 37, 45), {'spl': 35, 'sppt': 50, 'fppt': 50}),
+                                     ('83E1', (30, 32, 41), {'spl': 30, 'sppt': 50, 'fppt': 50})):
+            with self.subTest(machine=machine):
+                self.machine = machine
+                self.firmware_range(std)
+                self.helper_ready()
+                self.seed(extras_unlocked=True)
+                self.assertEqual(self.rpc('get_caps')['max'], extras)
+                self.assertTrue(self.rpc('get_extras_unlocked'))
+
     def test_machine_type_without_bios_values_scales_the_presets_to_its_firmware(self):
         self.machine = '83N6'
         self.stack.enter_context(patch.dict(tdp.PRESET_TABLE, clear=True))

@@ -56,6 +56,7 @@ Manage Modules. None of this has been tested on these consoles yet.
 
 | Module | Legion Go | Legion Go S |
 |---|---|---|
+| TDP & CPU | With the firmware's limits | Same, without **Allow up to 50 W** |
 | Battery | When SteamOS offers the Long Life charge mode | Same |
 | Lighting (stick lights) | With the 2025 controller firmware | Yes |
 | Vibration, Gyro & touchpad | With the 2025 controller firmware | Hidden |
