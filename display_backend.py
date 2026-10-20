@@ -672,12 +672,7 @@ def _pick_display() -> bool:
 def _as_float(raw):
     """gamescope stores floats bit-cast into a CARDINAL."""
     raw = _as_int(raw)
-    if raw is None:
-        return None
-    try:
-        return struct.unpack("f", struct.pack("I", raw & 0xFFFFFFFF))[0]
-    except (OverflowError, struct.error):
-        return None
+    return None if raw is None else struct.unpack("f", struct.pack("I", raw & 0xFFFFFFFF))[0]
 
 
 def _float_raw(value: float) -> int:

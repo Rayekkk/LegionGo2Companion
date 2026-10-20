@@ -1065,7 +1065,6 @@ class NativeDisplayTests(unittest.TestCase):
                     result = native.detect_native_display_support()
                 self.assertTrue(result["supported"])
                 self.assertEqual(result["status"], "supported")
-                self.assertEqual(result["script_path"], str(self.script))
 
     def test_profile_appearance_and_removal_are_observed(self):
         self.assertEqual(native.detect_native_display_support()["status"], "absent")

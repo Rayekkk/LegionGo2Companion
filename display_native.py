@@ -26,9 +26,4 @@ def detect_native_display_support() -> dict:
     except OSError:
         # An inaccessible path does not establish that support was removed.
         state, reason = "inconclusive", "system_profile_inaccessible"
-    return {
-        "status": state,
-        "supported": state == "supported",
-        "reason": reason,
-        "script_path": SYSTEM_SCRIPT,
-    }
+    return {"status": state, "supported": state == "supported", "reason": reason}
