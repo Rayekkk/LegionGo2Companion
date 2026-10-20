@@ -207,7 +207,7 @@ def _rgb_capability() -> tuple[str | None, str]:
         or max_brightness <= 0
         or max_brightness > 255
     ):
-        return None, "The joystick-ring driver ABI is not the audited Go 2 layout."
+        return None, "The joystick-ring driver ABI is not a supported layout."
     return real, ""
 
 
@@ -654,7 +654,7 @@ def _power_capability() -> tuple[bool, str]:
     identity = _read_identity()
     if not power_led_model(identity):
         _power_capability_cache = (
-            False, "Power-button light control supports only the Legion Go 2 (83N0 / 83N1).")
+            False, "Power-button light control is not available on this console.")
         return _power_capability_cache
     try:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
