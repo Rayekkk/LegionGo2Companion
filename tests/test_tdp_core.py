@@ -580,9 +580,11 @@ class TdpCoreTests(unittest.TestCase):
         with self.disk_full():
             with self.assertRaises(OSError):
                 tdp._check_and_enforce()  # limits written, then the save fails
-        tdp._transition_retry_at = 0.0  # the backoff has passed
-        events = tdp._check_and_enforce()
+            # Backed off: the next pass reports the charger but makes no second attempt.
+            events = tdp._check_and_enforce()
         self.assertEqual(events['power_source'], {'ac': True})
+        tdp._transition_retry_at = 0.0  # the backoff has passed
+        tdp._check_and_enforce()
         self.assertEqual(self.ppts(), (30, 32, 40))
         saved = self.saved()
         self.assertEqual((saved['active_spl'], saved['active_sppt'], saved['active_fppt']),

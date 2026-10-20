@@ -724,6 +724,17 @@ def _parse_ryzenadj_output(text: str) -> dict:
     return values
 
 
+def _ryzenadj_info(lock_timeout: float) -> dict:
+    """Live limits from `ryzenadj --info`, or {} when it is busy or fails."""
+    if not _ryzenadj_lock.acquire(timeout=lock_timeout):
+        return {}
+    try:
+        rc, out, _ = _run_ryzenadj(["--info"], timeout=3.0)
+    finally:
+        _ryzenadj_lock.release()
+    return _parse_ryzenadj_output(out) if rc == 0 else {}
+
+
 def _apply_ryzenadj(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
     if not _ryzenadj_lock.acquire(timeout=4.0):
         return _fail("ryzenadj busy")
@@ -919,10 +930,17 @@ _applied_mw: tuple = ()
 _applied_at: float = 0.0
 
 
+def _record_applied(source: str, triplet_mw: tuple) -> None:
+    """Note which layer now holds which limits ("", () = handed back to firmware)."""
+    global _last_source, _applied_mw, _applied_at
+    _last_source, _applied_mw = source, triplet_mw
+    _applied_at = time.monotonic() if triplet_mw else 0.0
+    _invalidate_limits_cache()
+
+
 def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
     """The firmware path inside the range it accepts; verified ryzenadj only
     beyond it (the Extras range) or when the firmware interface is absent."""
-    global _last_source, _applied_mw, _applied_at
     if not _legion_go_2():
         return _fail(UNSUPPORTED_MODEL)
     _capture_baseline()
@@ -932,19 +950,13 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
         return _fail("apply busy")
     try:
         caps = _wmi_caps()
+        # No SMU fallback inside the firmware range: a refusal is reported as is.
         if caps and all(caps[k]["min"] <= v <= caps[k]["max"] for k, v in triple_w):
-            result = _apply_wmi(*(v for _, v in triple_w))
-            if result["success"]:
-                _last_source = "wmi"
-                _applied_mw, _applied_at = (spl_mw, sppt_mw, fppt_mw), time.monotonic()
-                _invalidate_limits_cache()
-            # No SMU fallback inside the firmware range: a refusal is reported as is.
-            return result
-        result = _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
+            source, result = "wmi", _apply_wmi(*(v for _, v in triple_w))
+        else:
+            source, result = "ryzenadj", _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
         if result["success"]:
-            _last_source = "ryzenadj"
-            _applied_mw, _applied_at = (spl_mw, sppt_mw, fppt_mw), time.monotonic()
-            _invalidate_limits_cache()
+            _record_applied(source, (spl_mw, sppt_mw, fppt_mw))
         return result
     finally:
         _apply_lock.release()
@@ -974,16 +986,7 @@ def _wmi_limits_overridden(want_w: tuple) -> bool | None:
         return None
     _wmi_verified_at = now
 
-    if not _ryzenadj_lock.acquire(timeout=2.0):
-        return None
-    try:
-        rc, out, _ = _run_ryzenadj(["--info"], timeout=3.0)
-    finally:
-        _ryzenadj_lock.release()
-    if rc != 0:
-        return None
-
-    live = _parse_ryzenadj_output(out)
+    live = _ryzenadj_info(lock_timeout=2.0)
     pairs = [(live.get("sppt_limit"), want_w[1]), (live.get("fppt_limit"), want_w[2])]
     if any(v is None for v, _ in pairs):
         return None
@@ -1032,14 +1035,7 @@ def _read_limits() -> dict:
         if _limits_cache and time.monotonic() - _limits_cache_ts < _LIMITS_CACHE_TTL_S:
             return dict(_limits_cache)
 
-    if not _ryzenadj_lock.acquire(timeout=4.0):
-        return {}
-    try:
-        rc, out, _ = _run_ryzenadj(["--info"], timeout=3.0)
-    finally:
-        _ryzenadj_lock.release()
-
-    parsed = _parse_ryzenadj_output(out) if rc == 0 else {}
+    parsed = _ryzenadj_info(lock_timeout=4.0)
     if parsed:
         with _limits_cache_lock:
             _limits_cache, _limits_cache_ts = dict(parsed), time.monotonic()
@@ -1178,18 +1174,16 @@ def _transition_apply(target, why, key, reason):
         _transition_key, _transition_failures, _transition_retry_at = key, 0, 0.0
     if time.monotonic() < _transition_retry_at:
         return {"success": False}
+    result = {"success": False}  # what a raise counts as
     try:
         result = _apply_and_record(*target, why, reason)
-    except Exception:
-        _transition_failures += 1
-        _transition_retry_at = time.monotonic() + (60 if _transition_failures >= 3 else 5)
-        raise
-    if result.get("success"):
-        _transition_failures, _transition_retry_at = 0, 0.0
-    else:
-        _transition_failures += 1
-        # Three early wake retries, then a low-cost retry once a minute.
-        _transition_retry_at = time.monotonic() + (60 if _transition_failures >= 3 else 5)
+    finally:
+        if result.get("success"):
+            _transition_failures, _transition_retry_at = 0, 0.0
+        else:
+            _transition_failures += 1
+            # Three early wake retries, then a low-cost retry once a minute.
+            _transition_retry_at = time.monotonic() + (60 if _transition_failures >= 3 else 5)
     return result
 
 
@@ -1238,33 +1232,25 @@ def _check_and_enforce_locked() -> dict:
         profile = _load_profiles().get(appid) if appid else None
         if profile is not None:
             trigger = "AC state change" if ac_changed else "game launch"
+            why, kind = f"game profile on {trigger} (ac={ac_now})", "game"
             target = _profile_target(s, profile, ac_now)
-            if resettle:
-                events["_resettle_generation"] = _arm_ac_settle(target)
-            else:
-                _cancel_ac_settle()
-            result = _transition_apply(
-                target, f"game profile on {trigger} (ac={ac_now})",
-                (appid, ac_now, target), "ac" if ac_changed and not game_changed else "game")
-            _current_game_id = appid if result.get("success") else "\x00"
-            return events
-
-        # Nothing per-game applies, so the global settings are what should be
-        # running. Skipping this would leave the enforce pass below defending a
-        # stale active_* triplet left over from whatever ran last.
-        if appid:
-            why = "global TDP, running game has no profile"
-        elif prev:
-            why = "global TDP, game exited"
         else:
-            why = f"global TDP on AC change (ac={ac_now})"
-        target = _global_triplet(s)
+            # Nothing per-game applies, so the global settings are what should be
+            # running. Skipping this would leave the enforce pass below defending a
+            # stale active_* triplet left over from whatever ran last.
+            if appid:
+                why = "global TDP, running game has no profile"
+            elif prev:
+                why = "global TDP, game exited"
+            else:
+                why = f"global TDP on AC change (ac={ac_now})"
+            kind, target = "global", _global_triplet(s)
         if resettle:
             events["_resettle_generation"] = _arm_ac_settle(target)
         else:
             _cancel_ac_settle()
         result = _transition_apply(target, why, (appid, ac_now, target),
-                                   "ac" if ac_changed and not game_changed else "global")
+                                   "ac" if ac_changed and not game_changed else kind)
         _current_game_id = appid if result.get("success") else "\x00"
         return events
 
@@ -1297,17 +1283,21 @@ _drift_attempts: int   = 0
 _drift_context: tuple = (False, ())
 
 
+def _reset_drift(want: tuple = ()) -> None:
+    global _drift_target, _drift_settled, _drift_attempts, _drift_context
+    _drift_target, _drift_settled, _drift_attempts, _drift_context = want, (), 0, (False, ())
+
+
 def _enforce_target(want: tuple) -> None:
     """Re-apply `want` when the hardware has drifted off it.
 
     Some targets are unreachable (the SMU caps slow-limit near 50 W), so after a few
     failed attempts the settled value is accepted until the hardware moves off it.
     """
-    global _drift_target, _drift_settled, _drift_attempts, _drift_context
+    global _drift_settled, _drift_attempts, _drift_context
 
     if want != _drift_target:
-        _drift_target, _drift_settled, _drift_attempts = want, (), 0
-        _drift_context = (False, ())
+        _reset_drift(want)
 
     # Reuse the panel's cache only if filled after the last apply, else it shows a false drift.
     with _info_cache_lock:
@@ -1373,8 +1363,6 @@ def _enforce_target(want: tuple) -> None:
 
 def _restore_defaults_locked() -> dict:
     """Hand control back to firmware. Caller must hold _mutation_lock."""
-    global _last_source, _applied_mw, _applied_at
-    global _drift_target, _drift_settled, _drift_attempts, _drift_context
     if not _legion_go_2():
         return _ok()  # never written
     _capture_baseline()
@@ -1382,16 +1370,14 @@ def _restore_defaults_locked() -> dict:
     if not _apply_lock.acquire(timeout=8.0):
         return _fail("apply busy")
     try:
-        _drift_target, _drift_settled, _drift_attempts = (), (), 0
-        _drift_context = (False, ())
+        _reset_drift()
         path = _profile_path()
         if path:
             target = (saved if isinstance(saved, str) and saved != "custom"
                       and saved in _profile_choices(path) else "balanced")
             if not _write_profile(path, target) or _read_profile(path) != target:
                 return _fail(f"{target.capitalize()} firmware profile was not confirmed")
-            _last_source, _applied_mw, _applied_at = "", (), 0.0
-            _invalidate_limits_cache()
+            _record_applied("", ())
             decky.logger.info(f"[legotdp] restore_defaults: platform profile -> {target}")
             return _ok()
         if not _ryzenadj_lock.acquire(timeout=4.0):
@@ -1399,8 +1385,7 @@ def _restore_defaults_locked() -> dict:
         try:
             rc, out, err = _run_ryzenadj(["--max-performance"], timeout=5.0)
             if rc == 0:
-                _last_source, _applied_mw, _applied_at = "", (), 0.0
-                _invalidate_limits_cache()
+                _record_applied("", ())
             decky.logger.info(f"[legotdp] restore_defaults rc={rc}")
             return {"success": rc == 0, "stdout": out, "stderr": err, "returncode": rc}
         finally:
@@ -2185,27 +2170,16 @@ def _apply_tdp_locked(s: dict, app_id: str, spl: int, sppt: int, fppt: int,
             existing = _prepare_cpu_profile(s, profiles, app_id)
         effective_preset = preset_name or (
             existing.get("preset", "") if app_id else s.get("active_preset", ""))
-        requested = _target_for_preset(
-            s, spl, sppt, fppt, effective_preset)
-        want = requested
+        requested = want = _target_for_preset(s, spl, sppt, fppt, effective_preset)
+        # On AC with a separate AC profile, the sliders describe the
+        # battery values but the hardware should run the AC ones.
+        if (app_id and _get_ac_online() and existing.get("ac_separate")
+                and existing.get("ac_spl") is not None):
+            want = _profile_target(s, existing, True)
 
-        if app_id:
-            # On AC with a separate AC profile, the sliders describe the
-            # battery values but the hardware should run the AC ones.
-            if (_get_ac_online() and existing.get("ac_separate")
-                    and existing.get("ac_spl") is not None):
-                want = _target_for_preset(
-                    s,
-                    existing["ac_spl"],
-                    existing.get("ac_sppt", existing.get("sppt", _defaults()["sppt"])),
-                    existing.get("ac_fppt", existing.get("fppt", _defaults()["fppt"])),
-                    existing.get("ac_preset", ""),
-                )
-
-        cpu_state = (
-            _effective_cpu_state(s, profiles, app_id) if app_id
-            else _effective_cpu_state(s))
-        result = _apply_limits_with_saved_cpu_power(cpu_state, *want)
+        # Global is applied only while no game profile is in use, so "" resolves to Global.
+        result = _apply_limits_with_saved_cpu_power(
+            _effective_cpu_state(s, profiles, app_id), *want)
         if not result["success"]:
             return restore_failed(result)
 
