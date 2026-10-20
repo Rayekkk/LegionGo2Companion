@@ -65,7 +65,8 @@ class TdpCoreTests(unittest.TestCase):
         self.tmp.mkdir()
         self.store = AtomicSettingsManager('tdp_settings', str(self.root / 'settings'))
         self.seed()
-        self.app, self.ac, self.machine, self.cpu_unknown = '', False, '83N0', False
+        self.app, self.ac, self.machine = '', False, '83N0'
+        self.info_failure = None  # ryzenadj's output when it exits 1
         self.ryzenadj = []
         self.smu = {}  # limits written through ryzenadj; otherwise it reads the firmware's
         self.profile_writes = []
@@ -87,11 +88,11 @@ class TdpCoreTests(unittest.TestCase):
                 for flag, _, value in (arg.partition('=') for arg in argv[1:]):
                     if flag in LIMIT_FLAGS:
                         test.smu[LIMIT_FLAGS[flag]] = int(value) / 1000
-                self.returncode = 1 if test.cpu_unknown else 0
+                self.returncode = 0 if test.info_failure is None else 1
 
             def communicate(self, timeout=None):
-                if test.cpu_unknown:
-                    return b'', b'Unable to init ryzenadj'
+                if test.info_failure is not None:
+                    return test.info_failure, b''
                 if test.ryzenadj[-1] == ['--info']:
                     live = {key: test.smu.get(key, 0) if key in test.smu or not test.firmware.exists()
                             else test.ppt(key) for key in LIMIT_FLAGS.values()}
@@ -466,7 +467,7 @@ class TdpCoreTests(unittest.TestCase):
     def test_helper_that_cannot_read_the_cpu_hides_extras(self):
         self.bin.unlink()
         self.publish_helper()
-        self.cpu_unknown = True
+        self.info_failure = b'Unable to init ryzenadj\n'
         result = self.rpc('set_extras_unlocked', True)
         self.assertFalse(result['success'])
         self.assertIn(tdp.RYZENADJ_UNSUPPORTED_CPU, result['stderr'])
@@ -474,6 +475,14 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual((caps['extras'], caps['helper_retry_available'], caps['tdp_available']),
                          (False, False, True))
         self.assertFalse(self.saved()['extras_unlocked'])
+
+    def test_helper_that_names_the_cpu_but_cannot_read_its_power_table_still_offers_extras(self):
+        self.bin.unlink()
+        self.publish_helper()
+        self.info_failure = (b'CPU Family: Strix Point\n'
+                             b'Unable to init power metric table: -1, this does not affect adjustments\n')
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertTrue(self.rpc('get_caps')['extras'])
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX symlinks')
     def test_helper_directory_that_is_a_symlink_is_refused(self):

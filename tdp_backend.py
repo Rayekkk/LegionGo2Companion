@@ -762,10 +762,11 @@ def _ensure_ryzenadj(cancel=None, download=True) -> bool:
     mode = os.stat(BIN_PATH).st_mode
     if not (mode & stat.S_IXUSR):
         os.chmod(BIN_PATH, mode | 0o111)
-    # Only a definite answer counts: on a CPU it does not know, ryzenadj exits at once
-    # without a power table. A timeout or a kill proves nothing.
+    # Only a definite answer counts: on a CPU it does not know, ryzenadj exits at once,
+    # before naming the CPU family or printing limits. A failed power table read (seen
+    # on Strix) still names the family and does not affect writes; a timeout proves nothing.
     rc, out, _ = _spawn_ryzenadj(["--info"], timeout=3.0)
-    _ryzenadj_unsupported = rc > 0 and not _parse_ryzenadj_output(out)
+    _ryzenadj_unsupported = rc > 0 and "CPU Family" not in out and not _parse_ryzenadj_output(out)
     if _ryzenadj_unsupported:
         raise RuntimeError(RYZENADJ_UNSUPPORTED_CPU)
     return True
