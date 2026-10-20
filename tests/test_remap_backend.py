@@ -424,23 +424,23 @@ mapping:
 
     def test_enable_captures_profile_before_applying(self):
         memory = MemorySettings()
-        applied = {}
+        hardware = [BASE_PROFILE]
 
-        def fake_apply(state, adopt_external):
-            self.assertFalse(adopt_external)
-            applied["state"] = copy.deepcopy(state)
-            return state, remap_backend._build_profile(BASE_PROFILE, state)
+        def load(_path, profile):
+            hardware[0] = profile
+            return profile
 
         with (
             patch.object(remap_backend, "settings", memory),
+            patch.object(remap_backend, "_inputplumber_version", return_value="test"),
             patch.object(remap_backend, "_find_device", return_value=("/org/test", "Lenovo Legion Go 2")),
-            patch.object(remap_backend, "_get_profile", return_value=BASE_PROFILE),
-            patch.object(remap_backend, "_apply_state", side_effect=fake_apply),
-            patch.object(remap_backend, "_status_sync", return_value={"enabled": True}),
+            patch.object(remap_backend, "_get_profile", side_effect=lambda _: hardware[0]),
+            patch.object(remap_backend, "_load_profile", side_effect=load),
         ):
             status = remap_backend._mutate_sync({"enabled": True})
         self.assertTrue(status["enabled"])
-        self.assertEqual(applied["state"]["baseline_profile"], BASE_PROFILE)
+        self.assertNotEqual(hardware[0], BASE_PROFILE)
+        self.assertEqual(memory.data["state"]["baseline_profile"], BASE_PROFILE)
         self.assertTrue(memory.data["state"]["enabled"])
 
     def test_disable_restores_only_when_companion_owns_profile(self):
@@ -449,14 +449,22 @@ mapping:
             "baseline_profile": BASE_PROFILE,
         })
         memory = MemorySettings(owned)
+        hardware = [remap_backend._build_profile(BASE_PROFILE, owned)]
+
+        def load(_path, profile):
+            hardware[0] = profile
+            return profile
+
         with (
             patch.object(remap_backend, "settings", memory),
-            patch.object(remap_backend, "_restore_if_owned_locked", return_value=True) as restore,
-            patch.object(remap_backend, "_status_sync", return_value={"enabled": False}),
+            patch.object(remap_backend, "_inputplumber_version", return_value="test"),
+            patch.object(remap_backend, "_find_device", return_value=("/org/test", "Lenovo Legion Go 2")),
+            patch.object(remap_backend, "_get_profile", side_effect=lambda _: hardware[0]),
+            patch.object(remap_backend, "_load_profile", side_effect=load),
         ):
             result = remap_backend._mutate_sync({"enabled": False})
         self.assertFalse(result["enabled"])
-        restore.assert_called_once()
+        self.assertEqual(hardware[0], BASE_PROFILE)
         self.assertFalse(memory.data["state"]["enabled"])
         self.assertIsNone(memory.data["state"]["baseline_profile"])
 
