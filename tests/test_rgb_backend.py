@@ -465,6 +465,37 @@ class RgbBackendTests(unittest.TestCase):
                 self.assertFalse(memory.data["state"]["control_enabled"])
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
 
+    def test_uninstall_restores_the_rings_and_the_updated_plugin_reapplies_the_choice(self):
+        # Decky runs _uninstall before every update: hardware goes back, the choice stays.
+        with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
+            led = Path(raw)
+            make_led(led, enabled="false")
+            memory = MemorySettings()
+            with (
+                patch.object(rgb_backend, "settings", memory),
+                patch.object(rgb_backend, "_rgb_capability", return_value=(str(led), "")),
+                patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
+            ):
+                plugin = rgb_backend.Plugin()
+                for change in (plugin.set_control_enabled(True), plugin.set_rings_enabled(True),
+                               plugin.set_color(120, 100)):
+                    result = asyncio.run(change)
+                    self.assertTrue(result["success"], result.get("error"))
+                chosen = copy.deepcopy(memory.data["state"])
+                asyncio.run(plugin._uninstall())
+                self.assertEqual((led / "enabled").read_text().strip(), "false")
+                self.assertEqual(memory.data["state"], chosen)
+
+                async def update():
+                    updated = rgb_backend.Plugin()
+                    await updated._main()
+                    await updated._unload()
+                asyncio.run(update())
+                self.assertEqual((led / "enabled").read_text().strip(), "true")
+                self.assertTrue(rgb_backend._rgb_matches(
+                    chosen, rgb_backend._read_rgb_snapshot(str(led)), str(led)))
+                self.assertEqual(memory.data["state"]["original_rgb"], chosen["original_rgb"])
+
     def test_first_takeover_preserves_the_existing_colour_intensity(self):
         cases = (
             ("monocolor", "25 0 0", [100, 0, 0], "5"),

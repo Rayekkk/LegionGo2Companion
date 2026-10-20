@@ -1019,18 +1019,8 @@ class Plugin:
                 original_power = state.get("power_led_original_enabled")
                 if state["power_led_managed"] and original_power is not None:
                     ok = _write_power_led(original_power) and ok
-                if ok:
-                    restored = dict(DEFAULT_STATE)
-                    restored.update({
-                        "configured": state["configured"],
-                        "rings_enabled": state["rings_enabled"],
-                        "effect": state["effect"],
-                        "hue": state["hue"],
-                        "saturation": state["saturation"],
-                        "brightness": state["brightness"],
-                        "speed": state["speed"],
-                    })
-                    _save_state(restored)
+                # The state stays: Decky also uninstalls before every update, and the
+                # next _main reapplies it over the restored originals it still records.
                 return ok
         restored = await _offload(_restore)
         event("rgb", "restore", level="info" if restored else "warning",
