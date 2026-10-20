@@ -419,6 +419,37 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.wait_for(startup, 1)
 
+    async def test_shutdown_during_a_start_in_a_worker_thread_lets_no_further_firmware_call_begin(self):
+        # Decky reloads the plugin right after an install: the stop can land while the
+        # first module's start is in a thread making slow firmware calls one after another.
+        entered, calls = threading.Event(), []
+        def probe():
+            for step in range(5):
+                with module_runtime.firmware_lock:
+                    calls.append(step)
+                    entered.set()
+                    threading.Event().wait(0.1)  # One firmware call; never cut short.
+        def restore():
+            with module_runtime.firmware_lock:
+                calls.append('restored')
+        async def start():
+            await module_runtime.offload('tdp', probe)
+        async def unload():
+            await module_runtime.offload('tdp', restore)
+        self.plugin._tdp._main.side_effect = start
+        self.plugin._tdp._unload.side_effect = unload
+        self.plugin._start_desktop = AsyncMock()
+        self.plugin._publish_modules = AsyncMock()
+        startup = asyncio.ensure_future(self.plugin._main())
+        await asyncio.wait_for(asyncio.to_thread(entered.wait), 1)
+        await asyncio.wait_for(self.plugin._unload(), 2)
+        self.assertEqual(calls, [0, 'restored'])  # The call in flight finished, no other began; restoration ran.
+        self.assertFalse(module_runtime._workers.get('tdp'))  # Nothing left to hold the process.
+        self.plugin._tdp._unload.assert_awaited_once()  # The stopped start's own cleanup, inside the budget.
+        self.plugin._fan._main.assert_not_awaited()
+        await asyncio.wait_for(startup, 1)
+        self.assertFalse(module_runtime.firmware_lock.locked())
+
     async def test_retry_cannot_start_over_workers_whose_cleanup_failed(self):
         self.plugin._rgb._main.side_effect = RuntimeError('startup failed')
         self.plugin._rgb._unload.side_effect = RuntimeError('worker cleanup failed')

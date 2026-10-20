@@ -13,10 +13,38 @@ from diagnostics import event
 DMI_ROOT = "/sys/class/dmi/id"
 
 _workers = {}
+_starting = contextvars.ContextVar('starting_module', default=None)
+
+
+class StartStopped(RuntimeError):
+    """A stop came while this module was starting; its start makes no further firmware call."""
+
+
+class _FirmwareLock:
+    """A start whose stop was requested finishes the firmware call in flight but
+    begins no other: with the EC busy each call can take seconds, and Decky
+    SIGKILLs a stop still waiting on the start's thread after 5 s."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def locked(self):
+        return self._lock.locked()
+
+    def __enter__(self):
+        self._lock.acquire()
+        if _starting.get() in _stop_requested:
+            self._lock.release()
+            raise StartStopped('Stopped while starting; no further firmware call was made.')
+
+    def __exit__(self, *exc_info):
+        self._lock.release()
+
+
 # The Legion's AML aborts EC/WMI methods that run concurrently ("cannot release
 # Mutex [ECMT]"). Hold only around one firmware-backed sysfs write, innermost,
 # from worker threads only: never take another lock or block on I/O beyond it.
-firmware_lock = threading.Lock()
+firmware_lock = _FirmwareLock()
 CONTROLLER_MODULES = frozenset({'controller', 'remap', 'rgb', 'vibration'})
 _controller_paused = False
 _controller_generation = 0
@@ -49,6 +77,16 @@ def stop_requested(module):
 
 def begin_start(module):
     _stop_requested.discard(module)
+
+
+@contextlib.contextmanager
+def starting(module):
+    """Mark a module's start; its threads and tasks inherit the mark (firmware_lock)."""
+    token = _starting.set(module)
+    try:
+        yield
+    finally:
+        _starting.reset(token)
 
 
 def require_available(module):

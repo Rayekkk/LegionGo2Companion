@@ -5,6 +5,7 @@ Unreleased.
 ### Fixed
 
 - **Controller firmware:** Install no longer stops fwupd after a fixed 10 minutes while it is still writing a controller. It is stopped only after 10 minutes without any progress, or after 30 minutes in total, and is asked to exit cleanly first.
+- **Installing or reloading Companion:** when Decky stops Companion while it is still starting (as it does right after installing a ZIP), Companion now stops within Decky's time limit instead of being killed after 5 seconds while TDP or Battery kept talking to the firmware.
 
 ### Changed
 

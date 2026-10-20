@@ -442,7 +442,8 @@ class Plugin:
                 # their cleanup before retrying the saved user choice.
                 await self._stop_component(name)
             self._module_health[name] = {'ready': False}
-            result = await component._main()
+            with module_runtime.starting(name):  # Not its cleanup below: restoration is never refused.
+                result = await component._main()
             if isinstance(result, dict) and result.get('success') is False:
                 raise RuntimeError(result.get('error') or result.get('message') or 'Module startup failed.')
             self._module_health[name] = {'ready': True}
