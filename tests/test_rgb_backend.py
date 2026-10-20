@@ -496,6 +496,37 @@ class RgbBackendTests(unittest.TestCase):
                     chosen, rgb_backend._read_rgb_snapshot(str(led)), str(led)))
                 self.assertEqual(memory.data["state"]["original_rgb"], chosen["original_rgb"])
 
+    def test_uninstall_restores_the_power_led_and_the_updated_plugin_reapplies_it(self):
+        register = bytearray([0b10100101 & ~rgb_backend.POWER_LED_MASK])  # The LED is on before Companion.
+        with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
+            led = Path(raw)
+            make_led(led, enabled="false")
+            memory = MemorySettings()
+            with (
+                patch.object(rgb_backend, "settings", memory),
+                patch.object(rgb_backend, "_rgb_capability", return_value=(str(led), "")),
+                patch.object(rgb_backend, "_power_capability", return_value=(True, "")),
+                patch.object(rgb_backend, "_with_power_lock", side_effect=lambda operation: operation()),
+                patch.object(rgb_backend, "_map_power_register",
+                             side_effect=lambda _write, operation: operation(register, 0)),
+            ):
+                plugin = rgb_backend.Plugin()
+                for change in (plugin.set_control_enabled(True), plugin.set_power_led(False)):
+                    result = asyncio.run(change)
+                    self.assertTrue(result["success"], result.get("error"))
+                self.assertFalse(rgb_backend._read_power_led())
+                asyncio.run(plugin._uninstall())
+                self.assertTrue(rgb_backend._read_power_led(), "uninstall hands the original LED back")
+
+                async def update():
+                    updated = rgb_backend.Plugin()
+                    await updated._main()
+                    await updated._unload()
+                asyncio.run(update())
+                self.assertFalse(rgb_backend._read_power_led(), "the updated plugin reapplies the choice")
+                self.assertTrue(memory.data["state"]["power_led_managed"])
+                self.assertIs(memory.data["state"]["power_led_original_enabled"], True)
+
     def test_first_takeover_preserves_the_existing_colour_intensity(self):
         cases = (
             ("monocolor", "25 0 0", [100, 0, 0], "5"),
