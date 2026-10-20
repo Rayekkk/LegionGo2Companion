@@ -2152,7 +2152,6 @@ class Plugin:
     # Surfaced through is_ready() so a failed start shows up in the panel
     # instead of leaving the user with sliders that silently do nothing.
     _setup_error: str | None = None
-    _tasks: list = []
 
     async def is_ready(self) -> dict:
         return {"ready": self._ready, "error": self._setup_error or ""}
@@ -2496,25 +2495,20 @@ class Plugin:
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
-                if not enabled:
+                state["enabled"] = enabled
+                if enabled:
+                    _, target, _ = _startup_context_target(state)
+                    result = _apply_limits_with_saved_cpu_power(state, *target)
+                    state["active_spl"], state["active_sppt"], state["active_fppt"] = target
+                else:
                     result = _restore_defaults_locked()
-                    if not result["success"]:
-                        return restore_failed(result)
-                    state["enabled"] = False
-                    result["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(state)
-                    _save_settings(state)
-                    _cancel_ac_settle()
-                    return restore_failed(result)
-
-                state["enabled"] = True
-                _, target, _ = _startup_context_target(state)
-                result = _apply_limits_with_saved_cpu_power(state, *target)
+                    if result["success"]:
+                        result["cpu_power_errors"] = _best_effort_reapply_saved_cpu_power_locked(state)
                 if not result["success"]:
                     return restore_failed(result)
-                state["active_spl"], state["active_sppt"], state["active_fppt"] = target
                 _save_settings(state)
                 _cancel_ac_settle()
-                return restore_failed(result)
+                return result
         result = await _offload(_do)
         decky.logger.info(f"[legotdp] Plugin enabled={enabled} success={result['success']}")
         return result

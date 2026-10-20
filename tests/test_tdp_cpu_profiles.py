@@ -551,8 +551,8 @@ class CpuProfileTests(unittest.TestCase):
         self.assertEqual(self.limits, [25000, 28000, 35000])
         self.assert_hardware(False, '77')
 
-    def test_game_exit_other_game_and_profile_deletion_restore_global_cpu(self):
-        for destination in ('', '222', 'delete'):
+    def test_game_exit_other_game_profile_deletion_and_disabling_restore_global_cpu(self):
+        for destination in ('', '222', 'delete', 'disable'):
             with self.subTest(destination=destination):
                 self.seed({'111': self.game()})
                 self.app = '111'
@@ -562,6 +562,8 @@ class CpuProfileTests(unittest.TestCase):
                 self.assert_hardware(True, '204')
                 if destination == 'delete':
                     self.rpc('delete_game_profile', '111')
+                elif destination == 'disable':
+                    self.rpc('set_plugin_enabled', False)
                 else:
                     self.app = destination
                     tdp._check_and_enforce()
