@@ -2040,14 +2040,9 @@ class Plugin:
 
     @staticmethod
     def _iwd_snapshot_matches(left: dict, right: dict) -> bool:
-        return (
-            not bool(left.get("ambiguous"))
-            and not bool(right.get("ambiguous"))
-            and bool(left.get("modifier_present"))
-            == bool(right.get("modifier_present"))
-            and str(left.get("modifier_value") or "")
-            == str(right.get("modifier_value") or "")
-        )
+        return (not left.get("ambiguous") and not right.get("ambiguous")
+                and bool(left.get("modifier_present")) == bool(right.get("modifier_present"))
+                and str(left.get("modifier_value") or "") == str(right.get("modifier_value") or ""))
 
     @staticmethod
     def _applied_iwd(applied: dict) -> dict:
@@ -2087,6 +2082,8 @@ class Plugin:
         record(phase="rolling_back", rollback_reason=reason)
         conflicts = []
         mutations = journal.get("mutations", {})
+        # Discovery only cycles the connection: it writes no profile or iwd value.
+        automatic = journal.get("operation") == "automatic_high_band_reconnect" and journal.get("mutations") == {}
         backend = self._get_current_backend()
         iwd_only = bool(mutations.get("iwd", {}).get("planned")) and not any(
             mutation.get("planned") for name, mutation in mutations.items()
@@ -2142,7 +2139,7 @@ class Plugin:
         if backend == "wpa_supplicant":
             journal["rollback_iwd_restart_required"] = False
             journal["rollback_iwd_runtime_skipped_backend"] = backend
-            if iwd_only or (journal.get("operation") == "automatic_high_band_reconnect" and mutations == {}):
+            if iwd_only or automatic:
                 journal["rollback_reconnect_required"] = False
                 journal["rollback_reconnect_skipped_backend"] = backend
             self._save_band_policy_journal(journal, path)
@@ -2154,8 +2151,6 @@ class Plugin:
                 record(rollback_iwd_restart_completed=True)
 
         reconnect_uuid = str(journal.get("rollback_reconnect_uuid") or "")
-        automatic = (journal.get("operation") == "automatic_high_band_reconnect"
-                     and journal.get("mutations") == {})
         bound_iface = str(journal.get("automatic_iface") or "") if automatic else ""
         if journal.get("rollback_reconnect_required") and backend not in ("iwd", "wpa_supplicant"):
             conflicts.append("The active WiFi backend could not be verified for recovery")
@@ -2309,20 +2304,6 @@ class Plugin:
                             and self._iwd_snapshot_matches(current_iwd, original))
                 if not restored:
                     return IWD_BAND_CHANGED_OUTSIDE
-        return ""
-
-    def _band_policy_transition_error(self, settings: dict, target: str) -> str:
-        """Protect non-owned fields that the requested transition would replace."""
-        mode = settings.get("band_policy", BAND_POLICY_OFF)
-        state = settings.get("band_policy_state") or {}
-        applied = state.get("applied") or {}
-        if mode == BAND_POLICY_SIX_ONLY and target in IWD_BAND_POLICIES:
-            current_iwd = self._get_iwd_rank_modifier_snapshot()
-            if not self._iwd_snapshot_matches(current_iwd, self._applied_iwd(applied)):
-                return (
-                    "The iwd band setting changed after 6 GHz only was enabled. "
-                    "Disable the current policy before replacing it."
-                )
         return ""
 
     def _verify_band_policy(
@@ -2741,6 +2722,7 @@ class Plugin:
                             "The WiFi backend changed during recovery; retry after it is ready.")
         settings = _load_settings()
         current_mode = settings.get("band_policy", BAND_POLICY_OFF)
+        state = settings.get("band_policy_state") or {}
 
         def refuse(error: str, message: str, **extra) -> dict:
             return _refusal(error, message, band_policy=current_mode, rolled_back=False, **extra)
@@ -2751,7 +2733,6 @@ class Plugin:
             return refuse("preflight_failed", "6 GHz only requires the native WPA WiFi backend.")
 
         if current_mode not in BAND_POLICIES:
-            state = settings.get("band_policy_state") or {}
             if mode == BAND_POLICY_OFF and not (state.get("owns_iwd") or state.get("owns_nm_band")):
                 # Nothing was recorded as changed, so there is nothing to put back.
                 self._write_band_settings_fields(SETTINGS_FILE, {
@@ -2765,16 +2746,8 @@ class Plugin:
                           "Saved band policy is not recognized; no network changes were made.")
 
         preference_needs_upgrade = (
-            current_mode == BAND_POLICY_HIGH_ONLY
-            and mode == BAND_POLICY_HIGH_ONLY
-            and str(
-                ((settings.get("band_policy_state") or {}).get("applied") or {}).get(
-                    "iwd_modifier_value"
-                )
-                or ""
-            )
-            != BAND_PREFERENCE_2_4_MODIFIER
-        )
+            current_mode == mode == BAND_POLICY_HIGH_ONLY
+            and str((state.get("applied") or {}).get("iwd_modifier_value") or "") != BAND_PREFERENCE_2_4_MODIFIER)
         ownership_error = self._band_policy_ownership_error(settings)
         # Passing the strict check implies passing the transition check.
         transition_ownership_error = ownership_error and self._band_policy_ownership_error(
@@ -2783,13 +2756,8 @@ class Plugin:
         if current_mode == mode and not preference_needs_upgrade and not preference_needs_reapply:
             if ownership_error:
                 return refuse("ownership_conflict", ownership_error)
-            return {
-                "success": True,
-                "band_policy": current_mode,
-                "reconnected": False,
-                "rolled_back": False,
-                "message": "Band policy is already active.",
-            }
+            return {"success": True, "band_policy": current_mode, "reconnected": False, "rolled_back": False,
+                    "message": "Band policy is already active."}
 
         ownership_error = transition_ownership_error
         replaced_outside = False
@@ -2803,9 +2771,12 @@ class Plugin:
             replaced_outside = True
             diagnostic_event("wifi", "band_policy_outside_change_replaced")
 
-        transition_error = self._band_policy_transition_error(settings, mode)
-        if transition_error:
-            return refuse("transition_conflict", transition_error)
+        # 6 GHz only does not own the iwd file: never replace a value set there since.
+        if (current_mode == BAND_POLICY_SIX_ONLY and mode in IWD_BAND_POLICIES
+                and not self._iwd_snapshot_matches(self._get_iwd_rank_modifier_snapshot(),
+                                                   self._applied_iwd(state.get("applied") or {}))):
+            return refuse("transition_conflict", "The iwd band setting changed after 6 GHz only was enabled. "
+                                                 "Disable the current policy before replacing it.")
 
         if mode == BAND_POLICY_SIX_ONLY:
             if not self._nm_supports_six_ghz_only():
@@ -2829,21 +2800,13 @@ class Plugin:
                 # that unreliable observation, but never the hardware,
                 # backend, ownership, watchdog, or live-link checks.
                 capabilities = self._get_band_policy_capabilities_sync(not allow_unverified_scan)
-                available_key = (
-                    "five_six_only_try_available" if allow_unverified_scan
-                    else "five_six_only_available"
-                )
-                reason_key = (
-                    "reason_five_six_only_try" if allow_unverified_scan
-                    else "reason_five_six_only"
-                )
-                if not capabilities.get(available_key):
+                variant = "five_six_only_try" if allow_unverified_scan else "five_six_only"
+                if not capabilities.get(f"{variant}_available"):
                     return refuse("preflight_failed",
-                                  capabilities.get(reason_key) or "No usable 5/6 GHz access point was verified.",
+                                  capabilities.get(f"reason_{variant}") or "No usable 5/6 GHz access point was verified.",
                                   capabilities=capabilities)
 
         active_uuid = self._get_active_connection_uuid()
-        state = settings.get("band_policy_state") or {}
         inactive_iwd_cleanup = (mode == BAND_POLICY_OFF
                                 and current_mode in IWD_BAND_POLICIES
                                 and backend == "wpa_supplicant")
@@ -2869,23 +2832,15 @@ class Plugin:
         else:
             profile_uuid = str(active_uuid or state.get("connection_uuid") or "")
 
+        # (OFF to OFF already returned above as "already active".)
         if not profile_uuid and not profileless_iwd_transition:
-            if mode == BAND_POLICY_OFF and current_mode == BAND_POLICY_OFF:
-                return {
-                    "success": True,
-                    "band_policy": BAND_POLICY_OFF,
-                    "reconnected": False,
-                    "rolled_back": False,
-                }
             return refuse("no_wifi", "No managed WiFi profile was found.")
 
         if profileless_iwd_transition:
             # No NetworkManager field is owned or changed in this path.
             band_before = ""
         else:
-            band_before, band_result = self._nmcli_get(
-                profile_uuid, "802-11-wireless.band"
-            )
+            band_before, band_result = self._nmcli_get(profile_uuid, "802-11-wireless.band")
             if (not band_result.get("success") and mode == BAND_POLICY_OFF
                     and current_mode == BAND_POLICY_SIX_ONLY
                     and self._nm_profile_gone(profile_uuid)):
@@ -2936,30 +2891,22 @@ class Plugin:
     def _band_policy_targets(current_mode: str, mode: str, state: dict, band_before: str,
                              iwd_before: dict) -> tuple[str, dict, str, dict]:
         """Return (neutral band, neutral iwd, final band, final iwd) for a transition."""
-        # First calculate the neutral/original values after removing the
-        # currently owned policy.  This is what makes transitions mutually
-        # exclusive rather than stacking two independent toggles.
-        neutral_band = band_before
-        neutral_iwd = iwd_before
+        # Neutral = the recorded original once the owned policy is removed, so
+        # policies replace each other instead of stacking.
+        original = state.get("original") or {}
+        neutral_band, neutral_iwd = band_before, iwd_before
         if current_mode == BAND_POLICY_SIX_ONLY:
-            neutral_band = str((state.get("original") or {}).get("nm_band") or "")
+            neutral_band = str(original.get("nm_band") or "")
         elif current_mode in IWD_BAND_POLICIES:
-            neutral_iwd = (state.get("original") or {}).get("iwd") or {}
+            neutral_iwd = original.get("iwd") or {}
 
-        final_band = neutral_band
-        final_iwd = neutral_iwd
+        final_band, final_iwd = neutral_band, neutral_iwd
         if mode == BAND_POLICY_SIX_ONLY:
             final_band = "6GHz"
         elif mode in IWD_BAND_POLICIES:
-            final_iwd = {
-                "file_exists": True,
-                "rank_section_present": True,
-                "modifier_present": True,
-                "modifier_value": (
-                    BAND_STRICT_2_4_MODIFIER if mode == BAND_POLICY_STRICT_HIGH
-                    else BAND_PREFERENCE_2_4_MODIFIER
-                ),
-            }
+            final_iwd = {"file_exists": True, "rank_section_present": True, "modifier_present": True,
+                         "modifier_value": (BAND_STRICT_2_4_MODIFIER if mode == BAND_POLICY_STRICT_HIGH
+                                            else BAND_PREFERENCE_2_4_MODIFIER)}
         return neutral_band, neutral_iwd, final_band, final_iwd
 
     def _apply_band_policy_transaction(

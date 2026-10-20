@@ -382,6 +382,21 @@ class StrictWifiTests(unittest.TestCase):
         self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
         self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_OFF)
 
+    def test_six_only_to_preference_never_replaces_an_iwd_value_set_since(self):
+        state = dict(wifi.DEFAULT_SETTINGS, band_policy=wifi.BAND_POLICY_SIX_ONLY, band_policy_state={
+            "schema": 1, "mode": wifi.BAND_POLICY_SIX_ONLY, "connection_uuid": UUID,
+            "original": {"nm_band": "", "iwd": self.baseline}, "owns_nm_band": True, "owns_iwd": False,
+            "applied": {"nm_band": "6GHz", "iwd_modifier_present": False, "iwd_modifier_value": ""}})
+        self.settings.write_text(json.dumps(state), encoding="utf-8")
+        self.plugin._nmcli_get.return_value = ("6GHz", {"success": True})
+        before = self.iwd.read_bytes()   # a 2.4 GHz modifier written after 6 GHz only was enabled
+        result = self.change(wifi.BAND_POLICY_HIGH_ONLY)
+        self.assertEqual(result["error"], "transition_conflict", result)
+        self.assertEqual(self.iwd.read_bytes(), before)
+        self.assertEqual(profile_writes(self.commands), [])
+        self.assertFalse((self.journal_dir / "band-policy-transaction.json").exists())
+        self.assertEqual(wifi._load_settings()["band_policy"], wifi.BAND_POLICY_SIX_ONLY)
+
     def test_status_reports_strict_drift_even_when_wifi_disconnected(self):
         self.assertTrue(self.change(wifi.BAND_POLICY_STRICT_HIGH)["success"])
         self.iwd.write_text("[Rank]\nBandModifier2_4GHz=0.5\n", encoding="utf-8")
