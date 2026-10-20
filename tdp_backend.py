@@ -6,7 +6,7 @@ import decky
 from diagnostics import event, transition
 from system_process import system_env
 import module_runtime
-from active_app import resolve_running_app, scan_proc_for_appid
+from active_app import normalise_app_id, resolve_running_app, scan_proc_for_appid
 import asyncio
 import copy
 import functools
@@ -112,7 +112,6 @@ _current_ac_online: bool = False
 _last_cpu_power_check: float = 0.0
 CPU_POWER_DRIFT_CHECK_S = 60.0
 _resume_detected = module_runtime.ResumeWatch()
-APP_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_GAME_PROFILES = 512
 MAX_LABEL_LENGTH = 96
 
@@ -248,16 +247,6 @@ def _pick_profile_values(p: dict, ac_online: bool) -> tuple[int, int, int]:
         p.get("sppt", _defaults()["sppt"]),
         p.get("fppt", _defaults()["fppt"]),
     )
-
-
-def _normalise_app_id(value, *, allow_empty: bool = True) -> str | None:
-    if value in (None, "") and allow_empty:
-        return ""
-    if type(value) is int:
-        value = str(value)
-    if not isinstance(value, str) or APP_ID_RE.fullmatch(value) is None:
-        return None
-    return value
 
 
 def _safe_label(value) -> str:
@@ -450,7 +439,7 @@ def _normalised_profiles(raw_profiles: dict) -> dict:
     profiles: dict[str, dict] = {}
     ceilings = _load_ceilings_mw()
     for raw_app_id, raw_profile in raw_profiles.items():
-        app_id = _normalise_app_id(raw_app_id, allow_empty=False)
+        app_id = normalise_app_id(raw_app_id)
         if app_id is None or not isinstance(raw_profile, dict):
             continue
         p = dict(raw_profile)
@@ -2304,7 +2293,7 @@ class Plugin:
         def _do() -> dict:
             with _mutation_lock:
                 try:
-                    selected = _normalise_app_id(app_id)
+                    selected = normalise_app_id(app_id, allow_empty=True)
                     if selected is None or type(ac_profile) is not bool or (ac_profile and not selected):
                         return _cpu_scoped_status(
                             operation_success=False, operation_error="invalid CPU profile context")
@@ -2320,8 +2309,8 @@ class Plugin:
                                ac_profile: bool, expected_app_id: str | None, stored: bool = False) -> dict:
         def _do() -> dict:
             with _mutation_lock:
-                selected = _normalise_app_id(app_id)
-                expected = _normalise_app_id(expected_app_id) if expected_app_id is not None else None
+                selected = normalise_app_id(app_id, allow_empty=True)
+                expected = normalise_app_id(expected_app_id, allow_empty=True) if expected_app_id is not None else None
                 def status(success: bool, error: str = "") -> dict:
                     return _cpu_scoped_status(
                         selected or "", ac_profile if type(ac_profile) is bool else False,
@@ -2466,7 +2455,7 @@ class Plugin:
         return result
 
     async def get_game_profile(self, app_id: str) -> dict:
-        app_id = _normalise_app_id(app_id, allow_empty=False)
+        app_id = normalise_app_id(app_id)
         if app_id is None:
             return {"exists": False, "profile": {}, "ac_separate": False,
                     "ac_profile": {}, "error": "invalid app id"}
@@ -2511,7 +2500,7 @@ class Plugin:
 
     async def set_game_ac_profile(self, app_id: str, spl: int, sppt: int, fppt: int, ac_separate: bool, preset_name: str = "",
                                   stored: bool = False) -> dict:
-        app_id = _normalise_app_id(app_id, allow_empty=False)
+        app_id = normalise_app_id(app_id)
         if (app_id is None or type(ac_separate) is not bool or type(stored) is not bool
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
             return _fail("invalid profile request")
@@ -2562,7 +2551,7 @@ class Plugin:
         return await _offload(_do)
 
     async def delete_game_profile(self, app_id: str) -> dict:
-        app_id = _normalise_app_id(app_id, allow_empty=False)
+        app_id = normalise_app_id(app_id)
         if app_id is None:
             return _fail("invalid app id")
         def _do() -> dict:
@@ -2593,7 +2582,7 @@ class Plugin:
         Turning a profile off moves it, unchanged, to the inactive key; turning it
         on moves it back, or starts one from the global settings.
         """
-        app_id = _normalise_app_id(app_id, allow_empty=False)
+        app_id = normalise_app_id(app_id)
         if app_id is None or type(active) is not bool:
             return _fail("invalid profile request")
         def _do() -> dict:
@@ -2727,7 +2716,7 @@ class Plugin:
     async def set_active_app(self, app_id: str) -> None:
         """Frontend reports the authoritative running-game appid (or '' for none)."""
         global _frontend_appid, _frontend_appid_ts
-        normalised = _normalise_app_id(app_id)
+        normalised = normalise_app_id(app_id, allow_empty=True)
         if normalised is None:
             raise ValueError("invalid app id")
         _frontend_appid = normalised
@@ -2751,10 +2740,10 @@ class Plugin:
                         expected_app_id: str | None = None, stored: bool = False) -> dict:
         if not self._ready:
             return _fail("not ready")
-        app_id = _normalise_app_id(app_id)
+        app_id = normalise_app_id(app_id, allow_empty=True)
         expected_was_supplied = expected_app_id is not None
         expected_app_id = (
-            _normalise_app_id(expected_app_id) if expected_was_supplied else None)
+            normalise_app_id(expected_app_id, allow_empty=True) if expected_was_supplied else None)
         if (app_id is None or (expected_was_supplied and expected_app_id is None)
                 or type(stored) is not bool or (stored and not app_id)
                 or any(type(value) is not int for value in (spl, sppt, fppt))):

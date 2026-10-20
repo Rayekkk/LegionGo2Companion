@@ -6,7 +6,7 @@
 import decky
 import module_runtime
 from diagnostics import event, transition
-from active_app import resolve_running_app, scan_proc_for_appid
+from active_app import DEFAULT_APP, normalise_app_id, resolve_running_app, scan_proc_for_appid
 import copy
 import os
 import re
@@ -46,8 +46,6 @@ except Exception as _e:
 LEVEL_NAMES  = ["off", "low", "medium", "high"]
 RUMBLE_MODES = ["fps", "racing", "standard", "spg", "rpg"]
 
-DEFAULT_APP = "0"
-APP_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_GAME_PROFILES = 512
 MAX_NAME_LENGTH = 128
 # Same text as NOT_CONNECTED in desktop/native/vibration.mjs (both UIs show it as is).
@@ -386,16 +384,6 @@ def _coerce_bool(value, default: bool) -> bool:
     return default
 
 
-def _normalise_app_id(value, *, allow_default: bool = True) -> str | None:
-    if type(value) is int:
-        value = str(value)
-    if not isinstance(value, str) or APP_ID_RE.fullmatch(value) is None:
-        return None
-    if not allow_default and value == DEFAULT_APP:
-        return None
-    return value
-
-
 def _coerce_profile(raw: dict | None) -> dict:
     """Fill in missing fields and sanitise types."""
     raw = raw if isinstance(raw, dict) else {}
@@ -427,7 +415,7 @@ def _load_profiles() -> dict:
         raw_profiles = copy.deepcopy(raw_profiles) if isinstance(raw_profiles, dict) else {}
     profiles: dict[str, dict] = {}
     for raw_app_id, raw_entry in raw_profiles.items():
-        app_id = _normalise_app_id(raw_app_id)
+        app_id = normalise_app_id(raw_app_id)
         if app_id is None or not isinstance(raw_entry, dict):
             continue
         entry = {
@@ -862,7 +850,7 @@ class Plugin:
         frontend keeps hotplug and resume able to pick the right profile.
         """
         global _active_app_id
-        app_id = _normalise_app_id(app_id if app_id not in (None, "") else DEFAULT_APP)
+        app_id = normalise_app_id(app_id if app_id not in (None, "") else DEFAULT_APP)
         if app_id is None:
             return {"success": False, "changed": False,
                     "error": "invalid app id", **(await _offload(_settings_payload))}
@@ -965,7 +953,7 @@ class Plugin:
     async def set_profile_overwrite(self, app_id: str, enabled: bool,
                                     name: str = "") -> dict:
         """Turn a per-game profile on or off and apply the result."""
-        app_id = _normalise_app_id(app_id, allow_default=False)
+        app_id = normalise_app_id(app_id, allow_default=False)
         if app_id is None or type(enabled) is not bool:
             return {"success": False, "error": "invalid profile request"}
         name = name[:MAX_NAME_LENGTH] if isinstance(name, str) else ""
