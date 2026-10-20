@@ -95,6 +95,57 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(module.parse_virtual_report(virtual)["touchpad"]["is_touching"])
 
 
+class FakeSysfs:
+    """A POSIX sysfs path: resolve() follows `links`, file text comes from `files`."""
+    def __init__(self, path, links, files):
+        self.path, self.links, self.files = path, links, files
+    def __truediv__(self, part):
+        return FakeSysfs(f"{self.path}/{part}", self.links, self.files)
+    def resolve(self):
+        return FakeSysfs(self.links.get(self.path, self.path), self.links, self.files)
+    def glob(self, _pattern):
+        return [FakeSysfs(f"{self.path}/{name}", self.links, self.files)
+                for name in sorted({key[len(self.path) + 1:].split("/")[0] for key in self.links
+                                    if key.startswith(self.path + "/")})]
+    @property
+    def name(self):
+        return self.path.rsplit("/", 1)[1]
+    @property
+    def parent(self):
+        return FakeSysfs(self.path.rsplit("/", 1)[0], self.links, self.files)
+    def __str__(self):
+        return self.path
+
+
+class InventoryTests(unittest.TestCase):
+    """Which hidraw nodes count as the console's controller and InputPlumber's virtual one."""
+
+    def inventory(self, console, virtual_pid, virtual_name):
+        uhid = "/sys/devices/virtual/misc/uhid/0003:28DE:%04X.0009" % virtual_pid
+        usb = "/sys/devices/pci0000:00/usb1/1-1/1-1:1.2/0003:17EF:61EB.0002"
+        links = {"/sys/class/hidraw/hidraw1/device": usb, usb + "/driver": "/sys/bus/hid/drivers/hid-lenovo-go",
+                 "/sys/class/hidraw/hidraw7/device": uhid, uhid + "/driver": "/sys/bus/hid/drivers/hid-steam"}
+        files = {usb + "/uevent": "HID_ID=0003:000017EF:000061EB\nHID_NAME=Lenovo Legion Controller for Windows",
+                 usb.rsplit("/", 1)[0] + "/bInterfaceNumber": "02", "/sys/class/hidraw/hidraw1/dev": "240:1",
+                 uhid + "/uevent": f"HID_ID=0003:000028DE:0000{virtual_pid:04X}\nHID_NAME={virtual_name}",
+                 "/sys/class/hidraw/hidraw7/dev": "240:7"}
+        with patch.object(module, "HID_CLASS", FakeSysfs("/sys/class/hidraw", links, files)), \
+                patch.object(module, "_text", side_effect=lambda path: files.get(str(path))), \
+                patch.object(module, "_console", return_value=console):
+            return module._hid_inventory()
+
+    def test_each_console_finds_its_own_inputplumber_controller(self):
+        for console, pid, name, found in (
+                ("go2", 0x12FB, "Legion Go 2 Controller", True), ("go1", 0x12FE, "Legion Go Controller", True),
+                ("go1", 0x12FB, "Legion Go 2 Controller", False), ("go2", 0x12FE, "Legion Go Controller", False),
+                ("go1", 0x12FE, "Legion Go S Controller", False)):
+            with self.subTest(console=console, name=name):
+                physical, virtual = self.inventory(console, pid, name)
+                self.assertEqual(physical["pid"], "61eb")
+                self.assertEqual(virtual and virtual["path"], "/dev/hidraw7" if found else None)
+        self.assertEqual(self.inventory(None, 0x12FB, "Legion Go 2 Controller"), (None, None))
+
+
 class FilterTests(unittest.TestCase):
     def setUp(self):
         self.store = MemorySettings()

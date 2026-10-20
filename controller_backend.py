@@ -51,6 +51,9 @@ GO2_PIDS = {0x61EB, 0x61EC, 0x61ED, 0x61EE}  # Also a Go 1 on the 2025 controlle
 # InputPlumber's name for the controller. It already flips the Go 1's yaw sign by DMI (83E1),
 # and Companion only chooses which IMU it forwards, so no axis is changed here.
 INPUTPLUMBER_NAMES = {"go1": "Lenovo Legion Go", "go2": "Lenovo Legion Go 2"}
+# InputPlumber's virtual Steam Deck controller (28DE) for each: product id and HID_NAME
+# (target/steam_deck_uhid.rs and drivers/steam_deck/mod.rs, v0.62.0 to v0.82.0).
+VIRTUAL_CONTROLLERS = {"go1": (0x12FE, "Legion Go Controller"), "go2": (0x12FB, "Legion Go 2 Controller")}
 SOURCES = {"system", "combined", "left", "right"}
 IMU_KEYS = frozenset(f"{kind}:{side}" for kind in ("Gyroscope", "Accelerometer")
                      for side in ("Left", "Right", "Center"))
@@ -86,7 +89,8 @@ def _supported() -> bool:
 
 
 def _hid_inventory() -> tuple[dict | None, dict | None]:
-    if not _console():
+    console = _console()
+    if not console:
         return None, None
     physical, virtual = [], []
     for entry in list(HID_CLASS.glob("hidraw*"))[:128]:
@@ -110,7 +114,7 @@ def _hid_inventory() -> tuple[dict | None, dict | None]:
         if (vid == 0x17EF and pid in GO2_PIDS and driver == "hid-lenovo-go"
                 and _text(device.parent / "bInterfaceNumber") == "02"):
             physical.append(record)
-        if (vid == 0x28DE and pid == 0x12FB and values.get("HID_NAME") == "Legion Go 2 Controller"
+        if (vid == 0x28DE and (pid, values.get("HID_NAME")) == VIRTUAL_CONTROLLERS[console]
                 and str(device).startswith("/sys/devices/virtual/misc/uhid/")
                 and driver in {"hid-steam", "hid-generic"}):
             virtual.append(record)
