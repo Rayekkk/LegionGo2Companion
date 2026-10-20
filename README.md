@@ -800,7 +800,9 @@ Windows. Hardware calls are mocked; device testing is still required for startup
 transitions and native Steam UI behaviour. CI does not publish releases.
 
 The archive includes frontend source/build inputs, license notices and bundled pyudev source.
-RyzenAdj is downloaded separately and verified against its pinned hash. See
+RyzenAdj is downloaded separately and verified against its pinned hash before every use. It is
+kept in `/var/lib/legiongo2companion-tdp/`, outside Decky's plugin folder, so updates keep it;
+uninstalling leaves it there. See
 [SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component provenance.
 
 </details>

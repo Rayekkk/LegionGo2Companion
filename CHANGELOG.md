@@ -11,6 +11,8 @@ Unreleased.
 - **Controller firmware:** Install no longer stops fwupd after a fixed 10 minutes while it is still writing a controller. It is stopped only after 10 minutes without any progress, or after 30 minutes in total, and is asked to exit cleanly first.
 - **Installing or reloading Companion:** when Decky stops Companion while it is still starting (as it does right after installing a ZIP), Companion now stops within Decky's time limit instead of being killed after 5 seconds while TDP or Battery kept talking to the firmware.
 - **Updating Companion keeps your settings.** Decky runs Companion's uninstall before every update. It still hands the hardware back, but no longer forgets the gyro source, battery protection, lighting control or Wi-Fi band policy; the new version applies them again when it starts (the band policy once Wi-Fi has reconnected). Display reinstalls the script for the panel mode you set up (also when updating from 2.2.x) and asks you to restart Gaming Mode, unless another script is in its place or SteamOS's own Legion Go 2 display profile is running. The update from 2.2.x itself still loses the other choices once, because the old version's uninstall runs.
+- **TDP, Allow up to 50 W:** keeps working after a Companion update without **Retry helper download**. The verified `ryzenadj` helper is now kept outside Decky's plugin folder, which every update deletes. Updating from 2.2.x still needs one retry, because the old version's folder is already gone.
+- **TDP, Allow up to 50 W:** now always runs the firmware's custom mode under the higher limits. Before, the firmware mode chosen earlier (for example Performance) could stay active and replace the limits.
 
 ### Changed
 
