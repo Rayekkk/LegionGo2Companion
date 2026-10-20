@@ -99,11 +99,17 @@ class TdpCoreTests(unittest.TestCase):
                     return INFO.format(**live).encode(), b''
                 return b'', b''
 
-        def download(url, out, **_options):
+        def download(url, out, cancel=None, **_options):
             self.downloads.append(url)
             self.download_started.set()
-            if self.download_gate is not None and not self.download_gate.wait(5):
-                raise TimeoutError('test gate was not released')
+            if self.download_gate is not None:
+                for _ in range(500):
+                    if self.download_gate.wait(0.01):
+                        break
+                    if cancel is not None and cancel():
+                        raise InterruptedError('cancelled')  # as the real download between chunks
+                else:
+                    raise TimeoutError('test gate was not released')
             if self.archive is None:
                 out.write(b'partial archive')
                 raise TimeoutError('offline')
@@ -548,12 +554,41 @@ class TdpCoreTests(unittest.TestCase):
     def test_start_downloads_no_helper_unless_extras_are_on_and_offered(self):
         self.bin.unlink()
         self.publish_helper()
-        for machine, extras in (('83N0', False), ('83N6', True)):
+        for machine, extras in (('83N0', False), ('83N6', True), ('83E1', True)):
             with self.subTest(machine=machine):
                 self.machine = machine
+                if machine == '83E1':
+                    shutil.rmtree(self.firmware)  # no firmware TDP: the helper would never run
                 self.seed(extras_unlocked=extras)
                 self.start()
                 self.assertEqual(self.downloads, [])
+
+    def test_turning_extras_off_cancels_the_start_download_instead_of_waiting(self):
+        self.bin.unlink()
+        self.seed(extras_unlocked=True)
+        self.publish_helper()
+        self.download_gate = threading.Event()  # never released: only the cancel ends it
+        plugin = tdp.Plugin()
+        self.stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
+
+        async def scenario():
+            with patch.object(plugin, '_enforce_loop', new=AsyncMock()), \
+                    patch.object(plugin, '_info_loop', new=AsyncMock()):
+                await plugin._main()
+                await asyncio.to_thread(self.download_started.wait, 5)
+                result = await asyncio.wait_for(plugin.set_extras_unlocked(False), 2)
+                await asyncio.gather(*plugin._tasks)
+            plugin._tasks = []
+            return result
+        with patch.object(tdp, 'event') as event:
+            self.assertTrue(asyncio.run(scenario())['success'])
+        self.assertFalse(self.saved()['extras_unlocked'])
+        self.assertFalse(tdp._ryzenadj_available)
+        self.assertIn((('tdp', 'helper_job'), {'outcome': 'cancelled', 'reason': 'extras_off'}),
+                      [(call.args, call.kwargs) for call in event.call_args_list])
+        self.download_gate.set()
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])  # a later choice downloads again
+        self.assertEqual(len(self.downloads), 2)
 
     def test_loaded_spl_is_bounded_by_the_last_sane_firmware_ceiling(self):
         self.seed(spl=33000, sppt=40000, fppt=45000)

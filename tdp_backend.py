@@ -2358,6 +2358,7 @@ class Plugin:
     def __init__(self):
         self._tasks = []
         self._helper_cancel = threading.Event()
+        self._start_fetch_cancel = threading.Event()
         # Extras taps and helper retries run in tap order, so the last choice wins.
         self._extras_lock = asyncio.Lock()
         self._helper_error = ""
@@ -2440,21 +2441,28 @@ class Plugin:
         async with self._extras_lock:
             return await self._retry_extras()
 
-    async def _retry_extras(self) -> dict:
+    async def _fetch_helper_at_start(self) -> None:
+        """The start's one download; turning Extras off cancels it instead of waiting for it."""
+        async with self._extras_lock:
+            await self._retry_extras(self._start_fetch_cancel)
+
+    async def _retry_extras(self, extra_cancel: threading.Event | None = None) -> dict:
         if not _supported_model():
             return {"success": False, "error": UNSUPPORTED_MODEL}
         if not _extras_supported():
             return {"success": False, "error": EXTRAS_UNAVAILABLE}
         if _ryzenadj_available:
             return {"success": True}  # queued behind the retry that verified it
-        cancellation = self._helper_cancel
+        unload = self._helper_cancel
+        def cancelled() -> bool:
+            return unload.is_set() or (extra_cancel is not None and extra_cancel.is_set())
         def retry():
             global _ryzenadj_available, _current_game_id, _transition_key
             try:
-                if not _ensure_ryzenadj(cancel=cancellation.is_set):
+                if not _ensure_ryzenadj(cancel=cancelled):
                     raise RuntimeError("Verified RyzenAdj is unavailable")
                 with _mutation_lock:
-                    if cancellation.is_set():
+                    if cancelled():
                         return {"success": False, "error": "RyzenAdj download was cancelled"}
                     _ryzenadj_available = True
                     self._helper_error = ""
@@ -2463,12 +2471,13 @@ class Plugin:
                 transition("tdp", "helper_ready", True, outcome="verified")
                 return {"success": True}
             except Exception as exc:
-                if not cancellation.is_set():
+                if not cancelled():
                     self._helper_error = str(exc)
                     transition("tdp", "helper_ready", False, level="warning", error=exc,
                                outcome="deferred", retryable=True)
                 else:
-                    event("tdp", "helper_job", outcome="cancelled", reason="module_shutdown")
+                    event("tdp", "helper_job", outcome="cancelled",
+                          reason="module_shutdown" if unload.is_set() else "extras_off")
                 return {"success": False, "error": str(exc)}
         return await _offload(retry)
 
@@ -2529,6 +2538,8 @@ class Plugin:
         return await _offload(_do)
 
     async def set_extras_unlocked(self, enabled: bool) -> dict:
+        if enabled is False:
+            self._start_fetch_cancel.set()  # the start's download serves Extras that are now off
         async with self._extras_lock:
             return await self._set_extras_unlocked(enabled)
 
@@ -2958,6 +2969,7 @@ class Plugin:
 
     async def _main(self):
         self._helper_cancel = threading.Event()
+        self._start_fetch_cancel = threading.Event()
         self._helper_error = ""
         try:
             global _current_ac_online, _ryzenadj_available
@@ -3025,11 +3037,13 @@ class Plugin:
                 asyncio.create_task(self._info_loop()),
             ]
             saved = await _offload(_load_settings)
+            # As get_caps: without the firmware attributes only a Go 2 would run the helper.
             if (saved.get("extras_unlocked", False) and not _ryzenadj_available
-                    and not _ryzenadj_unsupported and _extras_supported()):
+                    and not _ryzenadj_unsupported and _extras_supported()
+                    and (bool(wmi) or await _offload(_legion_go_2))):
                 # Extras are on but the helper is gone (2.2.x kept it in the plugin folder,
                 # which the update deleted): one download per start, in the background.
-                self._tasks.append(asyncio.create_task(self.retry_extras()))
+                self._tasks.append(asyncio.create_task(self._fetch_helper_at_start()))
             decky.logger.info(
                 f"[legotdp] ready (wmi={'yes' if wmi else 'no'}, "
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")
