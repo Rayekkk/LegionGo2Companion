@@ -230,6 +230,29 @@ class TdpCoreTests(unittest.TestCase):
         self.assertFalse(result['success'])
         self.assertIn('ppt_pl1_spl=10 want 18', result['stderr'])
 
+    def test_stop_during_the_startup_apply_ends_the_start_quietly_with_no_further_firmware_write(self):
+        real_write_profile = tdp._write_profile.side_effect
+        def stop_after_first_write(path, value):
+            result = real_write_profile(path, value)
+            tdp.module_runtime.request_stop('tdp')  # Decky's stop lands mid-bounce.
+            return result
+        tdp._write_profile.side_effect = stop_after_first_write
+        self.addCleanup(tdp.module_runtime._stop_requested.discard, 'tdp')
+        self.stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
+        self.stack.enter_context(patch.object(tdp.Plugin, '_setup_error', None))
+        before, plugin = self.ppts(), tdp.Plugin()
+        async def start():
+            with tdp.module_runtime.starting('tdp'):
+                await plugin._main()
+        with patch.object(tdp, 'event') as event:
+            asyncio.run(start())
+        self.assertEqual(self.profile.read_text(), 'low-power')  # The write in flight finished...
+        self.assertEqual(self.ppts(), before)  # ...and no other began.
+        self.assertEqual(self.applies(), [])
+        self.assertFalse(tdp.Plugin._ready)
+        self.assertIsNone(tdp.Plugin._setup_error)
+        self.assertNotIn('startup_failed', [call.args[1] for call in event.call_args_list])
+
     # Clamp and path choice -------------------------------------------------
 
     def test_hardware_clamp_floor_and_ordering(self):

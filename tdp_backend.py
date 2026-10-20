@@ -2902,6 +2902,8 @@ class Plugin:
             decky.logger.info(
                 f"[legotdp] ready (wmi={'yes' if wmi else 'no'}, "
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")
+        except module_runtime.StartStopped:
+            return  # Like the stop check in _apply_saved: the stop ends the start, not an error.
         except Exception as e:
             Plugin._setup_error = str(e)
             event('tdp','startup_failed',level='error',error=e)

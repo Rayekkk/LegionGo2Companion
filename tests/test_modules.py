@@ -429,26 +429,24 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(step)
                     entered.set()
                     threading.Event().wait(0.1)  # One firmware call; never cut short.
-        def restore():
-            with module_runtime.firmware_lock:
-                calls.append('restored')
         async def start():
             await module_runtime.offload('tdp', probe)
-        async def unload():
-            await module_runtime.offload('tdp', restore)
         self.plugin._tdp._main.side_effect = start
-        self.plugin._tdp._unload.side_effect = unload
         self.plugin._start_desktop = AsyncMock()
         self.plugin._publish_modules = AsyncMock()
-        startup = asyncio.ensure_future(self.plugin._main())
-        await asyncio.wait_for(asyncio.to_thread(entered.wait), 1)
-        await asyncio.wait_for(self.plugin._unload(), 2)
-        self.assertEqual(calls, [0, 'restored'])  # The call in flight finished, no other began; restoration ran.
+        with patch.object(main.diagnostics, 'event') as event:
+            startup = asyncio.ensure_future(self.plugin._main())
+            await asyncio.wait_for(asyncio.to_thread(entered.wait), 1)
+            await asyncio.wait_for(self.plugin._unload(), 2)
+            await asyncio.wait_for(startup, 1)
+        self.assertEqual(calls, [0])  # The call in flight finished; no other began.
         self.assertFalse(module_runtime._workers.get('tdp'))  # Nothing left to hold the process.
-        self.plugin._tdp._unload.assert_awaited_once()  # The stopped start's own cleanup, inside the budget.
-        self.plugin._fan._main.assert_not_awaited()
-        await asyncio.wait_for(startup, 1)
         self.assertFalse(module_runtime.firmware_lock.locked())
+        self.plugin._tdp._unload.assert_awaited_once()  # Unloaded by the stop, inside the budget.
+        self.plugin._fan._main.assert_not_awaited()
+        self.assertIn(('tdp', 'module_start_stopped'), [args for args, _ in self.events(event)])
+        self.assertEqual([args for args, kwargs in self.events(event) if kwargs.get('level') in ('warning', 'error')], [])
+        self.assertEqual(self.plugin._module_status()['tdp']['error'], '')
 
     async def test_retry_cannot_start_over_workers_whose_cleanup_failed(self):
         self.plugin._rgb._main.side_effect = RuntimeError('startup failed')

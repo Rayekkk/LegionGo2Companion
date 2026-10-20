@@ -247,6 +247,23 @@ class Plugin:
                 out["success"] = False
             return out
 
+    @staticmethod
+    def _restore_mode(path: Path, before: str, target: str) -> None:
+        # Avoid replacing a third mode chosen externally during
+        # this operation. If readback itself is broken, attempt
+        # the exact pre-operation mode and verify restoration.
+        try:
+            _, actual = _parse_modes(_read_attr(path))
+        except Exception:
+            actual = None
+        if actual not in {None, target, before}:
+            raise BatteryError("Charging mode changed externally; rollback did not overwrite it.")
+        if actual != before:
+            _write_mode(path, before)
+        _, restored = _parse_modes(_read_attr(path))
+        if restored != before:
+            raise BatteryError("The original charging mode could not be confirmed.")
+
     def _transact(self, device: dict[str, Any], target: str | None,
                   state: dict[str, Any]) -> None:
         snapshot = self._snapshot()
@@ -277,22 +294,11 @@ class Plugin:
         except Exception as exc:
             failures = []
             hardware_restored = True
+            # A stop during startup refuses further firmware calls, never this restoration.
             if attempted:
                 try:
-                    # Avoid replacing a third mode chosen externally during
-                    # this operation. If readback itself is broken, attempt
-                    # the exact pre-operation mode and verify restoration.
-                    try:
-                        _, actual = _parse_modes(_read_attr(device["path"]))
-                    except Exception:
-                        actual = None
-                    if actual not in {None, target, before}:
-                        raise BatteryError("Charging mode changed externally; rollback did not overwrite it.")
-                    if actual != before:
-                        _write_mode(device["path"], before)
-                    _, restored = _parse_modes(_read_attr(device["path"]))
-                    if restored != before:
-                        raise BatteryError("The original charging mode could not be confirmed.")
+                    with module_runtime.starting(None):
+                        self._restore_mode(device["path"], before, target)
                 except Exception as rollback:
                     hardware_restored = False
                     failures.append(f"Hardware rollback failed: {rollback}")
@@ -309,6 +315,8 @@ class Plugin:
                   stage="rollback", restored=hardware_restored and not failures,
                   pending=not hardware_restored or bool(failures),
                   error=exc if failures else None)
+            if isinstance(exc, module_runtime.StartStopped) and not failures:
+                raise  # A stopped start, rolled back: not a battery failure.
             raise BatteryError(f"Battery setting failed: {exc}.{suffix}") from exc
 
     def _set(self, enabled: bool) -> dict[str, Any]:
@@ -358,6 +366,8 @@ class Plugin:
                     self._transact(device, target, state)
                 self._error = ""
                 transition("battery", "managed_profile", True, outcome="confirmed", initial=False)
+            except module_runtime.StartStopped:
+                raise  # The start ends here; its stop is no battery error.
             except Exception as exc:
                 message = str(exc)
                 transition("battery", "managed_profile", False, level="warning", error=exc,

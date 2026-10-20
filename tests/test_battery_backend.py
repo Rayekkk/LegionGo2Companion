@@ -232,6 +232,26 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.current(), "Fast")
         self.assertFalse(result["status"]["recovery_pending"])
 
+    async def test_stop_during_a_startup_repair_rolls_back_and_leaves_no_pending_recovery(self):
+        await self.plugin.set_enabled(True)
+        self.externally_select("Fast")  # The start's repair re-applies Long_Life.
+        runtime = battery.module_runtime
+        self.addCleanup(runtime._stop_requested.discard, "battery")
+        def write_then_stop(path, mode):
+            with runtime.firmware_lock:
+                self.write_mode(path, mode)
+            if mode == "Long_Life":
+                runtime.request_stop("battery")  # Decky's stop lands before the readback.
+        self.writer.side_effect = write_then_stop
+        with patch.object(battery, "event") as event:
+            with self.assertRaises(runtime.StartStopped), runtime.starting("battery"):
+                await self.plugin._main()
+        self.assertEqual(self.writes[-2:], ["Long_Life", "Fast"])  # Restoration was not refused.
+        self.assertEqual(self.current(), "Fast")
+        self.assertIsNone(self.store.getSetting("pending", None))
+        self.assertEqual(self.plugin._error, "")
+        self.assertNotIn("error", [call.kwargs.get("level") for call in event.call_args_list])
+
     async def test_release_restores_fast_only_while_own_setting_is_active(self):
         await self.plugin.set_enabled(True)
         result = await self.plugin.release_control()

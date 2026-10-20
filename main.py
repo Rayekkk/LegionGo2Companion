@@ -447,6 +447,9 @@ class Plugin:
             if isinstance(result, dict) and result.get('success') is False:
                 raise RuntimeError(result.get('error') or result.get('message') or 'Module startup failed.')
             self._module_health[name] = {'ready': True}
+        except module_runtime.StartStopped:
+            # A shutdown stopped it: not ready and no error; whoever stopped it unloads it.
+            diagnostics.event(name, 'module_start_stopped')
         except Exception as exc:
             diagnostics.event(name, 'module_start_failed', level='error', error=exc)
             self._module_health[name] = {'ready': False, 'error': str(exc)}
