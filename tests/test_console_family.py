@@ -130,6 +130,26 @@ class ApplicabilityTests(unittest.TestCase):
                 go2 = console.startswith("Go 2")
                 self.assertEqual((applicable["fan"], device["firmware"], device["power_led"]), (go2,) * 3)
 
+    def test_fan_stays_visible_on_a_go_2_whose_dmi_fails_the_model_gate(self):
+        import fan_backend
+        with tempfile.TemporaryDirectory() as raw:
+            identity = Path(raw)
+            def put(**values):
+                for name, value in values.items():
+                    (identity / name).write_bytes(value if isinstance(value, bytes) else value.encode() + b"\n")
+            with patch.object(module_runtime, "DMI_ROOT", raw):
+                put(sys_vendor="LENOVO", product_name="83N0")  # board_name and bios_version unreadable
+                self.assertTrue(fan_backend.Plugin.applicable())
+                put(product_name="83N1", bios_version="RRCN16WW")  # Fails the gate: shown with its error.
+                self.assertTrue(fan_backend.Plugin.applicable())
+                put(product_name=b"\xff\xfe\n")  # Unreadable machine type: not surely another console.
+                self.assertTrue(fan_backend.Plugin.applicable())
+                for vendor, model in (("LENOVO", "83E1"), ("LENOVO", "83L3"), ("OTHER", "83N0")):
+                    put(sys_vendor=vendor, product_name=model)
+                    self.assertFalse(fan_backend.Plugin.applicable(), model)
+            with patch.object(module_runtime, "DMI_ROOT", str(identity / "missing")):
+                self.assertFalse(fan_backend.Plugin.applicable())  # No DMI at all
+
     def test_a_failing_rule_hides_its_module_and_is_logged(self):
         plugin = main.Plugin()
         plugin._display = types.SimpleNamespace(applicable=lambda: 1 / 0)

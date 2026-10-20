@@ -17,7 +17,7 @@ from diagnostics import event as diagnostic_event, transition as diagnostic_tran
 import module_runtime
 from system_process import PYTHON, system_env
 from safe_settings import SettingsManager
-from fan_ec import BETA_MODELS, platform_check
+from fan_ec import BETA_MODELS, MODELS as FAN_MODELS, platform_check
 from fan_guardian import secure_root, check_owners, Sensors, outcome_of
 from fan_ec import Ports, EC
 from fan_sleep import Pause, Retry
@@ -381,12 +381,16 @@ class Plugin:
 
     @staticmethod
     def applicable() -> bool:
-        """The model gate itself (DMI only): elsewhere the module stays hidden and never opens the EC."""
+        """Hidden (and the EC never opened) only where the machine type is surely not a Go 2 Fan model.
+        Any other DMI failure keeps Fan visible with the model gate's error from startup."""
         try:
-            platform_check(module_runtime.DMI_ROOT)
-        except (OSError, RuntimeError, UnicodeError):
-            return False
-        return True
+            identity = [module_runtime.read_sysfs_text(os.path.join(module_runtime.DMI_ROOT, name), 128)
+                        for name in ('sys_vendor', 'product_name')]
+        except FileNotFoundError:
+            return False  # No DMI: not a Legion Go.
+        except (OSError, UnicodeError):
+            return True
+        return identity[0] == 'LENOVO' and identity[1] in FAN_MODELS
     BACKOFF_S, POLL_S = (1, 2, 5, 10, 30), 0.5
 
     def __init__(self):
