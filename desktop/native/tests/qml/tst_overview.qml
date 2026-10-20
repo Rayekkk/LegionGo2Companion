@@ -113,6 +113,20 @@ TestCase {
         for(const name of ["overviewBattery","overviewPerformance","overviewPreset","overviewPower","overviewPowerLimit","overviewTdpButton","overviewNetwork"])
             verify(findChild(view,name).visible,name);
     }
+    function test_betaNoticeOnlyOnTheGoAndGoSWithTheFirmwareHintOnOldGo1Firmware() {
+        const notice=findChild(view,"overviewBeta"),text=findChild(view,"overviewBetaText");
+        const beta="Built from Lenovo's firmware data, not yet tested on this console. Report problems on GitHub.";
+        const hint=" Update the controller firmware in Legion Space to unlock vibration, lighting and gyro.";
+        function on(device) { fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{fan:{ready:true}},device:device}}); }
+        on({console:"go2",model:"83N0",firmware:true,power_led:true,controller_driver:true});
+        verify(!notice.visible,"never on a Go 2");
+        on({console:"go2",model:"83N1",controller_driver:false});verify(!notice.visible);
+        on(undefined);verify(!notice.visible,"an unknown console shows none");
+        on({console:"gos"});verify(notice.visible);compare(notice.title,"Beta on Legion Go S");compare(text.text,beta);
+        on({console:"go1",controller_driver:true});compare(notice.title,"Beta on Legion Go");compare(text.text,beta);
+        on({console:"go1",controller_driver:false});compare(text.text,beta+hint);
+        on({console:"gos",controller_driver:false});compare(text.text,beta,"the hint is for the Go 1 only");
+    }
     function test_disabledFanCannotPresentItsLastSampleAsLive() {
         // Clean module disable can retain ready=true in the real backend.
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{fan:{enabled:false,ready:true}}}});

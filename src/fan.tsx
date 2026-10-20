@@ -6,10 +6,11 @@ import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, Game
 import { FC, useEffect, useRef, useState } from "react";
 import { errorText, infoRow } from "./shared";
 import { curveName as title, editPoint, fanStatus, nudgeSpeed, pointText, saveLabel, speedText } from "../desktop/native/fan.mjs";
+import { FAN_BETA_TEXT } from "../desktop/native/modules.mjs";
 
 export type Curve = [number, number][];
 export interface FanState {
-  supported: boolean; error: string; active_curve: string;
+  supported: boolean; beta?: boolean; error: string; active_curve: string;
   needs_curve_review?: boolean;
   settings: { enabled: boolean; revision: number; assign_tdp_presets?: boolean; display_unit?: "rpm" | "percent"; global_curve: Curve; presets: Record<string, Curve> };
   templates?: Record<string, Curve>;
@@ -371,6 +372,7 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
         <div style={{fontSize:20,fontWeight:600}}>{fanReadingLabel(status,now)}</div>
         <div style={{fontSize:13,color:"#afb7c0",marginTop:4}}>{fanState.headline}</div>
       </div>
+      {status.beta && infoRow("Beta", FAN_BETA_TEXT)}
       <PanelSectionRow><ToggleField label="Enable Fan Control" checked={status.settings.enabled}
         disabled={busy || !status.settings.enabled && (!status.supported || !!status.ownership?.blocked || dirty || !!status.needs_curve_review)}
         description={enableDescription}

@@ -312,6 +312,17 @@ TestCase {
         verify(fan.hasOwnCurve && useGlobal.enabled);verify(save.enabled,"an unchanged curve confirms the review");
         fan.dirty=true;verify(!useGlobal.enabled,"unsaved changes first");
     }
+    function test_fanBetaNoteOnlyWhereTheBackendCallsFanControlABeta() {
+        for(const beta of [undefined,true]) {
+            model.snapshots=Object.assign({},model.snapshots,{fan_get_state:{supported:true,beta:beta,ownership:{blocked:false},presets:[],
+                settings:{revision:1,enabled:false,global_curve:[],presets:{}}}});
+            model.received={get_version:fake.clock,fan_get_state:fake.clock};
+            const fan=createTemporaryObject(fanFactory,this,{backend:model});verify(fan!==null);
+            compare(fan.betaShown,beta===true);
+            const note=findChild(fan,"fanBeta");verify(note!==null);
+            if(beta)compare(findChild(fan,"fanBetaText").text,"Beta on this model: the fan is checked by a self-test before Companion first takes control.");
+        }
+    }
     function test_fanStillStartingHintAlsoForAPageOpenedMidStart() {
         model.snapshots=Object.assign({},model.snapshots,{fan_get_state:{supported:true,ownership:{blocked:false},presets:[],
             telemetry:{active:false,automatic:false},settings:{revision:1,enabled:true,global_curve:[],presets:{}}}});

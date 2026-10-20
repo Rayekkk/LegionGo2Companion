@@ -129,6 +129,7 @@ class ApplicabilityTests(unittest.TestCase):
                 # Fan, the power light and controller firmware keep their own Go 2 model gates.
                 go2 = console.startswith("Go 2")
                 self.assertEqual((applicable["fan"], device["firmware"], device["power_led"]), (go2,) * 3)
+                self.assertIs(device["controller_driver"], setup[1], "tells the UI a Go 1 is on older controller firmware")
 
     def test_fan_stays_visible_on_a_go_2_whose_dmi_fails_the_model_gate(self):
         import fan_backend

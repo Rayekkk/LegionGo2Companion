@@ -3,6 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "fan.mjs" as Fan
+import "modules.mjs" as Modules
 ColumnLayout {
     id:panel
     UiTheme { id:theme }
@@ -86,6 +87,11 @@ ColumnLayout {
     Timer { interval:500; repeat:true; running:panel.backend.windowActive; onTriggered:panel.tick=panel.backend.now() }
     UiModuleNotice { Layout.fillWidth:true;status:moduleStatus;onManageRequested:panel.navigate("modules") }
     Label { textFormat:Text.PlainText; text:moduleStatus.ready && typeof backend.moduleError==="function"?backend.moduleError("fan"):"";visible:text.length>0;color:theme.warning;wrapMode:Text.WordWrap;Layout.fillWidth:true }
+    readonly property bool betaShown:!!fanState.beta
+    RowLayout { objectName:"fanBeta"; visible:panel.betaShown; Layout.fillWidth:true; spacing:12
+        UiBadge { text:"Beta"; tone:"amber"; Layout.alignment:Qt.AlignTop }
+        Label { objectName:"fanBetaText"; textFormat:Text.PlainText; text:Modules.FAN_BETA_TEXT; color:theme.muted; wrapMode:Text.WordWrap; Layout.fillWidth:true }
+    }
     UiCard {
         Layout.fillWidth:true
         RowLayout {

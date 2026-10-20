@@ -40,6 +40,12 @@ run(async()=>{
   const telemetry=find(summary,n=>n!==summary && n.props && text(n)==='APU 44.5°C · 1600 RPM');
   assert.ok(telemetry,'The summary shows measured temperature and tachometer values');
   assert.equal(label(tree,'Enable Fan Control').props.checked,false);
+  assert.equal(label(tree,'Beta'),undefined,'No Beta note on the 83N0');
+  {
+    const beta=harness({...initial,beta:true});beta.render();await flush();
+    assert.equal(label(beta.render(),'Beta').props.description,'Beta on this model: the fan is checked by a self-test before Companion first takes control.');
+    beta.unmount();
+  }
   assert.equal(find(tree,n=>n.type==='SliderField'),undefined,'No slider editor');
   assert.equal(label(tree,'Speed edit step').props.selectedOption,100,'Default manual edit step is 100 RPM');
   assert.ok(label(tree,'Curve').props.rgOptions.some(o=>o.data==='custom'),'Custom and Maximum remain independent curve assignments');

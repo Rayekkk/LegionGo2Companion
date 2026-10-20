@@ -436,11 +436,12 @@ class Plugin:
         try:
             console, model = module_runtime.legion_device()
             # Options inside modules that keep their own model gate (Fan's is the module itself).
-            device = {'console': console, 'model': model or None,
-                      'firmware': firmware_applies(), 'power_led': rgb_backend.power_led_model()}
+            # controller_driver False on a Go 1 means its older controller firmware (no kernel driver).
+            device = {'console': console, 'model': model or None, 'firmware': firmware_applies(),
+                      'power_led': rgb_backend.power_led_model(), 'controller_driver': module_runtime.kernel_controller()}
         except Exception as exc:  # An unknown console must not stop the plugin from starting.
             diagnostics.event('plugin', 'device_unknown', level='warning', error=exc)
-            device = {'console': None, 'model': None, 'firmware': False, 'power_led': False}
+            device = {'console': None, 'model': None, 'firmware': False, 'power_led': False, 'controller_driver': False}
         return applicable, device
 
     async def _ensure_device(self):

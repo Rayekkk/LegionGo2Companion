@@ -30,14 +30,14 @@ import { ControllerPage, getControllerStatus, controllerSummary, type Controller
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
-import { cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
+import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
 type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; applicable?: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
 // What applies to this console besides the modules (get_version.device); a missing value is shown.
-type Device = {console?: string | null; model?: string | null; firmware?: boolean; power_led?: boolean};
+type Device = {console?: string | null; model?: string | null; firmware?: boolean; power_led?: boolean; controller_driver?: boolean};
 // Key order is the menu and Manage Modules order.
 const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => moduleShown(modules[key]) && modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
@@ -564,6 +564,7 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
 
   if (!activeSection) return <PageShell rootRef={panelRef}>
     <PanelSection title="Hardware Controls">
+      {betaNoticeTitle(device) && infoRow(betaNoticeTitle(device), betaNoticeText(device))}
       {Object.values(modules).some(state => state?.maintenance) && infoRow("Controller controls paused", "Firmware maintenance is in progress. Saved controller settings have not been changed.")}
       {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}{startingRow("tdp")}
       {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}{startingRow("fan")}

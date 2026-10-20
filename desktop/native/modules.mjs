@@ -36,3 +36,13 @@ export const moduleNote = (name, entry, device) => moduleStartingText(entry) || 
 export const moduleShown = entry => entry?.applicable !== false;
 export const cleanupRetryShown = entry => !!entry?.pending && !entry.maintenance && !entry.starting;
 export const startRetryShown = entry => entry?.enabled === true && entry.ready === false && !entry.pending && !entry.maintenance && !entry.starting;
+
+// Beta notices (Decky home page and Desktop Overview): consoles built from Lenovo's data but not yet tested.
+const BETA_NOTICE_TEXT = "Built from Lenovo's firmware data, not yet tested on this console. Report problems on GitHub.";
+const OLD_CONTROLLER_FIRMWARE_TEXT = "Update the controller firmware in Legion Space to unlock vibration, lighting and gyro.";
+export const FAN_BETA_TEXT = "Beta on this model: the fan is checked by a self-test before Companion first takes control.";
+const betaConsole = device => device?.console === "go1" ? "Legion Go" : device?.console === "gos" ? "Legion Go S" : "";
+export const betaNoticeTitle = device => betaConsole(device) ? "Beta on " + betaConsole(device) : "";
+/** A Go 1 whose controllers lack the kernel driver (device.controller_driver false) is on the older firmware. */
+export const betaNoticeText = device => !betaConsole(device) ? ""
+  : device.console === "go1" && device.controller_driver === false ? BETA_NOTICE_TEXT + " " + OLD_CONTROLLER_FIRMWARE_TEXT : BETA_NOTICE_TEXT;

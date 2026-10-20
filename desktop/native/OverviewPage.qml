@@ -49,6 +49,16 @@ ColumnLayout {
     readonly property bool controllersShown:shown("vibration") || shown("controller")
     function available(name) { return !backend.connected?"Offline":Modules.moduleStartingText(modules[name])?"Starting":modules[name]?.pending?"Restoring":modules[name]?.enabled===false?"Off":modules[name]?.error?"Needs attention":modules[name]?.ready?"On":"Unavailable"; }
     Timer { interval:500; repeat:true; running:overview.backend && overview.backend.windowActive; onTriggered:overview.tick=overview.backend.now() }
+    // The Legion Go and Go S are built from Lenovo's data and not yet tested (never shown on a Go 2).
+    readonly property var device:s("get_version").device
+    UiCard {
+        objectName:"overviewBeta"
+        visible:title.length>0
+        Layout.fillWidth:true
+        padding:20
+        title:Modules.betaNoticeTitle(overview.device)
+        Label { objectName:"overviewBetaText"; textFormat:Text.PlainText; text:Modules.betaNoticeText(overview.device); color:theme.muted; font.pixelSize:14; wrapMode:Text.WordWrap; Layout.fillWidth:true }
+    }
     GridLayout {
         id:summaryGrid
         Layout.fillWidth:true; columns:overview.width>=860 && overview.shown("battery") && overview.performanceShown?2:1; columnSpacing:theme.gap; rowSpacing:theme.gap

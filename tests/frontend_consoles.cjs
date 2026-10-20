@@ -30,6 +30,22 @@ run(async () => {
     assert.ok(!reads.some(name => /Fan|Vibe|Remap|Display|ControllerStatus|ControllerBattery|Driver/.test(name)),
       `a hidden module is never read: ${reads}`);
 
+    // The Beta row (title and text from modules.mjs) opens the home page of a Go 1 and a Go S, never a Go 2.
+    const notice = props => find(h.render(props), n => /^Beta on /.test(n.props?.label ?? ''));
+    const BETA = "Built from Lenovo's firmware data, not yet tested on this console. Report problems on GitHub.";
+    const OLD_FIRMWARE = 'Update the controller firmware in Legion Space to unlock vibration, lighting and gyro.';
+    const go1 = driver => ({ modules: status(driver ? [] : ['vibration', 'rgb', 'controller']),
+      device: { console: 'go1', model: '83E1', firmware: true, power_led: false, controller_driver: driver } });
+    assert.equal(notice(GO2), undefined, 'a Go 2 shows no Beta row');
+    assert.equal(notice({ modules: status([]), device: { console: 'go2', model: '83N1', controller_driver: false } }), undefined);
+    assert.equal(notice({ modules: status([]), device: {} }), undefined, 'an unknown console shows none');
+    assert.equal(notice(GO_S).props.label, 'Beta on Legion Go S');
+    assert.equal(notice(GO_S).props.description, BETA);
+    assert.equal(notice(go1(true)).props.label, 'Beta on Legion Go');
+    assert.equal(notice(go1(true)).props.description, BETA, 'newer controller firmware: no firmware hint');
+    assert.equal(notice(go1(false)).props.description, `${BETA} ${OLD_FIRMWARE}`, 'older controller firmware adds the hint');
+    assert.equal(notice({ modules: GO_S.modules, device: { ...GO_S.device, controller_driver: false } }).props.description, BETA,
+      'the firmware hint is for the Go 1 only');
     const page = props => h.render(props, h.exports.P);
     const rows = props => nodes(page(props)).filter(n => n.type === 'ToggleField').map(n => n.props.label);
     assert.deepEqual(rows(GO2), NAMES.map(n => TITLES[n]));
