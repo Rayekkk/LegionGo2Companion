@@ -63,7 +63,7 @@ class TdpCoreTests(unittest.TestCase):
         self.tmp.mkdir()
         self.store = AtomicSettingsManager('tdp_settings', str(self.root / 'settings'))
         self.seed()
-        self.app, self.ac = '', False
+        self.app, self.ac, self.machine = '', False, '83N0'
         self.ryzenadj = []
         self.smu = {}  # limits written through ryzenadj; otherwise it reads the firmware's
         self.profile_writes = []
@@ -115,7 +115,7 @@ class TdpCoreTests(unittest.TestCase):
         for name, callback in {
             '_get_running_appid': lambda: self.app, '_get_ac_online': lambda: self.ac,
             '_write_profile': write_profile,
-            '_legion_go_2': lambda: True,
+            '_machine_type': lambda: self.machine,
         }.items():
             self.stack.enter_context(patch.object(tdp, name, side_effect=callback))
         self.stack.enter_context(patch.object(tdp.module_runtime, 'suspend_offset', return_value=0.0))
@@ -430,7 +430,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(tdp._load_settings()['spl'], 30000)
         for broken in ('500', '0', None):
             with self.subTest(firmware_spl_max=broken):
-                tdp._firmware_spl_max_mw = None
+                tdp._firmware_caps = {}
                 if broken is None:
                     spl_max.unlink()
                 else:
@@ -472,14 +472,14 @@ class TdpCoreTests(unittest.TestCase):
         boost.write_text('0')
         tdp._ryzenadj_available = True
         self.seed(cpu_boost_enabled=True)
-        with patch.object(tdp, '_legion_go_2', return_value=False), \
-                patch.object(tdp.Plugin, '_ready', False), \
+        self.machine = '82XX'  # a Lenovo outside the Legion Go family
+        with patch.object(tdp.Plugin, '_ready', False), \
                 patch.object(tdp.Plugin, '_setup_error', None):
-            self.assertIn('Legion Go 2', tdp._apply_limits(15000, 20000, 25000)['stderr'])
+            self.assertEqual(tdp._apply_limits(15000, 20000, 25000)['stderr'], tdp.UNSUPPORTED_MODEL)
             self.assertFalse(self.rpc('set_cpu_boost', True)['success'])
             caps = self.rpc('get_caps')
             self.assertFalse(caps['tdp_available'])
-            self.assertIn('Legion Go 2', caps['tdp_error'])
+            self.assertEqual(caps['tdp_error'], tdp.UNSUPPORTED_MODEL)
             self.assertFalse(self.rpc('retry_extras')['success'])
             with tdp._mutation_lock:
                 self.assertTrue(tdp._release_controls_locked()['success'])
@@ -491,6 +491,94 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.downloads, [])
         self.assertEqual((self.profile.read_text(), boost.read_text()), ('balanced', '0'))
         self.assertEqual((self.ppts(), self.ryzenadj), ((10, 10, 10), []))
+
+    # Legion Go family ------------------------------------------------------
+
+    def firmware_range(self, maxes, mins=(5, 5, 5)):
+        for key, low, high in zip(tdp.WMI_ATTRS, mins, maxes):
+            (self.firmware / tdp.WMI_ATTRS[key] / 'min_value').write_text(str(low))
+            (self.firmware / tdp.WMI_ATTRS[key] / 'max_value').write_text(str(high))
+
+    def test_go_2_keeps_its_measured_presets_and_max(self):
+        caps = self.rpc('get_caps')
+        self.assertEqual(caps['presets'], {
+            'silent': {'spl': 8, 'sppt': 15, 'fppt': 20},
+            'balanced': {'spl': 16, 'sppt': 25, 'fppt': 30},
+            'performance': {'spl': 20, 'sppt': 32, 'fppt': 35},
+            'max': {'spl': 35, 'sppt': 37, 'fppt': 45},
+        })
+        self.assertFalse(caps['presets_estimated'])
+        self.assertEqual((caps['min'], caps['std'], caps['max']),
+                         (5, {'spl': 35, 'sppt': 37, 'fppt': 45}, {'spl': 35, 'sppt': 37, 'fppt': 45}))
+
+    def test_go_1_scales_the_presets_to_its_firmware_and_max_is_its_ceiling(self):
+        self.machine = '83E1'
+        self.firmware_range((30, 32, 41))
+        caps = self.rpc('get_caps')
+        self.assertTrue(caps['presets_estimated'])
+        self.assertEqual(caps['presets'], {
+            'silent': {'spl': 7, 'sppt': 13, 'fppt': 18},
+            'balanced': {'spl': 14, 'sppt': 22, 'fppt': 27},
+            'performance': {'spl': 17, 'sppt': 28, 'fppt': 32},
+            'max': {'spl': 30, 'sppt': 32, 'fppt': 41},
+        })
+        self.assertTrue(self.rpc('apply_tdp', 30000, 32000, 41000, preset_name='max')['success'])
+        self.assertEqual(self.ppts(), (30, 32, 41))  # the firmware path, not the Go 2's 35/37/45
+        self.assertEqual(self.applies(), [])
+
+    def test_single_dial_custom_reaches_a_firmware_ceiling_above_the_go_2s(self):
+        self.machine = '83N6'  # Go S: 40/43/53 W
+        self.firmware_range((40, 43, 53))
+        self.seed(advanced_tdp_control=False)
+        self.assertTrue(self.rpc('apply_tdp', 40000, 43000, 53000, preset_name='custom')['success'])
+        self.assertEqual(self.ppts(), (40, 43, 53))
+
+    def test_presets_and_limits_stay_inside_the_firmware_minimums(self):
+        self.firmware_range((35, 37, 45), mins=(10, 16, 18))
+        presets = self.rpc('get_caps')['presets']
+        self.assertEqual(presets['silent'], {'spl': 10, 'sppt': 16, 'fppt': 20})
+        self.assertEqual(presets['balanced'], {'spl': 16, 'sppt': 25, 'fppt': 30})
+        tdp._ryzenadj_available = True
+        self.assertTrue(tdp._apply_limits(6000, 7000, 8000)['success'])
+        self.assertEqual(self.ppts(), (10, 16, 18))  # raised to the firmware's floor, not ryzenadj
+        self.assertEqual(self.applies(), [])
+
+    def test_console_without_firmware_attributes_has_no_tdp_and_never_runs_ryzenadj(self):
+        self.machine = '83E1'
+        shutil.rmtree(self.firmware)
+        tdp._ryzenadj_available = True
+        caps = self.rpc('get_caps')
+        self.assertEqual((caps['tdp_available'], caps['extras'], caps['helper_retry_available'],
+                          caps['tdp_error']), (False, False, False, tdp.NO_FIRMWARE_TDP))
+        self.seed(extras_unlocked=True)
+        self.assertFalse(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertFalse(tdp._apply_limits(15000, 45000, 50000)['success'])
+        with tdp._mutation_lock:
+            self.assertTrue(tdp._release_controls_locked()['success'])
+        self.assertEqual(self.ryzenadj, [])
+
+    def test_cpu_boost_and_epp_work_on_the_whole_family(self):
+        self.machine = '83E1'
+        policy = self.cpu / 'cpufreq/policy0'
+        policy.mkdir(parents=True)
+        (policy / 'boost').write_text('0')
+        (policy / 'energy_performance_preference').write_text('balance_performance')
+        (policy / 'energy_performance_available_preferences').write_text(
+            'default performance balance_performance balance_power power')
+        self.assertTrue(self.rpc('set_cpu_boost', True)['success'])
+        self.assertTrue(self.rpc('set_epp', 'power')['success'])
+        self.assertEqual(((policy / 'boost').read_text(), (policy / 'energy_performance_preference').read_text()),
+                         ('1', 'power'))
+
+    def test_firmware_attributes_are_found_whatever_the_instance_index(self):
+        instance = self.root / 'firmware-attributes/lenovo-wmi-other-1/attributes'
+        instance.parent.mkdir(parents=True)
+        shutil.move(str(self.firmware), str(instance))
+        self.stack.enter_context(patch.object(
+            tdp, 'WMI_ROOT', str(self.root / 'firmware-attributes/lenovo-wmi-other-*/attributes')))
+        self.assertTrue(self.rpc('get_caps')['wmi'])
+        self.assertTrue(tdp._apply_limits(18000, 22000, 30000)['success'])
+        self.assertEqual((instance / tdp.WMI_ATTRS['fppt'] / 'current_value').read_text(), '30')
 
     def test_locking_extras_clamps_saved_profiles_and_reapplies(self):
         tdp._ryzenadj_available = True

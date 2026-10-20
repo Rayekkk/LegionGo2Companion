@@ -45,26 +45,35 @@ RYZENADJ_BINARY_SHA256 = "18a61170efec95d2366355b9dd5c75a961a9e8008d42e3471f4f41
 # The pinned RyzenAdj download uses TLS verification and a host allowlist.
 updater = Updater(user_agent="LeGoTDP")
 
-# Reported by get_caps() when the firmware does not answer. The frontend carries
-# the same numbers as FALLBACK_STD for the moments before get_caps() returns.
+# The Legion Go 2's firmware ceilings, used only on a Go 2 whose firmware does not
+# answer. The frontend carries the same numbers as FALLBACK_STD until get_caps() returns.
 FALLBACK_STD_W = {"spl": 35, "sppt": 37, "fppt": 45}
 
-# Absolute floor/ceiling for any single limit, in milliwatts. Applied on load, which
-# also migrates profiles saved back when the Extras ceiling was 60 W.
+# Floor without a firmware minimum, and the Extras ceiling of the boosts, in milliwatts.
+# Applied on load, which also migrates profiles saved back when the Extras ceiling was 60 W.
 HARD_MIN_MW = 5000
 HARD_MAX_MW = 50000
 
-# Preset ladder in watts.
+# The Legion Go 2 83N0 ladder in watts (its BIOS modes on AC, read with ryzenadj --info).
+# Its Max is its firmware ceiling; on every console Max is that console's ceiling.
 PRESETS_DEFAULT = {
     "silent":      {"spl": 8,  "sppt": 15, "fppt": 20},
     "balanced":    {"spl": 16, "sppt": 25, "fppt": 30},
     "performance": {"spl": 20, "sppt": 32, "fppt": 35},
     "max":         {"spl": 35, "sppt": 37, "fppt": 45},
 }
+PRESET_LADDER = ("silent", "balanced", "performance")
+# Measured ladders per DMI machine type. A machine type without a row gets the 83N0
+# ladder scaled to its own firmware ceilings, reported as estimated.
+# shortcut: AC values only; give a row separate battery values once a BIOS is shown to differ.
+PRESET_TABLE = {
+    "83N0": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},
+}
 
 # Lenovo firmware attributes. Writing these goes through the EC instead of poking the
 # SMU directly, so the firmware stops fighting us and the values survive suspend.
-WMI_ROOT  = "/sys/class/firmware-attributes/lenovo-wmi-other-0/attributes"
+# The instance index is not fixed, so the root is a pattern.
+WMI_ROOT  = "/sys/class/firmware-attributes/lenovo-wmi-other-*/attributes"
 WMI_ATTRS = {"spl": "ppt_pl1_spl", "sppt": "ppt_pl2_sppt", "fppt": "ppt_pl3_fppt"}
 PLATFORM_PROFILE_GLOB = "/sys/class/platform-profile/*/profile"
 
@@ -133,10 +142,33 @@ _FRONTEND_APPID_TTL = 12.0
 
 # ── Device identity ────────────────────────────────────────────────────────────
 
-# Read once: DMI does not change while the machine is running. Nothing is
-# written to power controls on any other model.
-_legion_go_2 = functools.cache(module_runtime.is_legion_go_2)
-UNSUPPORTED_MODEL = "TDP control is available only on the Lenovo Legion Go 2."
+# The Legion Go family by DMI machine type: Go and Go S (83E1, 83L3, 83N6, 83Q2, 83Q3)
+# and Go 2 (83N0, 83N1). Nothing is written to power controls on any other model.
+LEGION_GO_FAMILY = frozenset({"83E1", "83L3", "83N6", "83Q2", "83Q3", "83N0", "83N1"})
+UNSUPPORTED_MODEL = "TDP control is available only on Lenovo Legion Go consoles."
+NO_FIRMWARE_TDP = "This console's firmware does not expose TDP controls."
+
+
+@functools.cache
+def _machine_type() -> str:
+    """The DMI machine type of a Lenovo ("83N0"), else "". Read once: DMI does not
+    change while the machine is running."""
+    def read(name: str) -> str:
+        try:
+            return module_runtime.read_sysfs_text(os.path.join(module_runtime.DMI_ROOT, name), 128)
+        except (OSError, UnicodeError):
+            return ""
+    return read("product_name") if read("sys_vendor") == "LENOVO" else ""
+
+
+def _supported_model() -> bool:
+    return _machine_type() in LEGION_GO_FAMILY
+
+
+def _legion_go_2() -> bool:
+    """Only a Go 2 falls back to ryzenadj without the firmware attributes:
+    35/37/45 W are its ceilings, not another console's."""
+    return _machine_type() in ("83N0", "83N1")
 
 
 def _ok(**extra) -> dict:
@@ -149,7 +181,7 @@ def _fail(stderr: str, **extra) -> dict:
 
 def _defaults() -> dict:
     """Where a fresh install starts, in milliwatts."""
-    balanced = PRESETS_DEFAULT["balanced"]
+    balanced = _presets()[0]["balanced"]
     return {"spl":  balanced["spl"]  * 1000,
             "sppt": balanced["sppt"] * 1000,
             "fppt": balanced["fppt"] * 1000,
@@ -158,21 +190,50 @@ def _defaults() -> dict:
             "epp": None}
 
 
-def _standard_ceilings_mw() -> tuple[int, int, int]:
-    """Firmware ceilings in milliwatts, with the documented safe fallback."""
-    caps = _wmi_caps()
+def _ceilings_mw(caps: dict) -> tuple[int, int, int]:
+    """Firmware ceilings in milliwatts from a caps read, else the Go 2 fallback."""
     if caps:
-        return tuple(caps[k]["max"] * 1000 for k in ("spl", "sppt", "fppt"))
-    return tuple(FALLBACK_STD_W[k] * 1000 for k in ("spl", "sppt", "fppt"))
+        return tuple(caps[k]["max"] * 1000 for k in WMI_ATTRS)
+    return tuple(FALLBACK_STD_W[k] * 1000 for k in WMI_ATTRS)
+
+
+def _standard_ceilings_mw() -> tuple[int, int, int]:
+    """Firmware ceilings in milliwatts, read now."""
+    return _ceilings_mw(_wmi_caps())
+
+
+def _extras_ceilings_mw(std: tuple[int, int, int]) -> tuple[int, int, int]:
+    """The SMU keeps sustained power (STAPM) at the firmware's SPL ceiling; only the
+    boosts go higher (Legion Go 2: STAPM stays 35 W, slow/fast take 50), never below
+    a firmware ceiling that is already higher."""
+    return std[0], max(HARD_MAX_MW, std[1]), max(HARD_MAX_MW, std[2])
 
 
 def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     """Ceilings the current persisted mode is allowed to apply."""
     if state.get("extras_unlocked", False) and _ryzenadj_available:
-        # The SMU keeps sustained power (STAPM) at the firmware's SPL ceiling; only
-        # the boost limits go higher (Legion Go 2: STAPM stays 35 W, slow/fast take 50).
-        return _standard_ceilings_mw()[0], HARD_MAX_MW, HARD_MAX_MW
+        return _extras_ceilings_mw(_standard_ceilings_mw())
     return _standard_ceilings_mw()
+
+
+def _presets() -> tuple[dict, bool]:
+    """(ladder in watts, estimated) inside the firmware range of the last read.
+
+    Max is the firmware ceiling. A machine type without measured values gets the
+    83N0 ladder scaled per limit to its own ceilings (SPL 8/35 of its SPL max, ...).
+    """
+    std = _ceilings_mw(_firmware_caps)
+    row = PRESET_TABLE.get(_machine_type())
+    reference = PRESETS_DEFAULT["max"]
+    table = {}
+    for name in PRESET_LADDER:
+        watts = row[name] if row else {
+            key: round(PRESETS_DEFAULT[name][key] * limit / 1000 / reference[key])
+            for key, limit in zip(WMI_ATTRS, std)}
+        triplet = _clamp_triplet(*(watts[key] * 1000 for key in WMI_ATTRS), std)
+        table[name] = {key: value // 1000 for key, value in zip(WMI_ATTRS, triplet)}
+    table["max"] = {key: value // 1000 for key, value in zip(WMI_ATTRS, std)}
+    return table, row is None
 
 
 # Plugging the charger in makes the firmware apply its own profile after ours, so the
@@ -312,7 +373,8 @@ def _write_keys(values: dict[str, dict]) -> None:
 
 def _clamp_triplet(spl, sppt, fppt,
                    ceilings: tuple[int, int, int] | None = None) -> tuple[int, int, int]:
-    """Enforce 5 W <= spl <= sppt <= fppt <= 50 W (milliwatts).
+    """Enforce firmware min <= spl <= sppt <= fppt <= ceilings (milliwatts; 5 W
+    before any firmware read, 50 W without ceilings).
 
     SPPT/FPPT are offsets above SPL in the UI, so they can never sit below it.
     """
@@ -321,18 +383,21 @@ def _clamp_triplet(spl, sppt, fppt,
     except (TypeError, ValueError):
         return _defaults()["spl"], _defaults()["sppt"], _defaults()["fppt"]
     spl_max, sppt_max, fppt_max = ceilings or (HARD_MAX_MW, HARD_MAX_MW, HARD_MAX_MW)
-    spl  = max(HARD_MIN_MW, min(spl,  spl_max))
-    fppt = max(spl,         min(fppt, fppt_max))
-    sppt = max(spl,         min(sppt, min(sppt_max, fppt)))
+    # The minimums of the last firmware read: a WMI call per clamp would be too many.
+    spl_min, sppt_min, fppt_min = (tuple(_firmware_caps[k]["min"] * 1000 for k in WMI_ATTRS)
+                                   if _firmware_caps else (HARD_MIN_MW,) * 3)
+    spl  = max(spl_min, min(spl, spl_max))
+    fppt = max(spl, sppt_min, fppt_min, min(fppt, fppt_max))
+    sppt = max(spl, sppt_min, min(sppt, sppt_max, fppt))
     return spl, sppt, fppt
 
 
 def _load_ceilings_mw() -> tuple[int, int, int]:
     """Bounds for saved values: no mode runs SPL above the firmware ceiling, so a
     higher SPL saved by 2.2.0 or earlier reads as what actually runs."""
-    # Loads are frequent and every firmware read is a WMI call, so this takes the SPL max
-    # the last firmware read reported (35 W until one has); applying clamps to the live one.
-    return _firmware_spl_max_mw or FALLBACK_STD_W["spl"] * 1000, HARD_MAX_MW, HARD_MAX_MW
+    # Loads are frequent and every firmware read is a WMI call, so this takes the
+    # ceilings the last firmware read reported; applying clamps to the live ones.
+    return _extras_ceilings_mw(_ceilings_mw(_firmware_caps))
 
 
 def _clamp_for_settings(state: dict, spl, sppt, fppt) -> tuple[int, int, int]:
@@ -348,8 +413,8 @@ def _is_custom_preset(spl, sppt, fppt, preset: str) -> bool:
     except (TypeError, ValueError):
         values = ()
     return not any(
-        values == tuple(entry[key] * 1000 for key in ("spl", "sppt", "fppt"))
-        for entry in PRESETS_DEFAULT.values())
+        values == tuple(entry[key] * 1000 for key in WMI_ATTRS)
+        for entry in _presets()[0].values())
 
 
 def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, int, int]:
@@ -358,14 +423,11 @@ def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, 
             spl, sppt, fppt, preset):
         return _clamp_for_settings(state, spl, sppt, fppt)
     ceilings = _allowed_ceilings_mw(state)
-    if not state.get("extras_unlocked", False):
-        ceilings = tuple(min(limit, FALLBACK_STD_W[key] * 1000)
-                         for limit, key in zip(ceilings, ("spl", "sppt", "fppt")))
     try:
         requested_spl = int(spl)
     except (TypeError, ValueError):
         requested_spl = _defaults()["spl"]
-    spl = max(HARD_MIN_MW, min(requested_spl, ceilings[0]))
+    spl = _clamp_triplet(requested_spl, requested_spl, requested_spl, ceilings)[0]
     return _clamp_triplet(spl, spl + 10000, spl + 15000, ceilings)
 
 
@@ -746,7 +808,10 @@ def _apply_ryzenadj(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
 # ── Lenovo WMI firmware attributes ─────────────────────────────────────────────
 
 def _wmi_path(key: str, leaf: str) -> str:
-    return os.path.join(WMI_ROOT, WMI_ATTRS[key], leaf)
+    # The lenovo-wmi-other instance that has the PPT attributes; its index is not fixed.
+    root = next((path for path in sorted(glob.glob(WMI_ROOT))
+                 if os.path.isdir(os.path.join(path, WMI_ATTRS["spl"]))), WMI_ROOT)
+    return os.path.join(root, WMI_ATTRS[key], leaf)
 
 
 def _wmi_read(key: str, leaf: str) -> int | None:
@@ -758,8 +823,8 @@ def _wmi_read(key: str, leaf: str) -> int | None:
         return None
 
 
-# SPL max from the last firmware read that looked sane; the ceiling for loaded values.
-_firmware_spl_max_mw: int | None = None
+# The last firmware read that answered: bounds for loaded values, presets and clamps.
+_firmware_caps: dict = {}
 
 
 def _wmi_caps() -> dict:
@@ -767,12 +832,12 @@ def _wmi_caps() -> dict:
     caps = {}
     for key in WMI_ATTRS:
         lo, hi = _wmi_read(key, "min_value"), _wmi_read(key, "max_value")
-        if lo is None or hi is None:
+        # A handheld's firmware reporting 0 W or over 100 W is misread, not a range.
+        if lo is None or hi is None or not 0 <= lo <= hi or not 0 < hi <= 100:
             return {}
         caps[key] = {"min": lo, "max": hi}
-    global _firmware_spl_max_mw
-    if HARD_MIN_MW <= caps["spl"]["max"] * 1000 <= HARD_MAX_MW:
-        _firmware_spl_max_mw = caps["spl"]["max"] * 1000
+    global _firmware_caps
+    _firmware_caps = caps
     return caps
 
 
@@ -933,21 +998,25 @@ def _record_applied(source: str, triplet_mw: tuple) -> None:
 
 def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
     """The firmware path inside the range it accepts; verified ryzenadj only
-    beyond it (the Extras range) or when the firmware interface is absent."""
-    if not _legion_go_2():
+    beyond it (the Extras range) or, on a Go 2, when the firmware interface is absent."""
+    if not _supported_model():
         return _fail(UNSUPPORTED_MODEL)
     _capture_baseline()
-    spl_mw, sppt_mw, fppt_mw = _clamp_triplet(spl_mw, sppt_mw, fppt_mw)
-    triple_w = (("spl", spl_mw // 1000), ("sppt", sppt_mw // 1000), ("fppt", fppt_mw // 1000))
     if not _apply_lock.acquire(timeout=8.0):
         return _fail("apply busy")
     try:
         caps = _wmi_caps()
+        # After the read, so the firmware's minimums are the floors. Callers bound SPL.
+        spl_mw, sppt_mw, fppt_mw = _clamp_triplet(
+            spl_mw, sppt_mw, fppt_mw, tuple(max(HARD_MAX_MW, limit) for limit in _ceilings_mw(caps)))
+        triple_w = (("spl", spl_mw // 1000), ("sppt", sppt_mw // 1000), ("fppt", fppt_mw // 1000))
         # No SMU fallback inside the firmware range: a refusal is reported as is.
         if caps and all(caps[k]["min"] <= v <= caps[k]["max"] for k, v in triple_w):
             source, result = "wmi", _apply_wmi(*(v for _, v in triple_w))
-        else:
+        elif caps or _legion_go_2():
             source, result = "ryzenadj", _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
+        else:
+            source, result = "", _fail(NO_FIRMWARE_TDP)
         if result["success"]:
             _record_applied(source, (spl_mw, sppt_mw, fppt_mw))
         return result
@@ -1353,7 +1422,7 @@ def _enforce_target(want: tuple) -> None:
 
 def _restore_defaults_locked() -> dict:
     """Hand control back to firmware. Caller must hold _mutation_lock."""
-    if not _legion_go_2():
+    if not _supported_model():
         return _ok()  # never written
     _capture_baseline()
     saved = _baseline().get("platform_profile")
@@ -1370,6 +1439,8 @@ def _restore_defaults_locked() -> dict:
             _record_applied("", ())
             decky.logger.info(f"[legotdp] restore_defaults: platform profile -> {target}")
             return _ok()
+        if not _legion_go_2():
+            return _ok()  # no firmware path and no ryzenadj fallback: never written
         if not _ryzenadj_lock.acquire(timeout=4.0):
             return _fail("ryzenadj busy")
         try:
@@ -1386,7 +1457,7 @@ def _restore_defaults_locked() -> dict:
 
 def _release_controls_locked() -> dict:
     """Return every managed power control to standard policy without erasing intent."""
-    if not _legion_go_2():
+    if not _supported_model():
         return {"success": True, "error": ""}  # nothing was ever written here
     state = _load_settings()
     profiles = _load_profiles()
@@ -1496,7 +1567,7 @@ def _cpufreq_control_dirs() -> list[str]:
 
 def _boost_targets() -> tuple[list[str], bool, str]:
     """Select one Boost ABI in kernel-preferred fallback order."""
-    if not _legion_go_2():
+    if not _supported_model():
         return [], False, UNSUPPORTED_MODEL
     generic = os.path.join(CPU_SYS_ROOT, "cpufreq", "boost")
     if os.path.exists(generic):
@@ -1565,7 +1636,7 @@ def _capture_cpu_boost() -> dict:
 
 
 def _epp_targets() -> tuple[list[str], bool, str]:
-    if not _legion_go_2():
+    if not _supported_model():
         return [], False, UNSUPPORTED_MODEL
     return _policy_files("energy_performance_preference", "EPP")
 
@@ -2218,7 +2289,7 @@ class Plugin:
             return await self._retry_extras()
 
     async def _retry_extras(self) -> dict:
-        if not _legion_go_2():
+        if not _supported_model():
             return {"success": False, "error": UNSUPPORTED_MODEL}
         if _ryzenadj_available:
             return {"success": True}  # queued behind the retry that verified it
@@ -2514,33 +2585,41 @@ class Plugin:
         """Slider ceilings in watts. `std` is what the firmware accepts over WMI;
         `max` is the Extras range, which falls through to ryzenadj."""
         def _do() -> dict:
-            supported = _legion_go_2()
+            supported = _supported_model()
             caps = _wmi_caps() if supported else {}
-            std = {k: caps[k]["max"] for k in WMI_ATTRS} if caps else dict(FALLBACK_STD_W)
+            std_mw = _ceilings_mw(caps)
+            std = {k: v // 1000 for k, v in zip(WMI_ATTRS, std_mw)}
             firmware_available = bool(caps) and _profile_path() is not None
-            helper_available = (supported and _ryzenadj_available
+            # Only a Go 2 runs ryzenadj without the firmware attributes.
+            helper_usable = supported and (bool(caps) or _legion_go_2())
+            helper_available = (helper_usable and _ryzenadj_available
                                 and os.path.isfile(BIN_PATH))
             available = firmware_available or helper_available
             error = ""
             if not supported:
                 error = UNSUPPORTED_MODEL
+            elif not helper_usable:
+                error = NO_FIRMWARE_TDP
             elif not available:
                 error = "Firmware TDP controls are unavailable and verified RyzenAdj is unavailable"
                 if self._helper_error:
                     error += f": {self._helper_error}"
+            presets, estimated = _presets()
             return {
                 "min": min(caps[k]["min"] for k in WMI_ATTRS) if caps else HARD_MIN_MW // 1000,
                 "std": std,
                 # Until the helper is verified the two ranges are the same.
-                "max": dict(std) if not helper_available
-                       else dict(std, sppt=HARD_MAX_MW // 1000, fppt=HARD_MAX_MW // 1000),
+                "max": dict(std) if not helper_available else {
+                    k: v // 1000 for k, v in zip(WMI_ATTRS, _extras_ceilings_mw(std_mw))},
                 "wmi": bool(caps),
                 "extras": helper_available,
                 "tdp_available": available,
                 "tdp_error": error,
                 # Enabling Extras (or this retry) downloads the verified helper.
-                "helper_retry_available": supported and not helper_available,
-                "presets": PRESETS_DEFAULT,
+                "helper_retry_available": helper_usable and not helper_available,
+                "presets": presets,
+                # No measured ladder for this machine type: scaled from the firmware ceilings.
+                "presets_estimated": estimated,
             }
         return await _offload(_do)
 
@@ -2701,7 +2780,7 @@ class Plugin:
             global _current_ac_online, _ryzenadj_available
             Plugin._ready = False
             Plugin._setup_error = None
-            if not await _offload(_legion_go_2):
+            if not await _offload(_supported_model):
                 # Reported through is_ready(); no loop starts, nothing is written.
                 Plugin._setup_error = UNSUPPORTED_MODEL
                 event('tdp', 'unsupported_model', level='warning')

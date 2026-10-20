@@ -7,8 +7,8 @@
 // slider position breaks FPPT >= SPPT >= SPL or the ceilings. A tuning is {spl, spptOff, fpptOff} in watts;
 // caps are {spl, sppt, fppt}.
 export const OFFSET_MAX = { sppt: 15, fppt: 15 };
-// Used until get_caps() answers; the backend reports the firmware's real ceilings and falls back to these
-// same numbers (FALLBACK_STD_W in main.py) if it cannot.
+// Placeholders until get_caps() answers with this console's firmware ceilings (the Legion Go 2's numbers,
+// FALLBACK_STD_W in tdp_backend.py). Nothing after that answer uses them.
 export const FALLBACK_STD = { spl: 35, sppt: 37, fppt: 45 };
 // With Extras only the boosts go higher; the firmware keeps sustained power (SPL) at its own ceiling.
 export const FALLBACK_MAX = { spl: 35, sppt: 50, fppt: 50 };
@@ -32,11 +32,8 @@ export function normalise(t, caps, minW) {
 export const absolute = t => ({ spl: t.spl, sppt: t.spl + t.spptOff, fppt: t.spl + t.fpptOff });
 export const fromAbsolute = (spl, sppt, fppt) => ({ spl, spptOff: Math.max(0, sppt - spl), fpptOff: Math.max(0, fppt - spl) });
 
-/** Standard single-dial Custom mode uses the same caps as the Go 2 firmware. */
-export function simpleCaps(caps, unlocked) {
-  return unlocked ? caps : { spl: Math.min(caps.spl, FALLBACK_STD.spl), sppt: Math.min(caps.sppt, FALLBACK_STD.sppt),
-    fppt: Math.min(caps.fppt, FALLBACK_STD.fppt) };
-}
+/** Standard single-dial Custom mode uses the range in force: the firmware's, or the Extras range. */
+export const simpleCaps = caps => caps;
 
 export function simpleTuning(spl, caps, minW) {
   const bounded = clamp(spl, minW, caps.spl);

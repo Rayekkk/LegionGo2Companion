@@ -83,7 +83,7 @@ import vibration_backend  # noqa: E402
 import wifi_backend  # noqa: E402
 
 # The suite drives TDP on fake sysfs as a Legion Go 2; test_tdp_core covers the gate.
-tdp_backend._legion_go_2 = lambda: True
+tdp_backend._machine_type = lambda: "83N0"
 
 
 # Stuck-helper harness: run a harmless stalled child where the code under test would spawn its
