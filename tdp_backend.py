@@ -964,10 +964,10 @@ def _wmi_caps() -> dict:
     caps = {}
     for key in WMI_ATTRS:
         lo, hi = _wmi_read(key, "min_value"), _wmi_read(key, "max_value")
-        # A handheld's firmware reporting 0 W or over 100 W is misread, not a range.
-        if lo is None or hi is None or not 0 <= lo <= hi or not 0 < hi <= 100:
+        # A handheld's firmware reporting a ceiling under 5 W or over 100 W is misread, not a range.
+        if lo is None or hi is None or not 0 <= lo <= hi or not HARD_MIN_MW // 1000 <= hi <= 100:
             return {}
-        caps[key] = {"min": lo, "max": hi}
+        caps[key] = {"min": max(lo, HARD_MIN_MW // 1000), "max": hi}  # never below 5 W, whatever it reports
     global _firmware_caps
     _firmware_caps = caps
     return caps

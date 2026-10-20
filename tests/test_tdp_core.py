@@ -771,6 +771,12 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (10, 16, 18))  # raised to the firmware's floor, not ryzenadj
         self.assertEqual(self.applies(), [])
 
+    def test_a_firmware_minimum_under_5_w_never_lowers_the_floor(self):
+        self.firmware_range((35, 37, 45), mins=(0, 3, 0))
+        self.assertEqual(self.rpc('get_caps')['min'], 5)
+        self.assertTrue(tdp._apply_limits(1000, 2000, 3000)['success'])
+        self.assertEqual(self.ppts(), (5, 5, 5))
+
     def test_console_without_firmware_attributes_has_no_tdp_and_never_runs_ryzenadj(self):
         self.machine = '83E1'
         shutil.rmtree(self.firmware)
