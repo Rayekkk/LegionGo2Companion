@@ -3,7 +3,7 @@ import QtQuick
 import QtTest
 import "../.."
 TestCase {
-    name:"NativeOverview"; when:windowShown; width:1050; height:1200
+    name:"NativeOverview"; when:windowShown; width:1050; height:1200; visible:running
     QtObject {
         id:fake
         property var data:({})

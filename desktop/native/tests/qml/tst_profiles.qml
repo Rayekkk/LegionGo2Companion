@@ -265,7 +265,8 @@ TestCase {
         tryVerify(function(){ return stick.visible && stick.width>0; });
         verify(!row.visible);
         fake.data=Object.assign({},fake.data,{get_version:all});
-        tryVerify(function(){ return row.visible; });
+        // The cards are rebuilt when the controller modules return, so the row is looked up again.
+        tryVerify(function(){ const again=findChild(panel,"field_rgb_Power button light");return again!==null && again.visible; });
     }
     function test_newChargerProfileIsSavedBeforeChargerCpuSettingsUnlock() {
         const cpu={available:true,cpu_boost:{available:true,enabled:false},epp:{available:true,value:"77",numeric_supported:true,profiles:[]},
