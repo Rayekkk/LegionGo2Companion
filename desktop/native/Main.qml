@@ -2,6 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "modules.mjs" as Modules
 ApplicationWindow {
     id:window
     objectName:"companionWindow"
@@ -14,6 +15,12 @@ ApplicationWindow {
         {id:"overview",label:"Overview"},{id:"tdp",label:"TDP"},{id:"fan",label:"Fan Control"},
         {id:"controller",label:"Controllers"},{id:"rgb",label:"Lighting"},{id:"battery",label:"Battery"},{id:"display",label:"Display"},
         {id:"wifi",label:"Wi-Fi"},{id:"modules",label:"Modules"},{id:"about",label:"About"}]
+    // A page whose modules do not apply to this console is hidden (Controllers also holds controller firmware).
+    function pageShown(id) {
+        const gate=bridgeModel.state("get_version"),shown=name=>Modules.moduleShown(gate?.modules?.[name]);
+        return id==="controller"?["vibration","remap","controller"].some(shown) || gate?.device?.firmware!==false:
+            ["tdp","fan","rgb","battery","display","wifi"].indexOf(id)<0 || shown(id);
+    }
     property bool closing:false
     property bool explicitQuit:false
     // An unsaved draft on the open page; a plugin update waits for it instead of restarting the app.
@@ -21,7 +28,7 @@ ApplicationWindow {
     onPageChanged:Qt.callLater(function(){scroll.contentItem.contentY=0;})
     function quitApp() { explicitQuit=true;window.close(); }
     Connections { target:appHost;function onQuitRequested(){window.quitApp();} }
-    Connections { target:bridgeModel;function onChanged(method){if(method==="desktop_context")appHost.setContext(bridgeModel.connected && bridgeModel.age(method)<8,!!bridgeModel.state(method).gamescope);} }
+    Connections { target:bridgeModel;function onChanged(method){if(method==="get_version" && !window.pageShown(window.page))window.page="overview";if(method==="desktop_context")appHost.setContext(bridgeModel.connected && bridgeModel.age(method)<8,!!bridgeModel.state(method).gamescope);} }
     Connections { target:appHost;function onChanged(){if(!appHost.installed){bridgeModel.connected=false;rpc.cancelReads();}} }
     property alias backendProblem:bridgeModel.error
     palette { window:theme.background; windowText:theme.text; base:theme.input; text:theme.text;
@@ -67,6 +74,7 @@ ApplicationWindow {
                                 required property var modelData
                                 Layout.fillWidth:true; Layout.preferredHeight:52
                                 Layout.topMargin:modelData.id==="modules"?(window.height<760?12:20):0
+                                visible:window.pageShown(modelData.id)
                                 checked:window.page===modelData.id; checkable:true
                                 Accessible.name:modelData.label
                                 onClicked:window.page=modelData.id

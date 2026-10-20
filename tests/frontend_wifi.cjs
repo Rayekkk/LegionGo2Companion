@@ -213,7 +213,7 @@ run(async () => {
   unknownBackend.unmount();
   const unsupported=harness('wifi.tsx','WifiPage');unsupported.render();
   unsupported.respond('wifi_get_status',{...wifi,settings:{...wifi.settings,driver:'iwlwifi'}});await settle();
-  assert.equal(find(unsupported.render(),'Wi-Fi tweaks unavailable').props.description,'Only for the Legion Go 2 Wi-Fi card (MT7922).');
+  assert.equal(find(unsupported.render(),'Wi-Fi tweaks unavailable').props.description,'Only for the Legion Go Wi-Fi card (MT7922).');
   assert.deepEqual(options(unsupported.render()),['Automatic','Prefer 5/6 GHz'],'a saved policy can be cleared on any Wi-Fi card');
   unsupported.unmount();
 

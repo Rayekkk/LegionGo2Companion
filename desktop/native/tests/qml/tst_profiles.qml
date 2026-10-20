@@ -239,6 +239,34 @@ TestCase {
         fake.data=Object.assign({},fake.data,{rgb_get_status:status(true)});
         compare(field("rgb","Power button light").get(),true,"Managed: the saved choice");
     }
+    function test_whatDoesNotApplyToThisConsoleIsHidden() {
+        const all={blocked:false,modules:{tdp:{ready:true},fan:{ready:true},vibration:{ready:true},rgb:{ready:true},remap:{ready:true},controller:{ready:true},battery:{ready:true},display:{ready:true},wifi:{ready:true}},
+            device:{console:"go2",firmware:true,power_led:true}};
+        const goS={blocked:false,modules:{fan:{applicable:false},display:{applicable:false},remap:{applicable:false},vibration:{applicable:false},controller:{applicable:false},
+            rgb:{ready:true},battery:{ready:true},wifi:{ready:true},tdp:{ready:true}},device:{console:"gos",firmware:false,power_led:false}};
+        const hidden=["Fan Control","Vibration","Button mapping","Gyro & touchpad","Display"],kept=["TDP","Lighting","Battery","Wi-Fi"];
+        fake.data=Object.assign({},fake.data,{get_version:all,rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true},power_led:{supported:true,current:true}}});
+        panel.page="controller";
+        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,firmware");
+        for(const name of hidden.concat(kept))verify(field("modules",name).visible(),name);
+        compare(field("modules","Lighting").note(),"Stick lights and power button light.");
+        verify(field("rgb","Power button light").visible());
+        verify(field("battery","Controllers").visible());
+        fake.data=Object.assign({},fake.data,{get_version:goS});
+        compare(panel.cards.length,0,"Neither the controller modules nor controller firmware apply");
+        for(const name of hidden)verify(!field("modules",name).visible(),name);
+        for(const name of kept)verify(field("modules",name).visible(),name);
+        compare(field("modules","Lighting").note(),"Stick lights.");
+        verify(!field("rgb","Power button light").visible());
+        verify(!field("battery","Controllers").visible());
+        panel.page="rgb";
+        const row=findChild(panel,"field_rgb_Power button light");verify(row!==null);
+        const stick=findChild(panel,"field_rgb_Stick lights");verify(stick!==null);
+        tryVerify(function(){ return stick.visible && stick.width>0; });
+        verify(!row.visible);
+        fake.data=Object.assign({},fake.data,{get_version:all});
+        tryVerify(function(){ return row.visible; });
+    }
     function test_newChargerProfileIsSavedBeforeChargerCpuSettingsUnlock() {
         const cpu={available:true,cpu_boost:{available:true,enabled:false},epp:{available:true,value:"77",numeric_supported:true,profiles:[]},
             profile:{app_id:"42",ac_profile:true,active:false,cpu_boost_enabled:false,epp:"77"}};
@@ -562,7 +590,7 @@ TestCase {
         wifiState({},{recovery_required:true,recovery_errors:["Rollback failed"]});
         compare(notice.get(),"Wi-Fi settings are locked. Rollback failed");
         wifiState({driver:"iwlwifi"},{});
-        compare(notice.get(),"Wi-Fi tweaks unavailable. Only for the Legion Go 2 Wi-Fi card (MT7922).");
+        compare(notice.get(),"Wi-Fi tweaks unavailable. Only for the Legion Go Wi-Fi card (MT7922).");
     }
     function test_wifiChangeIsVerifiedInTheNextStatus() {
         wifiState({},{});

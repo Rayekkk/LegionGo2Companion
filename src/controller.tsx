@@ -76,7 +76,8 @@ export const controllerSummary = (status?: ControllerStatus) => {
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const notify = (body: string) => toaster.toast({ title: "Gyro & touchpad", body });
 
-export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
+/** firmware: controller firmware updates apply to this console (get_version.device.firmware). */
+export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ visible, firmware = true }) => {
   const [status, setStatus] = useState<ControllerStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<ControllerDiagnostics | null>(null);
   const [starting, setStarting] = useState(false);
@@ -264,7 +265,7 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
 
   if (!status) return <>
     {statusPlaceholder({ title: "Controller", label: "Status unavailable", error, onRetry: () => void refresh(), retryLabel: "Check Again" })}
-    <FirmwarePanel visible={visible} />
+    {firmware && <FirmwarePanel visible={visible} />}
   </>;
 
   const testing = starting || stopping || !!diagnostics?.active;
@@ -323,6 +324,6 @@ export const ControllerPage: FC<{ visible: boolean }> = ({ visible }) => {
         ["Steam controller", status.virtual ? status.virtual.path : "—"],
       ])}
     </PanelSection>
-    <FirmwarePanel visible={visible} />
+    {firmware && <FirmwarePanel visible={visible} />}
   </>;
 };

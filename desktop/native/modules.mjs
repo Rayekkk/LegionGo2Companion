@@ -28,6 +28,11 @@ const MODULE_OFF_AFTER_START_TEXT = "Turns off when it has finished starting.";
 // Turned off during a slow start, the module is also pending until the backend withdraws it.
 export const moduleStartingText = entry => !entry?.starting || entry.maintenance ? ""
   : entry.enabled === false ? MODULE_OFF_AFTER_START_TEXT : MODULE_STARTING_TEXT;
-export const moduleNote = (name, entry) => moduleStartingText(entry) || entry?.error || entry?.note || MODULE_DESCRIPTIONS[name] || "";
+/** What a module does on this console (get_version.device): the power button light only where it applies. */
+export const moduleDescription = (name, device) =>
+  name === "rgb" && device?.power_led === false ? "Stick lights." : MODULE_DESCRIPTIONS[name] || "";
+export const moduleNote = (name, entry, device) => moduleStartingText(entry) || entry?.error || entry?.note || moduleDescription(name, device);
+/** A module that does not apply to this console is not shown anywhere, Manage Modules included. */
+export const moduleShown = entry => entry?.applicable !== false;
 export const cleanupRetryShown = entry => !!entry?.pending && !entry.maintenance && !entry.starting;
 export const startRetryShown = entry => entry?.enabled === true && entry.ready === false && !entry.pending && !entry.maintenance && !entry.starting;

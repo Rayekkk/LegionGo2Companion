@@ -82,7 +82,8 @@ export const batterySummary = (status?: BatteryStatus, controllers?: ControllerB
   return `Protection ${status.enabled ? "on" : "off"}${pending ? " · saved choice pending" : ""}${levels}`;
 };
 
-export const BatteryPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+/** controllers: the console's controllers report their batteries (the Gyro & touchpad module applies). */
+export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ visible: tabShown = true, controllers: controllersShown = true }) => {
   const visible = useQuickAccessVisible() && tabShown;
   const [status, setStatus] = useState<BatteryStatus | null>(null);
   const [controllers, setControllers] = useState<ControllerBatteryStatus>(unavailableControllerBatteries);
@@ -153,8 +154,8 @@ export const BatteryPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
 
   const refresh = useCallback(() => {
     void refreshConsole();
-    void refreshControllers();
-  }, [refreshConsole, refreshControllers]);
+    if (controllersShown) void refreshControllers();
+  }, [refreshConsole, refreshControllers, controllersShown]);
 
   useEffect(() => {
     if (!visible) return;
@@ -222,7 +223,7 @@ export const BatteryPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
       status.reason || "A compatible battery charging interface was not detected.")
       : error && infoRow("Battery status not updated", error)}
     {infoRow(`Battery ${capacity}${status.charging_status ? ` · ${status.charging_status}` : ""}`,
-      `Controllers: ${controllersText(controllers)}`)}
+      controllersShown ? `Controllers: ${controllersText(controllers)}` : undefined)}
     {status.supported && <PanelSectionRow>
       <ToggleField
         label="Battery protection"
@@ -240,7 +241,7 @@ export const BatteryPage: FC<{ visible?: boolean }> = ({ visible: tabShown = tru
       ["Charging mode reported", status.current_mode || "Unknown"],
       ["Saved choice", status.managed ? protectionLabel(status.requested_enabled) : "None · Companion is not managing charging"],
       ...(status.reason ? [["Battery status", status.reason] as [string, string]] : []),
-      ...(!controllers.available && controllers.reason ? [["Controllers", controllers.reason] as [string, string]] : []),
+      ...(controllersShown && !controllers.available && controllers.reason ? [["Controllers", controllers.reason] as [string, string]] : []),
     ], status.managed && !status.recovery_pending ? restoreButton : undefined)}
   </PanelSection>;
 };

@@ -278,16 +278,21 @@ RowLayout {
     function rgbSpeed() { const speed=Number(rgbSettings().speed);return Number.isFinite(speed)?Rgb.speedStep(speed):undefined; }
     // Like Decky, which hides them: the effect controls wait for lighting control and the stick lights.
     function rgbEditable() { return Rgb.effectsEditable(rgbSettings()); }
+    // What does not apply to this console is not shown: a module (Manage Modules included), controller firmware, the power button light.
+    function shown(name) { return Modules.moduleShown(s("get_version")?.modules?.[name]); }
+    function cardShown(owner) { return owner==="firmware"?s("get_version")?.device?.firmware!==false:shown(owner); }
+    readonly property string shownCards:["vibration","remap","controller","firmware"].filter(cardShown).join()
+    onShownCardsChanged:rebuild()
     function moduleFields(name) {
         const label=Modules.MODULE_LABELS[name];
         const entry=()=>s("get_version").modules?.[name] || {};
         return [
             switcher(label,()=>Modules.moduleChecked(entry()),"modules_set_enabled",v=>[name,v],{
                 set:v=>{ if(!backend.busy && backend.connected)applyingModule=name; change("modules_set_enabled",[name,v]); },
-                available:()=>!Modules.moduleLocked(entry()),
-                note:()=>applyingModule===name?"Applying…":Modules.moduleNote(name,entry())}),
-            action("Retry "+label+" cleanup","modules_set_enabled",()=>[name,false],{visible:()=>Modules.cleanupRetryShown(entry())}),
-            action("Retry "+label+" start","modules_set_enabled",()=>[name,true],{visible:()=>Modules.startRetryShown(entry())})
+                available:()=>!Modules.moduleLocked(entry()),visible:()=>shown(name),
+                note:()=>applyingModule===name?"Applying…":Modules.moduleNote(name,entry(),s("get_version")?.device)}),
+            action("Retry "+label+" cleanup","modules_set_enabled",()=>[name,false],{visible:()=>shown(name) && Modules.cleanupRetryShown(entry())}),
+            action("Retry "+label+" start","modules_set_enabled",()=>[name,true],{visible:()=>shown(name) && Modules.startRetryShown(entry())})
         ];
     }
     // The Decky scale in 1% steps (Decky moves in 10% steps).
@@ -432,7 +437,7 @@ RowLayout {
                 number("Saturation",()=>rgbSettings().saturation,v=>change("rgb_set_color",[Number(rgbSettings().hue || 0),v]),0,100,{kind:"range",suffix:"%",visible:rgbUsesColor,available:rgbEditable}),
                 number("Brightness",()=>rgbSettings().brightness,v=>change("rgb_set_brightness",[v]),0,100,{kind:"range",suffix:"%",available:rgbEditable}),
                 choices("Speed",rgbSpeed,v=>change("rgb_set_speed",[v]),()=>Rgb.SPEEDS,{kind:"options",visible:()=>Rgb.usesSpeed(rgbSettings()),available:rgbEditable}),
-                switcher("Power button light",()=>Rgb.powerChecked(s("rgb_get_status")),"rgb_set_power_led",null,{available:()=>!!s("rgb_get_status").power_led?.supported,
+                switcher("Power button light",()=>Rgb.powerChecked(s("rgb_get_status")),"rgb_set_power_led",null,{available:()=>!!s("rgb_get_status").power_led?.supported,visible:()=>s("get_version")?.device?.power_led!==false,
                     note:()=>Rgb.powerNote(s("rgb_get_status"))}),
                 action("Restore original lighting","rgb_restore_original",null,{note:Rgb.RESTORE_NOTE,restore:true}),
                 notice("",()=>s("rgb_get_status").error || "")
@@ -475,7 +480,7 @@ RowLayout {
             battery:[{title:"Battery",barTitle:"Troubleshooting",fields:[
                 notice("",()=>battery().recovery_pending?"A charging change didn't finish. Restore the previous charging mode before changing it again.":battery().error || (battery().supported===false?battery().reason || "":"")),
                 text("Battery",()=>Battery.levelText(battery().capacity)+(battery().charging_status?" · "+battery().charging_status:"")),
-                text("Controllers",()=>Battery.controllersText(s("battery_get_controller_levels"))),
+                text("Controllers",()=>Battery.controllersText(s("battery_get_controller_levels")),{visible:()=>shown("controller")}),
                 switcher("Battery protection",()=>Battery.protectionChecked(battery()),"battery_set_enabled",null,{available:()=>!Battery.protectionLocked(battery()),
                     note:()=>Battery.protectionNote(battery())}),
                 notice("",()=>battery().current_mode?"Charging mode reported: "+battery().current_mode:""),
@@ -532,7 +537,7 @@ RowLayout {
                 text("Frequency",()=>Wifi.frequencyText(wifi()))
             ]}],
             modules:[{title:"Choose your modules",note:"Turning a module off stops it. Its settings are kept.",fields:Object.keys(Modules.MODULE_LABELS).reduce((fields,name)=>fields.concat(moduleFields(name)),[]).concat([
-                notice("",()=>s("get_version").modules?.display?.note?"Takes effect when you return to Gaming Mode.":"")])}],
+                notice("",()=>shown("display") && s("get_version").modules?.display?.note?"Takes effect when you return to Gaming Mode.":"")])}],
             about:[{title:"Companion",fields:[
                 text("Version",()=>s("get_version").version || "—"),
                 text("Updates",()=>updateStatus()[0],{note:()=>updateStatus()[1]}),
@@ -555,7 +560,7 @@ RowLayout {
         const owners=page==="controller"?["vibration","remap","controller"]:[page];
         let merged=[];
         for(const owner of owners) merged=merged.concat((sections[owner] || []).map(card=>Object.assign({owner:owner},card)));
-        cards=merged.map((card,index)=>Object.assign({column:index%2},card));
+        cards=merged.filter(card=>cardShown(card.owner)).map((card,index)=>Object.assign({column:index%2},card));
     }
     onPageChanged: { if(editGame) { editGame=""; backend.editApp=""; } tdpScope="global"; powerDirty=false; customPicked=false; controllerDetails=false; displaySwitch=false; displayDetails=false; wifiCheck=null; loadPower(); rebuild(); }
     Component.onCompleted: { loadPower(); rebuild(); }

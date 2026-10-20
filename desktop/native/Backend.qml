@@ -39,7 +39,7 @@ QtObject {
     }
     function canRead(method) {
         const name=owner(method), entry=state("get_version").modules?.[name];
-        return !name || !!entry && entry.enabled!==false && entry.ready===true && !entry.pending && !entry.maintenance;
+        return !name || !!entry && entry.applicable!==false && entry.enabled!==false && entry.ready===true && !entry.pending && !entry.maintenance;
     }
     function moduleError(name) { for(const method of Object.keys(readErrors))if(owner(method)===name && readErrors[method])return readErrors[method];return ""; }
     function issue(method, args, mutation, blocking, poll, then) {
@@ -62,7 +62,7 @@ QtObject {
     }
     function panelMethods() {
         if(page === "controller") {
-            let methods=["controller_get_status", "firmware_get_status"];
+            let methods=["controller_get_status"].concat(state("get_version")?.device?.firmware===false?[]:["firmware_get_status"]);
             if(now()-controllerDetailsAt>=3) {
                 controllerDetailsAt=now();
                 methods=methods.concat(["vibe_is_ready","vibe_get_settings","vibe_get_capabilities",
@@ -103,7 +103,7 @@ QtObject {
         if(!gate || typeof gate!=="object" || Array.isArray(gate) || gate.blocked!==false) {
             // The independent update outcome is readable while all hardware
             // controls are paused. Do not admit any component getters here.
-            if(windowActive && page==="controller")issue("firmware_get_status");
+            if(windowActive && page==="controller" && gate?.device?.firmware!==false)issue("firmware_get_status");
             return;
         }
         if(!windowActive) { if(host && host.trayVisible)issue("desktop_context");return; }

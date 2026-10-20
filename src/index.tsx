@@ -30,15 +30,17 @@ import { ControllerPage, getControllerStatus, controllerSummary, type Controller
 import { UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
-import { cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
+import { cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
-type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
+type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; applicable?: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
+// What applies to this console besides the modules (get_version.device); a missing value is shown.
+type Device = {console?: string | null; model?: string | null; firmware?: boolean; power_led?: boolean};
 // Key order is the menu and Manage Modules order.
 const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
-const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
+const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => moduleShown(modules[key]) && modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
 const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
 
@@ -91,6 +93,7 @@ interface Overview {
 
 interface GuardStatus {
   modules?: ModuleStates;
+  device?: Device;
   version: string;
   standalone_plugins?: string[];
   blocked: boolean;
@@ -252,7 +255,8 @@ const configureOverviewModules = (modules: ModuleStates) => {
 };
 const readOverviewSource = (source: OverviewSource) => {
   if (!frontendActive || overviewPaused || !overviewPollers.size ||
-      !moduleEnabled(overviewModules, source.module)) return;
+      !moduleEnabled(overviewModules, source.module)
+      || (source.key === "controller_batteries" && !moduleShown(overviewModules.controller))) return;
   if (source.pendingSince === null) source.pendingSince = overviewVisibleTime();
   if (source.pending) return;
   const revision = source.revision;
@@ -431,7 +435,7 @@ const displaySummary = (state?: DisplayState) => {
   return `${mode}${hdrFix}`;
 };
 
-const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
+const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, device }) => {
   const [busy, setBusy] = useState<ModuleKey | "restart" | null>(null);
   // The failed control shows its error until the next action.
   const [error, setError] = useState<{key: ModuleKey | "restart"; text: string} | null>(null);
@@ -465,9 +469,9 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
   };
   return <PanelSection title="Manage Modules">
     {infoRow("Choose your modules", "Turning a module off stops it and hides it. Its settings are kept.")}
-    {(Object.keys(moduleLabels) as ModuleKey[]).map(name => <PanelSectionRow key={name}>
+    {(Object.keys(moduleLabels) as ModuleKey[]).filter(name => moduleShown(modules[name])).map(name => <PanelSectionRow key={name}>
       <ToggleField label={moduleLabels[name]} checked={moduleChecked(modules[name])} disabled={busy !== null || moduleLocked(modules[name])}
-        description={busy === name ? "Applying…" : (error?.key === name && error.text) || moduleNote(name, modules[name])}
+        description={busy === name ? "Applying…" : (error?.key === name && error.text) || moduleNote(name, modules[name], device)}
         onChange={enabled => void change(name, enabled)} />
       {cleanupRetryShown(modules[name]) && <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, false)}>Retry {moduleLabels[name]} cleanup</ButtonItem>}
       {startRetryShown(modules[name]) &&
@@ -480,7 +484,7 @@ const ModulesPage: FC<{ modules: ModuleStates }> = ({ modules }) => {
   </PanelSection>;
 };
 
-const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) => {
+const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPTY_MODULES, device = {}} = {}) => {
   const visible = useQuickAccessVisible();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [onScreen, setOnScreen] = useState(true);
@@ -547,6 +551,8 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
     };
   }, [activeSection, enabledModules, visible, onScreen]);
 
+  // Controller battery levels come from the Gyro & touchpad controllers (not the Go S or a Go 1 on older firmware).
+  const controllerBatteries = moduleShown(modules.controller);
   // A module still starting keeps its place, without controls, until its start has finished.
   const startingRow = (module: ModuleKey) => {
     const text = moduleStartingText(modules[module]);
@@ -562,15 +568,15 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
       {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}{startingRow("tdp")}
       {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}{startingRow("fan")}
       {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}{startingRow("vibration")}
-      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb))} onClick={() => openSection("rgb")} />}{startingRow("rgb")}
+      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb, device.power_led !== false))} onClick={() => openSection("rgb")} />}{startingRow("rgb")}
       {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title={moduleLabels.remap} {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}{startingRow("remap")}
       {startingRow("controller")}
-      <SectionLink section="controller" restoreFocus={focusSection === "controller"}
+      {(moduleEnabled(modules, "controller") || device.firmware !== false) && <SectionLink section="controller" restoreFocus={focusSection === "controller"}
         title={moduleEnabled(modules, "controller") ? moduleLabels.controller : "Controller firmware"}
         {...(moduleEnabled(modules, "controller") ? summary("controller", controllerSummary(overview.controller))
           : { description: "Controller update status and Lenovo firmware updates" })}
-        onClick={() => openSection("controller")} />
-      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title={moduleLabels.battery} {...summary("battery", batterySummary(overview.battery, overview.controller_batteries))} onClick={() => openSection("battery")} />}{startingRow("battery")}
+        onClick={() => openSection("controller")} />}
+      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title={moduleLabels.battery} {...summary("battery", batterySummary(overview.battery, controllerBatteries ? overview.controller_batteries : undefined))} onClick={() => openSection("battery")} />}{startingRow("battery")}
       {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title={moduleLabels.display} {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}{startingRow("display")}
       {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title={moduleLabels.wifi} {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}{startingRow("wifi")}
     </PanelSection>
@@ -592,17 +598,17 @@ const Controls: FC<{modules?: ModuleStates}> = ({modules = EMPTY_MODULES} = {}) 
 
   return <PageShell rootRef={panelRef}>
     <SectionHeader title={title} onBack={() => setActiveSection(null)} />
-    {activeSection === "modules" && <ModulesPage modules={modules} />}
+    {activeSection === "modules" && <ModulesPage modules={modules} device={device} />}
     {activeSection === "tdp" && <TdpPage visible={onScreen} />}
     {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
     {activeSection === "vibration" && <VibrationPage />}
     {activeSection === "display" && <DisplayPage visible={onScreen} />}
     {activeSection === "wifi" && <WifiPage visible={onScreen} />}
-    {activeSection === "rgb" && <RgbPage visible={onScreen} />}
+    {activeSection === "rgb" && <RgbPage visible={onScreen} powerLight={device.power_led !== false} />}
     {activeSection === "remap" && <RemapPage visible={onScreen} />}
-    {activeSection === "controller" && (moduleEnabled(modules, "controller") ? <ControllerPage visible={pageVisible} />
+    {activeSection === "controller" && (moduleEnabled(modules, "controller") ? <ControllerPage visible={pageVisible} firmware={device.firmware !== false} />
       : <FirmwarePanel visible={pageVisible} allowUpdates={!Object.values(modules).some(state => state?.maintenance)} />)}
-    {activeSection === "battery" && <BatteryPage visible={onScreen} />}
+    {activeSection === "battery" && <BatteryPage visible={onScreen} controllers={controllerBatteries} />}
     {activeSection === "about" && <>
       <PanelSection title="Legion Go 2 Companion">
         {infoRow(`Version ${overview.version}`, "All-in-one hardware controls for Decky Loader.")}
@@ -641,9 +647,9 @@ const Content: FC = () => {
       {infoRow("Your settings are kept", "This safeguard does not erase Companion profiles or the standalone settings available for import.")}
       <PanelSectionRow><ButtonItem layout="below" onClick={() => void refreshGuard()}>Check again</ButtonItem></PanelSectionRow>
     </PanelSection>
-    <FirmwarePanel visible={visible} allowUpdates={false} />
+    {status.device?.firmware !== false && <FirmwarePanel visible={visible} allowUpdates={false} />}
   </PageShell>;
-  return <Controls modules={status.modules} />;
+  return <Controls modules={status.modules} device={status.device} />;
 };
 
 const Icon: FC = () => (

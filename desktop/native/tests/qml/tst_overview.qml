@@ -101,6 +101,18 @@ TestCase {
         fake.data=Object.assign({},fake.data,{vibe_get_settings:{settings:{level:2,mode:0}},vibe_get_capabilities:{intensity:["off","low","medium","high"],mode:["fps","racing"]}});
         compare(findChild(view,"overviewVibration").value,"Medium · FPS");
     }
+    function test_whatDoesNotApplyToThisConsoleIsHidden() {
+        const names=["overviewBattery","overviewPerformance","overviewPreset","overviewTemperature","overviewPower","overviewFan","overviewPowerLimit",
+            "overviewFanControl","overviewTdpButton","overviewFanButton","overviewControllers","overviewControllerBattery","overviewVibration","overviewGyro"];
+        for(const name of names)tryVerify(function(){ return findChild(view,name).visible; },5000,name);
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{fan:{applicable:false},display:{applicable:false},remap:{applicable:false},
+            vibration:{applicable:false},controller:{applicable:false},rgb:{ready:true},battery:{ready:true},wifi:{ready:true},tdp:{ready:true}},
+            device:{console:"gos",firmware:false,power_led:false}}});
+        for(const name of ["overviewTemperature","overviewFan","overviewFanControl","overviewFanButton","overviewControllers","overviewControllerBattery","overviewVibration","overviewGyro","overviewGyroBadge"])
+            verify(!findChild(view,name).visible,name);
+        for(const name of ["overviewBattery","overviewPerformance","overviewPreset","overviewPower","overviewPowerLimit","overviewTdpButton","overviewNetwork"])
+            verify(findChild(view,name).visible,name);
+    }
     function test_disabledFanCannotPresentItsLastSampleAsLive() {
         // Clean module disable can retain ready=true in the real backend.
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{fan:{enabled:false,ready:true}}}});

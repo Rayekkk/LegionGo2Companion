@@ -53,6 +53,16 @@ TestCase {
         fake.calls=[];model.windowActive=false;model.refreshPanel();
         compare(fake.calls.length,0);
     }
+    function test_whatDoesNotApplyToThisConsoleIsNeverRead() {
+        model.page="controller";model.windowActive=true;
+        compare(model.panelMethods().indexOf("firmware_get_status")>=0,true);
+        model.snapshots={get_version:{blocked:false,modules:{controller:{enabled:true,ready:true,applicable:false}},device:{firmware:false}}};
+        verify(!model.canRead("controller_get_status"));
+        compare(model.panelMethods().indexOf("firmware_get_status"),-1);
+        model.snapshots={get_version:{blocked:true,modules:{},device:{firmware:false}}};
+        fake.calls=[];model.refreshPanel();
+        compare(fake.calls.length,0);
+    }
     function test_firmwareMutationFailureRequiresFreshStatusBeforeAnotherAttempt() {
         model.snapshots={firmware_get_status:{phase:"idle"}};
         model.received={firmware_get_status:fake.clock};

@@ -43,13 +43,18 @@ ColumnLayout {
     }
     readonly property var gyroLabels:Gyro.SOURCE_LABELS
     readonly property var bandLabels:({off:"Automatic",five_six_no_24:"Prefer 5/6 GHz",five_six_only:"Only 5/6 GHz",six_ghz_only:"Only 6 GHz"})
+    // Cards and rows of modules that do not apply to this console are hidden.
+    function shown(name) { return Modules.moduleShown(modules[name]); }
+    readonly property bool performanceShown:shown("fan") || shown("tdp")
+    readonly property bool controllersShown:shown("vibration") || shown("controller")
     function available(name) { return !backend.connected?"Offline":Modules.moduleStartingText(modules[name])?"Starting":modules[name]?.pending?"Restoring":modules[name]?.enabled===false?"Off":modules[name]?.error?"Needs attention":modules[name]?.ready?"On":"Unavailable"; }
     Timer { interval:500; repeat:true; running:overview.backend && overview.backend.windowActive; onTriggered:overview.tick=overview.backend.now() }
     GridLayout {
         id:summaryGrid
-        Layout.fillWidth:true; columns:overview.width>=860?2:1; columnSpacing:theme.gap; rowSpacing:theme.gap
+        Layout.fillWidth:true; columns:overview.width>=860 && overview.shown("battery") && overview.performanceShown?2:1; columnSpacing:theme.gap; rowSpacing:theme.gap
         UiCard {
             objectName:"overviewBattery"
+            visible:overview.shown("battery")
             padding:20
             Layout.preferredWidth:summaryGrid.columns===2?1:-1; Layout.fillWidth:true; Layout.fillHeight:true; Layout.minimumWidth:0
             title:"Battery"; icon:"battery"
@@ -59,29 +64,30 @@ ColumnLayout {
                 Layout.fillWidth:true; implicitHeight:6; radius:3; color:"#354455"
                 Rectangle { width:parent.width*Math.max(0,Math.min(100,Number(overview.battery.capacity || 0)))/100; height:parent.height; radius:3; color:theme.accentText; visible:overview.batteryFresh }
             }
-            UiReadout { Layout.fillWidth:true; label:"Power source"; value:fresh("get_power_source",12)?s("get_power_source").ac?"External power":"Battery":"—" }
+            UiReadout { visible:overview.shown("tdp"); Layout.fillWidth:true; label:"Power source"; value:fresh("get_power_source",12)?s("get_power_source").ac?"External power":"Battery":"—" }
             UiReadout { Layout.fillWidth:true; label:"Battery protection"; value:overview.batteryFresh?overview.battery.enabled?"On":"Off":"—" }
             Item { Layout.fillHeight:true }
             UiButton { text:"Battery settings"; onClicked:overview.navigate("battery") }
         }
         UiCard {
             objectName:"overviewPerformance"
+            visible:overview.performanceShown
             padding:20
             Layout.fillWidth:true; Layout.fillHeight:true; Layout.preferredWidth:2; Layout.minimumWidth:0
             title:"Performance & cooling"; icon:"tdp"
-            trailing:UiBadge { objectName:"overviewPreset"; text:fresh("get_settings",12)?Tdp.overviewSummary(overview.power):overview.available("tdp") }
+            trailing:UiBadge { objectName:"overviewPreset"; visible:overview.shown("tdp"); text:fresh("get_settings",12)?Tdp.overviewSummary(overview.power):overview.available("tdp") }
             RowLayout { Layout.fillWidth:true; spacing:18; Layout.topMargin:10
-                UiMetric { objectName:"overviewTemperature"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU temperature"; value:overview.fanFresh?Number(overview.fan.readings.apu_temperature).toFixed(1)+" °C":"—"; note:"Hotter of CPU and GPU" }
-                UiMetric { objectName:"overviewPower"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU power"; value:overview.performanceFresh && overview.powerInfo.values?.package_draw!==undefined?Number(overview.powerInfo.values.package_draw).toFixed(1)+" W":"—" }
-                UiMetric { objectName:"overviewFan"; Layout.fillWidth:true; Layout.preferredWidth:1; label:"Fan speed"; value:overview.fanFresh?Fan.speedText(overview.fan.readings.rpm,overview.fan.settings?.display_unit,overview.fan.limits?.max_rpm):"—" }
+                UiMetric { objectName:"overviewTemperature"; visible:overview.shown("fan"); Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU temperature"; value:overview.fanFresh?Number(overview.fan.readings.apu_temperature).toFixed(1)+" °C":"—"; note:"Hotter of CPU and GPU" }
+                UiMetric { objectName:"overviewPower"; visible:overview.shown("tdp"); Layout.fillWidth:true; Layout.preferredWidth:1; label:"APU power"; value:overview.performanceFresh && overview.powerInfo.values?.package_draw!==undefined?Number(overview.powerInfo.values.package_draw).toFixed(1)+" W":"—" }
+                UiMetric { objectName:"overviewFan"; visible:overview.shown("fan"); Layout.fillWidth:true; Layout.preferredWidth:1; label:"Fan speed"; value:overview.fanFresh?Fan.speedText(overview.fan.readings.rpm,overview.fan.settings?.display_unit,overview.fan.limits?.max_rpm):"—" }
             }
             Rectangle { Layout.fillWidth:true; implicitHeight:1; color:theme.divider; Layout.topMargin:6 }
-            UiReadout { objectName:"overviewPowerLimit"; Layout.fillWidth:true; label:"Limits now"; value:overview.performanceFresh && overview.powerInfo.values?.spl_limit!=null?Tdp.limitsText(overview.powerInfo):"—" }
-            UiReadout { objectName:"overviewFanControl"; Layout.fillWidth:true; label:"Fan control"; value:fresh("fan_get_state",3)?Fan.fanStatus(overview.fan).headline:"—" }
+            UiReadout { objectName:"overviewPowerLimit"; visible:overview.shown("tdp"); Layout.fillWidth:true; label:"Limits now"; value:overview.performanceFresh && overview.powerInfo.values?.spl_limit!=null?Tdp.limitsText(overview.powerInfo):"—" }
+            UiReadout { objectName:"overviewFanControl"; visible:overview.shown("fan"); Layout.fillWidth:true; label:"Fan control"; value:fresh("fan_get_state",3)?Fan.fanStatus(overview.fan).headline:"—" }
             Item { Layout.fillHeight:true }
             RowLayout { Layout.fillWidth:true; spacing:10
-                UiButton { text:"Power limits"; onClicked:overview.navigate("tdp") }
-                UiButton { text:"Fan Control"; onClicked:overview.navigate("fan") }
+                UiButton { objectName:"overviewTdpButton"; visible:overview.shown("tdp"); text:"Power limits"; onClicked:overview.navigate("tdp") }
+                UiButton { objectName:"overviewFanButton"; visible:overview.shown("fan"); text:"Fan Control"; onClicked:overview.navigate("fan") }
                 Item { Layout.fillWidth:true }
             }
         }
@@ -89,7 +95,7 @@ ColumnLayout {
     RowLayout { Layout.fillWidth:true; Layout.topMargin:4
         Label { textFormat:Text.PlainText; text:"Current setup"; color:theme.text; font.pixelSize:17; font.weight:Font.DemiBold; Layout.fillWidth:true }
     }
-    GridLayout { Layout.fillWidth:true; columns:overview.width>=700?2:1; columnSpacing:theme.gap; rowSpacing:theme.gap
+    GridLayout { Layout.fillWidth:true; columns:overview.width>=700 && overview.controllersShown?2:1; columnSpacing:theme.gap; rowSpacing:theme.gap
         UiCard {
             padding:20
             Layout.fillWidth:true; Layout.fillHeight:true; Layout.preferredWidth:1; Layout.minimumWidth:0
@@ -102,14 +108,16 @@ ColumnLayout {
             UiButton { text:"Wi-Fi settings"; onClicked:overview.navigate("wifi") }
         }
         UiCard {
+            objectName:"overviewControllers"
+            visible:overview.controllersShown
             padding:20
             Layout.fillWidth:true; Layout.fillHeight:true; Layout.preferredWidth:1; Layout.minimumWidth:0
             title:"Controllers"; icon:"controller"
-            trailing:UiBadge { visible:!modules.controller?.ready; text:"Gyro: "+overview.available("controller"); tone:Modules.moduleStartingText(modules.controller)?"neutral":"amber" }
-            Label { textFormat:Text.PlainText; visible:overview.controllerFresh && !overview.controller.available; text:"Controller unavailable"; color:theme.warning; font.pixelSize:14; Layout.fillWidth:true }
-            UiReadout { Layout.fillWidth:true; label:"Left / right battery"; value:fresh("battery_get_controller_levels",12)?[overview.batteryPercent(overview.controllerBattery.left),overview.batteryPercent(overview.controllerBattery.right)].join(" / "):"—" }
-            UiReadout { objectName:"overviewVibration"; Layout.fillWidth:true; label:"Vibration"; value:fresh("vibe_get_settings",12)?overview.vibrationLevel():overview.available("vibration") }
-            UiReadout { Layout.fillWidth:true; label:"Gyro source"; value:overview.controllerFresh?overview.gyroLabels[overview.controller.gyro_source] || named(overview.controller.gyro_source):overview.available("controller") }
+            trailing:UiBadge { objectName:"overviewGyroBadge"; visible:overview.shown("controller") && !modules.controller?.ready; text:"Gyro: "+overview.available("controller"); tone:Modules.moduleStartingText(modules.controller)?"neutral":"amber" }
+            Label { textFormat:Text.PlainText; visible:overview.shown("controller") && overview.controllerFresh && !overview.controller.available; text:"Controller unavailable"; color:theme.warning; font.pixelSize:14; Layout.fillWidth:true }
+            UiReadout { objectName:"overviewControllerBattery"; visible:overview.shown("controller"); Layout.fillWidth:true; label:"Left / right battery"; value:fresh("battery_get_controller_levels",12)?[overview.batteryPercent(overview.controllerBattery.left),overview.batteryPercent(overview.controllerBattery.right)].join(" / "):"—" }
+            UiReadout { objectName:"overviewVibration"; visible:overview.shown("vibration"); Layout.fillWidth:true; label:"Vibration"; value:fresh("vibe_get_settings",12)?overview.vibrationLevel():overview.available("vibration") }
+            UiReadout { objectName:"overviewGyro"; visible:overview.shown("controller"); Layout.fillWidth:true; label:"Gyro source"; value:overview.controllerFresh?overview.gyroLabels[overview.controller.gyro_source] || named(overview.controller.gyro_source):overview.available("controller") }
             Item { Layout.fillHeight:true }
             UiButton { text:"Controllers"; onClicked:overview.navigate("controller") }
         }

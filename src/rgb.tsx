@@ -95,15 +95,16 @@ type Gesture = "color" | "brightness" | "speed";
 
 const effectLabel = (effect?: string) => EFFECT_LABELS[effect ?? ""] ?? "Custom";
 
-export const rgbSummary = (status?: RgbStatus) => {
-  if (!status?.settings) return "Stick lights and power button light";
+/** powerLight: the console has the power button light (get_version.device.power_led). */
+export const rgbSummary = (status?: RgbStatus, powerLight = true) => {
+  if (!status?.settings) return powerLight ? "Stick lights and power button light" : "Stick lights";
   const lighting = status.settings.control_enabled
     ? status.settings.rings_enabled
       ? effectLabel(status.settings.effect)
       : "Stick lights off"
     : "Lighting control off";
   const power = status.power_led?.current;
-  return `${lighting} · Power light ${power == null ? "unknown" : power ? "on" : "off"}`;
+  return powerLight ? `${lighting} · Power light ${power == null ? "unknown" : power ? "on" : "off"}` : lighting;
 };
 
 const hsvCss = (hue: number, saturation: number, value: number) => {
@@ -151,7 +152,7 @@ const RGBSliderStyles: FC<{ hue: number; saturation: number }> = ({
   `}</style>
 );
 
-export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+export const RgbPage: FC<{ visible?: boolean; powerLight?: boolean }> = ({ visible: tabShown = true, powerLight = true }) => {
   const visible = useQuickAccessVisible() && tabShown;
   const [status, setStatus] = useState<RgbStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -429,8 +430,8 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
         </>}
       </PanelSection>
 
-      <PanelSection title="Power button">
-        <PanelSectionRow>
+      <PanelSection title={powerLight ? "Power button" : undefined}>
+        {powerLight && <PanelSectionRow>
           <ToggleField
             label="Power button light"
             description={failure("power") ?? powerNote(status)}
@@ -438,7 +439,7 @@ export const RgbPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true })
             disabled={blocked || power?.supported !== true}
             onChange={(value) => void enqueue(() => setPowerLed(value), "power")}
           />
-        </PanelSectionRow>
+        </PanelSectionRow>}
         {/* The page's last row is always enabled; the backend refuses it during recovery. */}
         <PanelSectionRow>
           <ButtonItem layout="below" description={failure("restore") ?? RESTORE_NOTE}

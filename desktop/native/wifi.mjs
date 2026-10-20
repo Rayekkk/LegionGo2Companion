@@ -21,7 +21,8 @@ export function bandName(frequency) {
 
 export const savedPolicy = status => status?.settings?.band_policy ?? "off";
 const backendOf = status => { const b = status?.live?.wifi_backend; return b === "iwd" || b === "wpa_supplicant" ? b : ""; };
-const supported = status => status?.settings?.device_family === "legion_go_2" && status.settings.driver === "mt7921e";
+// Every Legion Go (wifi_backend.LEGION_GO_FAMILIES) with the MT7922 driver.
+const supported = status => ["legion_go", "legion_go_s", "legion_go_2"].includes(status?.settings?.device_family) && status.settings.driver === "mt7921e";
 
 /** A saved policy the active backend cannot use (iwd choices under WPA, or 6 GHz only under iwd). */
 export function inactivePolicy(status) {
@@ -87,7 +88,7 @@ export function bandNote(status) {
 export function wifiNotice(status) {
   if (!status?.success) return null;
   const live = status.live || {};
-  if (!supported(status)) return ["Wi-Fi tweaks unavailable", "Only for the Legion Go 2 Wi-Fi card (MT7922)."];
+  if (!supported(status)) return ["Wi-Fi tweaks unavailable", "Only for the Legion Go Wi-Fi card (MT7922)."];
   if (live.recovery_required) return ["Wi-Fi settings are locked",
     (live.recovery_errors || []).join("; ") || "A previous change must be recovered before another change."];
   if (!backendOf(status)) return ["Wi-Fi backend unavailable", "Wi-Fi controls appear once SteamOS reports its Wi-Fi backend."];
