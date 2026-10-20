@@ -332,7 +332,8 @@ class TdpEventTests(Events, unittest.TestCase):
     """test_tdp_core's fake firmware-attributes tree, platform profile, ryzenadj and helper download."""
 
     fixture = test_tdp_core.TdpCoreTests
-    seed, saved, rpc, publish_helper = fixture.seed, fixture.saved, fixture.rpc, fixture.publish_helper
+    seed, saved, rpc, publish_helper, ppt = (fixture.seed, fixture.saved, fixture.rpc,
+                                             fixture.publish_helper, fixture.ppt)
 
     def setUp(self):
         self.fixture.setUp(self)
