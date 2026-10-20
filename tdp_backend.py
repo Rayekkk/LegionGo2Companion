@@ -387,17 +387,10 @@ def _canonical_epp_syntax(value) -> str | None:
 
 def _load_settings() -> dict:
     s = _read_key(SETTINGS_KEY_SETTINGS, _defaults())
-    s["enabled"] = (
-        s.get("enabled") if type(s.get("enabled")) is bool else True)
-    s["extras_unlocked"] = (
-        s.get("extras_unlocked")
-        if type(s.get("extras_unlocked")) is bool else False)
-    s["advanced_tdp_control"] = (
-        s.get("advanced_tdp_control")
-        if type(s.get("advanced_tdp_control")) is bool else True)
-    boost = s.get(SETTINGS_FIELD_CPU_BOOST_ENABLED)
-    s[SETTINGS_FIELD_CPU_BOOST_ENABLED] = (
-        boost if type(boost) is bool else None)
+    for key, default in (("enabled", True), ("extras_unlocked", False),
+                         ("advanced_tdp_control", True), (SETTINGS_FIELD_CPU_BOOST_ENABLED, None)):
+        if type(s.get(key)) is not bool:
+            s[key] = default
     s[SETTINGS_FIELD_EPP] = _canonical_epp_syntax(
         s.get(SETTINGS_FIELD_EPP))
     ceilings = _load_ceilings_mw()
@@ -1516,15 +1509,17 @@ def _boost_targets() -> tuple[list[str], bool, str]:
     amd_global = os.path.join(CPU_SYS_ROOT, "amd_pstate", "cpb_boost")
     if os.path.exists(amd_global):
         return [amd_global], True, ""
-    dirs = _cpufreq_control_dirs()
-    if not dirs:
-        return [], False, ""
-    paths = [os.path.join(path, "boost") for path in dirs]
+    return _policy_files("boost", "CPU Boost")
+
+
+def _policy_files(leaf: str, label: str) -> tuple[list[str], bool, str]:
+    """`leaf` in every CPUFreq policy: (paths, supported, error); all or none."""
+    paths = [os.path.join(path, leaf) for path in _cpufreq_control_dirs()]
     present = [os.path.exists(path) for path in paths]
     if not any(present):
         return [], False, ""
     if not all(present):
-        return [], True, "CPU Boost is missing from one or more CPU policies"
+        return [], True, f"{label} is missing from one or more CPU policies"
     return paths, True, ""
 
 
@@ -1575,17 +1570,7 @@ def _capture_cpu_boost() -> dict:
 def _epp_targets() -> tuple[list[str], bool, str]:
     if not _legion_go_2():
         return [], False, UNSUPPORTED_MODEL
-    dirs = _cpufreq_control_dirs()
-    if not dirs:
-        return [], False, ""
-    paths = [os.path.join(
-        path, "energy_performance_preference") for path in dirs]
-    present = [os.path.exists(path) for path in paths]
-    if not any(present):
-        return [], False, ""
-    if not all(present):
-        return [], True, "EPP is missing from one or more CPU policies"
-    return paths, True, ""
+    return _policy_files("energy_performance_preference", "EPP")
 
 
 def _preference_tokens(path: str) -> list[str]:
@@ -1599,25 +1584,14 @@ def _preference_tokens(path: str) -> list[str]:
     raw = _read_cpu_power_text(source)
     if not raw:
         raise ValueError("empty EPP preference list")
-    result: list[str] = []
-    seen: set[str] = set()
-    for token in raw.split():
+    tokens = raw.split()
+    for token in tokens:
         # available_preferences is a list of named profiles plus the special
         # custom marker. A decimal here would be exposed in profiles but still
         # be rejected by set_epp without custom, violating the RPC contract.
         if token != "custom" and _EPP_NAME_RE.fullmatch(token) is None:
             raise ValueError(f"invalid EPP preference {token!r}")
-        if token not in seen:
-            seen.add(token)
-            result.append(token)
-    return result
-
-
-def _epp_numeric_value(value: str) -> int | None:
-    if _EPP_DECIMAL_RE.fullmatch(value):
-        number = int(value, 10)
-        return number if EPP_MIN <= number <= EPP_MAX else None
-    return _EPP_NAMED_VALUES.get(value)
+    return list(dict.fromkeys(tokens))
 
 
 def _capture_epp() -> dict:
@@ -1643,21 +1617,18 @@ def _capture_epp() -> dict:
     except (OSError, ValueError) as exc:
         result["error"] = f"EPP state unavailable: {exc}"
         return result
-    common = set(preference_lists[0])
-    for preferences in preference_lists[1:]:
-        common.intersection_update(preferences)
-    ordered_common = [
-        item for item in preference_lists[0] if item in common]
+    common = set(preference_lists[0]).intersection(*preference_lists[1:])
     numeric_supported = "custom" in common
     # custom is only a capability marker for numeric 0..255.
-    profiles = [item for item in ordered_common if item != "custom"]
+    profiles = [item for item in preference_lists[0] if item in common and item != "custom"]
     if not profiles and not numeric_supported:
-        result["error"] = (
-            "no EPP preference is supported by every CPU policy")
+        result["error"] = "no EPP preference is supported by every CPU policy"
         return result
     values = list(originals.values())
     value = values[0] if all(item == values[0] for item in values) else None
-    numeric_values = [_epp_numeric_value(item) for item in values]
+    # The originals are canonical, so a decimal one is already within 0..255.
+    numeric_values = [int(item) if _EPP_DECIMAL_RE.fullmatch(item) else _EPP_NAMED_VALUES.get(item)
+                      for item in values]
     numeric_value: int | None = None
     if all(item is not None and item == numeric_values[0]
            for item in numeric_values):
@@ -1778,10 +1749,7 @@ def _apply_cpu_boost_hardware(enabled: bool) -> dict:
     _capture_baseline()
     capture = _capture_cpu_boost()
     if not capture["can_set"]:
-        return {
-            "success": False,
-            "error": capture["error"] or "CPU Boost is unsupported",
-        }
+        return {"success": False, "error": capture["error"] or "CPU Boost is unsupported"}
     requested = {
         path: _boost_write_token(capture["originals"][path], enabled)
         for path in capture["targets"]
@@ -1816,10 +1784,7 @@ def _apply_epp_hardware(value: str) -> dict:
     _capture_baseline()
     capture = _capture_epp()
     if not capture["can_set"]:
-        return {
-            "success": False,
-            "error": capture["error"] or "EPP is unsupported",
-        }
+        return {"success": False, "error": capture["error"] or "EPP is unsupported"}
     canonical = _compatible_saved_epp(capture, value)
     if canonical is None:
         return {"success": False, "error": "invalid or unsupported EPP value"}
@@ -1838,36 +1803,19 @@ def _apply_epp_hardware(value: str) -> dict:
         capture["originals"], requested, _epp_equivalent, "EPP", resolve_readback)
 
 
-def _cpu_power_controls_status(
-    *, operation_success: bool | None = None, operation_error: str = ""
-) -> dict:
-    boost = _capture_cpu_boost()
-    epp = _capture_epp()
-    boost_public = {
-        "available": boost["available"],
-        "enabled": boost["enabled"],
-        "error": boost["error"],
-    }
-    epp_public = {
-        "available": epp["available"],
-        "value": epp["value"],
-        "profiles": epp["profiles"],
-        "numeric_supported": epp["numeric_supported"],
-        "min": EPP_MIN,
-        "max": EPP_MAX,
-        "numeric_value": epp["numeric_value"],
-        "error": epp["error"],
-    }
-    read_errors = [item for item in (boost["error"], epp["error"]) if item]
-    if operation_success is None:
-        operation_success = not read_errors
-        operation_error = "; ".join(read_errors)
+def _cpu_status_shape(boost: dict, epp: dict, success: bool | None, error: str) -> dict:
+    """The RPC shape; success None reports the read errors as the outcome."""
+    if success is None:
+        read_errors = [item for item in (boost["error"], epp["error"]) if item]
+        success, error = not read_errors, "; ".join(read_errors)
     return {
-        "success": operation_success,
+        "success": success,
         "available": boost["available"] or epp["available"],
-        "cpu_boost": boost_public,
-        "epp": epp_public,
-        "error": operation_error,
+        "cpu_boost": {key: boost[key] for key in ("available", "enabled", "error")},
+        "epp": {**{key: epp[key] for key in ("available", "value", "profiles",
+                                              "numeric_supported", "numeric_value", "error")},
+                "min": EPP_MIN, "max": EPP_MAX},
+        "error": error,
     }
 
 
@@ -1875,24 +1823,11 @@ def _cpu_power_controls_error_status(
     error: str, app_id: str = "", ac_profile: bool = False
 ) -> dict:
     """Preserve the RPC shape even if an unexpected dependency raises."""
-    return {
-        "success": False,
-        "available": False,
-        "cpu_boost": {"available": False, "enabled": None, "error": error},
-        "epp": {
-            "available": False,
-            "value": None,
-            "profiles": [],
-            "numeric_supported": False,
-            "min": EPP_MIN,
-            "max": EPP_MAX,
-            "numeric_value": None,
-            "error": error,
-        },
-        "error": error,
-        "profile": {"app_id": app_id, "ac_profile": ac_profile, "active": False,
-                    "cpu_boost_enabled": None, "epp": None},
-    }
+    unavailable = {"available": False, "enabled": None, "value": None, "profiles": [],
+                   "numeric_supported": False, "numeric_value": None, "error": error}
+    return {**_cpu_status_shape(unavailable, unavailable, False, error),
+            "profile": {"app_id": app_id, "ac_profile": ac_profile, "active": False,
+                        "cpu_boost_enabled": None, "epp": None}}
 
 
 def _scope_refusal(app_id: str, current_app_id: str, expected_app_id: str | None,
@@ -1931,8 +1866,10 @@ def _cpu_editor_profile(state: dict, profiles: dict, app_id: str,
             **_effective_cpu_values(state, selected, ac_profile)}
 
 
-def _cpu_scoped_status(app_id: str = "", ac_profile: bool = False, **operation) -> dict:
-    result = _cpu_power_controls_status(**operation)
+def _cpu_scoped_status(app_id: str = "", ac_profile: bool = False, *,
+                       operation_success: bool | None = None, operation_error: str = "") -> dict:
+    result = _cpu_status_shape(_capture_cpu_boost(), _capture_epp(),
+                               operation_success, operation_error)
     result["profile"] = _cpu_editor_profile(
         _load_settings(), _load_profiles(), app_id, ac_profile)
     saved = result["profile"]["epp"]

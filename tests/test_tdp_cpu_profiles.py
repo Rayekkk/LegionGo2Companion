@@ -117,6 +117,22 @@ class CpuProfileTests(unittest.TestCase):
             simplified, 20000, 32000, 35000, 'performance'),
             (20000, 32000, 35000))
 
+    def test_cpu_controls_keep_their_rpc_shape_when_a_read_fails(self):
+        status = self.rpc('get_cpu_power_controls')
+        self.assertEqual(status['cpu_boost'], {'available': True, 'enabled': False, 'error': ''})
+        self.assertEqual(status['epp'], {
+            'available': True, 'value': '77', 'numeric_value': 77, 'numeric_supported': True,
+            'profiles': ['default', 'performance', 'balance_performance', 'balance_power', 'power'],
+            'min': 0, 'max': 255, 'error': ''})
+        with patch.object(tdp, '_capture_epp', side_effect=OSError('gone')):
+            failed = asyncio.run(self.plugin.get_cpu_power_controls())
+        def shape(value):
+            return {key: shape(item) for key, item in value.items()} if isinstance(value, dict) else None
+        self.assertEqual(shape(failed), shape(status))
+        self.assertEqual((failed['success'], failed['available'], failed['epp']['available'],
+                          failed['cpu_boost']['enabled'], failed['epp']['profiles']),
+                         (False, False, False, None, []))
+
     def test_uninstall_restores_managed_cpu_controls_and_preserves_settings(self):
         before = self.payload()
         asyncio.run(self.plugin._uninstall())
