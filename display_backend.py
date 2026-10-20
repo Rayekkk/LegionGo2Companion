@@ -1955,7 +1955,7 @@ class Plugin:
             return dict(Plugin._state)
 
     @staticmethod
-    async def _apply_mode(mode: str) -> dict:
+    async def _apply_mode(mode: str, reinstall: bool = False) -> dict:
         # Persistence migration may normalize old values, but a malformed RPC
         # must never select PQ or install a script on the caller's behalf.
         if type(mode) is not str or mode not in MODES:
@@ -1965,7 +1965,7 @@ class Plugin:
         # buttons. BUNDLED_SCRIPT is process-global, so the whole transaction and
         # its derived runtime state must be serialised, not only the file write.
         async with Plugin._mode_lock:
-            operation = asyncio.create_task(Plugin._apply_mode_locked(mode))
+            operation = asyncio.create_task(Plugin._apply_mode_locked(mode, reinstall))
             try:
                 return await asyncio.shield(operation)
             except asyncio.CancelledError:
@@ -1976,7 +1976,7 @@ class Plugin:
                 raise
 
     @staticmethod
-    async def _apply_mode_locked(mode: str) -> dict:
+    async def _apply_mode_locked(mode: str, reinstall: bool = False) -> dict:
         await _offload(Plugin._refresh_native_support, True)
         if Plugin.native_display_active():
             return dict(Plugin._state)
@@ -1990,6 +1990,8 @@ class Plugin:
                 if Plugin.native_display_active():
                     return False, "Native gamescope display support is active."
                 _bind_script_dir()
+                if reinstall and os.path.lexists(INSTALLED_SCRIPT):
+                    return None, ""  # A script took its place since _script_lost_to_update looked.
                 backup = INSTALLED_SCRIPT + ".backup"
                 # lexists: a link there is unreadable by design and must not be lost.
                 installed_existed = os.path.lexists(INSTALLED_SCRIPT)
@@ -2044,6 +2046,9 @@ class Plugin:
 
         Plugin._state["setup_error"] = ""
         ok, note = await _offload(_install_then_save)
+        if ok is None:
+            diagnostic_event('display', 'script_reinstall_skipped', reason='script_present')
+            return dict(Plugin._state)
         if not ok:
             if Plugin.native_display_active():
                 return dict(Plugin._state)
@@ -3218,7 +3223,7 @@ class Plugin:
             await self.reset_settings()
         if not stopped() and await _offload(Plugin._script_lost_to_update):
             diagnostic_event('display', 'script_reinstalled', mode=Plugin._state["panel_mode"])
-            await Plugin._apply_mode(Plugin._state["panel_mode"])
+            await Plugin._apply_mode(Plugin._state["panel_mode"], reinstall=True)
 
         # Before the slower startup work: a game that creates its surface before
         # the forced-support flag is back loses HDR for its whole run.

@@ -129,11 +129,11 @@ class DisplayResetTests(ResetFixture, unittest.TestCase):
                      patch.object(display.Plugin, '_read_settings'), \
                      patch.object(display.Plugin, '_apply_mode_locked', new_callable=AsyncMock, return_value={'panel_mode': mode}) as apply:
                     self.assertEqual(asyncio.run(method(mode)), {'panel_mode': mode})
-                    apply.assert_awaited_once_with(mode)
+                    apply.assert_awaited_once_with(mode, False)
         with patch.object(display.Plugin, '_read_settings'), \
              patch.object(display.Plugin, '_apply_mode_locked', new_callable=AsyncMock, return_value={'panel_mode': 'pq'}) as apply:
             self.assertEqual(asyncio.run(self.plugin.run_setup()), {'panel_mode': 'pq'})
-            apply.assert_awaited_once_with('pq')
+            apply.assert_awaited_once_with('pq', False)
 
     def assert_paused(self):
         self.assertTrue(self.persisted()['reset_in_progress'])
@@ -482,6 +482,18 @@ class DisplayUpdateTests(ResetFixture, unittest.TestCase):
         self.assertEqual(self.script.read_bytes(), b'-- hand tuned')
         self.assertFalse(self.state['setup_done'])
         self.assertFalse(self.state['restart_pending'])
+
+    def test_update_never_replaces_a_script_that_appears_after_the_check(self):
+        lost = display.Plugin._script_lost_to_update
+        def then_written():
+            result = lost()
+            self.script.write_bytes(b'-- hand tuned')
+            return result
+        self.update(lambda: self.patch(display.Plugin, _script_lost_to_update=staticmethod(then_written)))
+        self.assertEqual(self.script.read_bytes(), b'-- hand tuned')
+        self.assertFalse(self.state['setup_done'])
+        self.assertFalse(self.state['restart_pending'])
+        self.assertEqual(self.state['setup_error'], '')
 
     def test_update_installs_nothing_while_the_native_profile_runs(self):
         def native():
