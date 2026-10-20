@@ -102,7 +102,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
     def test_repeated_brightness_release_failure_is_coalesced(self):
         self.fixture(lifecycle_fixture.NativeDisplayMigrationTests)
         with patch.object(display, '_write_nits', return_value=False):
-            for _ in range(7): self.assertFalse(display.Plugin._release_locked())
+            for _ in range(7): self.assertFalse(display.Plugin._release())
         self.assertEqual(len(self.events('display', 'brightness_restore_failed')), 1)
 
     def test_display_setup_keeps_private_failure_in_ui_and_logs_exception_metadata(self):

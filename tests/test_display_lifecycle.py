@@ -397,6 +397,14 @@ class DisplayStopDuringStartTests(ResetFixture, unittest.TestCase):
         self.assertEqual(self.edid_writes, [b'patched-edid'])
         self.assertIn((display.ATOM_FORCE_HDR_SUPPORT, 1), self.atoms)
 
+    def test_hand_edited_toggles_start_with_the_defaults_not_their_truthiness(self):
+        self.gate.set()
+        self.store.replace({**self.saved, 'enabled': 'false', 'edid_fix': 0})
+        asyncio.run(self.plugin._main())
+        self.assertIs(self.state['enabled'], True)
+        self.assertIs(self.state['edid_fix'], True)
+        self.assertEqual(self.edid_writes, [b'patched-edid'])
+
     def stop_during_start(self, uninstall):
         async def scenario():
             loader = self.main.Plugin()
