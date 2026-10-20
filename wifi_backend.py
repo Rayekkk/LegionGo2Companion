@@ -2397,10 +2397,13 @@ class Plugin:
                 f"family={info.get('device_family')}, driver={info.get('driver')}"
             )
             if module_runtime.stop_requested("wifi"):
-                return {"success": True}  # A stop came during the recovery above: start nothing.
+                # A stop came during the recovery above: start nothing, and the start is not finished.
+                raise module_runtime.StartStopped("Stopped while starting; the band monitor was not started.")
             self._high_band_monitor_ready = True
             self._start_high_band_monitor(settings)
             return {"success": True}
+        except module_runtime.StartStopped:
+            raise
         except Exception as e:
             diagnostic_event('wifi', 'main_failed', level='error', error=e, repeat=60)
             return {"success": False, "error": str(e)}

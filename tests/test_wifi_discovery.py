@@ -592,6 +592,18 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             start.assert_called_once()
             self.assertTrue(plugin._high_band_monitor_ready)
 
+    async def test_main_stopped_while_starting_starts_nothing_and_is_not_ready(self):
+        plugin = wifi.Plugin()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(plugin, "_get_wifi_interface", return_value=None))
+            stack.enter_context(patch.object(plugin, "get_device_info", new=AsyncMock(return_value=SETTINGS)))
+            stack.enter_context(patch.object(wifi.module_runtime, "stop_requested", return_value=True))
+            start = stack.enter_context(patch.object(plugin, "_start_high_band_monitor"))
+            with self.assertRaises(wifi.module_runtime.StartStopped):
+                await plugin._main()
+            start.assert_not_called()
+            self.assertFalse(plugin._high_band_monitor_ready)
+
     async def test_apply_starts_monitor_on_persistent_loop_not_worker_loop(self):
         plugin = wifi.Plugin()
         plugin._high_band_monitor_ready = True
