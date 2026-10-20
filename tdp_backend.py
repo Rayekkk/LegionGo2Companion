@@ -2427,7 +2427,8 @@ class Plugin:
         return {"ac": await _offload(_get_ac_online)}
 
     async def retry_extras(self) -> dict:
-        """Download and verify RyzenAdj. Only ever started by the user (Extras)."""
+        """Download and verify RyzenAdj: on the user's Extras or Retry, or once at a start
+        that finds Extras on and the helper missing."""
         async with self._extras_lock:
             return await self._retry_extras()
 
@@ -3015,6 +3016,12 @@ class Plugin:
                 asyncio.create_task(self._enforce_loop()),
                 asyncio.create_task(self._info_loop()),
             ]
+            saved = await _offload(_load_settings)
+            if (saved.get("extras_unlocked", False) and not _ryzenadj_available
+                    and not _ryzenadj_unsupported and _extras_supported()):
+                # Extras are on but the helper is gone (2.2.x kept it in the plugin folder,
+                # which the update deleted): one download per start, in the background.
+                self._tasks.append(asyncio.create_task(self.retry_extras()))
             decky.logger.info(
                 f"[legotdp] ready (wmi={'yes' if wmi else 'no'}, "
                 f"ryzenadj={'yes' if _ryzenadj_available else 'no'})")

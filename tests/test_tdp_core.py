@@ -461,8 +461,10 @@ class TdpCoreTests(unittest.TestCase):
         self.bin.write_bytes(HELPER + b'tampered')
         self.assertFalse(tdp._apply_limits(30000, 45000, 50000)['success'])
         self.assertEqual(self.applies(), [])
+        self.archive = None  # offline: the start's one download attempt fails
         self.start()
         self.assertFalse(tdp._ryzenadj_available)  # nor does a restart
+        self.assertEqual(self.applies(), [])
 
     def test_helper_that_cannot_read_the_cpu_hides_extras(self):
         self.bin.unlink()
@@ -498,18 +500,60 @@ class TdpCoreTests(unittest.TestCase):
 
     # Startup and capabilities ----------------------------------------------
 
-    def test_offline_start_never_downloads_and_keeps_saved_extras_intent(self):
+    def test_offline_start_tries_the_helper_once_and_keeps_saved_extras_intent(self):
         self.seed({'123': {'spl': 40000, 'sppt': 45000, 'fppt': 50000}},
                   extras_unlocked=True, spl=40000, sppt=45000, fppt=50000)
-        plugin = self.start()
+        with patch.object(tdp, 'transition') as transition:
+            plugin = self.start()
         self.assertTrue(asyncio.run(plugin.is_ready())['ready'])
-        self.assertEqual(self.downloads, [])
-        self.assertFalse(asyncio.run(plugin.get_caps())['extras'])
+        self.assertEqual(self.downloads, [tdp.RYZENADJ_URL])  # one attempt, no retry loop
+        self.assertIn(('tdp', 'helper_ready', False), [call.args for call in transition.call_args_list])
+        caps = asyncio.run(plugin.get_caps())
+        self.assertEqual((caps['extras'], caps['helper_retry_available']), (False, True))  # Retry as today
         self.assertEqual(self.ppts(), (35, 37, 45))  # runs inside the firmware range meanwhile
         saved = self.saved()
         # Extras intent is kept; a sustained limit above the firmware ceiling reads as the 35 W that runs.
         self.assertEqual((saved['extras_unlocked'], saved['spl'], saved['fppt']), (True, 35000, 50000))
         self.assertEqual(self.saved('game_profiles')['123']['spl'], 40000)
+        self.start()  # the next start tries once more
+        self.assertEqual(len(self.downloads), 2)
+
+    def test_start_with_extras_on_and_no_helper_downloads_it_in_the_background(self):
+        # An update from 2.2.x: Extras on, the helper deleted with the old plugin folder.
+        self.bin.unlink()
+        self.seed(extras_unlocked=True, spl=30000, sppt=45000, fppt=50000)
+        self.publish_helper()
+        self.download_gate = threading.Event()
+        plugin = tdp.Plugin()
+        self.stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
+
+        async def scenario():
+            with patch.object(plugin, '_enforce_loop', new=AsyncMock()), \
+                    patch.object(plugin, '_info_loop', new=AsyncMock()):
+                await plugin._main()  # returns while the download is still running
+                self.assertTrue(tdp.Plugin._ready)
+                await asyncio.to_thread(self.download_started.wait, 5)
+                self.assertEqual(self.ppts(), (30, 37, 45))  # the firmware range meanwhile
+                self.download_gate.set()
+                await asyncio.gather(*plugin._tasks)
+            plugin._tasks = []
+        asyncio.run(scenario())
+        self.assertEqual(self.bin.read_bytes(), HELPER)
+        self.assertTrue(asyncio.run(plugin.get_caps())['extras'])
+        tdp._check_and_enforce()  # the next pass runs the Extras target
+        self.assertEqual(self.applies(), [
+            ['--stapm-limit=30000', '--slow-limit=45000', '--fast-limit=50000']])
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_start_downloads_no_helper_unless_extras_are_on_and_offered(self):
+        self.bin.unlink()
+        self.publish_helper()
+        for machine, extras in (('83N0', False), ('83N6', True)):
+            with self.subTest(machine=machine):
+                self.machine = machine
+                self.seed(extras_unlocked=extras)
+                self.start()
+                self.assertEqual(self.downloads, [])
 
     def test_loaded_spl_is_bounded_by_the_last_sane_firmware_ceiling(self):
         self.seed(spl=33000, sppt=40000, fppt=45000)
