@@ -40,18 +40,8 @@ def _regular(path: Path, within: Path | None = None) -> Path:
 
 
 def _read(path: Path, within: Path | None = None) -> str:
-    resolved = _regular(path, within)
-    fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                 | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ImuError("The IMU attribute changed during access.")
-        raw = os.read(fd, 513)
-    finally:
-        os.close(fd)
-    if len(raw) > 512:
-        raise ImuError("The IMU attribute returned an oversized value.")
-    return raw.decode("ascii", errors="strict").strip()
+    return module_runtime.read_sysfs_text(
+        _regular(path, within), error=ImuError, subject="The IMU attribute")
 
 
 def _driver_name(device: Path) -> str:

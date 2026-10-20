@@ -5,6 +5,7 @@ import contextlib
 import contextvars
 import functools
 import os
+import stat
 import threading
 import time
 from diagnostics import event
@@ -160,6 +161,25 @@ async def drain(module):
         workers = tuple(_workers[module])
         await complete(asyncio.gather(*workers, return_exceptions=True))
         _workers[module].difference_update(worker for worker in workers if worker.done())
+
+def read_sysfs_text(path, limit=512, *, error=OSError, subject=None):
+    """Read a small ASCII sysfs attribute without following a final symlink.
+
+    Anything that is not a regular file, or is longer than `limit`, raises
+    `error`; a missing file stays the OSError from open, bad bytes a UnicodeError.
+    """
+    subject = subject or f"sysfs attribute {path}"
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise error(f"{subject} changed during access.")
+        raw = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > limit:
+        raise error(f"{subject} returned an oversized value.")
+    return raw.decode("ascii", errors="strict").strip()
+
 
 def is_legion_go_2(dmi_root=DMI_ROOT):
     """LENOVO 83N0/83N1, the identity the Legion Go 2 modules share.

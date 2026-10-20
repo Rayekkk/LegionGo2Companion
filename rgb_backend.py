@@ -118,20 +118,7 @@ def _strict_bool(value: Any, default: bool) -> bool:
     return value if type(value) is bool else default
 
 
-def _read_small(path: str, limit: int = 512) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise OSError(f"not a regular sysfs attribute: {path}")
-        raw = os.read(fd, limit + 1)
-    finally:
-        os.close(fd)
-    if len(raw) > limit:
-        raise OSError(f"attribute is unexpectedly large: {path}")
-    return raw.decode("ascii", errors="strict").strip()
+_read_small = module_runtime.read_sysfs_text
 
 
 def _read_identity() -> dict[str, str]:

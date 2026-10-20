@@ -55,17 +55,8 @@ def _checked_path(path: Path) -> Path:
 def _read_attr(path: Path, limit: int = 512) -> str:
     resolved = _checked_path(path)
     with module_runtime.firmware_lock:  # battery attributes are read through ACPI/WMI too
-        fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                     | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise BatteryError("Battery interface changed during access.")
-            data = os.read(fd, limit + 1)
-        finally:
-            os.close(fd)
-    if len(data) > limit:
-        raise BatteryError("Battery interface returned an oversized value.")
-    return data.decode("ascii", errors="strict").strip()
+        return module_runtime.read_sysfs_text(
+            resolved, limit, error=BatteryError, subject="Battery interface")
 
 
 def _optional_attr(path: Path) -> str | None:

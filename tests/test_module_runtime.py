@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Blocking hardware I/O offloaded through module_runtime must not stall the event loop."""
 import asyncio
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -91,6 +92,48 @@ class FirmwareLockTests(unittest.TestCase):
         with self.assertRaises(OSError):
             battery_backend._write_mode(self.charge_types, 'Fast')
         self.assertFalse(module_runtime.firmware_lock.locked())
+
+
+class SysfsReadTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+
+    def test_reads_a_stripped_ascii_value_up_to_the_limit(self):
+        path = self.root / 'attr'
+        path.write_bytes(b'  Standard \n')
+        self.assertEqual(module_runtime.read_sysfs_text(path), 'Standard')
+        path.write_bytes(b'x' * 512)
+        self.assertEqual(len(module_runtime.read_sysfs_text(path)), 512)
+        self.assertEqual(len(module_runtime.read_sysfs_text(path, 600)), 512)
+
+    def test_refuses_oversized_values_with_the_callers_error(self):
+        path = self.root / 'attr'
+        path.write_bytes(b'x' * 513)
+        with self.assertRaises(OSError):
+            module_runtime.read_sysfs_text(path)
+        with self.assertRaisesRegex(RuntimeError, 'Thing returned an oversized value'):
+            module_runtime.read_sysfs_text(path, error=RuntimeError, subject='Thing')
+
+    def test_refuses_non_ascii_and_missing_paths(self):
+        path = self.root / 'attr'
+        path.write_bytes(b'caf\xc3\xa9')
+        with self.assertRaises(UnicodeError):
+            module_runtime.read_sysfs_text(path)
+        with self.assertRaises(FileNotFoundError):
+            module_runtime.read_sysfs_text(self.root / 'missing')
+
+    @unittest.skipUnless(hasattr(os, 'O_NOFOLLOW'), 'POSIX symlink semantics')
+    def test_never_follows_a_final_symlink_or_reads_a_directory(self):
+        target = self.root / 'target'
+        target.write_text('Fast')
+        link = self.root / 'link'
+        link.symlink_to(target)
+        with self.assertRaises(OSError):
+            module_runtime.read_sysfs_text(link)
+        with self.assertRaisesRegex(RuntimeError, 'Thing changed during access'):
+            module_runtime.read_sysfs_text(self.root, error=RuntimeError, subject='Thing')
 
 
 if __name__ == '__main__':
