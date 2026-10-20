@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """An InputPlumber that lost the controller is restarted once, and only then."""
 import asyncio
+import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,7 @@ import inputplumber_process as module
 import main
 import module_runtime
 
+REAL_HID_MONITOR = module._hid_monitor
 RESTART = ["/usr/bin/systemctl", "--no-block", "try-restart", "inputplumber.service"]
 
 
@@ -28,6 +31,7 @@ class Console:
         self.composite = [False]  # One value per busctl tree; the last one stays.
         self.heals_on_restart = True
         self.fail_next = None
+        self.fwupd = None  # None: not on the bus; else the Status the daemon reports ("u 1" idle); "?": unreadable.
         self.calls = []
 
     def restarts(self):
@@ -41,6 +45,14 @@ class Console:
         if argv[1] == "show":
             text = "".join(f"{key}={value}\n" for key, value in self.state.items())
             return subprocess.CompletedProcess(argv, self.show_returncode, text)
+        if "get-property" in argv:
+            if self.fwupd in (None, "?"):
+                return subprocess.CompletedProcess(argv, 1, "", "Failed to get property Status")
+            return subprocess.CompletedProcess(argv, 0, self.fwupd + "\n", "")
+        if "NameHasOwner" in argv:
+            if self.fwupd == "?":
+                return subprocess.CompletedProcess(argv, 1, "", "Connection refused")
+            return subprocess.CompletedProcess(argv, 0, f"b {'false' if self.fwupd is None else 'true'}\n", "")
         if "tree" in argv:
             present = self.composite.pop(0) if len(self.composite) > 1 else self.composite[0]
             text = "/\n/org/shadowblip/InputPlumber\n/org/shadowblip/InputPlumber/Manager\n"
@@ -100,6 +112,27 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.recovery._wake.set()
         await self.until(lambda: self.checks.call_count >= 4)
         self.assertEqual(self.console.restarts(), [RESTART])
+
+    async def test_steamos_enabled_runtime_unit_is_restarted(self):
+        self.console.state["UnitFileState"] = "enabled-runtime"  # What SteamOS actually reports.
+        await self.until(lambda: "controller_recovered_after_restart" in self.names())
+        self.assertEqual(self.console.restarts(), [RESTART])
+
+    async def test_fwupd_working_on_a_device_holds_the_restart_and_idle_or_absent_does_not(self):
+        self.task.cancel()
+        for status, restarted in (("u 5", False), ("u 6", False), ("u 12", False), ("u 2", False), ("u 3", False),
+                                  ("u 14", False), ("garbage", False), ("?", False),
+                                  ("u 1", True), ("u 0", True), (None, True)):
+            with self.subTest(status=status):
+                self.console = Console()
+                self.console.fwupd = status
+                task = asyncio.create_task(module.LostControllerRecovery(lambda: False, lambda: False).run())
+                try:
+                    await asyncio.sleep(0.2)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                self.assertEqual(self.console.restarts(), [RESTART] if restarted else [])
 
     async def test_a_loss_inputplumber_repairs_itself_is_left_alone(self):
         self.console.composite = [False, True]
@@ -200,6 +233,40 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         recovery._wake.clear()
         recovery._drain(Monitor([OSError(105, "No buffer space available")]))
         self.assertTrue(recovery._wake.is_set())  # A lost event may have been the controller.
+
+    async def test_a_loop_that_cannot_read_the_monitor_only_costs_the_hotplug_watch(self):
+        monitor = types.SimpleNamespace(filter_by=lambda name: None, start=lambda: None, fileno=lambda: 99)
+        fake = types.ModuleType("pyudev")
+        fake.Context = lambda: None
+        fake.Monitor = types.SimpleNamespace(from_netlink=lambda context: monitor)
+
+        def refuse(*args):
+            raise NotImplementedError
+
+        with patch.dict(sys.modules, {"pyudev": fake}):
+            self.assertIsNone(REAL_HID_MONITOR(types.SimpleNamespace(add_reader=refuse), None))
+        self.assertIn("hotplug_watch_unavailable", self.names())
+
+    @unittest.skipIf(os.name == "nt", "The Windows loop has no add_reader.")
+    async def test_the_monitor_is_unregistered_when_the_watch_ends(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        monitor = types.SimpleNamespace(fileno=left.fileno, poll=lambda timeout: None)
+
+        def attach(loop, drain):
+            loop.add_reader(monitor.fileno(), drain, monitor)
+            return monitor
+        with patch.object(module, "_hid_monitor", side_effect=attach):
+            task = asyncio.create_task(module.LostControllerRecovery(lambda: False, lambda: False).run())
+            await asyncio.sleep(0.05)
+            right.send(b"x")  # Level-triggered: _drain runs (and finds nothing) while the reader is registered.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertFalse(asyncio.get_running_loop().remove_reader(left.fileno()))  # Already gone.
 
     async def test_a_wake_rechecks(self):
         self.console.composite = [True]

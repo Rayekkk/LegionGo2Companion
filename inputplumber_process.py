@@ -153,6 +153,8 @@ CONFIRM_S = 5.0  # the lost state must still hold this much later
 RESUME_POLL_S = 30.0  # a clock read only (ResumeWatch); the controller's own udev events usually come first
 RESTART_SPACING_S = 600.0
 RESTARTS_PER_RUN = 3
+FWUPD = "org.freedesktop.fwupd"
+FWUPD_IDLE = frozenset({"0", "1"})  # FwupdStatus UNKNOWN, IDLE; every other value is work on a device or a download
 
 
 def lost_controller() -> dict | None:
@@ -180,13 +182,30 @@ def lost_controller() -> dict | None:
     return {"status": state.get("UnitFileState") or None}  # the unit-file state, for the log
 
 
+def fwupd_busy() -> bool:
+    """True unless the fwupd daemon (Discover, fwupdmgr, a Steam update) is provably idle or not running.
+    Its Status is any FwupdStatus but IDLE/UNKNOWN while it works; an unreadable one is not idle."""
+    bus = ["--auto-start=no", "--system"]
+    try:
+        fields = run_busctl([*bus, "get-property", FWUPD, "/", FWUPD, "Status"], timeout=2.0).split()
+        return not (len(fields) == 2 and fields[0] == "u" and fields[1] in FWUPD_IDLE)
+    except InputPlumberError:
+        pass
+    try:  # No Status: fine only when fwupd is not on the bus at all (it is D-Bus activated).
+        owned = run_busctl([*bus, "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                            "org.freedesktop.DBus", "NameHasOwner", "s", FWUPD], timeout=2.0).split()
+    except InputPlumberError:
+        return True
+    return owned != ["b", "false"]
+
+
 class LostControllerRecovery:
     """Event-driven: one check SETTLE_S after start, a wake or the controller's last udev event;
     a restart needs the lost state twice, CONFIRM_S apart, and stays within the limits."""
 
     def __init__(self, blocked: Callable[[], bool], updating: Callable[[], bool]) -> None:
         self._blocked = blocked  # On the loop: closing, conflict guard, controller maintenance.
-        self._updating = updating  # In a thread: a firmware updater process.
+        self._updating = updating  # In a thread: a firmware updater process (fwupd itself is checked here).
         self._wake = asyncio.Event()
         self._restarts: list[float] = []
         self._verify = False  # A restart was requested and InputPlumber has not shown the controller since.
@@ -201,9 +220,7 @@ class LostControllerRecovery:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
-        monitor = _hid_monitor()
-        if monitor is not None:
-            loop.add_reader(monitor.fileno(), self._drain, monitor)
+        monitor = _hid_monitor(loop, self._drain)
         resume = module_runtime.ResumeWatch()
         resume.mark()
         trigger, due = "start", loop.time() + SETTLE_S
@@ -229,6 +246,7 @@ class LostControllerRecovery:
         finally:
             if monitor is not None:
                 loop.remove_reader(monitor.fileno())
+                monitor = None  # The last reference: libudev unrefs the monitor and closes its socket.
 
     async def _check(self, trigger: str) -> bool:
         """True after a restart was requested."""
@@ -249,7 +267,8 @@ class LostControllerRecovery:
             # A restart that brought no CompositeDevice back will not on the next try either.
             event("inputplumber", "restart_did_not_recover_controller", level="warning", repeat=600, **state)
             return False
-        if await asyncio.to_thread(self._updating) or self._blocked():
+        if (await asyncio.to_thread(self._updating) or await asyncio.to_thread(fwupd_busy)
+                or self._blocked()):
             return False
         now = asyncio.get_running_loop().time()
         if len(self._restarts) >= RESTARTS_PER_RUN or (self._restarts and now - self._restarts[-1] < RESTART_SPACING_S):
@@ -268,13 +287,15 @@ class LostControllerRecovery:
         return True
 
 
-def _hid_monitor():
-    """A netlink socket the kernel filters to HID events, read by the event loop (no thread)."""
+def _hid_monitor(loop, drain):
+    """A netlink socket the kernel filters to HID events, read by the event loop (no thread).
+    Without it the start and every wake still trigger a check."""
     try:
         import pyudev
         monitor = pyudev.Monitor.from_netlink(pyudev.Context())
         monitor.filter_by("hid")
         monitor.start()
+        loop.add_reader(monitor.fileno(), drain, monitor)
         return monitor
     except Exception as exc:
         event("inputplumber", "hotplug_watch_unavailable", level="warning", error=exc)
