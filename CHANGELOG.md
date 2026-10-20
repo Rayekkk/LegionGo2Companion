@@ -1,3 +1,11 @@
+# 2.3.0
+
+Unreleased.
+
+### Fixed
+
+- **Controller firmware:** Install no longer stops fwupd after a fixed 10 minutes while it is still writing a controller. It is stopped only after 10 minutes without any progress, or after 30 minutes in total, and is asked to exit cleanly first.
+
 # 2.2.1
 
 Released 2026-10-20.
