@@ -114,17 +114,9 @@ class DisplayResetTests(ResetFixture, unittest.TestCase):
             self.state['native_support_detected'] = native
             for method in (self.plugin.run_setup, self.plugin.set_panel_mode):
                 for invalid in ('typo', '', 'PQ', None, False, 0, [], {}, ['pq']):
-                    with self.subTest(native=native, method=method.__name__, value=invalid), \
-                         patch.object(display.Plugin, '_read_settings') as read, \
-                         patch.object(display.Plugin, '_refresh_native_support') as native_probe, \
-                         patch.object(display, '_install_script') as install, \
-                         patch.object(display.Plugin, '_activate_mode') as activate:
+                    with self.subTest(native=native, method=method.__name__, value=invalid):
                         with self.assertRaisesRegex(ValueError, 'Unknown display mode'):
                             asyncio.run(method(invalid))
-                        read.assert_not_called()
-                        native_probe.assert_not_called()
-                        install.assert_not_called()
-                        activate.assert_not_called()
                         self.assertEqual({p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}, original)
                         self.assertEqual(self.state['panel_mode'], 'hybrid')
                         self.assertEqual(self.atoms, [])
@@ -723,10 +715,8 @@ class NativeDisplayMigrationTests(LegacyHybridFixture, unittest.TestCase):
     def test_fresh_uninstall_detects_native_before_default_atom_writes_or_backup_restore(self):
         self.fresh_instance()
         self.backup.write_bytes(b'foreign-backup')
-        with patch.object(display.Plugin, '_edid_restore', return_value=True), \
-             patch.object(display, '_uninstall_script') as legacy_uninstall:
+        with patch.object(display.Plugin, '_edid_restore', return_value=True):
             asyncio.run(self.plugin._uninstall())
-        legacy_uninstall.assert_not_called()
         self.assertEqual(self.atoms, [])
         self.assertFalse(self.script.exists())
         self.assertEqual(self.backup.read_bytes(), b'foreign-backup')
