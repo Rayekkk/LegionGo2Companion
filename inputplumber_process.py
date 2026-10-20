@@ -154,7 +154,9 @@ RESUME_POLL_S = 30.0  # a clock read only (ResumeWatch); the controller's own ud
 RESTART_SPACING_S = 600.0
 RESTARTS_PER_RUN = 3
 FWUPD = "org.freedesktop.fwupd"
-FWUPD_IDLE = frozenset({"0", "1"})  # FwupdStatus UNKNOWN, IDLE; every other value is work on a device or a download
+# FwupdStatus values that mean a device is being touched (2.0.x enum). An idle fwupd 2.0.18 keeps
+# reporting a stale earlier value (measured: 3, DECOMPRESSING), so only these hold the restart.
+FWUPD_DEVICE_WORK = frozenset({"4", "5", "6", "9", "10", "11", "12", "14"})  # RESTART WRITE VERIFY READ ERASE AUTH BUSY USER
 
 
 def lost_controller() -> dict | None:
@@ -183,12 +185,12 @@ def lost_controller() -> dict | None:
 
 
 def fwupd_busy() -> bool:
-    """True unless the fwupd daemon (Discover, fwupdmgr, a Steam update) is provably idle or not running.
-    Its Status is any FwupdStatus but IDLE/UNKNOWN while it works; an unreadable one is not idle."""
+    """True while the fwupd daemon (Discover, fwupdmgr, a Steam update) works on a device, or when
+    that cannot be ruled out: an unreadable Status is not idle."""
     bus = ["--auto-start=no", "--system"]
     try:
         fields = run_busctl([*bus, "get-property", FWUPD, "/", FWUPD, "Status"], timeout=2.0).split()
-        return not (len(fields) == 2 and fields[0] == "u" and fields[1] in FWUPD_IDLE)
+        return not (len(fields) == 2 and fields[0] == "u" and fields[1].isdigit()) or fields[1] in FWUPD_DEVICE_WORK
     except InputPlumberError:
         pass
     try:  # No Status: fine only when fwupd is not on the bus at all (it is D-Bus activated).

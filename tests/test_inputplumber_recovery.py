@@ -120,9 +120,10 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fwupd_working_on_a_device_holds_the_restart_and_idle_or_absent_does_not(self):
         self.task.cancel()
-        for status, restarted in (("u 5", False), ("u 6", False), ("u 12", False), ("u 2", False), ("u 3", False),
+        # "u 3" is what an idle fwupd 2.0.18 keeps reporting on the console, so it must not hold the restart.
+        for status, restarted in (("u 5", False), ("u 6", False), ("u 12", False), ("u 4", False), ("u 10", False),
                                   ("u 14", False), ("garbage", False), ("?", False),
-                                  ("u 1", True), ("u 0", True), (None, True)):
+                                  ("u 1", True), ("u 0", True), ("u 3", True), ("u 2", True), (None, True)):
             with self.subTest(status=status):
                 self.console = Console()
                 self.console.fwupd = status
