@@ -59,6 +59,12 @@ TestCase {
         model.snapshots={get_version:{blocked:false,modules:{controller:{enabled:true,ready:true,applicable:false}},device:{firmware:false}}};
         verify(!model.canRead("controller_get_status"));
         compare(model.panelMethods().indexOf("firmware_get_status"),-1);
+        // Battery applies, the controllers do not (Go S): their levels are not read.
+        model.snapshots={get_version:{blocked:false,modules:{battery:{enabled:true,ready:true},controller:{enabled:true,ready:true,applicable:false}}}};
+        verify(model.canRead("battery_get_status"));
+        verify(!model.canRead("battery_get_controller_levels"));
+        model.snapshots={get_version:{blocked:false,modules:{battery:{enabled:true,ready:true},controller:{enabled:false,ready:true}}}};
+        verify(model.canRead("battery_get_controller_levels"));  // Turned off, not absent: as before.
         model.snapshots={get_version:{blocked:true,modules:{},device:{firmware:false}}};
         fake.calls=[];model.refreshPanel();
         compare(fake.calls.length,0);

@@ -38,7 +38,9 @@ QtObject {
         return "tdp";
     }
     function canRead(method) {
-        const name=owner(method), entry=state("get_version").modules?.[name];
+        const name=owner(method), modules=state("get_version").modules, entry=modules?.[name];
+        // A Battery reading that the controller code serves: not asked where the controllers do not apply.
+        if(method==="battery_get_controller_levels" && modules?.controller?.applicable===false)return false;
         return !name || !!entry && entry.applicable!==false && entry.enabled!==false && entry.ready===true && !entry.pending && !entry.maintenance;
     }
     function moduleError(name) { for(const method of Object.keys(readErrors))if(owner(method)===name && readErrors[method])return readErrors[method];return ""; }

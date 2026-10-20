@@ -213,6 +213,16 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._battery._main.assert_awaited_once()
         self.assertIs(status["battery"]["applicable"], True)
 
+    async def test_battery_never_reads_controllers_that_do_not_apply(self):
+        self.plugin._controller.applicable = lambda: False  # Go S, a Go on the older controller firmware
+        self.plugin._controller.get_battery_levels = AsyncMock()
+        await self.plugin._migration()
+        await self.plugin._main()
+        result = await self.plugin.battery_get_controller_levels()
+        await self.plugin._unload()
+        self.assertEqual((result["available"], result["left"], result["right"]), (False, None, None))
+        self.plugin._controller.get_battery_levels.assert_not_awaited()
+
 
 class BandPolicyDeviceTests(unittest.TestCase):
     def test_band_policy_follows_the_mt7921e_driver_on_every_legion_go(self):

@@ -1428,6 +1428,9 @@ class Plugin:
         return await self._battery.get_status()
 
     async def battery_get_controller_levels(self):
+        if not self._applies('controller'):  # Go S, a Go on the older controller firmware: no controller code runs.
+            return {'available': False, 'left': None, 'right': None, 'connection_left': None, 'connection_right': None,
+                    'reason': 'This console has no supported controllers.'}
         return await self._controller.get_battery_levels()
 
     async def battery_set_enabled(self, enabled):
