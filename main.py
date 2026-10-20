@@ -75,6 +75,11 @@ _REFUSALS = frozenset({'unsupported_backend', 'unsupported_device', 'preflight_f
                        'backend_inactive', 'iwd_inactive', 'preference_disabled', 'managed_profile_not_active'})
 
 
+def _refused_before_change(exc):
+    """A restore the backend turned down before touching anything: safe to repeat once WiFi is back."""
+    return isinstance(exc, module_runtime.NotConfirmed) and exc.code in _REFUSALS
+
+
 def _logged_rpc(function, name):
     """Observe the existing boundary; never retry, cancel or change its result."""
     read = name.startswith(('get_', 'is_')) or '_get_' in name or name.endswith('_is_ready')
@@ -821,10 +826,15 @@ class Plugin:
                     await module_runtime.complete(asyncio.to_thread(self._save_modules))
                 except Exception as exc:
                     if entry.get('update'):
-                        # WiFi is still reconnecting: keep the module running on Automatic and retry.
-                        diagnostics.event(name, 'band_policy_restore_deferred', level='warning', error=exc)
-                        if self._band_restore is None or self._band_restore.done():
-                            self._band_restore = module_runtime.background_task(self._retry_band_policy(entry))
+                        # The module keeps running on Automatic. Only a refusal made before any change
+                        # (WiFi still reconnecting) is retried; a failed change would drop the link again.
+                        if _refused_before_change(exc):
+                            diagnostics.event(name, 'band_policy_restore_deferred', level='warning', error=exc)
+                            if self._band_restore is None or self._band_restore.done():
+                                self._band_restore = module_runtime.background_task(self._retry_band_policy(entry))
+                        else:
+                            diagnostics.event(name, 'band_policy_restore_postponed', level='warning',
+                                              attempts=1, error=exc)
                         continue
                     self._module_state[name] = {'enabled': False, 'pending': True,
                                                 'resume': entry['resume'], 'error': str(exc)}
@@ -848,7 +858,7 @@ class Plugin:
             return True
         error = None
         for count in range(1, BAND_RESTORE_ATTEMPTS + 1):
-            await asyncio.sleep(BAND_RESTORE_RETRY_S)
+            await self._band_retry_pause()
             async with self._guard_lock:
                 if (self._closing or self._guard_blocked or self._guard_error
                         or self._module_state.get('wifi') is not entry
@@ -863,8 +873,13 @@ class Plugin:
                 return
             except Exception as exc:
                 error = exc
+                if not _refused_before_change(exc):
+                    break
         diagnostics.event('wifi', 'band_policy_restore_postponed', level='warning',
-                          attempts=BAND_RESTORE_ATTEMPTS, error=error)
+                          attempts=count, error=error)
+
+    async def _band_retry_pause(self):
+        await asyncio.sleep(BAND_RESTORE_RETRY_S)
 
     async def _start_controllers_after_updater(self):
         deadline = time.monotonic() + UPDATER_WAIT_S

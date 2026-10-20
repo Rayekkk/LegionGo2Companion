@@ -200,12 +200,43 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated._module_state['wifi']['resume'], {'band_policy': 'five_six_only'})
         await updated._unload()
 
+    async def test_update_band_policy_failed_after_a_change_is_tried_once(self):
+        import diagnostics
+        failed = {'success': False, 'error': 'band_policy_apply_failed', 'rolled_back': True,
+                  'message': 'WiFi did not reconnect.'}
+        updated, _ = self.updated_with_band_policy(failed)
+        with patch.object(main, 'BAND_RESTORE_RETRY_S', 0), patch.object(diagnostics, 'event') as event:
+            await updated._main()
+            if updated._band_restore is not None:
+                await updated._band_restore
+        self.assertEqual(updated._wifi.set_band_policy.await_count, 1)
+        self.assertEqual([c.args[1] for c in event.call_args_list if c.args[0] == 'wifi'],
+                         ['band_policy_restore_postponed'])
+        status = updated._module_status()['wifi']
+        self.assertEqual((status['enabled'], status['pending'], status['error']), (True, False, ''))
+        updated._wifi._unload.assert_not_awaited()
+        kept = {'enabled': True, 'update': True, 'resume': {'band_policy': 'five_six_only'}}
+        self.assertEqual(self.make_plugin()._module_state['wifi'], kept)
+        await updated._unload()
+
+    async def test_update_band_policy_failing_after_a_refusal_stops_retrying(self):
+        refused = {'success': False, 'error': 'no_wifi'}
+        failed = {'success': False, 'error': 'band_policy_apply_failed', 'rolled_back': True}
+        updated, _ = self.updated_with_band_policy(refused, failed)
+        with patch.object(main, 'BAND_RESTORE_RETRY_S', 0):
+            await updated._main()
+            await updated._band_restore
+        self.assertEqual(updated._wifi.set_band_policy.await_count, 2)
+        await updated._unload()
+
     async def test_user_band_choice_replaces_the_one_an_update_is_restoring(self):
         updated, _ = self.updated_with_band_policy({'success': False, 'error': 'no_wifi'}, {'success': True})
-        with patch.object(main, 'BAND_RESTORE_RETRY_S', 0.5):  # The user chooses before the next attempt.
+        gate = asyncio.Event()  # The retry waits here until the user has chosen.
+        with patch.object(updated, '_band_retry_pause', gate.wait):
             await updated._main()
             await updated.wifi_set_band_policy('off')
             self.assertEqual(self.make_plugin()._module_state['wifi'], {'enabled': True})
+            gate.set()
             await updated._band_restore
         self.assertEqual(updated._wifi.set_band_policy.await_args_list,
                          [unittest.mock.call('five_six_only'), unittest.mock.call('off', False)])

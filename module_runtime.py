@@ -260,8 +260,16 @@ class ResumeWatch:
         return previous is not None and current - previous >= 1.0
 
 
+class NotConfirmed(RuntimeError):
+    """A backend reply that did not confirm success; ``code`` is its ``error`` field, if any."""
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
 def require_success(result):
     if not isinstance(result, dict) or result.get('success') is not True:
         detail = result if isinstance(result, dict) else {}
-        raise RuntimeError(detail.get('error') or detail.get('message')
-                           or detail.get('stderr') or 'Hardware restoration was not confirmed.')
+        raise NotConfirmed(detail.get('error') or detail.get('message')
+                           or detail.get('stderr') or 'Hardware restoration was not confirmed.',
+                           detail.get('error'))
