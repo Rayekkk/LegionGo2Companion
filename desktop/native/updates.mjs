@@ -2,7 +2,7 @@
 // Update check and device report texts, shared by the Desktop app and the Decky panel (src/updates.tsx imports this file).
 
 export const DEVICE_REPORT_TITLE = "Save device report";
-export const DEVICE_REPORT_DESCRIPTION = "Saves a text file to your Desktop with this console's hardware and firmware details for a bug report. No serial numbers, network names or user names.";
+export const DEVICE_REPORT_DESCRIPTION = "Saves a text file to your Desktop with this console's hardware and firmware details and read-only firmware tables (DSDT) and EC readings, for a bug report. No serial numbers, network names or user names.";
 /** The outcome of save_device_report: where the file is, or why it is not. */
 export const deviceReportResult = result => result?.success === true && result.path ? `Saved to ${result.path}`
   : result?.error || "The device report could not be saved. Try again.";

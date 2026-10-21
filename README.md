@@ -681,8 +681,14 @@ The report is made on the console, without internet, and only reads. It lists th
 firmware versions (DMI, BIOS and EC, firmware attributes, battery, controllers and their drivers,
 sensors, the display's maker and model, the Wi-Fi adapter and its bands, fwupd devices), the
 SteamOS, kernel, InputPlumber and fwupd versions, Companion's module status, and how many warnings
-and errors Companion logged in the last 24 hours. It contains no serial numbers, MAC addresses,
-network names, user names or log text. Open it in a text editor to check it before you send it.
+and errors Companion logged in the last 24 hours. It also holds read-only firmware tables (DSDT)
+and EC readings, which help add Fan Control and the power-button light on more consoles: the BIOS's
+ACPI table (DSDT, compressed, with a one-line command to restore it), and on a Legion Go console
+the EC memory the DSDT describes, read as memory without sending the EC any command, with fields
+that can hold a serial number blanked. With the Fan module on (Legion Go 2) the report reads no EC
+memory and shows Fan Control's own last readings instead. It contains no serial numbers, MAC
+addresses, network names, user names or log text. Open it in a text editor to check it before you
+send it.
 
 ## How it works
 
