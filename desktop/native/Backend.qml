@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 import QtQuick
+import "updates.mjs" as Updates
 
 QtObject {
     id: backend
@@ -23,6 +24,8 @@ QtObject {
     property real overviewDetailsAt:-1000
     property real networkDetailsAt:-1000
     property real controllerDetailsAt:-1000
+    property bool reportSaving:false // save_device_report runs beside the rest of the app, not as a blocking change
+    property string reportText:""
     property real panelLeaseAt:-1000 // backend lease TTL is 90 s; renew every 30 s, not every poll
     signal changed(string method)
     signal mutationDone(string method, var result, bool success)
@@ -61,6 +64,11 @@ QtObject {
         }
         transport.cancelReads();
         issue(method, args, true, true, false, then);
+    }
+    function saveDeviceReport() {
+        if(reportSaving || !connected || (host && !host.installed))return;
+        reportSaving=true; reportText="";
+        issue("save_device_report",[],true,false);
     }
     function panelMethods() {
         if(page === "controller") {
@@ -150,6 +158,7 @@ QtObject {
             if (!request) return;
             const copy = Object.assign({},backend.requests); delete copy[id]; backend.requests = copy;
             if (request.blocking) backend.busy = false;
+            if(method==="save_device_report") { backend.reportSaving=false;backend.reportText=Updates.deviceReportResult(problem?{success:false,error:problem}:result); }
             if(backend.host && !backend.host.installed) {
                 backend.connected=false;
                 if(request.mutation)backend.mutationDone(method,result,false);

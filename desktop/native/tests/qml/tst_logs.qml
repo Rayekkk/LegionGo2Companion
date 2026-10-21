@@ -41,18 +41,17 @@ TestCase {
     QtObject {
         id:bridge
         property bool connected:true
-        property bool busy:false
-        property string error:""
+        property bool reportSaving:false
+        property string reportText:""
         property var calls:[]
-        signal mutationDone(string method, var result, bool success)
-        function mutate(method,args){if(busy || !connected)return;busy=true;calls=calls.concat([[method,args]]);}
-        function finish(result,success,problem){busy=false;error=problem || "";mutationDone("save_device_report",result,success);}
+        function saveDeviceReport(){if(reportSaving || !connected)return;reportSaving=true;reportText="";calls=calls.concat([["save_device_report",[]]]);}
+        function finish(text){reportSaving=false;reportText=text;}
     }
     Component { id:factory;LogsPage { width:1050;viewer:fake;backend:bridge } }
     property var view
     function init(){
         fake.records=[];fake.refreshes=0;fake.exports=0;fake.loading=false;fake.error="";fake.status="";fake.warnings=[];fake.exportedPath="";
-        bridge.connected=true;bridge.busy=false;bridge.error="";bridge.calls=[];
+        bridge.connected=true;bridge.reportSaving=false;bridge.reportText="";bridge.calls=[];
         fake.search="";fake.level="warning";fake.copied=false;fake.copies=0;fake.hidden=0;fake.fileSinkUnavailable=false;fake.source="all";fake.component="all";fake.ageMinutes=0;
         view=createTemporaryObject(factory,this);verify(view!==null);
         view.Window.window.width=1100;view.Window.window.height=1000;
@@ -151,12 +150,12 @@ TestCase {
         mouseClick(button);
         compare(bridge.calls,[["save_device_report",[]]]);
         compare(button.text,"Saving report…");verify(!button.enabled);
-        bridge.finish({success:true,path:"/home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt"},true);
+        bridge.finish("Saved to /home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt");
         compare(findChild(view,"logsDeviceReportResult").text,"Saved to /home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt");
         compare(button.text,"Save device report");
-        mouseClick(button);bridge.finish({success:false,error:"The Desktop directory does not belong to the console user."},true);
+        mouseClick(button);bridge.finish("The Desktop directory does not belong to the console user.");
         compare(findChild(view,"logsDeviceReportResult").text,"The Desktop directory does not belong to the console user.");
-        mouseClick(button);bridge.finish(null,false,"Backend unavailable.");
+        mouseClick(button);bridge.finish("Backend unavailable.");
         compare(findChild(view,"logsDeviceReportResult").text,"Backend unavailable.");
         bridge.connected=false;verify(!button.enabled);
     }

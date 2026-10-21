@@ -498,6 +498,16 @@ TestCase {
         model.issue("get_version");response(1,{blocked:false,modules:{}});
         verify(model.connected);
     }
+    function test_deviceReportRunsBesideTheRestOfTheApp() {
+        model.saveDeviceReport();
+        compare(fake.calls[0].method,"save_device_report");verify(fake.calls[0].mutation);
+        verify(model.reportSaving);verify(!model.busy,"the rest of the app stays usable");
+        model.saveDeviceReport();compare(fake.calls.length,1);
+        response(0,{success:true,path:"/home/deck/Desktop/report.txt"});
+        verify(!model.reportSaving);compare(model.reportText,"Saved to /home/deck/Desktop/report.txt");
+        model.saveDeviceReport();response(1,null,"Backend unavailable.");
+        verify(!model.reportSaving);compare(model.reportText,"Backend unavailable.");
+    }
     function test_invalidDesktopContextCannotKeepPreviousGameOrModeFresh() {
         model.snapshots=Object.assign({},model.snapshots,{desktop_context:{app_id:"42",gamescope:false}});
         for(const invalid of [null,[],false,{app_id:42,gamescope:false},{app_id:"42",gamescope:"false"}]) {

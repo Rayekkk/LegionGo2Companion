@@ -7,8 +7,6 @@ ColumnLayout {
     id:panel
     property var viewer
     property var backend // save_device_report: the shared backend writes the report, not this app
-    property bool reportSaving:false
-    property string reportText:""
     property var selectedRecord:null
     property int selectedIndex:-1
     readonly property bool compact:width<760
@@ -75,14 +73,6 @@ ColumnLayout {
     Component.onCompleted:Qt.callLater(function(){if(viewer)viewer.refresh();})
     onViewerChanged:clearSelection()
     Connections { target:panel.viewer;function onFiltersChanged(){panel.clearSelection();} }
-    Connections {
-        target:panel.backend
-        function onMutationDone(method,result,success) {
-            if(method!=="save_device_report")return;
-            panel.reportSaving=false;
-            panel.reportText=Updates.deviceReportResult(success?result:{success:false,error:panel.backend.error});
-        }
-    }
     UiCard {
         Layout.fillWidth:true; padding:18; spacing:12
         GridLayout {
@@ -98,12 +88,12 @@ ColumnLayout {
                 UiButton { objectName:"logsRefresh";text:"Refresh logs";enabled:!!panel.viewer && !panel.viewer.loading;onClicked:{panel.clearSelection();panel.viewer.refresh();} }
                 UiButton { objectName:"logsCopy";text:"Copy to clipboard";enabled:!!panel.viewer && panel.viewer.exportable && !panel.viewer.loading;onClicked:{searchDelay.stop();panel.viewer.search=search.text;panel.viewer.copyToClipboard();} }
                 UiButton { objectName:"logsExport";text:panel.viewer && panel.viewer.exporting?"Exporting…":"Export to Desktop";tone:"primary";enabled:!!panel.viewer && panel.viewer.exportable && !panel.viewer.loading && !panel.viewer.exporting;onClicked:{searchDelay.stop();panel.viewer.search=search.text;panel.viewer.exportFiltered();} }
-                UiButton { objectName:"logsDeviceReport";text:panel.reportSaving?"Saving report…":Updates.DEVICE_REPORT_TITLE;enabled:!!panel.backend && panel.backend.connected && !panel.backend.busy;onClicked:{panel.reportText="";panel.backend.mutate("save_device_report",[]);panel.reportSaving=panel.backend.busy;} }
+                UiButton { objectName:"logsDeviceReport";text:panel.backend && panel.backend.reportSaving?"Saving report…":Updates.DEVICE_REPORT_TITLE;enabled:!!panel.backend && panel.backend.connected && !panel.backend.reportSaving;onClicked:panel.backend.saveDeviceReport() }
             }
         }
         Label { objectName:"logsDeviceReportInfo";Layout.fillWidth:true;wrapMode:Text.WordWrap;textFormat:Text.PlainText;color:theme.muted;font.pixelSize:theme.fontSmall;text:Updates.DEVICE_REPORT_DESCRIPTION }
         Label { objectName:"logsDeviceReportResult";Layout.fillWidth:true;wrapMode:Text.WrapAnywhere;textFormat:Text.PlainText;font.pixelSize:theme.fontSmall
-            visible:text.length>0;text:panel.reportText;color:panel.reportText.startsWith("Saved to ")?theme.success:theme.warning }
+            visible:text.length>0;text:panel.backend?panel.backend.reportText:"";color:text.startsWith("Saved to ")?theme.success:theme.warning }
         Label {
             objectName:"logsExportedPath";Layout.fillWidth:true;wrapMode:Text.WrapAnywhere;textFormat:Text.PlainText;color:theme.success;font.pixelSize:theme.fontSmall
             visible:!!panel.viewer && (panel.viewer.exportedPath.length>0 || panel.viewer.copied)
