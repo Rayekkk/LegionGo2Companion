@@ -157,7 +157,7 @@ ApplicationWindow {
     } }
     Component { id:logBrowser; ColumnLayout { spacing:12
         UiButton { objectName:"logsBack"; text:"‹ About"; onClicked:window.page="about" }
-        LogsPage { Layout.fillWidth:true; viewer:logViewer }
+        LogsPage { Layout.fillWidth:true; viewer:logViewer; backend:bridgeModel }
     } }
     Connections { target:bridgeModel;function onConnectedChanged(){if(!bridgeModel.connected)appHost.inspectService();} }
     UiConfirm { id:startDecky; title:"Start Decky?"; okText:"Start Decky"

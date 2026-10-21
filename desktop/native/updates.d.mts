@@ -12,4 +12,13 @@ export interface UpdateCheck {
   error?: string;
 }
 
+export interface DeviceReport {
+  success: boolean;
+  path?: string;
+  error?: string;
+}
+
+export const DEVICE_REPORT_TITLE: string;
+export const DEVICE_REPORT_DESCRIPTION: string;
+export function deviceReportResult(result: DeviceReport | null | undefined): string;
 export function updateStatus(check: UpdateCheck | null | undefined, currentVersion: string): [string, string];

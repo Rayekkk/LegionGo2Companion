@@ -30,6 +30,14 @@ run(async () => {
     assert.ok(!reads.some(name => /Fan|Vibe|Remap|Display|ControllerStatus|ControllerBattery|Driver/.test(name)),
       `a hidden module is never read: ${reads}`);
 
+    // About offers the device report on every console, also an unknown one where no module applies.
+    for (const props of [GO2, GO_S, { modules: status(NAMES), device: {} }]) {
+      find(h.render(props), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
+      const about = h.render(props);
+      assert.ok(find(about, n => n.type === 'DeviceReportSection'), `device report on ${props.device.console ?? 'an unknown console'}`);
+      find(about, n => n.props?.onBack).props.onBack();
+    }
+
     // The Beta row (title and text from modules.mjs) opens the home page of a Go 1 and a Go S, never a Go 2.
     const notice = props => find(h.render(props), n => /^Beta on /.test(n.props?.label ?? ''));
     const BETA = "Built from Lenovo's firmware data, not yet tested on this console. Report problems on GitHub.";

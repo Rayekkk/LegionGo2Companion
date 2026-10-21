@@ -4,7 +4,8 @@
 import { callable } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import { type UpdateCheck, updateStatus } from "../desktop/native/updates.mjs";
+import { DEVICE_REPORT_DESCRIPTION, DEVICE_REPORT_TITLE, type DeviceReport, deviceReportResult,
+  type UpdateCheck, updateStatus } from "../desktop/native/updates.mjs";
 import { errorText, infoRow } from "./shared";
 
 interface UpdateDownload {
@@ -23,6 +24,7 @@ type UpdateState = {
 
 const checkUpdates = callable<[], UpdateCheck>("updates_check");
 const downloadUpdate = callable<[string], UpdateDownload>("updates_download");
+const saveDeviceReport = callable<[], DeviceReport>("save_device_report");
 const listeners = new Set<(state: UpdateState) => void>();
 let state: UpdateState = { busy: null };
 let generation = 0;
@@ -46,6 +48,35 @@ export function stopUpdates() {
   active = false;
   publish({ busy: null });
 }
+
+/** About: a read-only hardware report for bug reports, shown on every console. */
+export const DeviceReportSection: FC = () => {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const mounted = useRef(true);
+  const running = useRef(false);  // A second click before the re-render must not start another report.
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const save = async () => {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    let text: string;
+    try {
+      text = deviceReportResult(await saveDeviceReport());
+    } catch (error) {
+      text = deviceReportResult({ success: false, error: errorText(error, "") });
+    }
+    running.current = false;
+    if (mounted.current) { setMessage(text); setBusy(false); }
+  };
+  return <PanelSection title="Bug reports">
+    {infoRow(DEVICE_REPORT_TITLE, DEVICE_REPORT_DESCRIPTION)}
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={() => void save()}>
+      {busy ? "Saving report…" : DEVICE_REPORT_TITLE}
+    </ButtonItem></PanelSectionRow>
+    {message && infoRow("Device report", <span style={{ overflowWrap: "anywhere" }}>{message}</span>)}
+  </PanelSection>;
+};
 
 export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }) => {
   const [view, setView] = useState<UpdateState>(() => state);

@@ -127,5 +127,23 @@ run(async () => {
   assert.equal(field(invalid.render(), '0.6.4 downloaded'), undefined);
   invalid.stop(); button(invalid.render(), 'Check for updates').props.onClick();
   assert.equal(invalid.calls.length, 2, 'Stopped plugin cannot start another request');
+
+  // Device report (About): one RPC per click, the saved path or the error, nothing before a click.
+  const report = mount('updates.tsx', { component: 'DeviceReportSection', deferAll: true });
+  tree = report.render();
+  assert.match(field(tree, 'Save device report').props.description, /No serial numbers, network names or user names\.$/);
+  assert.equal(report.calls.length, 0, 'Opening About saves nothing');
+  button(tree, 'Save device report').props.onClick(); button(tree, 'Save device report').props.onClick();
+  assert.deepEqual(report.calls.map(call => call.name), ['save_device_report'], 'A double click saves one report');
+  assert.equal(button(report.render(), 'Saving report…').props.disabled, true);
+  const savedPath = '/home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt';
+  report.respond('save_device_report', { success: true, path: savedPath }); await settle();
+  assert.equal(field(report.render(), 'Device report').props.description.props.children, `Saved to ${savedPath}`);
+  button(report.render(), 'Save device report').props.onClick();
+  report.respond('save_device_report', { success: false, error: 'The Desktop directory does not belong to the console user.' }); await settle();
+  assert.equal(field(report.render(), 'Device report').props.description.props.children, 'The Desktop directory does not belong to the console user.');
+  button(report.render(), 'Save device report').props.onClick();
+  report.reject('save_device_report', new Error('Backend unavailable')); await settle();
+  assert.match(field(report.render(), 'Device report').props.description.props.children, /Backend unavailable/);
   console.log('Frontend updates: manual requests, retries, concurrent clicks, cached remounts and lifecycle isolation passed.');
 });

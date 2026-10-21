@@ -38,10 +38,21 @@ TestCase {
         function copyToClipboard(){copies++;copied=true;}
         function exportFiltered(){exports++;exportedPath="/home/deck/Desktop/LegionGoCompanion-logs.jsonl";}
     }
-    Component { id:factory;LogsPage { width:1050;viewer:fake } }
+    QtObject {
+        id:bridge
+        property bool connected:true
+        property bool busy:false
+        property string error:""
+        property var calls:[]
+        signal mutationDone(string method, var result, bool success)
+        function mutate(method,args){if(busy || !connected)return;busy=true;calls=calls.concat([[method,args]]);}
+        function finish(result,success,problem){busy=false;error=problem || "";mutationDone("save_device_report",result,success);}
+    }
+    Component { id:factory;LogsPage { width:1050;viewer:fake;backend:bridge } }
     property var view
     function init(){
         fake.records=[];fake.refreshes=0;fake.exports=0;fake.loading=false;fake.error="";fake.status="";fake.warnings=[];fake.exportedPath="";
+        bridge.connected=true;bridge.busy=false;bridge.error="";bridge.calls=[];
         fake.search="";fake.level="warning";fake.copied=false;fake.copies=0;fake.hidden=0;fake.fileSinkUnavailable=false;fake.source="all";fake.component="all";fake.ageMinutes=0;
         view=createTemporaryObject(factory,this);verify(view!==null);
         view.Window.window.width=1100;view.Window.window.height=1000;
@@ -132,8 +143,25 @@ TestCase {
         verify(findChild(view,"logsSinkNotice").visible);
         verify(findChild(view,"logsSinkNotice").text.includes("event log file"));
     }
+    function test_device_report_saves_through_the_backend_and_shows_where(){
+        const button=findChild(view,"logsDeviceReport");
+        compare(button.text,"Save device report");
+        verify(findChild(view,"logsDeviceReportInfo").text.includes("No serial numbers, network names or user names."));
+        verify(button.enabled,"no log records needed");
+        mouseClick(button);
+        compare(bridge.calls,[["save_device_report",[]]]);
+        compare(button.text,"Saving report…");verify(!button.enabled);
+        bridge.finish({success:true,path:"/home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt"},true);
+        compare(findChild(view,"logsDeviceReportResult").text,"Saved to /home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt");
+        compare(button.text,"Save device report");
+        mouseClick(button);bridge.finish({success:false,error:"The Desktop directory does not belong to the console user."},true);
+        compare(findChild(view,"logsDeviceReportResult").text,"The Desktop directory does not belong to the console user.");
+        mouseClick(button);bridge.finish(null,false,"Backend unavailable.");
+        compare(findChild(view,"logsDeviceReportResult").text,"Backend unavailable.");
+        bridge.connected=false;verify(!button.enabled);
+    }
     function test_controls_meet_the_touch_size(){
-        for(const name of ["logsRefresh","logsCopy","logsExport","logsReset","option_warning","option_error","option_all","logsSource","logsAge","logsComponent","logsSearch"])
+        for(const name of ["logsRefresh","logsCopy","logsExport","logsDeviceReport","logsReset","option_warning","option_error","option_all","logsSource","logsAge","logsComponent","logsSearch"])
             verify(findChild(view,name).height>=48,name+" is "+findChild(view,name).height);
         fake.records=[{time:"2026-10-14T12:00:00Z",event:"a",component:"fan",source:"backend",level:"error"}];
         verify(row(0).height>=48);

@@ -317,7 +317,9 @@ class SaveFile(unittest.TestCase):
 
 
 class ReportRpc(unittest.IsolatedAsyncioTestCase):
-    def test_admission(self):
+    def test_desktop_contract_and_admission(self):
+        methods = json.loads((support.ROOT / "desktop/native/rpc-methods.json").read_text(encoding="utf-8"))
+        self.assertIn("save_device_report", methods)
         self.assertIsNone(main._rpc_module("save_device_report"), "no module: shown on every console")
         self.assertTrue(main._pause_exempt("save_device_report", (), {}))
 

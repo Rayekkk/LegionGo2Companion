@@ -27,7 +27,7 @@ import { getRemapStatus, RemapPage, remapSummary, type RemapStatus } from "./rem
 import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySummary,
   type BatteryStatus, type ControllerBatteryStatus } from "./battery";
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
-import { UpdateSection, startUpdates, stopUpdates } from "./updates";
+import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
 import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
@@ -616,6 +616,7 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
         {infoRow("Author", "Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice.")}
       </PanelSection>
       <UpdateSection currentVersion={overview.version} />
+      <DeviceReportSection />
     </>}
   </PageShell>;
 };

@@ -52,6 +52,7 @@
   "rgb_set_power_led",
   "rgb_set_rings_enabled",
   "rgb_set_speed",
+  "save_device_report",
   "set_advanced_tdp_control",
   "set_cpu_boost",
   "set_epp",
