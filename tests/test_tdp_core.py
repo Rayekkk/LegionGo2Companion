@@ -997,6 +997,31 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (8, 8, 20))
         self.assertEqual(self.rpc('get_settings')['battery_preset'], 'silent')
 
+    def test_get_settings_names_what_runs_without_reading_the_firmware(self):
+        self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'}},
+                  separate_battery_presets=True)
+        self.choose('performance')
+        tdp._current_ac_online = False
+        with patch.object(tdp, '_wmi_read', side_effect=AssertionError('live firmware read')):
+            settings = self.rpc('get_settings')
+        self.assertEqual(self.ppts(), (20, 20, 35))
+        self.assertEqual((settings['battery_preset'], settings['running']),
+                         ('performance', {'spl': 20, 'sppt': 20, 'fppt': 35, 'preset': 'performance', 'battery': True, 'game': False}))
+        self.app = '123'
+        tdp._check_and_enforce()
+        tdp._current_ac_online = False
+        self.assertEqual(self.rpc('get_settings')['running'],
+                         {'spl': 8, 'sppt': 8, 'fppt': 20, 'preset': 'silent', 'battery': True, 'game': True})
+        self.ac = True
+        tdp._check_and_enforce()
+        self.assertEqual(self.rpc('get_settings')['running'],
+                         {'spl': 8, 'sppt': 15, 'fppt': 20, 'preset': 'silent', 'battery': False, 'game': True})
+        self.app = ''
+        tdp._check_and_enforce()
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['success'])
+        self.assertEqual(self.rpc('get_settings')['running'],
+                         {'spl': 16, 'sppt': 25, 'fppt': 30, 'preset': 'custom', 'battery': False, 'game': False})
+
     def test_game_profiles_follow_separate_battery_presets(self):
         self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'},
                    '456': {'spl': 16000, 'sppt': 25000, 'fppt': 30000, 'preset': 'balanced',

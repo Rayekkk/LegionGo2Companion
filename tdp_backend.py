@@ -444,9 +444,16 @@ def _load_ceilings_mw() -> tuple[int, int, int]:
     return _extras_ceilings_mw(std) if _extras_supported() else std
 
 
-def _clamp_for_settings(state: dict, spl, sppt, fppt) -> tuple[int, int, int]:
-    """Clamp a target to the range currently unlocked and actually available."""
-    return _clamp_triplet(spl, sppt, fppt, _allowed_ceilings_mw(state))
+def _clamp_for_settings(state: dict, spl, sppt, fppt, ceilings=None) -> tuple[int, int, int]:
+    """Clamp a target to the range currently unlocked and actually available
+    (`ceilings`: already resolved for this state, else read now)."""
+    return _clamp_triplet(spl, sppt, fppt, ceilings or _allowed_ceilings_mw(state))
+
+
+def _shown_ceilings_mw(state: dict) -> tuple[int, int, int]:
+    """_allowed_ceilings_mw from the last firmware read: for naming what runs, never for applying."""
+    std = _ceilings_mw(_firmware_caps)
+    return _extras_ceilings_mw(std) if _extras_allowed(state) else std
 
 
 def _is_custom_preset(spl, sppt, fppt, preset: str) -> bool:
@@ -461,12 +468,12 @@ def _is_custom_preset(spl, sppt, fppt, preset: str) -> bool:
         for entry in _presets().values())
 
 
-def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, int, int]:
+def _target_for_preset(state: dict, spl, sppt, fppt, preset: str, ceilings=None) -> tuple[int, int, int]:
     """In simplified Custom mode, derive burst limits from the single TDP dial."""
     if state.get("advanced_tdp_control", True) or not _is_custom_preset(
             spl, sppt, fppt, preset):
-        return _clamp_for_settings(state, spl, sppt, fppt)
-    ceilings = _allowed_ceilings_mw(state)
+        return _clamp_for_settings(state, spl, sppt, fppt, ceilings)
+    ceilings = ceilings or _allowed_ceilings_mw(state)
     try:
         requested_spl = int(spl)
     except (TypeError, ValueError):
@@ -476,7 +483,7 @@ def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, 
 
 
 def _battery_target(state: dict, target: tuple[int, int, int], preset: str,
-                    ac_online: bool | None = None) -> tuple[int, int, int]:
+                    ac_online: bool | None = None, ceilings=None) -> tuple[int, int, int]:
     """With "Separate battery presets" on battery, Silent/Balanced/Performance run the
     firmware's battery values. The preset is named as both UIs name it: the saved name
     while the values still match, else the preset these values are."""
@@ -489,24 +496,35 @@ def _battery_target(state: dict, target: tuple[int, int, int], preset: str,
     if name not in PRESET_LADDER or (_get_ac_online() if ac_online is None else ac_online):
         return target
     battery = _presets(battery=True)[name]
-    return _clamp_for_settings(state, *(battery[key] * 1000 for key in WMI_ATTRS))
+    return _clamp_for_settings(state, *(battery[key] * 1000 for key in WMI_ATTRS), ceilings)
 
 
-def _running_battery_preset(state: dict) -> str:
-    """The preset whose battery values run now, else "" (also for Custom limits equal to them)."""
-    if not state.get("separate_battery_presets", False) or _current_ac_online:
-        return ""
+def _running(state: dict) -> dict:
+    """What runs now, named once for both UIs: the applied limits in watts, the preset of the
+    scope in use whose values they are ("custom" when none), whether they are its battery values
+    (Separate battery presets) and whether a game profile runs. No firmware read: showing only."""
+    ceilings = _shown_ceilings_mw(state)
+    active = _active_triplet(state, ceilings)
     app_id = _get_running_appid()
     profile = _load_profiles().get(app_id) if app_id else None
-    preset = profile.get("preset", "") if profile is not None else state.get("active_preset", "")
-    values = (_pick_profile_values(profile, False) if profile is not None
-              else (state["spl"], state["sppt"], state["fppt"]))
-    requested = _target_for_preset(state, *values, preset)
-    active = _battery_target(state, requested, preset, False)
-    if active == requested or active != _active_triplet(state):
-        return ""
-    return next((name for name, entry in _presets(battery=True).items() if name in PRESET_LADDER
-                 and _clamp_for_settings(state, *(entry[key] * 1000 for key in WMI_ATTRS)) == active), "")
+    ac_online = _current_ac_online
+    if profile is not None:
+        preset = profile.get("ac_preset" if ac_online and profile.get("ac_separate") else "preset", "")
+        values = _pick_profile_values(profile, ac_online)
+    else:
+        preset, values = state.get("active_preset", ""), (state["spl"], state["sppt"], state["fppt"])
+    requested = _target_for_preset(state, *values, preset, ceilings)
+    battery = ""
+    if _battery_target(state, requested, preset, ac_online, ceilings) == active != requested:
+        battery = next((key for key, entry in _presets(battery=True).items() if key in PRESET_LADDER
+                        and _clamp_for_settings(state, *(entry[k] * 1000 for k in WMI_ATTRS), ceilings) == active), "")
+    name = battery
+    if not name and preset != "custom":
+        ladder = {key: tuple(entry[k] * 1000 for k in WMI_ATTRS) for key, entry in _presets().items()}
+        name = preset if ladder.get(preset) == active else next(
+            (key for key, values in ladder.items() if values == active), "")
+    return {**dict(zip(WMI_ATTRS, (round(value / 1000) for value in active))),
+            "preset": name or "custom", "battery": bool(battery), "game": profile is not None}
 
 
 def _profile_target(state: dict, profile: dict, ac_online: bool) -> tuple[int, int, int]:
@@ -1274,10 +1292,10 @@ def _global_triplet(s: dict, ac_online: bool | None = None) -> tuple[int, int, i
                            preset, ac_online)
 
 
-def _active_triplet(s: dict) -> tuple[int, int, int]:
+def _active_triplet(s: dict, ceilings=None) -> tuple[int, int, int]:
     """The last applied target, clamped for the current Extras state."""
     return _clamp_for_settings(
-        s, *(s.get("active_" + key, s[key]) for key in ("spl", "sppt", "fppt")))
+        s, *(s.get("active_" + key, s[key]) for key in ("spl", "sppt", "fppt")), ceilings)
 
 
 def _startup_context_target(s: dict) -> tuple[str, tuple[int, int, int], bool]:
@@ -2366,8 +2384,8 @@ class Plugin:
     async def get_settings(self) -> dict:
         def _do() -> dict:
             state = _load_settings()
-            # Both UIs name the limits that run by their values; battery values need the name.
-            state["battery_preset"] = _running_battery_preset(state)
+            running = state["running"] = _running(state)
+            state["battery_preset"] = running["preset"] if running["battery"] else ""  # read by the UIs before "running"
             return state
         return await _offload(_do)
 
