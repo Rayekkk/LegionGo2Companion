@@ -436,6 +436,20 @@ run(async () => {
     assert.equal(count(h, 'apply_tdp'), 1); assert.equal(presetButton(h.render(), 'custom').props.description, 'Set your own limits below.');
     assert.ok(button(h.render(), 'Apply')); h.unmount();
   });
+  await test('the panel names what runs now from get_settings.running, and falls back without it', async () => {
+    const saved = { enabled: true, spl: 16000, sppt: 25000, fppt: 30000, active_preset: 'balanced' };
+    const old = mount({ responses: { get_settings: saved } }); await ready(old);
+    assert.match(enableDescription(old), /^Global: Balanced · 16 W/); old.unmount();
+    const running = { spl: 12, sppt: 12, fppt: 20, preset: 'silent', battery: true, game: false };
+    const h = mount({ responses: { get_settings: { ...saved, running } } }); await ready(h);
+    assert.match(enableDescription(h), /^Global: Silent · 12 W/);
+    h.responses.get_settings = { ...saved, running: { ...running, spl: 20, sppt: 32, fppt: 35, preset: 'performance', battery: false } };
+    h.visible(false); await settle(); h.visible(true); await settle(); h.render();
+    assert.match(enableDescription(h), /^Global: Performance · 20 W/);
+    h.unmount();
+    const g = mount({ game: 111, responses: { get_settings: { ...saved, running: { ...running, game: true, preset: 'custom', spl: 25 } } } }); await ready(g);
+    assert.match(enableDescription(g), /^Game 111: Custom · 25 W/); g.unmount();
+  });
   await test('Separate battery presets: a switch where TDP works, and battery values on battery', async () => {
     const batteryCaps = { ...caps, presets: { silent: { spl: 8, sppt: 15, fppt: 20 }, balanced: { spl: 16, sppt: 25, fppt: 30 },
       performance: { spl: 20, sppt: 32, fppt: 35 }, max: { spl: 35, sppt: 37, fppt: 45 } } };
@@ -503,6 +517,14 @@ run(async () => {
       { spl: 16, sppt: 25, fppt: 30, global: true, label: 'Balanced' });
     assert.equal(T.activeLimits({ spl: 15000, sppt: 20000, fppt: 25000, active_spl: 35000, active_sppt: 37000, active_fppt: 45000, active_preset: 'custom' }).label, 'Maximum');
     assert.equal(T.activeLimits({}), null);
+    // The backend's `running` is taken as it is; an incomplete one falls back to the saved and active_* values.
+    const run = { spl: 12, sppt: 12, fppt: 20, preset: 'silent', battery: true, game: false };
+    assert.deepEqual(T.activeLimits({ spl: 16000, sppt: 25000, fppt: 30000, active_preset: 'balanced', running: run }),
+      { spl: 12, sppt: 12, fppt: 20, global: true, label: 'Silent' });
+    assert.equal(T.activeLimits({ spl: 1000, sppt: 2000, fppt: 3000, running: { ...run, game: true, preset: 'custom' } }).global, false);
+    assert.equal(T.activeLimits({ spl: 16000, sppt: 25000, fppt: 30000, active_preset: 'balanced', running: { ...run, preset: 'x' } }).label, 'Balanced');
+    assert.equal(T.runningNow({ running: { ...run, sppt: null } }), null);
+    assert.equal(T.overviewSummary({ enabled: true, running: run }), 'Silent · 12 W');
     // Separate battery presets: Balanced on battery runs 16/16/30 and is still named (and owned by Global).
     assert.deepEqual(T.activeLimits({ spl: 16000, sppt: 25000, fppt: 30000, active_spl: 16000, active_sppt: 16000,
       active_fppt: 30000, active_preset: 'balanced', battery_preset: 'balanced' }),

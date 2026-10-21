@@ -24,9 +24,9 @@ import {
   absolute, BATTERY_PRESETS_LABEL, BATTERY_PRESETS_NOTE, boostNote, boostUsable, capsState, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote,
   eppPercent, eppTitle, eppUnavailable, eppValue, extrasConfirm, extrasNote, extrasShown, FALLBACK_MAX, FALLBACK_MIN,
   FALLBACK_STD, fromAbsolute, helperRetryShown, limitsText, normalise, offsetMax, powerSummary,
-  PRESET_LABELS, PRESET_ORDER, PRESETS, presetNote, resolvedPreset, scopeNote, simpleTuning, sourceNote,
+  PRESET_LABELS, PRESET_ORDER, PRESETS, presetNote, resolvedPreset, runningNow, scopeNote, simpleTuning, sourceNote,
   shownPresets, sourceText, tdpNotice, boostRoomNote, withFppt, withSpl, withSppt,
-  type Caps, type CapsInfo, type CpuPowerControls, type PresetKey, type PresetTable, type TdpInfo, type Tuning,
+  type Caps, type CapsInfo, type CpuPowerControls, type PresetKey, type PresetTable, type RunningLimits, type TdpInfo, type Tuning,
 } from "../desktop/native/tdp.mjs";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -45,7 +45,8 @@ function savedTuning(limits: { spl: number; sppt: number; fppt: number }, stored
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface Settings   { spl: number; sppt: number; fppt: number; enabled: boolean;
-                       active_preset?: string; advanced_tdp_control?: boolean; separate_battery_presets?: boolean }
+                       active_preset?: string; advanced_tdp_control?: boolean; separate_battery_presets?: boolean;
+                       running?: RunningLimits }
 interface TdpResult  { success: boolean; stderr?: string; skipped?: boolean; returncode?: number }
 interface PowerSource { ac: boolean }
 interface GameProfile {
@@ -682,6 +683,9 @@ const useTdpState = (tabShown: boolean) => {
   const [extrasUnlocked, setExtrasUnlocked] = useState(false);
   const [advancedTdpControl, setAdvancedTdpControl] = useState(true);
   const [separateBattery, setSeparateBattery] = useState(false);
+  // What runs now, as the backend names it (get_settings.running); undefined until read or from an older backend.
+  const [running, setRunning] = useState<RunningLimits | undefined>(undefined);
+  const [runningRevision, setRunningRevision] = useState(0);
 
   const [savedPreset,   setSavedPreset]   = useState<string | undefined>(undefined);
   const [savedAcPreset, setSavedAcPreset] = useState<string | undefined>(undefined);
@@ -749,7 +753,7 @@ const useTdpState = (tabShown: boolean) => {
   const finishOperation = (scope: { operation: number }) => {
     if (scope.operation !== operationRef.current) return;
     operationBusyRef.current = false;
-    if (pageMountedRef.current) setLoading(false);
+    if (pageMountedRef.current) { setLoading(false); setRunningRevision((n) => n + 1); }
   };
   const readCaps = () => {
     if (capsReadRef.current) return capsReadRef.current;
@@ -874,6 +878,7 @@ const useTdpState = (tabShown: boolean) => {
           setEnabled(s.enabled !== false);
           setAdvancedTdpControl(s.advanced_tdp_control !== false);
           setSeparateBattery(s.separate_battery_presets === true);
+          setRunning(runningNow(s) ?? undefined);
           if (powerRevision === powerSourceRevisionRef.current) setAcOnline(ps.ac);
           initialPowerReadRef.current = true;
           noGameSyncedRef.current = AppWatcher.currentGame() === null;
@@ -928,7 +933,8 @@ const useTdpState = (tabShown: boolean) => {
 
   // The Desktop app may change Separate battery presets meanwhile: re-read it on every
   // later opening (initialization has just read it for the first one) and every ten seconds
-  // while the page is open.
+  // while the page is open. The same read keeps what runs now: it is re-read after every
+  // action and power-source change and when a game's profile is shown too.
   const batteryReadRef = useRef(false);
   useEffect(() => {
     if (!ready || !visible) return;
@@ -939,14 +945,16 @@ const useTdpState = (tabShown: boolean) => {
       const operation = operationRef.current;
       getSettings().then((s) => {
         // A toggle from this page since the read has the newer answer.
-        if (active && !operationBusyRef.current && operation === operationRef.current)
+        if (active && !operationBusyRef.current && operation === operationRef.current) {
           setSeparateBattery(s.separate_battery_presets === true);
+          setRunning(runningNow(s) ?? undefined);
+        }
       }).catch(() => undefined).finally(() => { reading = false; });
     };
     if (batteryReadRef.current) read(); else batteryReadRef.current = true;
     const timer = setInterval(read, 10000);
     return () => { active = false; clearInterval(timer); };
-  }, [ready, visible]);
+  }, [ready, visible, runningRevision, acOnline]);
 
   // ── Game detection ────────────────────────────────────────────────────────────
   // AppWatcher owns this and runs for the whole session, so the backend keeps
@@ -1044,6 +1052,7 @@ const useTdpState = (tabShown: boolean) => {
       setAcTuning(view);
       setPreset(selected);
       setGlobalProfile({ ...absolute(view), preset: s.active_preset || undefined });
+      setRunning(runningNow(s) ?? undefined);
     };
     const complete = (expected: string) => {
       if (!current(expected)) return;
@@ -1093,7 +1102,7 @@ const useTdpState = (tabShown: boolean) => {
         if (gp.error && !gp.exists) throw new Error(gp.error);
         if (gp.exists && !gp.profile) throw new Error("Game profile data is missing or corrupt.");
         // An unused profile is kept for later; the game runs on Global settings.
-        if (gp.exists && gp.active !== false) showGameProfile(gp);
+        if (gp.exists && gp.active !== false) { showGameProfile(gp); setRunningRevision((n) => n + 1); }
         else {
           await adoptGlobal(requestedGame.appId);
           if (current(requestedGame.appId)) setProfileExists(gp.exists);
@@ -1111,7 +1120,7 @@ const useTdpState = (tabShown: boolean) => {
     stdCaps, extrasAvailable, tdpAvailable, presets, minW, enabled, setEnabled, game, perGame, setPerGame,
     profileExists, setProfileExists, acOnline, acSeparate, setAcSeparate, editingAc, setEditingAc, globalProfile,
     setGlobalProfile, extrasUnlocked, setExtrasUnlocked, advancedTdpControl, setAdvancedTdpControl, savedPreset,
-    separateBattery, setSeparateBattery, batteryPresets, setSavedPreset, savedAcPreset, setSavedAcPreset, operationLoading, profilePending, setProfilePending,
+    separateBattery, setSeparateBattery, batteryPresets, running, setSavedPreset, savedAcPreset, setSavedAcPreset, operationLoading, profilePending, setProfilePending,
     profileError, setProfileError, setProfileAttempt, loading, cpuBusy, setDirty, dirty, dirtyRef, draftBaseRef,
     setFailure, details, setDetails, cpuNote, setCpuNote, info, cpuBusyOwnersRef, onCpuBusyChange, beginOperation,
     operationCurrent, finishOperation, readCaps, adoptCaps, caps, active, setActive, clearDraft, done,
@@ -1146,7 +1155,7 @@ const powerSection = (s: TdpState) => {
     acSeparate, setAcSeparate, acOnline, tdpAvailable, enabled, setEnabled, setSavedPreset, savedPreset,
     setSavedAcPreset, savedAcPreset, globalProfile, setGlobalProfile, adoptGlobalSettings, showGameProfile,
     setProfileAttempt, profilePending, profileError, info, extrasUnlocked, stdCaps, cpuBusy, loading,
-    cpuBusyOwnersRef, separateBattery, batteryPresets } = s;
+    cpuBusyOwnersRef, separateBattery, batteryPresets, running: backendRunning } = s;
   /** Run `proceed` now, or after confirming that the unsaved Custom limits are dropped. */
   const askDiscard = (proceed: () => void) => {
     if (!dirtyRef.current) return proceed();
@@ -1279,11 +1288,13 @@ const powerSection = (s: TdpState) => {
   const runningStored = !perGame ? globalProfile.preset : acSeparate && acOnline ? savedAcPreset : savedPreset;
   const stored = absolute(running);
   const nowKey = resolvedPreset(stored.spl, stored.sppt, stored.fppt, runningStored, presets);
-  const nowLabel = PRESET_LABELS[nowKey];
+  // The backend names what runs now; without it (older backend) the page's own scope and values stand in.
+  const nowLabel = backendRunning ? PRESET_LABELS[backendRunning.preset] : PRESET_LABELS[nowKey];
   // A preset runs its battery values on battery with Separate battery presets; Custom runs as saved.
-  const now = nowKey === "custom" ? stored : shownPresets(presets, batteryPresets, separateBattery, !acOnline)[nowKey];
+  const now = backendRunning ?? (nowKey === "custom" ? stored : shownPresets(presets, batteryPresets, separateBattery, !acOnline)[nowKey]);
+  const runningOwner = backendRunning ? backendRunning.game : perGame;
   const enableDescription = failureFor("enabled") ?? (enabled && (profilePending || profileError) ? "Reading profile…"
-    : powerSummary(enabled, perGame && game ? game.name : "Global", nowLabel, now,
+    : powerSummary(enabled, runningOwner && game ? game.name : "Global", nowLabel, now,
       info?.success ? info.values?.package_draw : null, extrasUnlocked, stdCaps));
   const presetDescription = failureFor("preset") ?? presetNote(preset, shownPresets(presets, batteryPresets,
     separateBattery, !editingAc && ((perGame && acSeparate) || !acOnline)));

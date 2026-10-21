@@ -11,8 +11,9 @@ export interface CapsInfo {
 export interface CapsState { tdpAvailable: boolean; extrasAvailable: boolean; helperRetryAvailable: boolean; tdpError: string }
 export interface TdpValues { spl_limit?: number; sppt_limit?: number; fppt_limit?: number; package_draw?: number; source?: string }
 export interface TdpInfo { success: boolean; values: TdpValues; error?: string }
+export interface RunningLimits { spl: number; sppt: number; fppt: number; preset: PresetKey; battery: boolean; game: boolean }
 export interface SettingsLimits {
-  spl?: number; sppt?: number; fppt?: number; active_spl?: number; active_sppt?: number; active_fppt?: number; active_preset?: string;
+  running?: RunningLimits; spl?: number; sppt?: number; fppt?: number; active_spl?: number; active_sppt?: number; active_fppt?: number; active_preset?: string;
   battery_preset?: string;
 }
 export interface CpuBoostControl { available: boolean; enabled: boolean | null; error: string }
@@ -42,6 +43,7 @@ export const PRESETS: PresetTable;
 export const PRESET_LABELS: Record<PresetKey, string>;
 export const PRESET_ORDER: PresetKey[];
 export function resolvedPreset(spl: number, sppt: number, fppt: number, stored: string | undefined, table: PresetTable): PresetKey;
+export function runningNow(settings: SettingsLimits | null | undefined): RunningLimits | null;
 export function activeLimits(settings: SettingsLimits | null | undefined, table?: PresetTable):
   { spl: number; sppt: number; fppt: number; global: boolean; label: string } | null;
 export function overviewSummary(settings: (SettingsLimits & { enabled?: boolean }) | null | undefined, table?: PresetTable): string;

@@ -89,7 +89,8 @@ run(async()=>{
  await base.setGame(111);base.render();await settle();base.render();
  assert.equal(count(base,'get_game_profile'),1);
  await base.setGame(null);base.render();await settle();base.render();
- assert.equal(count(base,'get_settings'),3,'Leaving a game still reloads global settings.');
+ // Showing a game's profile re-reads settings once to name what runs now (get_settings.running); leaving reloads Global.
+ assert.equal(count(base,'get_settings'),4,'Leaving a game still reloads global settings.');
  assert.equal(count(base,'apply_tdp'),0,'The backend, not the panel, applies game and global limits.');
  base.unmount();
  const simple=mount('tdp.tsx','TdpPage',{

@@ -13,7 +13,7 @@ import {
 import { FC, ReactNode, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
-import { overviewSummary } from "../desktop/native/tdp.mjs";
+import { overviewSummary, type RunningLimits } from "../desktop/native/tdp.mjs";
 import { FanPage, getFanState, fanSummary, type FanState } from "./fan";
 import {
   VibrationPage,
@@ -50,6 +50,7 @@ interface TdpSettings {
   active_spl?: number;
   active_sppt?: number;
   active_fppt?: number;
+  running?: RunningLimits;
   spl?: number;
   sppt?: number;
   fppt?: number;

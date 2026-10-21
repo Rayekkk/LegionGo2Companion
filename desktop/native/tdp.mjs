@@ -81,8 +81,17 @@ export function resolvedPreset(spl, sppt, fppt, stored, table) {
 
 const exceedsCaps = (spl, sppt, fppt, caps) => spl > caps.spl || sppt > caps.sppt || fppt > caps.fppt;
 
-/** What runs now according to get_settings (mW), in watts with its preset label; null while unknown. */
+/** The backend's `running` from get_settings ({spl, sppt, fppt} in W, preset, battery, game) when it is complete;
+ *  null for an older backend, which the callers then answer from the saved and active_* values. */
+export function runningNow(settings) {
+  const run = settings?.running;
+  return run && [run.spl, run.sppt, run.fppt].every(Number.isFinite) && PRESET_LABELS[run.preset] ? run : null;
+}
+
+/** What runs now according to get_settings, in watts with its preset label; null while unknown. */
 export function activeLimits(settings, table = PRESETS) {
+  const run = runningNow(settings);
+  if (run) return { spl: run.spl, sppt: run.sppt, fppt: run.fppt, global: run.game !== true, label: PRESET_LABELS[run.preset] };
   const spl = settings?.active_spl ?? settings?.spl, sppt = settings?.active_sppt ?? settings?.sppt;
   const fppt = settings?.active_fppt ?? settings?.fppt;
   if (spl == null || sppt == null || fppt == null) return null;
