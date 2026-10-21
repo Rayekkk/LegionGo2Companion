@@ -196,5 +196,16 @@ class ProcessWatchTests(unittest.TestCase):
         self.assertEqual(query.call_count, 1)
 
 
+class BusctlJsonTests(unittest.TestCase):
+    def test_returns_the_data_of_busctls_json_reply_and_rejects_anything_else(self):
+        with patch.object(module, "run_busctl", return_value='{"type":"as","data":[["/a","/b"]]}') as busctl:
+            self.assertEqual(module.json_value(["call", "x"]), [["/a", "/b"]])
+        self.assertEqual(busctl.call_args.args[0], ["--json=short", "call", "x"])
+        for reply in ("", "not json", '{"type":"s"}', "[1]"):
+            with self.subTest(reply=reply), patch.object(module, "run_busctl", return_value=reply), \
+                    self.assertRaises(module.InputPlumberError):
+                module.json_value(["call", "x"])
+
+
 if __name__ == "__main__":
     unittest.main()

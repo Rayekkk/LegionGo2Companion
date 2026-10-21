@@ -138,7 +138,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.task.cancel()
         # "u 3" is what an idle fwupd 2.0.18 keeps reporting on the console, so it must not hold the restart.
         for status, restarted in (("u 5", False), ("u 6", False), ("u 12", False), ("u 4", False), ("u 10", False),
-                                  ("u 14", False), ("garbage", False), ("?", False),
+                                  ("u 14", False), ("garbage", False), ("s 3", False), ("?", False),
                                   ("u 1", True), ("u 0", True), ("u 3", True), ("u 2", True), (None, True)):
             with self.subTest(status=status):
                 self.console = Console()
@@ -179,6 +179,35 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.updating = False
             self.recovery._wake.set()  # a controller event re-arms the check
             await self.until(lambda: self.console.restarts())
+        self.assertEqual(self.console.restarts(), [RESTART])
+
+    async def test_start_controller_events_and_wakes_leave_inputplumber_its_settle_time(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        self.console.composite = [True]  # nothing lost: every check is one query
+        with patch.object(module, "SETTLE_S", 0.5), patch.object(module, "RESUME_POLL_S", 0.05):
+            self.task = asyncio.create_task(self.recovery.run())
+            for count, trigger in enumerate((lambda: None, self.recovery._wake.set,
+                                             lambda: setattr(self, "suspended", 5.0))):
+                trigger()
+                await asyncio.sleep(0.3)
+                self.assertEqual(self.checks.call_count, count, "checked before InputPlumber settled")
+                await self.until(lambda: self.checks.call_count == count + 1)
+
+    async def test_maintenance_that_begins_during_the_confirmation_holds_and_retries(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        lost_controller = self.checks.side_effect
+        def check():
+            if self.checks.call_count == 1:
+                self.blocked = True  # firmware maintenance starts between the two looks
+            return lost_controller()
+        self.checks.side_effect = check
+        self.task = asyncio.create_task(self.recovery.run())
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.console.restarts(), [])
+        self.blocked = False  # no new controller event or wake
+        await self.until(lambda: self.console.restarts())
         self.assertEqual(self.console.restarts(), [RESTART])
 
     async def test_cancel_ends_held_retries(self):
