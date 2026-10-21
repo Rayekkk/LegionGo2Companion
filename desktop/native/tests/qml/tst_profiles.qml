@@ -239,6 +239,20 @@ TestCase {
         fake.data=Object.assign({},fake.data,{rgb_get_status:status(true)});
         compare(field("rgb","Power button light").get(),true,"Managed: the saved choice");
     }
+    function test_powerLightBetaNoteOnlyWhereTheBackendCallsItABeta() {
+        const text="Beta on this console: the power-button light is set through the same firmware field as on the Legion Go 2, checked against this console's BIOS at every use.";
+        for(const beta of [undefined,true]) {
+            fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{rgb:{enabled:true,ready:true}},device:{console:beta?"go1":"go2",power_led:true}},
+                rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true},power_led:{supported:true,current:true,beta:beta}}});
+            panel.page="rgb";
+            compare(allFields("rgb").find(item=>item.name==="Power button light beta").visible(),beta===true);
+            if(beta) {
+                const row=findChild(panel,"field_rgb_Power button light beta");verify(row!==null);
+                tryVerify(function(){ return row.visible && row.width>0; });
+                compare(row.badge,"Beta");compare(row.value,text);
+            }
+        }
+    }
     function test_whatDoesNotApplyToThisConsoleIsHidden() {
         const all={blocked:false,modules:{tdp:{ready:true},fan:{ready:true},vibration:{ready:true},rgb:{ready:true},remap:{ready:true},controller:{ready:true},battery:{ready:true},display:{ready:true},wifi:{ready:true}},
             device:{console:"go2",firmware:true,power_led:true}};

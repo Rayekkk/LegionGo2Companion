@@ -71,6 +71,15 @@ run(async () => {
       assert.ok(button(tree, 'Restore original lighting'), 'restoring the lights stays');
       h.unmount();
     }
+    // The Beta row sits under the switch only where the backend calls the light a beta (Legion Go, Go S).
+    for (const beta of [undefined, true]) {
+      const status = { ...rgb, power_led: { supported: true, current: true, beta } };
+      const h = mount('rgb.tsx', { component: 'RgbPage', responses: { rgb_get_status: () => status } });
+      h.render({ powerLight: true }); await settle(); const tree = h.render({ powerLight: true });
+      assert.equal(label(tree, 'Beta')?.props.description, beta ? 'Beta on this console: the power-button light is set through the '
+        + "same firmware field as on the Legion Go 2, checked against this console's BIOS at every use." : undefined);
+      h.unmount();
+    }
   }
   {
     const h = mount('battery.tsx', { component: 'BatteryPage', responses: {

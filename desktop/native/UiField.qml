@@ -19,6 +19,7 @@ ColumnLayout {
     property string lowLabel:""
     property string highLabel:""
     property bool hue:false
+    property string badge:""  // A paragraph led by a badge (the Fan page's Beta row).
     readonly property var liveValue:kind==="range"?range.displayedValue:value
     // A button that already says what it does leads its row; its note follows it.
     readonly property bool bare:kind==="button" && (label.length===0 || String(value)===label)
@@ -26,7 +27,11 @@ ColumnLayout {
     signal triggered()
     spacing: 4
     Layout.minimumHeight:kind==="text" || kind==="paragraph"?24:theme.target
-    Label { textFormat:Text.PlainText; visible:field.kind==="paragraph";text:String(field.value || "");color:theme.muted;font.pixelSize:theme.fontSmall;wrapMode:Text.WordWrap;Layout.fillWidth:true }
+    Label { textFormat:Text.PlainText; visible:field.kind==="paragraph" && !field.badge;text:String(field.value || "");color:theme.muted;font.pixelSize:theme.fontSmall;wrapMode:Text.WordWrap;Layout.fillWidth:true }
+    RowLayout { visible:field.kind==="paragraph" && !!field.badge; Layout.fillWidth:true; spacing:12
+        UiBadge { text:field.badge; tone:"amber"; Layout.alignment:Qt.AlignTop }
+        Label { textFormat:Text.PlainText; text:String(field.value || ""); color:theme.muted; wrapMode:Text.WordWrap; Layout.fillWidth:true }
+    }
     RowLayout {
     visible:field.kind!=="paragraph" && field.kind!=="list" && (field.kind!=="buttons" || field.label.length>0)
     Layout.fillWidth:true;spacing:16

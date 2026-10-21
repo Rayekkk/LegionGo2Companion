@@ -442,6 +442,8 @@ RowLayout {
                 choices("Speed",rgbSpeed,v=>change("rgb_set_speed",[v]),()=>Rgb.SPEEDS,{kind:"options",visible:()=>Rgb.usesSpeed(rgbSettings()),available:rgbEditable}),
                 switcher("Power button light",()=>Rgb.powerChecked(s("rgb_get_status")),"rgb_set_power_led",null,{available:()=>!!s("rgb_get_status").power_led?.supported,visible:()=>s("get_version")?.device?.power_led!==false,
                     note:()=>Rgb.powerNote(s("rgb_get_status"))}),
+                field("","paragraph",()=>Rgb.POWER_LED_BETA_TEXT,()=>{},{name:"Power button light beta",badge:"Beta",
+                    visible:()=>s("get_version")?.device?.power_led!==false && !!s("rgb_get_status").power_led?.beta}),
                 action("Restore original lighting","rgb_restore_original",null,{note:Rgb.RESTORE_NOTE,restore:true}),
                 notice("",()=>s("rgb_get_status").error || "")
             ]}],
@@ -650,7 +652,7 @@ RowLayout {
                     objectName:"field_"+section.modelData.owner+"_"+(modelData.name || modelData.label)
                     Layout.fillWidth:true
                     prefix:modelData.prefix || "";suffix:modelData.suffix || "";hue:!!modelData.hue
-                    lowLabel:modelData.lowLabel || "";highLabel:modelData.highLabel || ""
+                    lowLabel:modelData.lowLabel || "";highLabel:modelData.highLabel || "";badge:modelData.badge || ""
                     editContext:panel.page+"|"+panel.tdpScope+"|"+panel.app()
                     label:modelData.label; kind:modelData.kind; value:modelData.get()
                     note:typeof modelData.note==="function"?modelData.note():modelData.note || ""

@@ -4,9 +4,10 @@ type Settings = { control_enabled?: boolean; rings_enabled?: boolean; effect?: s
 type Status = {
   settings?: Settings;
   rgb?: { supported?: boolean; reason?: string; drift?: boolean };
-  power_led?: { supported?: boolean; reason?: string; current?: boolean | null; drift?: boolean };
+  power_led?: { supported?: boolean; reason?: string; current?: boolean | null; drift?: boolean; beta?: boolean };
 };
 export const RESTORE_NOTE: string;
+export const POWER_LED_BETA_TEXT: string;
 export const SPEEDS: { id: number; label: string }[];
 export function effectsEditable(settings?: Settings | null): boolean;
 export function usesColor(settings?: Settings | null): boolean;

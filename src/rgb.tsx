@@ -14,7 +14,7 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
-import { controlNote, effectsEditable, powerChecked as powerShown, powerNote, RESTORE_NOTE, ringsNote, SPEEDS, speedStep,
+import { controlNote, effectsEditable, POWER_LED_BETA_TEXT, powerChecked as powerShown, powerNote, RESTORE_NOTE, ringsNote, SPEEDS, speedStep,
   usesColor as colorEffect, usesSpeed as speedEffect } from "../desktop/native/rgb.mjs";
 
 interface RgbSettings {
@@ -58,6 +58,7 @@ export interface RgbStatus {
     current?: boolean | null;
     managed?: boolean;
     drift?: boolean;
+    beta?: boolean;
   };
   recovery_required?: boolean;
   error?: string;
@@ -440,6 +441,7 @@ export const RgbPage: FC<{ visible?: boolean; powerLight?: boolean }> = ({ visib
             onChange={(value) => void enqueue(() => setPowerLed(value), "power")}
           />
         </PanelSectionRow>}
+        {powerLight && power?.beta && infoRow("Beta", POWER_LED_BETA_TEXT)}
         {/* The page's last row is always enabled; the backend refuses it during recovery. */}
         <PanelSectionRow>
           <ButtonItem layout="below" description={failure("restore") ?? RESTORE_NOTE}
