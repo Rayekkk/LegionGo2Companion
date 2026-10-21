@@ -220,6 +220,17 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._battery._main.assert_awaited_once()
         self.assertIs(status["battery"]["applicable"], True)
 
+    async def test_applicability_is_unknown_until_the_console_is_detected(self):
+        before = (await self.plugin.get_version())["modules"]
+        self.assertEqual({name: entry["applicable"] for name, entry in before.items()},
+                         dict.fromkeys(main.MODULE_NAMES))  # null: the UIs wait instead of showing every module
+        await self.plugin._migration()
+        await self.plugin._main()
+        after = (await self.plugin.get_version())["modules"]
+        self.assertEqual({name: entry["applicable"] for name, entry in after.items()},
+                         {name: name not in ("fan", "display") for name in main.MODULE_NAMES})
+        await self.plugin._unload()
+
     async def test_a_module_that_applies_after_a_controller_event_starts_and_none_is_stopped(self):
         driver = {"bound": False}
         self.plugin._vibration.applicable = lambda: driver["bound"]

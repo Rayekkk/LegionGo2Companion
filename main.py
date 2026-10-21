@@ -464,7 +464,8 @@ class Plugin:
 
     def _module_status(self):
         result = {name: {'enabled': self._module_enabled(name),
-                       'applicable': self._applies(name),
+                       # None until the console is detected: both UIs wait rather than show every module.
+                       'applicable': self._applies(name) if self._applicable else None,
                        'ready': self._module_health.get(name, {}).get('ready', True),
                        'pending': bool(self._module_state.get(name, {}).get('pending')),
                        # A startup error no longer applies once the module is turned off.
