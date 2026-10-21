@@ -549,11 +549,14 @@ class DisplayUpdateTests(ResetFixture, unittest.TestCase):
         self.assertFalse(self.script.exists())
         self.assertFalse(self.state['setup_done'])
 
-    def test_update_from_2_2_reinstalls_but_from_2_1_0_leaves_setup(self):
-        # 2.2.x wrote no marker but always has the EDID journal key; 2.1.0 never wrote it.
-        for version, edid_keys, installed in (('2.2', True, True), ('2.1.0', False, False)):
-            with self.subTest(version=version):
-                self.store.replace({key: value for key, value in self.saved.items()
+    def test_update_from_a_version_without_the_marker_reinstalls_only_a_mode_that_was_set_up(self):
+        # Before 2.3 no marker: the saved panel mode, written only after Setup installed its script, is the
+        # evidence. The EDID journal key is not: 2.2.x writes it only when it patches or resets the EDID.
+        for case, panel_mode, edid_keys, installed in (('EDID journal kept', 'hybrid', True, True),
+                                                      ('EDID never patched', 'hybrid', False, True),
+                                                      ('Setup never done', None, True, False)):
+            with self.subTest(case):
+                self.store.replace({key: value for key, value in {**self.saved, 'panel_mode': panel_mode}.items()
                                     if key != 'script_reinstall' and (edid_keys or not key.startswith('edid_write'))})
                 if self.script.exists():
                     self.script.unlink()

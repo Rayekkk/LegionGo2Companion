@@ -2275,11 +2275,9 @@ class Plugin:
                 return False  # The Gaming Mode user is not known yet; the next start decides.
             marker = settings.getSetting("script_reinstall", None)
             loaded = settings.getSetting("script_reinstall_loaded", None)
-            if marker is None:
-                # shortcut: 2.2.x left no marker; only 2.2+ writes the EDID journal key, and 2.1.0
-                # users choose again in Setup. Drop once updates from 2.2.x are no longer expected.
-                marker = "edid_write_pending" in settings.settings
-            lost = (marker is True and Plugin._state.get("panel_mode") in MODES
+            # Before 2.3 no marker: a saved panel mode is the evidence, as every version saves it
+            # only after Setup installed its script (2.1.0 too; no setting tells 2.2.x apart).
+            lost = (marker in (True, None) and Plugin._state.get("panel_mode") in MODES
                     and not Plugin._state.get("reset_in_progress")
                     and not Plugin.native_display_active() and not os.path.lexists(INSTALLED_SCRIPT))
             bundled = _read_script_bytes(BUNDLED_SCRIPT)
