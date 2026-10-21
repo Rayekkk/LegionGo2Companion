@@ -611,49 +611,79 @@ def _power_led_layout_ok(data: bytes, layout: PowerLedLayout = POWER_LED_GO2) ->
     try:
         if data[:4] != b"DSDT" or int.from_bytes(data[4:8], "little") != len(data):
             return False
-        opcode = b"\x5b\x80" + layout.region
-        region = data.find(opcode)
-        if region < 0 or data.find(opcode, region + 1) >= 0:
+        region = aml_region(data, layout.region)
+        if region is None or region[0] != layout.base or region[1] <= layout.offset:
             return False
-        i = region + 6
-        if data[i] != 0x00:  # SystemMemory
-            return False
-        base, size = _aml_integer(data, i + 1)
-        length, _ = _aml_integer(data, i + 1 + size)
-        if base != layout.base or length <= layout.offset:
-            return False
-        found = []
-        start = data.find(b"\x5b\x81")
-        while start >= 0:
-            try:
-                package, count = _aml_pkglen(data, start + 2)
-            except IndexError:
-                break  # Opcode bytes at the very end of the table.
-            name = start + 2 + count
-            if data[name:name + 4] == layout.region:
-                end, p, bit = start + 2 + package, name + 5, 0
-                while p < end:
-                    op = data[p]
-                    if op == 0x00:  # ReservedField
-                        width, count = _aml_pkglen(data, p + 1)
-                        bit += width; p += 1 + count
-                    elif op == 0x01:  # AccessField
-                        p += 3
-                    elif op == 0x03:  # ExtendedAccessField
-                        p += 4
-                    elif 0x41 <= op <= 0x5A or op == 0x5F:  # NamedField
-                        width, count = _aml_pkglen(data, p + 4)
-                        if data[p:p + 4] == layout.field:
-                            found.append((bit, width))
-                        bit += width; p += 4 + count
-                    else:
-                        return False
-                if p != end:
-                    return False
-            start = data.find(b"\x5b\x81", start + 2)
-        return found == [(layout.offset * 8 + layout.bit, 1)]
+        fields = aml_fields(data, layout.region)
+        return fields is not None and [(bit, width) for name, bit, width in fields if name == layout.field] \
+            == [(layout.offset * 8 + layout.bit, 1)]
     except (IndexError, KeyError):
         return False
+
+
+def aml_region(data: bytes, region: bytes) -> tuple[int, int] | None:
+    """(base, length) of the one OperationRegion(region, SystemMemory, constant, constant), else None.
+    Raises IndexError/KeyError on a table this parser does not understand."""
+    opcode = b"\x5b\x80" + region
+    start = data.find(opcode)
+    if start < 0 or data.find(opcode, start + 1) >= 0:
+        return None
+    i = start + 6
+    if data[i] != 0x00:  # SystemMemory
+        return None
+    base, size = _aml_integer(data, i + 1)
+    length, _ = _aml_integer(data, i + 1 + size)
+    return base, length
+
+
+def aml_fields(data: bytes, region: bytes) -> list[tuple[bytes, int, int]] | None:
+    """(name, bit offset, bit width) of every named field across every Field(region); None when an
+    element this parser does not know makes the offsets uncertain. Raises IndexError like aml_region."""
+    found = []
+    start = data.find(b"\x5b\x81")
+    while start >= 0:
+        try:
+            package, count = _aml_pkglen(data, start + 2)
+        except IndexError:
+            break  # Opcode bytes at the very end of the table.
+        name = start + 2 + count
+        if data[name:name + 4] == region:
+            end, p, bit = start + 2 + package, name + 5, 0
+            while p < end:
+                op = data[p]
+                if op == 0x00:  # ReservedField
+                    width, count = _aml_pkglen(data, p + 1)
+                    bit += width; p += 1 + count
+                elif op == 0x01:  # AccessField
+                    p += 3
+                elif op == 0x03:  # ExtendedAccessField
+                    p += 4
+                elif 0x41 <= op <= 0x5A or op == 0x5F:  # NamedField
+                    width, count = _aml_pkglen(data, p + 4)
+                    found.append((data[p:p + 4], bit, width))
+                    bit += width; p += 4 + count
+                else:
+                    return None
+            if p != end:
+                return None
+        start = data.find(b"\x5b\x81", start + 2)
+    return found
+
+
+def read_dsdt(path: str | None = None, limit: int = DSDT_LIMIT) -> bytes:
+    """The live DSDT (root-only, read-only), never through a final symlink; stops reading past `limit`."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path or DSDT_PATH, flags)
+    try:
+        data = b""
+        while len(data) <= limit:
+            block = os.read(fd, 65536)
+            if not block:
+                break
+            data += block
+        return data
+    finally:
+        os.close(fd)
 
 
 def power_led_layout(identity: dict[str, str] | None = None) -> PowerLedLayout | None:
@@ -688,18 +718,7 @@ def _power_capability() -> tuple[bool, str]:
             False, "Power-button light control is not available on this console.")
         return _power_capability_cache
     try:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(DSDT_PATH, flags)
-        try:
-            data = b""
-            while len(data) <= DSDT_LIMIT:
-                block = os.read(fd, 65536)
-                if not block:
-                    break
-                data += block
-        finally:
-            os.close(fd)
+        data = read_dsdt()
     except OSError:
         _power_capability_cache = (False, "The BIOS ACPI table could not be read.")
         return _power_capability_cache

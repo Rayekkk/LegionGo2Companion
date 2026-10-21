@@ -244,10 +244,10 @@ class ReportContent(_Fixture):
     def test_the_whole_report_stops_at_its_time_limit(self):
         self.fake_console()
         text = device_report.collect(facts(), seconds=0)
-        self.assertEqual(text.count("unavailable: report time limit reached"), len(device_report.SECTIONS))
+        self.assertEqual(text.count("unavailable: report time limit reached"), len(device_report.SECTIONS) + 1)
         self.assertEqual(self.commands.calls, [])
         stopping = device_report.collect(facts(), stopped=lambda: True)
-        self.assertEqual(stopping.count("unavailable: Companion is stopping"), len(device_report.SECTIONS))
+        self.assertEqual(stopping.count("unavailable: Companion is stopping"), len(device_report.SECTIONS) + 1)
 
     def test_ryzenadj_limit_rows_only_from_the_verified_helper(self):
         output = ("CPU Family: Strix Point\nSMU BIOS Interface Version: 24\nVersion: v0.17.0\n"
@@ -326,6 +326,140 @@ class ReportContent(_Fixture):
         text = device_report.scrub(f"a 00-11-22-33-44-55 b\nSerial: X\nbssid x\nkeep /home/{USER}/x\n{USER}'s deck\n"
                                    "steamdeck stays", USER)
         self.assertEqual(text, "a <removed> b\n<removed>\n<removed>\nkeep /home/<user>/x\n<removed>'s deck\nsteamdeck stays\n")
+
+
+# ERAM as the Go 2 / Go S DSDT lays it out, at a test address: ECMV at 0x00, TCPU at 0x07, the 32-byte SMBus
+# buffer SMDA at 0x20 and the battery serial BTSN at 0x82.
+EC_FIELDS = [(b"ECMV", 8), (None, 0x30), (b"TCPU", 8), (None, 0xC0), (b"SMDA", 256), (None, 0x210), (b"BTSN", 16)]
+EC_BASE = 0x2300
+
+
+def two_regions(first, second):
+    """One DSDT holding the AML of two synthetic tables."""
+    aml = first[36:] + second[36:]
+    return b"DSDT" + (36 + len(aml)).to_bytes(4, "little") + bytes(28) + aml
+
+
+class EcAndDsdt(_Fixture):
+    def setUp(self):
+        super().setUp()
+        memory = bytearray(0x3000)
+        for i in range(0xFF):
+            memory[EC_BASE + i] = (i * 7 + 1) & 0xFF
+        memory[EC_BASE + 0x20:EC_BASE + 0x2C] = b"BATTSECRET42"
+        memory[EC_BASE + 0x82:EC_BASE + 0x84] = b"\xAB\xCD"
+        self.memory = bytes(memory)
+        self.write("/dev/mem", self.memory)
+        self.write("/sys/firmware/acpi/tables/DSDT", support.power_led_dsdt(base=EC_BASE, fields=EC_FIELDS))
+
+    def go1(self, **changes):
+        return facts(device={"console": "go1", "model": "83E1"}, fan={"supported": False, "beta": False, "error": ""},
+                     **changes)
+
+    @unittest.skipUnless(os.name == "posix", "mmap with PROT_READ requires POSIX")
+    def test_ec_memory_is_read_only_through_a_prot_read_mapping_of_the_dsdt_region(self):
+        os.chmod(self.root / "dev/mem", 0o444)  # An attempt to open it for writing fails (unless root).
+        opened, mapped = [], []
+        real_open, real_mmap = os.open, device_report.mmap.mmap
+        def spy_open(path, flags, *args, **kwargs):
+            opened.append((str(path), flags))
+            return real_open(path, flags, *args, **kwargs)
+        def spy_mmap(*args, **kwargs):
+            mapped.append(kwargs)
+            return real_mmap(*args, **kwargs)
+        with patch.object(device_report.os, "open", spy_open), patch.object(device_report.mmap, "mmap", spy_mmap), \
+                patch("fan_ec.Ports", side_effect=AssertionError("no EC port access")):
+            lines = device_report._ec(device_report._Context(self.go1(), float("inf")))
+        text = "\n".join(lines)
+        self.assertIn(f"ERAM base=0x{EC_BASE:X} length=0xFF; blanked (--): BTSN SMDA", text)
+        self.assertIn("ERAM+00: 01 08 0F 16 1D 24 2B 32", text, "ECMV and TCPU as stored")
+        self.assertIn("ERAM+20: " + " ".join(["--"] * 16), text, "the SMBus buffer is blanked")
+        self.assertIn("ERAM+80: 81 88 -- -- 9D", text, "the battery serial is blanked")
+        self.assertNotIn("AB CD", text)
+        self.assertEqual(len([line for line in lines if line.startswith("  ERAM+")]), 16)
+        memory = [flags for path, flags in opened if path.endswith("mem")]
+        self.assertEqual(len(memory), 1)
+        self.assertEqual(memory[0] & (os.O_WRONLY | os.O_RDWR), 0)
+        self.assertEqual([(m["prot"], m["offset"]) for m in mapped], [(device_report.mmap.PROT_READ, 0x2000)])
+        self.assertEqual((self.root / "dev/mem").read_bytes(), self.memory)
+
+    def test_only_the_dsdt_s_ec_window_and_its_page_are_read(self):
+        reads = []
+        def fake_read(base, length):
+            reads.append((base, length))
+            return bytes(length)
+        cases = {
+            "no EC window": (support.power_led_dsdt(region=b"XRAM"), []),
+            "EmbeddedControl space": (support.power_led_dsdt(space=0x03), []),
+            "window larger than 256 bytes": (support.power_led_dsdt(base=EC_BASE, length=0x400), []),
+            "mailbox in the window's page": (two_regions(support.power_led_dsdt(base=EC_BASE),
+                                                         support.power_led_dsdt(region=b"SMA2", base=0x2A00, length=0x80)),
+                                             [(EC_BASE, 0xFF), (0x2A00, 0x80)]),
+            "mailbox in another page": (two_regions(support.power_led_dsdt(base=EC_BASE),
+                                                    support.power_led_dsdt(region=b"SMA2", base=0x5A00, length=0x80)),
+                                        [(EC_BASE, 0xFF)]),
+            "unknown field element": (support.power_led_dsdt(base=EC_BASE, fields=[(b"\x02xyz", 8)]), []),
+        }
+        for reason, (table, expected) in cases.items():
+            with self.subTest(reason):
+                reads.clear()
+                self.write("/sys/firmware/acpi/tables/DSDT", table)
+                with patch.object(device_report, "_read_physical", side_effect=fake_read):
+                    lines = device_report._ec(device_report._Context(self.go1(), float("inf")))
+                self.assertEqual(reads, expected, lines)
+                if reason == "no EC window":
+                    self.assertEqual(lines, ["skipped: the DSDT declares no EC memory window (ERAM or ECMM)"])
+
+    def test_go_2_with_the_fan_module_on_reads_no_ec_and_reports_fan_controls_readings(self):
+        telemetry = {"kind": "telemetry", "active": True, "ec_version": "1.16", "rpm": 3100, "effective": 3100,
+                     "override": 0, "ec_temperature": 52, "power_mode": 2, "temperatures": {"k10temp": 60}}
+        fan = {"supported": True, "beta": False, "error": "", "telemetry": telemetry}
+        with patch.object(device_report, "_read_physical") as read, \
+                patch("fan_ec.Ports", side_effect=AssertionError("no EC port access")), \
+                patch("fan_backend.read_automatic", side_effect=AssertionError("no passive EC read")):
+            text = device_report.collect(facts(fan=fan))
+            read.assert_not_called()
+            text_off = device_report.collect(facts(fan=dict(fan, telemetry=None)))
+        self.assertIn("EC memory (read-only) ==\nskipped: the Fan module is on", text)
+        self.assertIn("Fan Control's last EC readings: ec_version=1.16 rpm=3100 effective=3100 override=0 "
+                      "ec_temperature=52 power_mode=2\n", text)
+        self.assertIn("Fan Control's last EC readings: none (no Fan Control session)", text_off)
+
+    def test_other_hardware_gets_no_ec_read(self):
+        with patch.object(device_report, "_read_physical") as read:
+            text = device_report.collect(facts(device={"console": None, "model": None}))
+        read.assert_not_called()
+        self.assertIn("EC memory (read-only) ==\nskipped: not a Legion Go console", text)
+
+    def test_dsdt_is_appended_unfiltered_and_restores_to_the_same_sha256(self):
+        import base64, hashlib, random, re, zlib
+        table = support.power_led_dsdt(base=EC_BASE, fields=EC_FIELDS)
+        table = table[:4] + (len(table) + 3000).to_bytes(4, "little") + table[8:] + random.Random(1).randbytes(3000)
+        self.write("/sys/firmware/acpi/tables/DSDT", table)
+        with patch.object(device_report, "_read_physical", side_effect=lambda base, length: bytes(length)):
+            first = device_report.collect(self.go1())
+            block = first.split(device_report.DSDT_BEGIN)[-1].split(device_report.DSDT_END)[0]
+            # A user name that occurs in the base64 as a word: the filter would have replaced it.
+            user = next(part for part in re.split(r"[+/\n]", block) if len(part) >= 3)
+            text = device_report.collect(self.go1(user=user))
+        self.assertNotEqual(device_report.scrub(block, user), block + "\n", "the test name hits the filter")
+        self.assertIn(f"size: {len(table)} bytes, sha256: {hashlib.sha256(table).hexdigest()}", text)
+        self.assertIn(device_report.DSDT_RESTORE, text)
+        encoded = text.split(device_report.DSDT_BEGIN)[-1].split(device_report.DSDT_END)[0]
+        self.assertEqual(hashlib.sha256(zlib.decompress(base64.b64decode(encoded))).hexdigest(),
+                         hashlib.sha256(table).hexdigest())
+        self.assertTrue(text.rstrip().endswith(device_report.DSDT_END))
+        self.assertIn(f"ERAM base=0x{EC_BASE:X}", text, "the EC section and the table share one DSDT read")
+
+    def test_dsdt_over_the_size_limit_or_incomplete_is_left_out(self):
+        with patch.object(device_report, "DSDT_LIMIT", 64), patch.object(device_report, "_read_physical") as read:
+            text = device_report.collect(self.go1())
+        read.assert_not_called()
+        self.assertIn(f"== {device_report.DSDT_TITLE} ==\nunavailable: larger than 0 KiB", text)
+        self.assertIn("EC memory (read-only) ==\nunavailable: larger than 0 KiB", text)
+        self.write("/sys/firmware/acpi/tables/DSDT", support.power_led_dsdt()[:-1])
+        self.assertIn("unavailable: not a complete DSDT", device_report.collect(self.go1()))
+        self.assertNotIn(device_report.DSDT_BEGIN + "\n", device_report.collect(self.go1()))
 
 
 @unittest.skipUnless(os.name == "posix", "the dir_fd save with ownership requires POSIX")
@@ -413,6 +547,7 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
             sent = collect.call_args.args[0]
             self.assertEqual(sent["user"], USER)
             self.assertFalse(sent["modules"]["tdp"]["applicable"])
+            self.assertIsNone(sent["fan"]["telemetry"], "no Fan session: no EC readings to pass on")
             save.assert_called_once_with("text", "/home/" + USER, 1000, 1000)
             with patch.object(main, "_session_account", return_value=None):
                 self.assertFalse((await plugin.save_device_report())["success"])

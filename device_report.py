@@ -3,24 +3,31 @@
 """Device report: a read-only text file of this console's hardware and firmware details for a bug report.
 
 Only the allowlisted fields below are collected, then the whole text passes a privacy filter. Nothing is
-written to hardware, no EC is read, no controller is opened and no module lock is taken; firmware-backed
-sysfs reads (ACPI/WMI methods) hold module_runtime.firmware_lock one at a time like every other reader.
-Each section fails on its own ("unavailable: <reason>"), external programs get fixed argv and a time limit,
-and the whole collection stops starting new sections after TOTAL_SECONDS.
+written to hardware, no controller is opened and no module lock is taken; firmware-backed sysfs reads
+(ACPI/WMI methods) hold module_runtime.firmware_lock one at a time like every other reader. The EC is never
+sent a command: its memory window is read through /dev/mem (PROT_READ) only where the live DSDT declares it
+(_ec). The DSDT itself is appended after the privacy filter (_dsdt). Each section fails on its own
+("unavailable: <reason>"), external programs get fixed argv and a time limit, and the whole collection
+stops starting new sections after TOTAL_SECONDS.
 """
 
+import base64
 import collections
 import datetime
 import glob
+import hashlib
 import json
+import mmap
 import os
 import platform
 import re
 import stat
 import subprocess
 import time
+import zlib
 
 import module_runtime
+import rgb_backend
 import tdp_backend
 from fan_guardian import validated_firmware
 from system_process import run
@@ -55,6 +62,18 @@ _SUPPLY_NAME = re.compile(r"BAT\d*|AC\d*|ACAD|ADP\d*|ucsi-source-psy-[A-Za-z0-9:
 _HWMON_NAME = re.compile(r"acpitz|k10temp|amdgpu|nvme|spd5118|lenovo_wmi_\w+|mt79\d\d_phy\d+|iwlwifi_\d+"
                          r"|BAT\d*|AC\d*|ACAD|ADP\d*|ucsi_source_psy_\w+")
 RYZENADJ_SECONDS = 1.0  # With its 2 s kill wait, below the 4 s that TDP's restore waits for the ryzenadj lock.
+DSDT = "/sys/firmware/acpi/tables/DSDT"
+DEV_MEM = "/dev/mem"
+DSDT_LIMIT = 512 << 10  # Lenovo's Legion Go DSDTs are 83-116 KiB (41-51 KiB compressed).
+# EC memory as the Legion Go family's DSDTs name it: ERAM (Go 2, Go S) or ECMM (Go 1) is the EC's RAM
+# window; EFAN (Go 1 fan table) and SMA2 (EC mailbox) are read only inside that window's page. Other
+# SystemMemory regions of the EC device (GPIO, CMOS, eSPI registers) are never read.
+EC_WINDOWS = (b"ERAM", b"ECMM")
+EC_EXTRA = (b"EFAN", b"SMA2")
+# Blanked bytes: a field named like a serial number (BTSN, SNUM, SER*) or a unique ID (*UID*), and any field
+# wider than 32 bits (SMBus and battery buffers that can hold a serial or name string).
+_EC_PRIVATE = re.compile(rb"SN|SER|UID")
+FAN_TELEMETRY = ("ec_version", "rpm", "effective", "override", "ec_temperature", "power_mode")
 
 
 class _Unavailable(Exception):
@@ -110,6 +129,23 @@ class _Context:
         self.facts = facts
         self.deadline = deadline
         self.stopped = stopped
+        self._dsdt = None
+
+    def dsdt(self):
+        """The live DSDT, read once for the EC section and the appended table."""
+        if self._dsdt is None:
+            try:
+                data = rgb_backend.read_dsdt(_path(DSDT), DSDT_LIMIT)
+                if len(data) > DSDT_LIMIT:
+                    raise _Unavailable(f"larger than {DSDT_LIMIT >> 10} KiB")
+                if data[:4] != b"DSDT" or int.from_bytes(data[4:8], "little") != len(data):
+                    raise _Unavailable("not a complete DSDT")
+                self._dsdt = data
+            except Exception as exc:
+                self._dsdt = exc
+        if isinstance(self._dsdt, Exception):
+            raise self._dsdt
+        return self._dsdt
 
     def command(self, argv):
         """stdout of a fixed program, inside both its own and the report's time limit."""
@@ -446,11 +482,106 @@ def _events(context):
         or ["no warnings or errors"]
 
 
+def _read_physical(base, length):
+    """`length` bytes at physical address `base`: /dev/mem opened read-only and mapped PROT_READ, read one byte
+    load at a time (the DSDT declares these fields ByteAcc or AnyAcc). A memory read sends the EC no command."""
+    page = base - base % mmap.PAGESIZE
+    fd = os.open(_path(DEV_MEM), os.O_RDONLY | getattr(os, "O_SYNC", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        mapped = mmap.mmap(fd, base - page + length, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ, offset=page)
+        try:
+            return bytes([mapped[i] for i in range(base - page, base - page + length)])
+        finally:
+            mapped.close()
+    finally:
+        os.close(fd)
+
+
+def _ec_regions(data):
+    """(name, base, length) of the EC memory this DSDT declares: its one RAM window and the EC_EXTRA regions in
+    the same page. IndexError/KeyError: a table this parser does not understand."""
+    windows = [(name, *region) for name in EC_WINDOWS if (region := rgb_backend.aml_region(data, name))]
+    if len(windows) != 1:
+        return []
+    page = windows[0][1] // mmap.PAGESIZE
+    extra = [(name, *region) for name in EC_EXTRA if (region := rgb_backend.aml_region(data, name))]
+    return windows + [region for region in extra if region[1] // mmap.PAGESIZE == page]
+
+
+def _ec_dump(data, name, base, length):
+    label = name.decode("ascii", "replace")
+    fields = rgb_backend.aml_fields(data, name)
+    if fields is None:
+        return [f"{label}: skipped: its DSDT field map is not understood, so private fields cannot be blanked"]
+    private, blanked = set(), set()
+    for field, bit, width in fields:
+        if width > 32 or _EC_PRIVATE.search(field):
+            private.update(range(bit // 8, (bit + width + 7) // 8))
+            blanked.add(field.decode("ascii", "replace"))
+    raw = _read_physical(base, length)
+    lines = [f"{label} base=0x{base:X} length=0x{length:X}; blanked (--): {' '.join(sorted(blanked)) or 'none'}"]
+    for row in range(0, length, 16):
+        lines.append(f"  {label}+{row:02X}: " + " ".join(
+            "--" if i in private else f"{raw[i]:02X}" for i in range(row, min(row + 16, length))))
+    return lines
+
+
+def _ec(context):
+    facts = context.facts
+    if not (facts.get("device") or {}).get("console"):
+        return ["skipped: not a Legion Go console"]
+    fan = facts.get("fan") or {}
+    if fan.get("supported") and ((facts.get("modules") or {}).get("fan") or {}).get("enabled"):
+        # The Go 2's Fan module owns EC access: no read beside it, only what its own session already read.
+        telemetry = fan.get("telemetry") or {}
+        readings = " ".join(f"{key}={telemetry[key]}" for key in FAN_TELEMETRY if key in telemetry)
+        return ["skipped: the Fan module is on, so the report reads no EC memory beside it",
+                f"Fan Control's last EC readings: {readings or 'none (no Fan Control session)'}"]
+    data = context.dsdt()
+    try:
+        regions = _ec_regions(data)
+    except (IndexError, KeyError):
+        raise _Unavailable("the DSDT's EC regions are not understood") from None
+    if not regions:
+        return ["skipped: the DSDT declares no EC memory window (ERAM or ECMM)"]
+    lines = []
+    for name, base, length in regions:
+        if not 0 < length <= 256 or base % mmap.PAGESIZE + length > mmap.PAGESIZE:
+            lines.append(f"{name.decode('ascii', 'replace')}: skipped: unexpected size 0x{length:X}")
+            continue
+        try:
+            lines += _ec_dump(data, name, base, length)
+        except Exception as exc:
+            lines.append(f"{name.decode('ascii', 'replace')}: unavailable: {_reason(exc)}")
+    lines.append("Not read: EC registers outside these DSDT regions (such as the Go 2 fan registers); "
+                 "reading them needs EC port transactions.")
+    return lines
+
+
+DSDT_BEGIN = "-----BEGIN DSDT (zlib, base64)-----"
+DSDT_END = "-----END DSDT-----"
+DSDT_RESTORE = ("python3 -c \"import sys,base64,zlib;t=open(sys.argv[1]).read();"
+                f"t=t.split('{DSDT_BEGIN}')[-1].split('{DSDT_END}')[0];"
+                "open('DSDT.aml','wb').write(zlib.decompress(base64.b64decode(t)))\" <report file>")
+
+
+def _dsdt(context):
+    """The live DSDT, compressed and in base64. It is appended after scrub(): the filter could break the base64
+    (random text can contain "ssid" or the user's name), and it has nothing to remove. The DSDT is the BIOS's
+    ACPI code, the same on every console with that BIOS apart from addresses patched in at boot: serial numbers
+    live in SMBIOS, MAC addresses and user names in the OS, none of them in this table."""
+    data = context.dsdt()
+    return [f"size: {len(data)} bytes, sha256: {hashlib.sha256(data).hexdigest()}",
+            "Restore it as DSDT.aml (then: iasl -d DSDT.aml):", DSDT_RESTORE, DSDT_BEGIN,
+            *base64.encodebytes(zlib.compress(data, 9)).decode("ascii").split(), DSDT_END]
+
+
 SECTIONS = (("DMI", _dmi), ("System", _system), ("Companion", _companion),
             ("Firmware attributes", _firmware_attributes), ("Battery and power", _power),
             ("RyzenAdj limits", _ryzenadj), ("Controllers and input", _controllers), ("Fan sensors", _fan),
-            ("Display", _display), ("Network", _network), ("fwupd devices", _fwupd),
-            ("Companion events, last 24 hours", _events))
+            ("EC memory (read-only)", _ec), ("Display", _display), ("Network", _network),
+            ("fwupd devices", _fwupd), ("Companion events, last 24 hours", _events))
+DSDT_TITLE = "ACPI DSDT (firmware table, not filtered)"
 
 
 def scrub(text, user=""):
@@ -472,20 +603,26 @@ def collect(facts, seconds=TOTAL_SECONDS, stopped=lambda: False):
     """The report text. `facts`: version, device, modules, inputplumber_restarts, tdp_caps, fan, log_dir, user.
     `stopped()`: Companion is stopping, so no further section starts."""
     context = _Context(facts, time.monotonic() + seconds, stopped)
-    body = []
-    for title, section in SECTIONS:
-        body += ["", f"== {title} =="]
-        if time.monotonic() >= context.deadline or stopped():
-            body.append("unavailable: report time limit reached" if not stopped() else "unavailable: Companion is stopping")
-            continue
-        try:
-            body += section(context)
-        except Exception as exc:
-            body.append(f"unavailable: {_reason(exc)}")
+
+    def run_sections(sections):
+        lines = []
+        for title, section in sections:
+            lines += ["", f"== {title} =="]
+            if time.monotonic() >= context.deadline or stopped():
+                lines.append("unavailable: report time limit reached" if not stopped()
+                             else "unavailable: Companion is stopping")
+                continue
+            try:
+                lines += section(context)
+            except Exception as exc:
+                lines.append(f"unavailable: {_reason(exc)}")
+        return lines
+    body = run_sections(SECTIONS)
     created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     header = (f"Legion Go Companion device report\nCompanion version: {facts.get('version')}\n"
               f"Created: {created}\n{PRIVACY_NOTE}\n")
-    return header + scrub("\n".join(body), facts.get("user") or "")
+    return header + scrub("\n".join(body), facts.get("user") or "") + "\n".join(
+        run_sections(((DSDT_TITLE, _dsdt),))) + "\n"
 
 
 def save(text, home, uid, gid):
