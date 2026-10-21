@@ -51,7 +51,9 @@ is unavailable on your console.
 ### Other Legion Go consoles (early beta)
 
 Companion also runs on the **Legion Go** (83E1) and the **Legion Go S** (83L3, 83N6). It shows only the modules and options that apply to the console it runs on, also in
-Manage Modules. None of this has been tested on these consoles yet.
+Manage Modules. None of this has been tested on these consoles yet. A machine type that is not
+listed is placed by its product name (a Legion Go S, or the Legion Go 8APU1) and is never taken
+for a Legion Go 2; the types 83Q2 and 83Q3 are left out on purpose.
 
 | Module | Legion Go | Legion Go S |
 |---|---|---|
@@ -607,7 +609,7 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
 | A curve point will not move further | Temperatures stay in order and speeds cannot drop between points; the last point stays at 100°C and at least 2000 RPM. |
 | The gyro test works but the game does not react | Check that game's Steam Input layout. |
-| The controllers stopped working, often after sleep | Companion restarts SteamOS's InputPlumber by itself when it has lost the controllers (at most once per 10 minutes); if they still do not respond, restart the console. |
+| The controllers stopped working, often after sleep | Companion restarts SteamOS's InputPlumber by itself when it has lost the controllers (at most once per 10 minutes, and three times until Decky or the console restarts); if they still do not respond, restart the console. |
 | Battery stays above 80% with protection on | Normal: protection stops charging, it does not discharge the battery. |
 | A game still reads old HDR values | Turn on **Fix HDR brightness in games** and restart the game. |
 | Wi-Fi stays on 2.4 GHz | Check the live band; use **Reconnect to 5/6 GHz** when offered. A setting cannot create a missing 5/6 GHz network. |
@@ -826,7 +828,9 @@ transitions and native Steam UI behaviour. CI does not publish releases.
 The archive includes frontend source/build inputs, license notices and bundled pyudev source.
 RyzenAdj is downloaded separately and verified against its pinned hash before every use. It is
 kept in `/var/lib/legiongo2companion-tdp/`, outside Decky's plugin folder, so updates keep it;
-uninstalling leaves it there. See
+uninstalling leaves it there. A Wi-Fi band change keeps a short rollback journal in
+`/var/lib/legiongo2companion-wifi/` until the change has finished; the empty folder stays after
+uninstalling. See
 [SOURCE.md](SOURCE.md) for rebuilding and [NOTICE](NOTICE) for component provenance.
 
 </details>
