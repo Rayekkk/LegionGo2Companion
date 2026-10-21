@@ -189,7 +189,7 @@ def _companion(context):
     caps = facts.get("tdp_caps")
     if isinstance(caps, dict):
         lines.append("TDP: " + " ".join(f"{key}={caps.get(key)}" for key in (
-            "tdp_available", "wmi", "extras", "presets_estimated", "min", "std", "max")))
+            "tdp_available", "wmi", "extras", "min", "std", "max")))
         if caps.get("tdp_error"):
             lines.append(f"TDP error: {caps['tdp_error']}")
     else:

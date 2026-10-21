@@ -694,7 +694,6 @@ class TdpCoreTests(unittest.TestCase):
             'performance': {'spl': 20, 'sppt': 32, 'fppt': 35},
             'max': {'spl': 35, 'sppt': 37, 'fppt': 45},
         })
-        self.assertFalse(caps['presets_estimated'])
         self.assertEqual((caps['min'], caps['std'], caps['max']),
                          (5, {'spl': 35, 'sppt': 37, 'fppt': 45}, {'spl': 35, 'sppt': 37, 'fppt': 45}))
 
@@ -702,7 +701,6 @@ class TdpCoreTests(unittest.TestCase):
         self.machine = '83N6'
         self.firmware_range((40, 43, 53))
         caps = self.rpc('get_caps')
-        self.assertFalse(caps['presets_estimated'])
         self.assertEqual(caps['presets'], {
             'silent': {'spl': 10, 'sppt': 15, 'fppt': 20},
             'balanced': {'spl': 15, 'sppt': 25, 'fppt': 30},
@@ -744,24 +742,10 @@ class TdpCoreTests(unittest.TestCase):
                 self.assertEqual(self.rpc('get_caps')['max'], extras)
                 self.assertTrue(self.rpc('get_extras_unlocked'))
 
-    def test_machine_type_without_bios_values_scales_the_presets_to_its_firmware(self):
-        self.machine = '83N6'
-        self.stack.enter_context(patch.dict(tdp.PRESET_TABLE, clear=True))
-        self.firmware_range((30, 32, 41))
-        caps = self.rpc('get_caps')
-        self.assertTrue(caps['presets_estimated'])
-        self.assertEqual(caps['presets'], {
-            'silent': {'spl': 7, 'sppt': 13, 'fppt': 18},
-            'balanced': {'spl': 14, 'sppt': 22, 'fppt': 27},
-            'performance': {'spl': 17, 'sppt': 28, 'fppt': 32},
-            'max': {'spl': 30, 'sppt': 32, 'fppt': 41},
-        })
-
     def test_go_1_uses_its_bios_presets_and_max_is_its_ceiling(self):
         self.machine = '83E1'
         self.firmware_range((30, 32, 41))
         caps = self.rpc('get_caps')
-        self.assertFalse(caps['presets_estimated'])
         self.assertEqual(caps['presets'], {
             'silent': {'spl': 8, 'sppt': 15, 'fppt': 20},
             'balanced': {'spl': 15, 'sppt': 25, 'fppt': 30},

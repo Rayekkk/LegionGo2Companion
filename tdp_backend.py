@@ -70,9 +70,7 @@ _GO_S_LADDER = {
     "balanced":    {"spl": 15, "sppt": 25, "fppt": 30},
     "performance": {"spl": 30, "sppt": 35, "fppt": 40},
 }
-# The BIOS's own modes on AC per DMI machine type, in watts. A limit missing from a row
-# (or a machine type without one) is the 83N0 value scaled to that console's firmware
-# ceiling, and the ladder is reported as estimated.
+# The BIOS's own modes on AC per DMI machine type, in watts; every Legion Go family type has a full row.
 PRESET_TABLE = {
     "83N0": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # measured
     "83N1": {name: PRESETS_DEFAULT[name] for name in PRESET_LADDER},  # BIOS: same as 83N0
@@ -230,7 +228,7 @@ def _fail(stderr: str, **extra) -> dict:
 
 def _defaults() -> dict:
     """Where a fresh install starts, in milliwatts."""
-    balanced = _presets()[0]["balanced"]
+    balanced = _presets()["balanced"]
     return {"spl":  balanced["spl"]  * 1000,
             "sppt": balanced["sppt"] * 1000,
             "fppt": balanced["fppt"] * 1000,
@@ -264,28 +262,22 @@ def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     return _standard_ceilings_mw()
 
 
-def _presets(battery: bool = False) -> tuple[dict, bool]:
-    """(ladder in watts, estimated) inside the firmware range of the last read.
+def _presets(battery: bool = False) -> dict:
+    """The ladder in watts inside the firmware range of the last read; Max is the firmware ceiling.
 
-    Max is the firmware ceiling. A limit without a BIOS value is the 83N0 one scaled
-    to this console's ceiling for that limit (SPL 8/35 of its SPL max, ...).
-    `battery` takes the BIOS's battery values where it has them.
+    `battery` takes the BIOS's battery values. A machine outside the family (UNSUPPORTED, never
+    applied) shows the 83N0 row.
     """
     std = _ceilings_mw(_firmware_caps)
-    row = PRESET_TABLE.get(_machine_type(), {})
+    row = PRESET_TABLE.get(_machine_type(), PRESET_TABLE["83N0"])
     if battery:
         row = BATTERY_PRESET_TABLE.get(_machine_type(), row)
-    reference = PRESETS_DEFAULT["max"]
-    table, estimated = {}, False
+    table = {}
     for name in PRESET_LADDER:
-        known = row.get(name, {})
-        estimated = estimated or len(known) < len(WMI_ATTRS)
-        watts = {key: known.get(key, round(PRESETS_DEFAULT[name][key] * limit / 1000 / reference[key]))
-                 for key, limit in zip(WMI_ATTRS, std)}
-        triplet = _clamp_triplet(*(watts[key] * 1000 for key in WMI_ATTRS), std)
+        triplet = _clamp_triplet(*(row[name][key] * 1000 for key in WMI_ATTRS), std)
         table[name] = {key: value // 1000 for key, value in zip(WMI_ATTRS, triplet)}
     table["max"] = {key: value // 1000 for key, value in zip(WMI_ATTRS, std)}
-    return table, estimated
+    return table
 
 
 # Plugging the charger in makes the firmware apply its own profile after ours, so the
@@ -467,7 +459,7 @@ def _is_custom_preset(spl, sppt, fppt, preset: str) -> bool:
         values = ()
     return not any(
         values == tuple(entry[key] * 1000 for key in WMI_ATTRS)
-        for entry in _presets()[0].values())
+        for entry in _presets().values())
 
 
 def _target_for_preset(state: dict, spl, sppt, fppt, preset: str) -> tuple[int, int, int]:
@@ -492,12 +484,12 @@ def _battery_target(state: dict, target: tuple[int, int, int], preset: str,
     if not state.get("separate_battery_presets", False) or preset == "custom":
         return target
     ladder = {name: tuple(entry[key] * 1000 for key in WMI_ATTRS)
-              for name, entry in _presets()[0].items()}
+              for name, entry in _presets().items()}
     name = preset if ladder.get(preset) == tuple(target) else next(
         (key for key, values in ladder.items() if values == tuple(target)), "")
     if name not in PRESET_LADDER or (_get_ac_online() if ac_online is None else ac_online):
         return target
-    battery = _presets(battery=True)[0][name]
+    battery = _presets(battery=True)[name]
     return _clamp_for_settings(state, *(battery[key] * 1000 for key in WMI_ATTRS))
 
 
@@ -514,7 +506,7 @@ def _running_battery_preset(state: dict) -> str:
     active = _battery_target(state, requested, preset, False)
     if active == requested or active != _active_triplet(state):
         return ""
-    return next((name for name, entry in _presets(battery=True)[0].items() if name in PRESET_LADDER
+    return next((name for name, entry in _presets(battery=True).items() if name in PRESET_LADDER
                  and _clamp_for_settings(state, *(entry[key] * 1000 for key in WMI_ATTRS)) == active), "")
 
 
@@ -2795,10 +2787,9 @@ class Plugin:
                 error = "Firmware TDP controls are unavailable and verified RyzenAdj is unavailable"
                 if self._helper_error:
                     error += f": {self._helper_error}"
-            presets, estimated = _presets()
             return {
                 # What Silent/Balanced/Performance run on battery with "Separate battery presets".
-                "battery_presets": _presets(battery=True)[0],
+                "battery_presets": _presets(battery=True),
                 "min": min(caps[k]["min"] for k in WMI_ATTRS) if caps else HARD_MIN_MW // 1000,
                 "std": std,
                 # Until the helper is verified the two ranges are the same.
@@ -2811,9 +2802,7 @@ class Plugin:
                 # Enabling Extras (or this retry) downloads the verified helper.
                 "helper_retry_available": (helper_usable and not helper_available
                                            and not _ryzenadj_unsupported),
-                "presets": presets,
-                # No measured ladder for this machine type: scaled from the firmware ceilings.
-                "presets_estimated": estimated,
+                "presets": _presets(),
             }
         return await _offload(_do)
 

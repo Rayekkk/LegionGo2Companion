@@ -41,7 +41,7 @@ def facts(**changes):
                          "wifi": {"applicable": True, "enabled": True, "ready": False,
                                   "error": "nmcli could not activate MyHomeNet"},
                          "tdp": {"applicable": True, "enabled": True, "ready": True}},
-             "inputplumber_restarts": 1, "tdp_caps": {"tdp_available": True, "presets_estimated": False, "min": 5},
+             "inputplumber_restarts": 1, "tdp_caps": {"tdp_available": True, "min": 5},
              "fan": {"supported": True, "beta": False, "error": ""}, "log_dir": "/nonexistent", "user": USER}
     value.update(changes)
     return value
@@ -170,7 +170,7 @@ class ReportContent(_Fixture):
                          "bios_version: RRCN16WW", "ec_firmware_release: 1.16", "VERSION_ID: 3.8.28",
                          "InputPlumber: 0.78.0", "fwupd: 2.0.18", "CPU: AMD Ryzen Z2 Extreme",
                          "legion_device: console=go2 model=83N0", "InputPlumber restarts for a lost controller (this Companion start): 1",
-                         "presets_estimated=False", "Fan: supported=True beta=False", "Fan self-tested BIOS/EC pairs: RRCN16WW/1.16",
+                         "TDP: tdp_available=True wmi=None extras=None min=5", "Fan: supported=True beta=False", "Fan self-tested BIOS/EC pairs: RRCN16WW/1.16",
                          "lenovo-wmi-other-0/ppt_pl1_spl: type=integer; current_value=20; min_value=5; max_value=35",
                          "platform_profile: balanced", "BAT0: type=Battery", "charge_types=[Standard] Long_Life",
                          "capacity=80", "model_name=L24D4PG3", "ACAD: type=Mains online=1",
