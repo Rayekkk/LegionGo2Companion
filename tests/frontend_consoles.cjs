@@ -43,7 +43,7 @@ run(async () => {
     const BETA = "Built from Lenovo's firmware data, not yet tested on this console. Report problems on GitHub.";
     const OLD_FIRMWARE = 'Update the controller firmware in Legion Space to unlock vibration, lighting and gyro.';
     const go1 = driver => ({ modules: status(driver ? [] : ['vibration', 'rgb', 'controller']),
-      device: { console: 'go1', model: '83E1', firmware: true, power_led: false, controller_driver: driver } });
+      device: { console: 'go1', model: '83E1', firmware: false, power_led: false, controller_driver: driver } });
     assert.equal(notice(GO2), undefined, 'a Go 2 shows no Beta row');
     assert.equal(notice({ modules: status([]), device: { console: 'go2', model: '83N1', controller_driver: false } }), undefined);
     assert.equal(notice({ modules: status([]), device: {} }), undefined, 'an unknown console shows none');
