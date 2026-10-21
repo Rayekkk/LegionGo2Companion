@@ -43,7 +43,7 @@ class CpuProfileTests(unittest.TestCase):
         self.resumed = False
         self.limits = [25000, 28000, 35000]
         self.applies = []
-        def apply(*values):
+        def apply(*values, extras=False):
             self.limits[:] = values
             self.applies.append(tuple(values))
             # Firmware changing the platform profile can reset these controls.
@@ -536,7 +536,7 @@ class CpuProfileTests(unittest.TestCase):
         before = self.payload()
         apply = tdp._apply_limits
         first = True
-        def refused(*values):
+        def refused(*values, **_extras):
             nonlocal first
             result = apply(*values)
             if first:
@@ -800,7 +800,7 @@ class CpuProfileTests(unittest.TestCase):
                 tdp._current_game_id = ''; tdp._transition_key = None
                 tdp._check_and_enforce()
                 before = self.payload()
-                def failed_apply(*_values):
+                def failed_apply(*_values, **_extras):
                     self.hardware(True, '128')
                     return {'success': False, 'returncode': -1, 'stdout': '',
                             'stderr': 'firmware refused TDP'}

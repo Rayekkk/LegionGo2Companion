@@ -255,9 +255,13 @@ def _extras_ceilings_mw(std: tuple[int, int, int]) -> tuple[int, int, int]:
     return std[0], HARD_MAX_MW, HARD_MAX_MW
 
 
+def _extras_allowed(state: dict) -> bool:
+    return bool(state.get("extras_unlocked", False)) and _ryzenadj_available and _extras_supported()
+
+
 def _allowed_ceilings_mw(state: dict) -> tuple[int, int, int]:
     """Ceilings the current persisted mode is allowed to apply."""
-    if state.get("extras_unlocked", False) and _ryzenadj_available and _extras_supported():
+    if _extras_allowed(state):
         return _extras_ceilings_mw(_standard_ceilings_mw())
     return _standard_ceilings_mw()
 
@@ -1120,9 +1124,9 @@ def _record_applied(source: str, triplet_mw: tuple) -> None:
     _invalidate_limits_cache()
 
 
-def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
+def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int, *, extras: bool = False) -> dict:
     """The firmware path inside the range it accepts; verified ryzenadj only
-    beyond it (the Extras range) or, on a Go 2, when the firmware interface is absent."""
+    beyond it (the Extras range, when `extras`) or, on a Go 2, when the firmware interface is absent."""
     if not _supported_model():
         return _fail(UNSUPPORTED_MODEL)
     _capture_baseline()
@@ -1130,10 +1134,11 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int) -> dict:
         return _fail("apply busy")
     try:
         caps = _wmi_caps()
-        # After the read, so the firmware's minimums are the floors. Callers bound SPL;
-        # the boosts never pass 50 W (Extras), nor the firmware's own range on a Go S.
+        # After the read, so the firmware's minimums are the floors. Callers clamp first;
+        # this repeats it: SPL never passes the firmware ceiling, the boosts 50 W (Extras).
+        std = _ceilings_mw(caps)
         spl_mw, sppt_mw, fppt_mw = _clamp_triplet(
-            spl_mw, sppt_mw, fppt_mw, None if _extras_supported() else _ceilings_mw(caps))
+            spl_mw, sppt_mw, fppt_mw, _extras_ceilings_mw(std) if extras and _extras_supported() else std)
         triple_w = (("spl", spl_mw // 1000), ("sppt", sppt_mw // 1000), ("fppt", fppt_mw // 1000))
         # No SMU fallback inside the firmware range: a refusal is reported as is.
         if caps and all(caps[k]["min"] <= v <= caps[k]["max"] for k, v in triple_w):
@@ -2122,7 +2127,7 @@ def _apply_limits_with_saved_cpu_power(
     turning their optional capability failure into a TDP failure.
     Caller holds _mutation_lock.
     """
-    result = _apply_limits(spl, sppt, fppt)
+    result = _apply_limits(spl, sppt, fppt, extras=_extras_allowed(state))
     if result["success"]:
         # Without a reason, the RPC that applied it is the event's operation.
         event('tdp', 'limits_applied', reason=reason, source=_last_source,

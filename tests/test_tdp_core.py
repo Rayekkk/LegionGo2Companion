@@ -300,17 +300,23 @@ class TdpCoreTests(unittest.TestCase):
     def test_extras_select_the_firmware_custom_mode_before_ryzenadj(self):
         self.helper_ready()
         self.profile.write_text('performance')  # measured: Extras used to leave a firmware mode on
-        result = tdp._apply_limits(60000, 70000, 80000)
+        result = tdp._apply_limits(60000, 70000, 80000, extras=True)
         self.assertTrue(result['success'], result)
         self.assertEqual(self.profile.read_text(), 'custom')
         self.assertEqual(self.ppts(), (35, 37, 45))  # the nearest limits the firmware accepts
-        self.assertEqual(self.applies(), [[
-            '--stapm-limit=50000', '--slow-limit=50000', '--fast-limit=50000']])
+        self.assertEqual(self.applies(), [[  # SPL stays at the firmware ceiling, only the boosts reach 50 W
+            '--stapm-limit=35000', '--slow-limit=50000', '--fast-limit=50000']])
+
+    def test_without_extras_a_request_above_the_firmware_range_never_reaches_ryzenadj(self):
+        self.helper_ready()
+        self.assertTrue(tdp._apply_limits(60000, 70000, 80000)['success'])
+        self.assertEqual(self.ppts(), (35, 37, 45))
+        self.assertEqual(self.applies(), [])
 
     def test_extras_never_run_ryzenadj_when_custom_mode_is_not_confirmed(self):
         self.helper_ready()
         with self.firmware_ignores_writes():
-            result = tdp._apply_limits(35000, 45000, 50000)
+            result = tdp._apply_limits(35000, 45000, 50000, extras=True)
         self.assertFalse(result['success'])
         self.assertEqual(self.applies(), [])
 
@@ -326,7 +332,7 @@ class TdpCoreTests(unittest.TestCase):
             '--stapm-limit=30000', '--slow-limit=50000', '--fast-limit=50000']])
 
     def test_out_of_range_without_verified_helper_writes_nothing(self):
-        result = tdp._apply_limits(40000, 45000, 50000)
+        result = tdp._apply_limits(40000, 45000, 50000, extras=True)
         self.assertFalse(result['success'])
         self.assertEqual(self.applies(), [])
         self.assertEqual(self.ppts(), (10, 10, 10))
@@ -483,7 +489,7 @@ class TdpCoreTests(unittest.TestCase):
         self.publish_helper()
         self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
         self.bin.write_bytes(HELPER + b'tampered')
-        self.assertFalse(tdp._apply_limits(30000, 45000, 50000)['success'])
+        self.assertFalse(tdp._apply_limits(30000, 45000, 50000, extras=True)['success'])
         self.assertEqual(self.applies(), [])
         self.archive = None  # offline: the start's one download attempt fails
         self.start()
@@ -788,7 +794,7 @@ class TdpCoreTests(unittest.TestCase):
                           caps['tdp_error']), (False, False, False, tdp.NO_FIRMWARE_TDP))
         self.seed(extras_unlocked=True)
         self.assertFalse(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
-        self.assertFalse(tdp._apply_limits(15000, 45000, 50000)['success'])
+        self.assertFalse(tdp._apply_limits(15000, 45000, 50000, extras=True)['success'])
         with tdp._mutation_lock:
             self.assertTrue(tdp._release_controls_locked()['success'])
         self.assertEqual(self.ryzenadj, [])
