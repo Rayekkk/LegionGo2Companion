@@ -821,7 +821,7 @@ class Plugin:
         if self._device.get('console') and self._inputplumber is None and not self._closing:
             # A system repair, independent of the modules; it never runs during controller maintenance.
             self._inputplumber_recovery = LostControllerRecovery(
-                lambda: self._closing or self._guard_blocked or module_runtime.is_paused('controller'),
+                lambda: self._closing or self._guard_blocked or bool(self._guard_error) or module_runtime.is_paused('controller'),
                 updater_running)
             self._inputplumber = module_runtime.background_task(self._inputplumber_recovery.run())
         if self._guard_task is None:

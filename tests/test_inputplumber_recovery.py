@@ -387,6 +387,9 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.started[0].blocked())
         finally:
             module_runtime.resume_controller()
+        plugin._guard_error = "scan failed"  # Admission closed by an unverified conflict scan.
+        self.assertTrue(self.started[0].blocked())
+        plugin._guard_error = ""
         began = time.monotonic()
         await plugin._unload()
         self.assertLess(time.monotonic() - began, main.SHUTDOWN_BUDGET_S)
