@@ -182,40 +182,33 @@ _FRONTEND_APPID_TTL = 12.0
 
 # ── Device identity ────────────────────────────────────────────────────────────
 
-# The Legion Go family by DMI machine type: Go (83E1), Go S (83L3, 83N6) and Go 2
-# (83N0, 83N1). Nothing is written to power controls on any other model.
-LEGION_GO_FAMILY = frozenset({"83E1", "83L3", "83N6", "83N0", "83N1"})
 UNSUPPORTED_MODEL = "TDP control is available only on Lenovo Legion Go consoles."
-# Extras (boosts up to 50 W through ryzenadj) on the Go and the Go 2; the Go S has none.
-EXTRAS_MODELS = frozenset({"83E1", "83N0", "83N1"})
 EXTRAS_UNAVAILABLE = "Allow up to 50 W is not available on this console."
 NO_FIRMWARE_TDP = "This console's firmware does not expose TDP controls."
+# The preset row of a machine type the table does not list, by the console it was placed as.
+_CONSOLE_ROW = {"go1": "83E1", "gos": "83L3", "go2": "83N0"}
 
 
 @functools.cache
-def _machine_type() -> str:
-    """The DMI machine type of a Lenovo ("83N0"), else "". Read once: DMI does not
-    change while the machine is running."""
-    def read(name: str) -> str:
-        try:
-            return module_runtime.read_sysfs_text(os.path.join(module_runtime.DMI_ROOT, name), 128)
-        except (OSError, UnicodeError):
-            return ""
-    return read("product_name") if read("sys_vendor") == "LENOVO" else ""
+def _device() -> tuple:
+    """(console, machine type) as the family places it; nothing is written outside the family.
+    Read once: DMI does not change while the machine is running."""
+    return module_runtime.legion_device()
 
 
 def _supported_model() -> bool:
-    return _machine_type() in LEGION_GO_FAMILY
+    return _device()[0] is not None
 
 
 def _extras_supported() -> bool:
-    return _machine_type() in EXTRAS_MODELS
+    """Extras (boosts up to 50 W through ryzenadj) on the Go and the Go 2; the Go S has none."""
+    return _device()[0] in ("go1", "go2")
 
 
 def _legion_go_2() -> bool:
     """Only a Go 2 falls back to ryzenadj without the firmware attributes:
     35/37/45 W are its ceilings, not another console's."""
-    return _machine_type() in ("83N0", "83N1")
+    return _device()[0] == "go2"
 
 
 def _ok(**extra) -> dict:
@@ -273,9 +266,11 @@ def _presets(battery: bool = False) -> dict:
     applied) shows the 83N0 row.
     """
     std = _ceilings_mw(_firmware_caps)
-    row = PRESET_TABLE.get(_machine_type(), PRESET_TABLE["83N0"])
+    console, model = _device()
+    model = model if model in PRESET_TABLE else _CONSOLE_ROW.get(console, "83N0")
+    row = PRESET_TABLE[model]
     if battery:
-        row = BATTERY_PRESET_TABLE.get(_machine_type(), row)
+        row = BATTERY_PRESET_TABLE.get(model, row)
     table = {}
     for name in PRESET_LADDER:
         triplet = _clamp_triplet(*(row[name][key] * 1000 for key in WMI_ATTRS), std)

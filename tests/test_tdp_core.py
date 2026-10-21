@@ -127,7 +127,7 @@ class TdpCoreTests(unittest.TestCase):
         for name, callback in {
             '_get_running_appid': lambda: self.app, '_get_ac_online': lambda: self.ac,
             '_write_profile': write_profile,
-            '_machine_type': lambda: self.machine,
+            '_device': lambda: (tdp.module_runtime.LEGION_GO_MODELS.get(self.machine), self.machine),
         }.items():
             self.stack.enter_context(patch.object(tdp, name, side_effect=callback))
         self.stack.enter_context(patch.object(tdp.module_runtime, 'suspend_offset', return_value=0.0))
@@ -747,6 +747,15 @@ class TdpCoreTests(unittest.TestCase):
                 self.seed(extras_unlocked=True)
                 self.assertEqual(self.rpc('get_caps')['max'], extras)
                 self.assertTrue(self.rpc('get_extras_unlocked'))
+
+    def test_a_machine_type_placed_by_product_version_gets_its_consoles_tdp(self):
+        self.firmware_range((40, 43, 53))
+        with patch.object(tdp, '_device', return_value=('gos', '83ZZ')):  # a Go S of a later batch
+            caps = self.rpc('get_caps')
+            self.assertEqual((caps['tdp_available'], caps['extras']), (True, False))
+            self.assertEqual(caps['presets']['performance'], {'spl': 30, 'sppt': 35, 'fppt': 40})
+            self.assertTrue(self.rpc('apply_tdp', 15000, 25000, 30000)['success'])
+        self.assertEqual(self.ppts(), (15, 25, 30))
 
     def test_go_1_uses_its_bios_presets_and_max_is_its_ceiling(self):
         self.machine = '83E1'
