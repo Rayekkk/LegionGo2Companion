@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 const root=resolve(import.meta.dirname,'..');
 const read=name=>readFileSync(resolve(root,name),'utf8');
 const methods=JSON.parse(read('desktop/native/rpc-methods.json'));
@@ -22,6 +23,15 @@ if(process.argv.includes('--runtime')) {
   assert.equal(createHash('sha256').update(elf).digest('hex'),manifest.files.legiongo2companion.sha256,'Executable checksum');
   assert.equal(elf.subarray(0,6).toString('hex'),'7f454c460201');
   assert.equal(elf.readUInt16LE(18),62,'Linux executable must target x86-64');
+  // The executable is built from desktop/native alone: it must be that tree as it is now.
+  const rebuild='Rebuild it: python3 scripts/build-native.py ... --bundle dist/desktop';
+  assert.ok(/^[0-9a-f]{40}$/.test(manifest.source_commit ?? '') && manifest.source_dirty===false,
+    `dist/desktop was built from an unknown or uncommitted desktop/native. ${rebuild}`);
+  const git=(...args)=>spawnSync('git',['-C',root,...args],{encoding:'utf8'});
+  const changed=git('diff','--quiet',manifest.source_commit,'--','desktop/native');
+  const untracked=git('status','--porcelain','--','desktop/native');
+  assert.ok(changed.status===0 && untracked.status===0 && untracked.stdout==='',
+    `desktop/native changed since ${manifest.source_commit.slice(0,7)}, the commit dist/desktop was built from. ${rebuild}`);
   console.log('Native Linux executable verified; it links the system Qt 6.9+. This does not establish device execution.');
 }
 console.log(`Native Desktop contract: ${methods.length} existing guarded RPCs; Decky frontend is independent.`);
