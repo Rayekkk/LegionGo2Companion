@@ -266,6 +266,74 @@ class AtomicSettingsTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(manager.path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(manager.backup_path).st_mode), 0o600)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission check")
+    def test_a_rewrite_is_private_unless_the_caller_keeps_a_system_files_mode(self):
+        path = self.root / "file.json"
+        path.write_text("{}"); path.chmod(0o644)
+        safe_settings.atomic_write_json(str(path), {"a": 1})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        path.chmod(0o644)
+        safe_settings._atomic_write_bytes(str(path), b"{}\n", keep_existing=True)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlinks")
+    def test_an_atomic_write_never_replaces_a_link_at_the_target(self):
+        outside = Path(self.temp.name) / "outside.json"
+        outside.write_text("{}")
+        link = self.root / "module.json"
+        link.symlink_to(outside)
+        with self.assertRaises(safe_settings.UnsafeSettingsPath):
+            safe_settings.atomic_write_json(str(link), {"a": 1})
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(outside.read_text(), "{}")
+
+    def test_a_first_install_creates_its_own_settings_directory(self):
+        fresh = self.root / "fresh"
+        manager = safe_settings.AtomicSettingsManager("module", str(fresh))
+        manager.setSetting("a", 1)
+        manager.commit()
+        self.assertEqual(json.loads((fresh / "module.json").read_text(encoding="utf-8")), {"a": 1})
+        self.assertFalse((self.root / "module.json").exists())
+        if os.name == "posix":
+            mask = os.umask(0); os.umask(mask)
+            self.assertEqual(stat.S_IMODE(fresh.stat().st_mode), 0o755 & ~mask)
+
+    def test_settings_names_are_one_plain_path_component(self):
+        for name in ("", ".", "..", "a/b", "a\x00b", None):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                safe_settings.AtomicSettingsManager(name, str(self.root))
+
+    def test_nesting_is_bounded_anywhere_in_the_file(self):
+        deep = "[" * 100 + "]" * 100
+        (self.root / "module.json").write_text('{"first": [], "zero": 0, "second": ' + deep + '}', encoding="utf-8")
+        with self.assertRaises(safe_settings.CorruptSettings):
+            safe_settings.load_json_object(str(self.root / "module.json"))
+
+    def test_stored_values_never_alias_the_callers_objects_and_defaults_apply(self):
+        manager = self.manager()
+        value = {"nested": [1]}
+        manager.setSetting("a", value)
+        value["nested"].append(2)
+        self.assertEqual(manager.getSetting("a"), {"nested": [1]})
+        payload = {"b": {"nested": [1]}}
+        manager.replace(payload)
+        payload["b"]["nested"].append(2)
+        self.assertEqual((manager.getSetting("a"), manager.getSetting("b")), (None, {"nested": [1]}))
+        self.assertEqual(manager.getSetting("missing", 5), 5)
+
+    def test_a_rejected_change_leaves_the_saved_settings_in_use(self):
+        (self.root / "module.json").write_text('{"kept": 1}', encoding="utf-8")
+        manager = self.manager()
+        too_big = "x" * (safe_settings.MAX_SETTINGS_BYTES + 1)
+        manager.setSetting("big", too_big)
+        with self.assertRaises(ValueError):
+            manager.commit()
+        self.assertEqual(manager.settings, {"kept": 1})
+        manager.setSetting("pending", 2)
+        with self.assertRaises(ValueError):
+            manager.replace({"big": too_big})
+        self.assertEqual(manager.settings, {"kept": 1, "pending": 2})
+
 
 class NonblockingMetadataTests(unittest.TestCase):
     def test_settings_open_cannot_wait_for_a_fifo_replaced_after_lstat(self):
@@ -305,6 +373,17 @@ class OpenDirectoryTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["file", "link", "outside", "vetoed"])
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(list((self.root / "vetoed").iterdir()), [])
+
+    def test_without_a_starting_directory_the_walk_starts_at_root(self):
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, cwd)
+        (self.root / "tmp").mkdir()  # the same name below the working directory must not be taken
+        fd = safe_settings.open_directory(["tmp"])
+        try:
+            self.assertEqual(os.fstat(fd).st_ino, os.stat("/tmp").st_ino)
+        finally:
+            os.close(fd)
 
     def test_missing_components_are_created_with_their_mode_and_each_is_vetted(self):
         seen, mask = [], os.umask(0)
