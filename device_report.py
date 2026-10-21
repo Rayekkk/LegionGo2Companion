@@ -174,6 +174,8 @@ def _companion(context):
         state = " ".join(f"{key}={entry.get(key)}" for key in ("applicable", "enabled", "ready"))
         flags = "".join(f" {key}" for key in ("pending", "starting", "maintenance") if entry.get(key))
         error = str(entry.get("error") or "").replace("\n", " ")[:100]
+        if error and name == "wifi":
+            error = "(text left out: it can name a network)"
         lines.append(f"module {name}: {state}{flags}{' error=' + error if error else ''}")
     restarts = facts.get("inputplumber_restarts")
     lines.append("InputPlumber restarts for a lost controller (this Companion start): "

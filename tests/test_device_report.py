@@ -36,7 +36,9 @@ def facts(**changes):
     value = {"version": "2.3.0", "device": {"console": "go2", "model": "83N0", "firmware": True, "power_led": True,
                                              "controller_driver": True},
              "modules": {"fan": {"applicable": True, "enabled": True, "ready": False,
-                                 "error": f"Settings in /home/{USER}/.config could not be read"}},
+                                 "error": f"Settings in /home/{USER}/.config could not be read"},
+                         "wifi": {"applicable": True, "enabled": True, "ready": False,
+                                  "error": "nmcli could not activate MyHomeNet"}},
              "inputplumber_restarts": 1, "tdp_caps": {"tdp_available": True, "presets_estimated": False, "min": 5},
              "fan": {"supported": True, "beta": False, "error": ""}, "log_dir": "/nonexistent", "user": USER}
     value.update(changes)
