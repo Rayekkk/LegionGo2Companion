@@ -242,6 +242,32 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.profile_writes, ['low-power', 'custom'])
         self.assertEqual(self.ppts(), (18, 22, 30))
 
+    def test_a_monitor_started_by_a_finished_start_keeps_its_firmware_access_after_a_stop_request(self):
+        plugin, outcome = tdp.Plugin(), []
+        self.stack.enter_context(patch.object(tdp.Plugin, '_ready', False))
+        self.stack.enter_context(patch.object(tdp.Plugin, '_setup_error', None))
+        self.addCleanup(tdp.module_runtime._stop_requested.discard, 'tdp')
+
+        async def monitor(go):
+            await go.wait()
+            try:
+                await asyncio.to_thread(tdp.module_runtime.firmware_lock.__enter__)
+                tdp.module_runtime.firmware_lock.__exit__(None, None, None)
+                outcome.append('ran')
+            except tdp.module_runtime.StartStopped:
+                outcome.append('refused')
+
+        async def run():
+            go = asyncio.Event()
+            with patch.object(plugin, '_enforce_loop', new=lambda: monitor(go)),                     patch.object(plugin, '_info_loop', new=AsyncMock()):
+                with tdp.module_runtime.starting('tdp'):
+                    await plugin._main()
+                tdp.module_runtime.request_stop('tdp')  # A stop marked for a start that has already finished.
+                go.set()
+                await asyncio.gather(*plugin._tasks)
+        asyncio.run(run())
+        self.assertEqual(outcome, ['ran'])
+
     def test_stop_before_the_startup_apply_is_a_stopped_start_not_a_ready_one(self):
         real_caps = tdp._wmi_caps
         def stop_after_caps():

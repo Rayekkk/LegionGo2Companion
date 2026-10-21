@@ -3022,8 +3022,8 @@ class Plugin:
             Plugin._ready = True
             # Keep references - a bare create_task() may be garbage-collected mid-run.
             self._tasks = [
-                asyncio.create_task(self._enforce_loop()),
-                asyncio.create_task(self._info_loop()),
+                module_runtime.background_task(self._enforce_loop()),
+                module_runtime.background_task(self._info_loop()),
             ]
             saved = await _offload(_load_settings)
             # As get_caps: without the firmware attributes only a Go 2 would run the helper.

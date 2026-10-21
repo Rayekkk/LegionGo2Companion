@@ -122,9 +122,11 @@ def controller_operation(module):
 
 
 def background_task(operation):
-    """Start a long-lived monitor outside the caller's operation generation; never use it to revive a stale retry."""
+    """Start a long-lived monitor outside the caller's operation generation and outside a start's
+    stop mark (firmware_lock); never use it to revive a stale retry."""
     context = contextvars.copy_context()
     context.run(_operation_generation.set, None)
+    context.run(_starting.set, None)
     task = context.run(asyncio.create_task, operation)
     def completed(worker):
         if not worker.cancelled():

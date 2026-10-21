@@ -422,7 +422,7 @@ class Plugin:
             self._running = True
         await self._thread(self._repair)
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._watch())
+            self._task = module_runtime.background_task(self._watch())
 
     async def _unload(self):
         task, self._task = self._task, None
