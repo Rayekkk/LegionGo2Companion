@@ -215,6 +215,11 @@ class LostControllerRecovery:
         self._restarts: list[float] = []
         self._verify = False  # A restart was requested and InputPlumber has not shown the controller since.
 
+    @property
+    def restarts(self) -> int:
+        """Restarts requested since this Companion start (the device report shows it)."""
+        return len(self._restarts)
+
     def _drain(self, monitor) -> None:
         try:
             for device in iter(lambda: monitor.poll(0), None):

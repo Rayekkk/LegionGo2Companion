@@ -39,6 +39,7 @@ const CONTENTS = [
   "system_process.py",
   "inputplumber_process.py",
   "companion_updates.py",
+  "device_report.py",
   "bounded_http.py",
   "tdp_backend.py",
   "fan_backend.py",

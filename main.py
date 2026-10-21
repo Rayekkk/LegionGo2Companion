@@ -33,6 +33,7 @@ import wifi_backend
 import module_runtime
 import diagnostics
 from companion_updates import CompanionUpdates
+import device_report
 from controller_firmware import FirmwarePreparation, INSTALL_SECONDS, updater_running, applies as firmware_applies
 from safe_settings import SettingsManager
 from module_control import withdraw, capture_intent, restore_intent
@@ -44,6 +45,9 @@ from conflict_guard import installed_conflicts, CHECK_INTERVAL_S
 MODULE_NAMES = ('tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller')
 FIRMWARE_RPCS = frozenset({'firmware_get_status', 'firmware_check', 'firmware_download', 'firmware_install'})
 UPDATE_RPCS = frozenset({'updates_check', 'updates_download'}) | FIRMWARE_RPCS
+# Read-only and for any console: no module of its own, also during controller maintenance (it opens no
+# controller), never while the conflict guard has paused Companion (another plugin may be calling the firmware).
+REPORT_RPCS = frozenset({'save_device_report'})
 # Admission exceptions (_guard_component_calls). By default a public RPC waits for startup, is refused while the
 # conflict guard is blocked/failed or the plugin closes, and needs its module (_rpc_module) enabled, ready and
 # not paused; module-less calls (modules_*, updates) also wait while controllers are paused and drain admitted RPCs.
@@ -51,9 +55,10 @@ _UNGUARDED_RPCS = frozenset({'get_version'})
 # Paused or disabled modules cannot hide the update state; this snapshot never opens a controller.
 _ALWAYS_ADMITTED_RPCS = frozenset({'firmware_get_status'})
 _RPC_RESOURCE = {'battery_get_controller_levels': 'controller'}  # Pauses with the controllers, not the battery.
-_PAUSE_EXEMPT_RPCS = FIRMWARE_RPCS  # The firmware handoff itself.
+_PAUSE_EXEMPT_RPCS = FIRMWARE_RPCS | REPORT_RPCS  # The firmware handoff itself, and the read-only report.
 _PAUSE_EXEMPT_MODULE_CHANGES = tuple(name for name in MODULE_NAMES if name not in module_runtime.CONTROLLER_MODULES)
-_BACKGROUND_RPCS = UPDATE_RPCS | {'retry_extras', 'set_extras_unlocked'}  # May download (Extras: RyzenAdj).
+# May download (Extras: RyzenAdj); the report runs up to 20 s and never waits for module calls to drain.
+_BACKGROUND_RPCS = UPDATE_RPCS | REPORT_RPCS | {'retry_extras', 'set_extras_unlocked'}
 _UPDATER_RPCS = UPDATE_RPCS - FIRMWARE_RPCS  # Need the companion updater started.
 GUARD_FAILURE_LIMIT = 3  # Consecutive failed scans (~15 s of periodic checks) before modules are withdrawn.
 UPDATER_WAIT_S = INSTALL_SECONDS  # A write that outlives its Companion is one fwupdtool run.
@@ -138,7 +143,7 @@ def _rpc_module(name):
                            ('rgb_', 'rgb'), ('remap_', 'remap'), ('battery_', 'battery'), ('controller_', 'controller')):
         if name.startswith(prefix):
             return module
-    return None if name.startswith('modules_') or name in UPDATE_RPCS else 'tdp'
+    return None if name.startswith('modules_') or name in UPDATE_RPCS or name in REPORT_RPCS else 'tdp'
 
 
 def _plugin_version() -> str:
@@ -149,6 +154,17 @@ def _plugin_version() -> str:
         return str(value or "0.0.0")
     except (OSError, ValueError, TypeError):
         return "0.0.0"
+
+
+def _session_account():
+    """The console (Decky) user's pwd entry, never root; None when unknown."""
+    try:
+        import pwd
+        username = getattr(decky, 'DECKY_USER', None) or os.environ.get('DECKY_USER')
+        account = pwd.getpwnam(username) if username else None
+    except (ImportError, KeyError):
+        return None
+    return account if account is not None and account.pw_uid > 0 else None
 
 
 def _runtime_identity(dmi='/sys/class/dmi/id', os_release='/etc/os-release') -> dict:
@@ -322,6 +338,8 @@ class Plugin:
         self._updater_wait = None
         self._band_restore = None
         self._inputplumber = None  # Restarts an InputPlumber that lost the controller (Legion Go family).
+        self._inputplumber_recovery = None
+        self._device_report = None  # The running save_device_report; concurrent requests share it.
         self._guard_blocked = False
         self._guard_conflicts = []
         self._guard_error = ""
@@ -376,16 +394,9 @@ class Plugin:
     def _ensure_updates(self):
         if self._updates is not None:
             return
-        home, uid, gid = '', -1, -1
-        try:
-            import pwd
-            username = getattr(decky, 'DECKY_USER', None) or os.environ.get('DECKY_USER')
-            account = pwd.getpwnam(username) if username else None
-            if account is not None and account.pw_uid > 0:
-                home, uid, gid = account.pw_dir, account.pw_uid, account.pw_gid
-        except (ImportError, KeyError):
-            pass
-        self._updates = CompanionUpdates(PLUGIN_DIR, home, uid, gid)
+        account = _session_account()
+        self._updates = CompanionUpdates(PLUGIN_DIR, *((account.pw_dir, account.pw_uid, account.pw_gid)
+                                                       if account else ('', -1, -1)))
 
     async def _run_rpc(self, resource, function, args, kwargs):
         async with self._rpc_locks[resource]:
@@ -808,9 +819,10 @@ class Plugin:
         decky.logger.info(f"[legiongo2companion] startup v{_plugin_version()}")
         if self._device.get('console') and self._inputplumber is None and not self._closing:
             # A system repair, independent of the modules; it never runs during controller maintenance.
-            self._inputplumber = module_runtime.background_task(LostControllerRecovery(
+            self._inputplumber_recovery = LostControllerRecovery(
                 lambda: self._closing or self._guard_blocked or module_runtime.is_paused('controller'),
-                updater_running).run())
+                updater_running)
+            self._inputplumber = module_runtime.background_task(self._inputplumber_recovery.run())
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._watch_conflicts())
         await self._check_guard()
@@ -1166,6 +1178,40 @@ class Plugin:
 
     async def updates_download(self, expected_version: str):
         return await asyncio.to_thread(self._updates.download, expected_version)
+
+    async def save_device_report(self):
+        """A read-only hardware and firmware report in the console user's Desktop folder (device_report)."""
+        task = self._device_report
+        if task is None or task.done():
+            task = self._device_report = asyncio.create_task(self._save_device_report())
+        return await asyncio.shield(task)
+
+    async def _save_device_report(self):
+        account = _session_account()
+        if account is None:
+            return {'success': False, 'error': 'The console user is unknown, so the report cannot be saved.'}
+        await self._ensure_device()
+        try:
+            caps = await asyncio.wait_for(self._tdp.get_caps(), 5.0)
+        except Exception as exc:
+            caps = type(exc).__name__
+        recovery = self._inputplumber_recovery
+        facts = {'version': _plugin_version(), 'device': dict(self._device),
+                 'modules': await asyncio.to_thread(self._module_status),
+                 'inputplumber_restarts': recovery.restarts if recovery else None, 'tdp_caps': caps,
+                 'fan': {'supported': self._fan._supported, 'beta': self._fan._beta, 'error': self._fan._error},
+                 'log_dir': diagnostics.LOG_DIR, 'user': account.pw_name}
+        try:
+            text = await asyncio.wait_for(asyncio.to_thread(
+                device_report.collect, facts, stopped=lambda: self._closing), device_report.TOTAL_SECONDS + 5)
+            path = await asyncio.to_thread(device_report.save, text, account.pw_dir, account.pw_uid, account.pw_gid)
+        except asyncio.TimeoutError:
+            return {'success': False, 'error': 'Collecting the report took too long. Try again.'}
+        except (OSError, ValueError) as exc:
+            diagnostics.event('plugin', 'device_report_failed', level='warning', error=exc)
+            return {'success': False, 'error': str(exc) if isinstance(exc, ValueError)
+                    else 'The report could not be saved in the Desktop folder.'}
+        return {'success': True, 'path': path}
 
     async def firmware_get_status(self):
         return await asyncio.to_thread(self._firmware.status)
