@@ -28,6 +28,72 @@ class OffloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await module_runtime.offload('battery', blocked), (True, 'done'))
 
 
+class ControllerMaintenanceTests(unittest.IsolatedAsyncioTestCase):
+    """fwupd must never write a controller while Companion's own controller work runs."""
+
+    def setUp(self):
+        self.addCleanup(module_runtime.resume_controller)
+
+    async def test_maintenance_waits_for_running_controller_work_then_refuses_new_work(self):
+        release = threading.Event()
+        worker = asyncio.create_task(module_runtime.offload('rgb', release.wait, 5))
+        await asyncio.sleep(0.05)
+        module_runtime.pause_controller()
+        drained = asyncio.create_task(module_runtime.drain_controller())
+        await asyncio.sleep(0.1)
+        self.assertFalse(drained.done(), 'maintenance began while a controller write was running')
+        release.set()
+        await drained
+        self.assertTrue(await worker)
+        ran = []
+        with self.assertRaises(module_runtime.ControllerPaused):
+            await module_runtime.offload('rgb', ran.append, 1)
+        self.assertEqual(ran, [])
+        self.assertTrue(await module_runtime.offload('battery', lambda: True))
+
+    async def test_an_operation_begun_before_maintenance_cannot_continue_after_it(self):
+        for _ in range(2):  # every maintenance, not only the first
+            with module_runtime.controller_scope('rgb'):
+                module_runtime.pause_controller()
+                module_runtime.resume_controller()
+                with self.assertRaises(module_runtime.ControllerPaused):
+                    module_runtime.require_available('rgb')
+            module_runtime.require_available('rgb')
+
+
+class PlatformProbeTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(time, 'CLOCK_BOOTTIME'), 'Linux boot-time clock')
+    def test_suspend_offset_is_the_time_spent_suspended(self):
+        offset = module_runtime.suspend_offset()
+        self.assertIsNotNone(offset)
+        self.assertGreaterEqual(offset, -0.01)
+        self.assertLessEqual(offset, time.clock_gettime(time.CLOCK_BOOTTIME))
+
+    @unittest.skipUnless(os.name == 'posix', 'HID device names and driver links')
+    def test_kernel_controller_follows_the_real_driver_link(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for driver in ('hid-lenovo-go', 'hid-generic'):
+                (root / 'drivers' / driver).mkdir(parents=True)
+            devices = root / 'devices'
+            devices.mkdir()
+            def device(name, driver):
+                (devices / name).mkdir()
+                (devices / name / 'driver').symlink_to(root / 'drivers' / driver)
+            device('0003:17EF:61EC.0002', 'hid-generic')
+            self.assertFalse(module_runtime.kernel_controller(str(devices)))
+            device('0003:17EF:61EB.0003', 'hid-lenovo-go')
+            self.assertTrue(module_runtime.kernel_controller(str(devices)))
+
+    def test_require_success_raises_not_confirmed_for_any_unconfirmed_reply(self):
+        for reply, message in ((None, 'not confirmed'), ('ok', 'not confirmed'), ({'success': 'true'}, 'not confirmed'),
+                               ({'success': False, 'stderr': 'busy'}, 'busy'),
+                               ({'success': False, 'error': 'E1', 'message': 'm'}, 'E1')):
+            with self.subTest(reply=reply), self.assertRaisesRegex(module_runtime.NotConfirmed, message):
+                module_runtime.require_success(reply)
+        module_runtime.require_success({'success': True})
+
+
 
 class FirmwareLockTests(unittest.TestCase):
     """The Legion's AML aborts EC/WMI methods that run at once; Companion's own writes take turns."""
