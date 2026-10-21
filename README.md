@@ -563,7 +563,8 @@ clear it. Companion never switches the backend or runs another Wi-Fi manager.
 ### About
 
 **About** shows the installed version, author and license, and checks for updates as
-described in [Updating](#updating).
+described in [Updating](#updating). **Save device report** is described in
+[Reporting a problem on Legion Go / Go S (beta)](#reporting-a-problem-on-legion-go--go-s-beta).
 
 ## Desktop app
 
@@ -635,6 +636,24 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 page says, when it happened and what you did, plus the logs from **About → View logs** in the
 Desktop app or as described in [LOGGING.md](docs/LOGGING.md). [CHANGELOG.md](CHANGELOG.md) lists
 the changes in each version.
+
+### Reporting a problem on Legion Go / Go S (beta)
+
+Companion has not been tested on the Legion Go, the Legion Go S or the Legion Go 2 Z2 (83N1) yet,
+so reports from these consoles help most.
+
+1. In Decky open Companion → **About** → **Save device report** (Desktop app: **About → View logs
+   → Save device report**). A file `LegionGoCompanion-device-report-<date>-<time>.txt` appears on
+   your Desktop.
+2. Open a [Beta report](https://github.com/Rayekkk/LegionGo2Companion/issues/new?template=beta-report.yml),
+   say what works and what does not, and attach the file.
+
+The report is made on the console, without internet, and only reads. It lists the model and
+firmware versions (DMI, BIOS and EC, firmware attributes, battery, controllers and their drivers,
+sensors, the display's maker and model, the Wi-Fi adapter and its bands, fwupd devices), the
+SteamOS, kernel, InputPlumber and fwupd versions, Companion's module status, and how many warnings
+and errors Companion logged in the last 24 hours. It contains no serial numbers, MAC addresses,
+network names, user names or log text. Open it in a text editor to check it before you send it.
 
 ## How it works
 

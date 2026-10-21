@@ -1,0 +1,46 @@
+name: Beta report (Legion Go / Go S)
+description: How Companion works on a Legion Go, Legion Go S, Legion Go 2 Z2 (83N1) or another new model.
+title: "Beta report: Legion Go / Go S"
+body:
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console
+      options:
+        - Legion Go
+        - Legion Go S
+        - Legion Go 2 Z2 (83N1)
+        - other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Companion version
+      description: Shown in Decky under Legion Go 2 Companion → About.
+      placeholder: "2.3.0"
+    validations:
+      required: true
+  - type: textarea
+    id: works
+    attributes:
+      label: What works
+      description: The modules and options you tried that behave as expected.
+  - type: textarea
+    id: broken
+    attributes:
+      label: What does not work
+      description: What you did, what the page said and when it happened.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Device report
+      description: >-
+        In Decky open Legion Go 2 Companion → About → **Save device report** (Desktop app: About → View logs →
+        **Save device report**). Drag the `LegionGoCompanion-device-report-….txt` file it saved on your Desktop
+        into this box. It contains no serial numbers, network names or user names.
+      placeholder: Drop the device report file here.
+    validations:
+      required: true
