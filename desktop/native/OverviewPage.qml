@@ -44,7 +44,8 @@ ColumnLayout {
     readonly property var gyroLabels:Gyro.SOURCE_LABELS
     readonly property var bandLabels:({off:"Automatic",five_six_no_24:"Prefer 5/6 GHz",five_six_only:"Only 5/6 GHz",six_ghz_only:"Only 6 GHz"})
     // Cards and rows of modules that do not apply to this console are hidden.
-    function shown(name) { return Modules.moduleShown(modules[name]); }
+    // Nothing is listed until get_version says which modules apply to this console.
+    function shown(name) { return !!s("get_version").modules && !Modules.consoleDetecting(modules) && Modules.moduleShown(modules[name]); }
     readonly property bool performanceShown:shown("fan") || shown("tdp")
     readonly property bool controllersShown:shown("vibration") || shown("controller")
     function available(name) { return !backend.connected?"Offline":Modules.moduleStartingText(modules[name])?"Starting":modules[name]?.pending?"Restoring":modules[name]?.enabled===false?"Off":modules[name]?.error?"Needs attention":modules[name]?.ready?"On":"Unavailable"; }

@@ -32,8 +32,11 @@ export const moduleStartingText = entry => !entry?.starting || entry.maintenance
 const moduleDescription = (name, device) =>
   name === "rgb" && device?.power_led === false ? "Stick lights." : MODULE_DESCRIPTIONS[name] || "";
 export const moduleNote = (name, entry, device) => moduleStartingText(entry) || entry?.error || entry?.note || moduleDescription(name, device);
-/** A module that does not apply to this console is not shown anywhere, Manage Modules included. */
-export const moduleShown = entry => entry?.applicable !== false;
+/** A module that does not apply to this console is not shown anywhere, Manage Modules included.
+ *  applicable null: the backend has not detected the console yet; no field: an older backend, shown. */
+export const moduleShown = entry => entry?.applicable !== false && entry?.applicable !== null;
+/** Which modules apply is not known yet (applicable null): the UI waits instead of flashing everything. */
+export const consoleDetecting = modules => Object.values(modules ?? {}).some(entry => entry?.applicable === null);
 export const cleanupRetryShown = entry => !!entry?.pending && !entry.maintenance && !entry.starting;
 export const startRetryShown = entry => entry?.enabled === true && entry.ready === false && !entry.pending && !entry.maintenance && !entry.starting;
 

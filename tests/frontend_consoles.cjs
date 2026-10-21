@@ -92,6 +92,11 @@ run(async () => {
   const M = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/modules.mjs')).href);
   assert.equal(M.moduleShown({ applicable: false }), false);
   assert.equal(M.moduleShown({ enabled: false }), true, 'turned off is not the same as not applicable');
-  assert.equal(M.moduleShown(undefined), true, 'shown until the backend says otherwise');
+  assert.equal(M.moduleShown(undefined), true, 'an older backend without the field is shown');
+  assert.equal(M.moduleShown({ applicable: null }), false, 'not detected yet: not shown');
+  assert.equal(M.consoleDetecting({ tdp: { applicable: null }, fan: { applicable: null } }), true);
+  assert.equal(M.consoleDetecting({ tdp: { applicable: true }, fan: { applicable: false } }), false);
+  assert.equal(M.consoleDetecting({ tdp: { enabled: true } }), false, 'no field: an older backend');
+  assert.equal(M.consoleDetecting(undefined), false);
   console.log('Console visibility verified.');
 });

@@ -18,6 +18,8 @@ ApplicationWindow {
     // A page whose modules do not apply to this console is hidden (Controllers also holds controller firmware).
     function pageShown(id) {
         const gate=bridgeModel.state("get_version"),shown=name=>Modules.moduleShown(gate?.modules?.[name]);
+        // Until the first answer says which modules apply, only the pages that always apply are listed.
+        if(!gate?.modules || Modules.consoleDetecting(gate.modules))return ["controller","tdp","fan","rgb","battery","display","wifi"].indexOf(id)<0;
         return id==="controller"?["vibration","remap","controller"].some(shown) || gate?.device?.firmware!==false:
             ["tdp","fan","rgb","battery","display","wifi"].indexOf(id)<0 || shown(id);
     }

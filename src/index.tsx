@@ -30,11 +30,11 @@ import { ControllerPage, getControllerStatus, controllerSummary, type Controller
 import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
-import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
+import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, consoleDetecting, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
-type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; applicable?: boolean; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
+type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; applicable?: boolean | null; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
 const EMPTY_MODULES: ModuleStates = {};
 // What applies to this console besides the modules (get_version.device); a missing value is shown.
 type Device = {console?: string | null; model?: string | null; firmware?: boolean; power_led?: boolean; controller_driver?: boolean};
@@ -635,7 +635,8 @@ const Content: FC = () => {
     return () => clearInterval(timer);
   }, [visible]);
 
-  if (!status) return <PageShell><PanelSection title="Checking installed plugins">
+  // The backend answers get_version before it has detected the console (applicable null): wait, don't flash every module.
+  if (!status || (!status.blocked && consoleDetecting(status.modules))) return <PageShell><PanelSection title="Checking installed plugins">
     {infoRow("Checking compatibility", "Hardware controls will appear after the check completes.")}
   </PanelSection></PageShell>;
   if (status.blocked) return <PageShell>
