@@ -145,7 +145,9 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.console.fwupd = status
                 task = asyncio.create_task(module.LostControllerRecovery(lambda: False, lambda: False).run())
                 try:
-                    await asyncio.sleep(0.2)
+                    # Held: the check reached the fwupd question and said no. Otherwise: the restart came.
+                    await self.until(lambda: self.console.restarts() if restarted
+                                     else any("get-property" in argv for argv in self.console.calls))
                 finally:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -182,13 +184,16 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_ends_held_retries(self):
         self.task.cancel()
         await asyncio.gather(self.task, return_exceptions=True)
-        self.blocked = True
-        self.task = asyncio.create_task(self.recovery.run())
-        await asyncio.sleep(0.1)
+        blocked, seen = [True], []
+        self.task = asyncio.create_task(module.LostControllerRecovery(
+            lambda: seen.append(1) or blocked[0], lambda: False).run())
+        await self.until(lambda: len(seen) >= 2)  # the first check and a retry were held
         self.task.cancel()
         await asyncio.gather(self.task, return_exceptions=True)
-        self.blocked = False
-        await asyncio.sleep(0.1)
+        blocked[0] = False
+        asked = len(seen)
+        await asyncio.sleep(0.1)  # A retry that survived the cancel would now find the way free.
+        self.assertEqual(len(seen), asked)
         self.assertEqual(self.console.restarts(), [])
         self.assertEqual(self.checks.call_count, 0)
 
@@ -229,17 +234,27 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(name):
                 self.console = Console()
                 flags = {"blocked": [False], "updating": False}
+                asked = {"blocked": 0, "updating": 0}
                 if name == "blocked":
                     flags["blocked"] = [True]
                 elif name == "updating":
                     flags["updating"] = True
                 else:
                     flags["blocked"] = [False, True]  # Firmware install or Decky's stop began meanwhile.
-                blocked = lambda: flags["blocked"].pop(0) if len(flags["blocked"]) > 1 else flags["blocked"][0]
+
+                def blocked():
+                    asked["blocked"] += 1
+                    return flags["blocked"].pop(0) if len(flags["blocked"]) > 1 else flags["blocked"][0]
+
+                def updating():
+                    asked["updating"] += 1
+                    return flags["updating"]
                 self.checks.reset_mock()
-                task = asyncio.create_task(module.LostControllerRecovery(blocked, lambda: flags["updating"]).run())
+                task = asyncio.create_task(module.LostControllerRecovery(blocked, updating).run())
                 try:
-                    await asyncio.sleep(0.2)
+                    # The check has reached the question that holds the restart.
+                    await self.until({"blocked": lambda: asked["blocked"] >= 1, "updating": lambda: asked["updating"] >= 1,
+                                      "blocked_during_confirmation": lambda: asked["blocked"] >= 2}[name])
                 finally:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -250,9 +265,9 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_restart_that_does_not_help_is_not_repeated(self):
         self.console.heals_on_restart = False
         await self.until(lambda: "restart_did_not_recover_controller" in self.names())
-        for _ in range(3):
+        for again in (2, 3, 4):
             self.recovery._wake.set()
-            await asyncio.sleep(0.08)
+            await self.until(lambda: self.names().count("restart_did_not_recover_controller") == again)
         self.assertEqual(self.console.restarts(), [RESTART])
 
     async def test_restarts_are_spaced_and_capped_per_run(self):
@@ -312,16 +327,18 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         left, right = socket.socketpair()
         self.addCleanup(left.close)
         self.addCleanup(right.close)
-        monitor = types.SimpleNamespace(fileno=left.fileno, poll=lambda timeout: None)
+        attached, drained = [], []
+        monitor = types.SimpleNamespace(fileno=left.fileno, poll=lambda timeout: drained.append(1))
 
         def attach(loop, drain):
             loop.add_reader(monitor.fileno(), drain, monitor)
+            attached.append(1)
             return monitor
         with patch.object(module, "_hid_monitor", side_effect=attach):
             task = asyncio.create_task(module.LostControllerRecovery(lambda: False, lambda: False).run())
-            await asyncio.sleep(0.05)
+            await self.until(lambda: attached)
             right.send(b"x")  # Level-triggered: _drain runs (and finds nothing) while the reader is registered.
-            await asyncio.sleep(0.05)
+            await self.until(lambda: drained)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self.assertFalse(asyncio.get_running_loop().remove_reader(left.fileno()))  # Already gone.
