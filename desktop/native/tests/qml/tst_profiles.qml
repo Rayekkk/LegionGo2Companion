@@ -240,7 +240,7 @@ TestCase {
         compare(field("rgb","Power button light").get(),true,"Managed: the saved choice");
     }
     function test_powerLightBetaNoteOnlyWhereTheBackendCallsItABeta() {
-        const text="Beta on this console: the power-button light is set through the same firmware field as on the Legion Go 2, checked against this console's BIOS at every use.";
+        const text="Beta on this console: the power-button light is set through the same firmware field as on the Legion Go 2, checked against this console's BIOS before Companion uses it.";
         for(const beta of [undefined,true]) {
             fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{rgb:{enabled:true,ready:true}},device:{console:beta?"go1":"go2",power_led:true}},
                 rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true},power_led:{supported:true,current:true,beta:beta}}});

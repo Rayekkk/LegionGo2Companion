@@ -20,7 +20,7 @@ export const ringsNote = status => status?.rgb?.drift ? RESTORING : "";
 export const powerChecked = status => status?.settings?.power_led_managed
   ? !!status.settings.power_led_enabled : status?.power_led?.current ?? true;
 /** Shown beside the switch where the backend calls the light a beta (power_led.beta: Legion Go, Go S). */
-export const POWER_LED_BETA_TEXT = "Beta on this console: the power-button light is set through the same firmware field as on the Legion Go 2, checked against this console's BIOS at every use.";
+export const POWER_LED_BETA_TEXT = "Beta on this console: the power-button light is set through the same firmware field as on the Legion Go 2, checked against this console's BIOS before Companion uses it.";
 export const powerNote = status => status?.power_led?.supported
   ? `Turn the light in the power button on or off.${status.power_led.drift ? ` ${RESTORING}` : ""}`
   : status?.power_led?.reason ?? "The power button light is unavailable.";

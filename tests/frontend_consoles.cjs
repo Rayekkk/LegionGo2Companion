@@ -77,7 +77,7 @@ run(async () => {
       const h = mount('rgb.tsx', { component: 'RgbPage', responses: { rgb_get_status: () => status } });
       h.render({ powerLight: true }); await settle(); const tree = h.render({ powerLight: true });
       assert.equal(label(tree, 'Beta')?.props.description, beta ? 'Beta on this console: the power-button light is set through the '
-        + "same firmware field as on the Legion Go 2, checked against this console's BIOS at every use." : undefined);
+        + "same firmware field as on the Legion Go 2, checked against this console's BIOS before Companion uses it." : undefined);
       h.unmount();
     }
   }
