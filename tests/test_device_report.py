@@ -72,7 +72,8 @@ class Commands:
             out = ("Wiphy phy0\n\twiphy index: 0\n\tPermanent MAC: 12:34:56:78:9A:BC\n\tSSID: MyHomeNet\n"
                    "\tBand 1:\n\t\tFrequencies:\n\t\t\t* 2412.0 MHz [1] (20.0 dBm)\n"
                    "\t\t\t* 2484.0 MHz [14] (disabled)\n\t\tBitrates (non-HT):\n\t\t\t* 1.0 Mbps\n"
-                   "\tBand 2:\n\t\tFrequencies:\n\t\t\t* 5180.0 MHz [36] (23.0 dBm)\n")
+                   "\tBand 2:\n\t\tFrequencies:\n\t\t\t* 5180.0 MHz [36] (23.0 dBm)\n"
+                   "\tBand 4:\n\t\tFrequencies:\n\t\t\t* 5955.0 MHz [1] (disabled)\n")
         if out is None:
             return subprocess.CompletedProcess(argv, 1, "", "")
         return subprocess.CompletedProcess(argv, 0, out, "")
@@ -178,13 +179,14 @@ class ReportContent(_Fixture):
                          "hwmon5 name=lenovo_wmi_other files=fan1_input,pwm1_enable fan1_input=3100",
                          "card1-eDP-1: manufacturer=LEN product=0x8A3B name=LGO2 OLED",
                          "gamescope display scripts: lenovo.legiongo2.oled.lua",
-                         "Wi-Fi band 1: 2412 MHz; disabled: 2484", "Wi-Fi band 2: 5180 MHz; disabled: none",
+                         "Wi-Fi bands: 2.4 GHz, 5 GHz\n",  # no channel lists: they name the country
                          "Legion Go 2 Controller: plugin=legion_hid version=0x0000041a", "guids=1234-guid",
                          "/home/<user>/.config", "fan.control_fault warning: 1",
                          "RyzenAdj limits ==\nnot installed or not verified"):
             self.assertIn(expected, text)
         self.assertNotIn("old_failure", text, "only the last 24 hours")
         self.assertNotIn("NVMe", text, "fwupd: only Legion/Lenovo plugins")
+        self.assertNotIn("2484", text, "Wi-Fi: no channel lists")
         self.assertNotIn("BootOrder", text, "firmware attributes: lenovo-wmi-other only")
         if os.name == "posix":
             for expected in ("HID 0003:17EF:61EB.0001 name=Lenovo Legion Go 2 driver=hid-lenovo-go",

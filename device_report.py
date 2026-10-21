@@ -402,16 +402,16 @@ def _network(context):
     if not lines:
         lines.append("PCI network controllers: none")
     try:
-        bands, band = collections.OrderedDict(), None
+        # Only which bands have a usable channel: the channel lists would name the country.
+        usable, in_band = set(), False
         for line in context.command([IW, "phy"]).splitlines():
-            if match := _BAND.match(line):
-                band = bands.setdefault(match.group(1), ([], []))
-            elif band is not None and (match := _FREQUENCY.match(line)):
-                band["disabled" in match.group(2)].append(match.group(1))
-        for number, (enabled, disabled) in bands.items():
-            lines.append(f"Wi-Fi band {number}: {' '.join(enabled) or 'none'} MHz; disabled: {' '.join(disabled) or 'none'}")
-        if not bands:
-            lines.append("Wi-Fi bands: none reported")
+            if _BAND.match(line):
+                in_band = True
+            elif in_band and (match := _FREQUENCY.match(line)) and "disabled" not in match.group(2):
+                mhz = int(match.group(1))
+                usable.add("2.4 GHz" if mhz < 3000 else "5 GHz" if mhz < 5925 else "6 GHz" if mhz <= 7125 else "")
+        lines.append("Wi-Fi bands: " + (", ".join(band for band in ("2.4 GHz", "5 GHz", "6 GHz") if band in usable)
+                                        or "none usable"))
     except Exception as exc:
         lines.append(f"Wi-Fi bands: unavailable: {_reason(exc)}")
     return lines
