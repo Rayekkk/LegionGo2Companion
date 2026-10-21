@@ -439,6 +439,18 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(('fan', 'module_start_failed'), [args for args, _ in self.events(event)])
             self.plugin._fan._unload.assert_awaited_once()  # The failed start's cleanup.
 
+    async def test_hung_start_that_was_stopped_is_not_logged_as_started_late(self):
+        with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main.diagnostics, 'event') as event:
+            release = await self.start_with_hung_fan(main.module_runtime.StartStopped('stopped'))
+            published = self.plugin._publish_modules.await_count
+            release.set()
+            while self.plugin._publish_modules.await_count == published:
+                await asyncio.sleep(0.01)
+            names = [args for args, _ in self.events(event)]
+            self.assertIn(('fan', 'module_start_stopped'), names)
+            self.assertNotIn(('fan', 'module_started_late'), names)
+            self.assertFalse(self.plugin._module_status()['fan']['ready'])
+
     async def test_shutdown_during_hung_start_stays_within_budget(self):
         with patch.object(main, 'MODULE_START_LIMIT_S', 0.05), patch.object(main, 'STARTING_STOP_WAIT_S', 0.05), \
                 patch.object(main.diagnostics, 'event') as event:

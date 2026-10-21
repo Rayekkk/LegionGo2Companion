@@ -635,9 +635,9 @@ class Plugin:
 
     async def _finish_late_start(self, name, start, began):
         await asyncio.wait({start})
-        # A failure was already recorded in health and logged as module_start_failed.
-        started = not start.cancelled() and start.exception() is None
-        if started:
+        # A failure was already recorded in health and logged as module_start_failed,
+        # a stopped start (not ready, no error) as module_start_stopped.
+        if self._module_health.get(name, {}).get('ready'):
             diagnostics.event(name, 'module_started_late', seconds=round(time.monotonic() - began, 1))
         async with self._guard_lock:
             if self._closing or not self._modules_started:
