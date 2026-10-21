@@ -199,6 +199,7 @@ EDID_BACKUP = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "edid-original.bin")
 EDID_BLOCK = 128
 EXT_TAG_CTA = 0x02
 EXT_TAG_DISPLAYID = 0x70
+REINSTALL_ATTEMPTS = 3  # Starts that may try to put back a script our uninstall removed.
 
 # panel_mode stays None (setup screen) until the user picks: no mode is a safe default.
 DEFAULT_SETTINGS = {
@@ -219,6 +220,7 @@ DEFAULT_SETTINGS = {
     "edid_write_pending": None,
     "edid_patched_identity": None,
     "script_reinstall": False,  # our uninstall removed the script; the next start puts it back
+    "script_reinstall_attempts": None,  # starts that tried; REINSTALL_ATTEMPTS failures give up
     # What the running session had loaded when it was removed: {"session", "sha256", "restart_pending"};
     # after a silent reinstall, {"session", "sha256"} of the bytes that session still runs.
     "script_reinstall_loaded": None,
@@ -2268,16 +2270,20 @@ class Plugin:
             return ok
 
     @staticmethod
-    def _script_lost_to_update() -> bool:
-        """True once after our uninstall removed the script of a mode set up earlier, if nothing took its place."""
+    def _script_lost_to_update() -> dict | None:
+        """After our uninstall removed the script of a mode set up earlier, if nothing took its place:
+        the settings that close the reinstall once it succeeded; else None (also once out of attempts)."""
         with Plugin._runtime_lock:
             if not _bind_script_dir():
-                return False  # The Gaming Mode user is not known yet; the next start decides.
+                return None  # The Gaming Mode user is not known yet; the next start decides.
             marker = settings.getSetting("script_reinstall", None)
             loaded = settings.getSetting("script_reinstall_loaded", None)
+            attempts = settings.getSetting("script_reinstall_attempts", None)
+            attempts = 0 if attempts is None else attempts if type(attempts) is int and attempts >= 0 else REINSTALL_ATTEMPTS
             # Before 2.3 no marker: a saved panel mode is the evidence, as every version saves it
             # only after Setup installed its script (2.1.0 too; no setting tells 2.2.x apart).
-            lost = (marker in (True, None) and Plugin._state.get("panel_mode") in MODES
+            lost = (marker in (True, None) and attempts < REINSTALL_ATTEMPTS
+                    and Plugin._state.get("panel_mode") in MODES
                     and not Plugin._state.get("reset_in_progress")
                     and not Plugin.native_display_active() and not os.path.lexists(INSTALLED_SCRIPT))
             bundled = _read_script_bytes(BUNDLED_SCRIPT)
@@ -2289,12 +2295,17 @@ class Plugin:
                 # This session loaded these very bytes before the update removed the file:
                 # putting them back needs no Gaming Mode restart.
                 Plugin._loaded_script_variant = _script_variant(bundled)
-            if settings.getSetting("script_reinstall", None) is not False:
+            if lost:
+                # Counted before the attempt, so a start that dies in it counts too.
+                Plugin._store_settings({"script_reinstall_attempts": attempts + 1})
                 # Kept after a silent reinstall: a later plugin reload in this session finds the file
                 # newer than the session's start and must still know the session runs these bytes.
-                Plugin._store_settings({"script_reinstall": False, "script_reinstall_loaded": {
-                    "session": Plugin._gamescope_started_at, "sha256": sha} if silent else None})
-            return lost
+                return {"script_reinstall": False, "script_reinstall_attempts": None, "script_reinstall_loaded": {
+                    "session": Plugin._gamescope_started_at, "sha256": sha} if silent else None}
+            if marker is not False:
+                Plugin._store_settings({"script_reinstall": False, "script_reinstall_attempts": None,
+                                        "script_reinstall_loaded": None})
+            return None
 
     @staticmethod
     def _refresh_setup() -> None:
@@ -3247,9 +3258,13 @@ class Plugin:
         stopped = functools.partial(module_runtime.stop_requested, "display")
         if Plugin._state["reset_in_progress"] and not stopped():
             await self.reset_settings()
-        if not stopped() and await _offload(Plugin._script_lost_to_update):
-            diagnostic_event('display', 'script_reinstalled', mode=Plugin._state["panel_mode"])
-            await Plugin._apply_mode(Plugin._state["panel_mode"], reinstall=True)
+        reinstalled = None if stopped() else await _offload(Plugin._script_lost_to_update)
+        if reinstalled is not None:
+            mode = Plugin._state["panel_mode"]
+            ok = not (await Plugin._apply_mode(mode, reinstall=True)).get("setup_error")
+            diagnostic_event('display', 'script_reinstalled', level='info' if ok else 'warning', mode=mode, success=ok)
+            if ok:  # A failure keeps the marker: the next start tries again.
+                await _offload(Plugin._store_settings, reinstalled)
 
         # Before the slower startup work: a game that creates its surface before
         # the forced-support flag is back loses HDR for its whole run.
@@ -3361,7 +3376,8 @@ class Plugin:
                     if note == "removed the display script":
                         # Decky also uninstalls before every update; the next start puts it back,
                         # without a restart if this session already runs the same script.
-                        Plugin._store_settings({"script_reinstall": True, "script_reinstall_loaded": {
+                        Plugin._store_settings({"script_reinstall": True, "script_reinstall_attempts": None,
+                                                "script_reinstall_loaded": {
                             "session": Plugin._gamescope_started_at,
                             "sha256": hashlib.sha256(removed).hexdigest() if removed is not None else None,
                             "restart_pending": Plugin._state.get("restart_pending") is True}})

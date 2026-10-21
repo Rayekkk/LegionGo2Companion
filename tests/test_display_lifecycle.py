@@ -518,6 +518,31 @@ class DisplayUpdateTests(ResetFixture, unittest.TestCase):
                 self.assertTrue(self.state['restart_pending'])
                 self.assertEqual(self.state['setup_note'], 'installed, restart Game Mode to apply')
 
+    def test_a_failed_reinstall_is_retried_at_the_next_start_a_bounded_number_of_times(self):
+        real = display._install_script
+        with patch.object(display, '_install_script', return_value=(False, 'disk full')):
+            self.update()
+        self.assertFalse(self.script.exists())
+        self.assertEqual(self.state['setup_error'], 'disk full')
+        self.assertIsNot(self.persisted()['script_reinstall'], False, 'kept for the next start')
+
+        def start(install):
+            display.Plugin._task = display.Plugin._prop_task = None  # the previous start's, on its own loop
+            self.state.update(setup_error='', setup_done=False)
+            with patch.object(display, '_install_script', side_effect=install):
+                asyncio.run(display.Plugin()._main())
+        start(real)
+        self.assertEqual(self.script.read_bytes(), self.own_lua)
+        self.assertIs(self.persisted()['script_reinstall'], False)
+
+        self.script.unlink()
+        self.store.replace({**self.saved, 'script_reinstall': True})
+        failed = Mock(return_value=(False, 'disk full'))
+        for _ in range(5):
+            start(failed)
+        self.assertEqual(failed.call_count, display.REINSTALL_ATTEMPTS)
+        self.assertIs(self.persisted()['script_reinstall'], False, 'given up')
+
     def test_update_never_replaces_a_script_found_in_its_place(self):
         self.update(lambda: self.script.write_bytes(b'-- hand tuned'))
         self.assertEqual(self.script.read_bytes(), b'-- hand tuned')
