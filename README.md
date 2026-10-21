@@ -59,31 +59,37 @@ left out on purpose.
 | Feature | Legion Go 2 | Legion Go | Legion Go S |
 |---|:---:|:---:|:---:|
 | TDP & CPU (Boost, EPP) | ✅ | ✅ ¹ | ✅ ¹ |
-| Allow up to 50 W | ✅ | ✅ ¹ | ❌ |
+| Allow up to 50 W | ✅ | ✅ ¹ | ➖ |
 | Separate battery presets | ✅ | ✅ ¹ | ✅ ¹ |
 | Fan Control | ✅ ³ | ❌ | ❌ |
-| Vibration | ✅ | ✅ ² | ❌ |
+| Vibration | ✅ | ✅ ² | ➖ |
 | Lighting (stick lights) | ✅ | ✅ ² | ✅ |
-| Power-button light | ✅ | ❌ | ❌ |
-| Button mapping | ✅ | ❌ | ❌ |
-| Gyro & touchpad | ✅ | ✅ ² | ❌ |
+| Power-button light | ✅ | ✅ ⁴ | ✅ ⁴ |
+| Button mapping | ✅ | ➖ | ➖ |
+| Gyro & touchpad | ✅ | ✅ ² | ➖ |
 | Battery protection | ✅ | ✅ ¹ | ✅ ¹ |
-| Display | ✅ | ❌ | ❌ |
+| Display | ✅ | ➖ | ➖ |
 | Wi-Fi and band policy | ✅ | ✅ ¹ | ✅ ¹ |
 | Controller firmware | ✅ | ❌ | ❌ |
 | Device report | ✅ | ✅ | ✅ |
 | Desktop app | ✅ | ✅ | ✅ |
+
+✅ supported · ➖ not needed on this console · ❌ not supported yet
 
 ¹ When SteamOS offers what the feature needs: the firmware's power limits for TDP, the Long
 Life charge mode for Battery, the MT7922 (`mt7921e`) Wi-Fi driver for the band policy.
 ² With the 2025 controller firmware. The Legion Go's controllers on older firmware have no Linux
 driver for these, so Companion hides them; update the controllers in Legion Space to unlock them.
 ³ On the Legion Go 2 Z2 (83N1) Fan Control is a beta, see below.
+⁴ Beta: not tested on this console yet.
 
-Not offered on the Legion Go and Legion Go S on purpose: Fan Control and the power-button light
-need EC data that has only been verified on the Legion Go 2; Display's modes are for the Legion Go 2
-OLED panel (the other consoles use SteamOS's own display profiles); SteamOS handles the Legion Go's
-back buttons and the Legion Go S gyro natively.
+Not supported yet on the Legion Go and Legion Go S: Fan Control, which needs EC data that has only
+been verified on the Legion Go 2, and controller firmware updates. Not needed there: Display's modes
+are for the Legion Go 2 OLED panel (the other consoles use SteamOS's own display profiles); SteamOS
+handles the Legion Go's back buttons and the Legion Go S gyro natively; the Legion Go S has no
+vibration to set, needs no button mapping, and its firmware already allows more than 50 W. The
+power-button light uses the same firmware field as on the Legion Go 2, at the place each console's
+own BIOS describes, and stays hidden when the BIOS does not describe it exactly so.
 
 <details>
 <summary><b>Model compatibility and hardware checks</b></summary>
@@ -93,12 +99,15 @@ when the expected Lenovo controller and the complete `hid-lenovo-go` lighting in
 present. An 8AHP2 owner confirmed RGB and sleep/wake recovery on SteamOS 3.9.1 Preview
 (build 20260914.100). This covers controller RGB; not every feature has been verified on 8AHP2.
 
-The **power-button light**, **Fan Control** and **controller firmware** require a Legion Go 2:
-**83N0 / Legion Go 8ASP2** or **83N1 / Legion Go 8AHP2** (Fan Control on the 83N1 is a beta:
-its BIOS describes the same EC fields, but the fan registers have not been tested on it, and it
-needs the 83N1's own RQCN BIOS line). They do not depend on an exact BIOS or EC version:
+**Fan Control** and **controller firmware** require a Legion Go 2: **83N0 / Legion Go 8ASP2**
+or **83N1 / Legion Go 8AHP2** (Fan Control on the 83N1 is a beta: its BIOS describes the same EC
+fields, but the fan registers have not been tested on it, and it needs the 83N1's own RQCN BIOS
+line). The **power-button light** works on these and, as a beta, on the Legion Go (83E1) and the
+Legion Go S (83L3, 83N6). None of them depend on an exact BIOS or EC version:
 
-- The power-button light checks that the BIOS's ACPI table still describes the light the same way.
+- The power-button light checks that the BIOS's ACPI table still describes the light the same way
+  (on each console the place its own BIOS uses), reads the light back after each change and puts it
+  back if the change did not hold.
 - Fan Control checks the EC fan interface's readings at every start. On its first start with a
   BIOS/EC version it has not seen (on an 83N1 always the first start) it also runs a one-time fan check: a short raise of the fan speed that Companion watches. If
   that check fails, Fan Control returns to firmware automatic, turns off and the page says
@@ -396,7 +405,7 @@ Turn on **Enable lighting control**, switch **Stick lights** on or off and choos
 <a href="docs/screenshots/rgb-lighting.png"><img src="docs/screenshots/rgb-lighting.png" alt="Lighting effect, hue, saturation and brightness" width="360"></a>
 
 Changes save automatically and come back after startup and wake. **Power button light**
-switches the light in the power button (83N0 model). **Restore original lighting** returns the
+switches the light in the power button (beta on the Legion Go and Legion Go S). **Restore original lighting** returns the
 lights to how they were before Companion.
 
 <details>
