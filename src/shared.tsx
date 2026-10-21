@@ -82,7 +82,7 @@ export const runningApp = (): RunningApp | null => {
 };
 
 /** One Router read, handed to every watching module. */
-export const checkRunningApp = () => {
+const checkRunningApp = () => {
   const app = runningApp();
   return Promise.all([...gameClients].map((client) => client.check(app)));
 };

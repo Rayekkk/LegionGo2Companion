@@ -25,14 +25,11 @@ export interface WifiStatus {
   error?: string;
   message?: string;
 }
-export const POLICY_LABELS: Record<Policy, string>;
 export const POLICY_ACTIONS: Record<Policy, WifiAction>;
 export const CONFIRMATIONS: Record<"five_six_only" | "six_ghz_only", { title: string; ok: string; text: string }>;
 export const CHANGED: string;
 export const UNVERIFIED: string;
-export function bandName(frequency?: string | number | null): string;
 export function savedPolicy(status?: WifiStatus | null): Policy;
-export function inactivePolicy(status?: WifiStatus | null): boolean;
 export function canRun(status: WifiStatus | null | undefined, action: WifiAction): boolean;
 export function actionShown(status: WifiStatus | null | undefined, action: "band" | "high" | "six"): boolean;
 export function bandOptions(status?: WifiStatus | null): { id: Policy; label: string }[];

@@ -26,7 +26,6 @@ export interface CpuPowerControls {
   profile?: { app_id: string; ac_profile: boolean; active: boolean; cpu_boost_enabled: boolean | null; epp: string | null };
 }
 
-export const OFFSET_MAX: { sppt: number; fppt: number };
 export const FALLBACK_STD: Caps;
 export const FALLBACK_MAX: Caps;
 export const FALLBACK_MIN: number;
@@ -43,9 +42,7 @@ export function withFppt(t: Tuning, v: number, caps: Caps): Tuning;
 export const PRESETS: PresetTable;
 export const PRESET_LABELS: Record<PresetKey, string>;
 export const PRESET_ORDER: PresetKey[];
-export function detectPreset(spl: number, sppt: number, fppt: number, table?: PresetTable): PresetKey;
 export function resolvedPreset(spl: number, sppt: number, fppt: number, stored: string | undefined, table: PresetTable): PresetKey;
-export function exceedsCaps(spl: number, sppt: number, fppt: number, caps: Caps): boolean;
 export function activeLimits(settings: SettingsLimits | null | undefined, table?: PresetTable):
   { spl: number; sppt: number; fppt: number; global: boolean; label: string } | null;
 export function overviewSummary(settings: (SettingsLimits & { enabled?: boolean }) | null | undefined, table?: PresetTable): string;
@@ -72,7 +69,6 @@ export function sourceText(info: TdpInfo | null | undefined): string;
 export const EPP_NAMED_VALUES: Record<string, number>;
 export const EPP_PREFERENCE: string;
 export function eppLabel(profile: string | null | undefined): string;
-export function parseNumericEpp(value: string | null | undefined): number | null;
 export function editorControls(controls: CpuPowerControls): CpuPowerControls;
 export function eppPercent(epp: EppControl, step: number): number;
 export function eppValue(percent: number): string;

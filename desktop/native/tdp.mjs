@@ -6,7 +6,7 @@
 // SPL is the dial; slow and fast boost are headroom above it, so raising the TDP carries them along and no
 // slider position breaks FPPT >= SPPT >= SPL or the ceilings. A tuning is {spl, spptOff, fpptOff} in watts;
 // caps are {spl, sppt, fppt}.
-export const OFFSET_MAX = { sppt: 15, fppt: 15 };
+const OFFSET_MAX = { sppt: 15, fppt: 15 };
 // Placeholders until get_caps() answers with this console's firmware ceilings (the Legion Go 2's numbers,
 // FALLBACK_STD_W in tdp_backend.py). Nothing after that answer uses them.
 export const FALLBACK_STD = { spl: 35, sppt: 37, fppt: 45 };
@@ -66,7 +66,7 @@ export const PRESETS = {
 export const PRESET_LABELS = { silent: "Silent", balanced: "Balanced", performance: "Performance", max: "Maximum", custom: "Custom" };
 export const PRESET_ORDER = ["silent", "balanced", "performance", "max", "custom"];
 
-export function detectPreset(spl, sppt, fppt, table = PRESETS) {
+function detectPreset(spl, sppt, fppt, table = PRESETS) {
   for (const key of Object.keys(table)) {
     const v = table[key];
     if (v.spl === spl && v.sppt === sppt && v.fppt === fppt) return key;
@@ -81,7 +81,7 @@ export function resolvedPreset(spl, sppt, fppt, stored, table) {
   return value && value.spl === spl && value.sppt === sppt && value.fppt === fppt ? stored : detectPreset(spl, sppt, fppt, table);
 }
 
-export const exceedsCaps = (spl, sppt, fppt, caps) => spl > caps.spl || sppt > caps.sppt || fppt > caps.fppt;
+const exceedsCaps = (spl, sppt, fppt, caps) => spl > caps.spl || sppt > caps.sppt || fppt > caps.fppt;
 
 /** What runs now according to get_settings (mW), in watts with its preset label; null while unknown. */
 export function activeLimits(settings, table = PRESETS) {
@@ -183,7 +183,7 @@ export function eppLabel(profile) {
   return readable.charAt(0).toUpperCase() + readable.slice(1);
 }
 
-export function parseNumericEpp(value) {
+function parseNumericEpp(value) {
   if (!value || !/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 && parsed <= 255 ? parsed : null;

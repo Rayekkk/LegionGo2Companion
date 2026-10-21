@@ -6,7 +6,6 @@ type Status = {
   rgb?: { supported?: boolean; reason?: string; drift?: boolean };
   power_led?: { supported?: boolean; reason?: string; current?: boolean | null; drift?: boolean };
 };
-export const RESTORING: string;
 export const RESTORE_NOTE: string;
 export const SPEEDS: { id: number; label: string }[];
 export function effectsEditable(settings?: Settings | null): boolean;

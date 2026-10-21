@@ -4,7 +4,7 @@
 // Key order is the menu and Manage Modules order.
 export const MODULE_LABELS = { tdp: "TDP", fan: "Fan Control", vibration: "Vibration", rgb: "Lighting",
   remap: "Button mapping", controller: "Gyro & touchpad", battery: "Battery", display: "Display", wifi: "Wi-Fi" };
-export const MODULE_DESCRIPTIONS = {
+const MODULE_DESCRIPTIONS = {
   tdp: "Power limits and CPU settings. Off: Lenovo's default limits return.",
   fan: "Your own fan curve. Off: the fan returns to automatic.",
   vibration: "Controller and touchpad vibration.",
@@ -29,7 +29,7 @@ const MODULE_OFF_AFTER_START_TEXT = "Turns off when it has finished starting.";
 export const moduleStartingText = entry => !entry?.starting || entry.maintenance ? ""
   : entry.enabled === false ? MODULE_OFF_AFTER_START_TEXT : MODULE_STARTING_TEXT;
 /** What a module does on this console (get_version.device): the power button light only where it applies. */
-export const moduleDescription = (name, device) =>
+const moduleDescription = (name, device) =>
   name === "rgb" && device?.power_led === false ? "Stick lights." : MODULE_DESCRIPTIONS[name] || "";
 export const moduleNote = (name, entry, device) => moduleStartingText(entry) || entry?.error || entry?.note || moduleDescription(name, device);
 /** A module that does not apply to this console is not shown anywhere, Manage Modules included. */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Wi-Fi rules and texts, shared by the Desktop app and the Decky panel (src/wifi.tsx imports this file).
 
-export const POLICY_LABELS = { off: "Automatic", five_six_no_24: "Prefer 5/6 GHz", five_six_only: "Only 5/6 GHz", six_ghz_only: "Only 6 GHz" };
+const POLICY_LABELS = { off: "Automatic", five_six_no_24: "Prefer 5/6 GHz", five_six_only: "Only 5/6 GHz", six_ghz_only: "Only 6 GHz" };
 /** The action that applies each band policy; "high" and "six" are the one-time reconnects. */
 export const POLICY_ACTIONS = { off: "off", five_six_no_24: "prefer", five_six_only: "strict", six_ghz_only: "sixOnly" };
 export const CONFIRMATIONS = {
@@ -13,7 +13,7 @@ export const CONFIRMATIONS = {
 export const CHANGED = "Wi-Fi changed. Choose again.";
 export const UNVERIFIED = "The final connection or setting could not be verified. Check the current Wi-Fi state.";
 
-export function bandName(frequency) {
+function bandName(frequency) {
   const value = Number(frequency);
   if (!Number.isFinite(value) || value <= 0) return "Unknown band";
   return value < 3000 ? "2.4 GHz" : value < 5925 ? "5 GHz" : "6 GHz";
@@ -25,7 +25,7 @@ const backendOf = status => { const b = status?.live?.wifi_backend; return b ===
 const supported = status => ["legion_go", "legion_go_s", "legion_go_2"].includes(status?.settings?.device_family) && status.settings.driver === "mt7921e";
 
 /** A saved policy the active backend cannot use (iwd choices under WPA, or 6 GHz only under iwd). */
-export function inactivePolicy(status) {
+function inactivePolicy(status) {
   const backend = status?.live?.wifi_backend, saved = savedPolicy(status);
   return (backend === "wpa_supplicant" && (saved === "five_six_no_24" || saved === "five_six_only"))
     || (backend === "iwd" && saved === "six_ghz_only");

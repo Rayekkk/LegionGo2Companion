@@ -54,13 +54,13 @@ export const speedLabel = (rpm: number | undefined, state: Pick<FanState, "setti
   speedText(rpm, state.settings.display_unit, state.limits?.max_rpm);
 const RPM_EDIT_STEPS = [1,10,50,100,200,500];
 const PERCENT_EDIT_STEPS = [1,2,5,10];
-export const speedEditStep = (rpmStep: number, state: Pick<FanState, "settings" | "limits">) => {
+const speedEditStep = (rpmStep: number, state: Pick<FanState, "settings" | "limits">) => {
   const percent = state.settings.display_unit === "percent";
   const options = percent ? PERCENT_EDIT_STEPS : RPM_EDIT_STEPS;
   const wanted = percent ? rpmStep/state.limits.max_rpm*100 : rpmStep;
   return options.reduce((best, value) => Math.abs(value-wanted) < Math.abs(best-wanted) ? value : best);
 };
-export const fanReadingLabel = (state?: FanState, now = Date.now()) => {
+const fanReadingLabel = (state?: FanState, now = Date.now()) => {
   const r = state?.readings;
   const age = (r?.age_seconds ?? Infinity) + (now-(state?.receivedAt ?? -Infinity))/1000;
   if (!r?.valid || !Number.isFinite(age) || age < 0 || age > 2.5 ||
@@ -68,7 +68,7 @@ export const fanReadingLabel = (state?: FanState, now = Date.now()) => {
   return `APU ${r.apu_temperature!.toFixed(1)}°C · ${speedLabel(r.rpm, state!)}`;
 };
 export { editPoint, fanStatus };
-export const fanMode = (state?: FanState) => fanStatus(state).headline;
+const fanMode = (state?: FanState) => fanStatus(state).headline;
 export const fanSummary = (state?: FanState) => `${fanReadingLabel(state)} · ${fanMode(state)}`;
 const notify = (body: string) => toaster.toast({ title: "Fan Control", body });
 

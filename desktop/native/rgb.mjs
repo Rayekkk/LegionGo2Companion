@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Lighting rules and texts, shared by the Desktop app and the Decky panel (src/rgb.tsx imports this file).
 
-export const RESTORING = "Restoring saved state…";
+const RESTORING = "Restoring saved state…";
 export const RESTORE_NOTE = "Returns the lights to how they were before Companion.";
 export const SPEEDS = [{ id: 0, label: "Slow" }, { id: 50, label: "Medium" }, { id: 100, label: "Fast" }];
 
