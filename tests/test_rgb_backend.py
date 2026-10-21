@@ -14,8 +14,9 @@ from unittest.mock import patch
 
 import test_integration  # Shared Decky and Windows/POSIX compatibility fixture.
 
+import module_runtime
 import rgb_backend
-from support import power_led_dsdt
+from support import GO1_POWER_LED_FIELDS, power_led_dsdt
 
 
 class MemorySettings:
@@ -78,6 +79,7 @@ def led_writes(led, *, fail=0):
 class RgbBackendTests(unittest.TestCase):
     def setUp(self):
         rgb_backend._power_capability_cache = None
+        rgb_backend._power_layout = None
         rgb_backend._last_error = ""
 
     def test_successful_write_allows_bounded_stale_readback_without_replaying_write(self):
@@ -497,7 +499,7 @@ class RgbBackendTests(unittest.TestCase):
                 self.assertEqual(memory.data["state"]["original_rgb"], chosen["original_rgb"])
 
     def test_uninstall_restores_the_power_led_and_the_updated_plugin_reapplies_it(self):
-        register = bytearray([0b10100101 & ~rgb_backend.POWER_LED_MASK])  # The LED is on before Companion.
+        register = bytearray([0b10100101 & ~rgb_backend.POWER_LED_GO2.mask])  # The LED is on before Companion.
         with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
             led = Path(raw)
             make_led(led, enabled="false")
@@ -506,6 +508,7 @@ class RgbBackendTests(unittest.TestCase):
                 patch.object(rgb_backend, "settings", memory),
                 patch.object(rgb_backend, "_rgb_capability", return_value=(str(led), "")),
                 patch.object(rgb_backend, "_power_capability", return_value=(True, "")),
+                patch.object(rgb_backend, "_power_layout", rgb_backend.POWER_LED_GO2),
                 patch.object(rgb_backend, "_with_power_lock", side_effect=lambda operation: operation()),
                 patch.object(rgb_backend, "_map_power_register",
                              side_effect=lambda _write, operation: operation(register, 0)),
@@ -663,6 +666,7 @@ class RgbBackendTests(unittest.TestCase):
 
         with (
             patch.object(rgb_backend, "_power_capability", return_value=(True, "")),
+            patch.object(rgb_backend, "_power_layout", rgb_backend.POWER_LED_GO2),
             patch.object(rgb_backend, "_with_power_lock", side_effect=lambda operation: operation()),
             patch.object(rgb_backend, "_map_power_register", side_effect=fake_map),
         ):
@@ -774,6 +778,136 @@ class RgbBackendTests(unittest.TestCase):
                 clock.return_value=110
                 self.assertFalse(rgb_backend._power_capability()[0])
                 mmio.assert_not_called()
+
+
+def go_s_dsdt(**changes):
+    return power_led_dsdt(**{"base": 0xFE0B0300, **changes})
+
+
+def go1_dsdt(**changes):
+    return power_led_dsdt(**{"base": 0xFE0B0300, "region": b"ECMM", "fields": GO1_POWER_LED_FIELDS, **changes})
+
+
+GO2_DMI = dict(product_family="Legion Go 8ASP2", product_name="83N0", board_name="LNVNB161216")
+
+
+class PowerLedBetaTests(unittest.TestCase):
+    """Owner's decision D1: the power-button light on the Go S and Go 1, each gated by DMI and its own DSDT."""
+
+    class Register:
+        def __init__(self, value, drop=False):
+            self.value, self.drop = value, drop
+
+        def __getitem__(self, _index):
+            return self.value
+
+        def __setitem__(self, _index, value):
+            if not self.drop:
+                self.value = value
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        (self.root / "dmi").mkdir()
+        (self.root / "mem").write_bytes(bytes(4096))
+        self.register = self.Register(0xFF)
+        self.mapped = []
+        for target, name, value in (
+            (module_runtime, "DMI_ROOT", str(self.root / "dmi")),
+            (rgb_backend, "DSDT_PATH", str(self.root / "DSDT")),
+            (rgb_backend, "DEV_MEM_PATH", str(self.root / "mem")),
+            (rgb_backend, "_power_capability_cache", None),
+            (rgb_backend, "_power_layout", None),
+            (rgb_backend, "_last_error", ""),
+        ):
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, kwargs in (
+            ("_rgb_capability", dict(return_value=(None, "test"))),
+            ("_with_power_lock", dict(side_effect=lambda operation: operation())),
+            ("_map_power_register", dict(side_effect=lambda write, operation: self.mapped.append(
+                rgb_backend._power_layout.address) or operation(self.register, 0))),
+        ):
+            patcher = patch.object(rgb_backend, name, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def console(self, dsdt, vendor="LENOVO", **dmi):
+        for name, value in dict(sys_vendor=vendor, bios_version="TEST01WW", **dmi).items():
+            (self.root / "dmi" / name).write_text(value + "\n", encoding="ascii")
+        (self.root / "DSDT").write_bytes(dsdt)
+        rgb_backend._power_capability_cache = None
+        rgb_backend._power_layout = None
+        self.mapped.clear()
+
+    def test_each_console_sets_only_its_own_bit_at_its_own_address(self):
+        for dmi, dsdt, address, bit, beta in (
+            (GO2_DMI, power_led_dsdt(), 0xFEEC2310, 6, False),  # Go 2 unchanged
+            (dict(product_family="Legion Go S 8ARP1", product_name="83L3"), go_s_dsdt(), 0xFE0B0310, 6, True),
+            (dict(product_family="Legion Go S 8APU1", product_name="83N6"), go_s_dsdt(), 0xFE0B0310, 6, True),
+            (dict(product_family="Legion Go 8APU1", product_name="83E1"), go1_dsdt(), 0xFE0B0352, 5, True),
+        ):
+            with self.subTest(model=dmi["product_name"]), patch.object(rgb_backend, "settings", MemorySettings()):
+                self.console(dsdt, **dmi)
+                self.register.value = 0xFF  # off, every other bit set
+                plugin = rgb_backend.Plugin()
+                result = asyncio.run(plugin.set_power_led(True))
+                self.assertTrue(result["success"], result["error"])
+                self.assertEqual(self.register.value, 0xFF & ~(1 << bit))
+                self.assertEqual(set(self.mapped), {address})
+                power = result["status"]["power_led"]
+                self.assertEqual((power["supported"], power["current"], power["beta"]), (True, True, beta))
+                self.assertTrue(asyncio.run(plugin.set_power_led(False))["success"])
+                self.assertEqual(self.register.value, 0xFF)
+
+    def test_a_dsdt_that_does_not_describe_the_models_field_hides_the_light_without_mmio(self):
+        go_s = dict(product_family="Legion Go S 8ARP1", product_name="83L3")
+        go1 = dict(product_family="Legion Go 8APU1", product_name="83E1")
+        lpbl_bit7 = [(None, 0x80)] + [(n, 1) for n in (b"LSTE", b"LID2", b"EKTS", b"DISV", b"SMAF", b"S4RF", b"OSRT", b"LPBL")]
+        for reason, dmi, dsdt in (
+            ("Go S with the Go 2's ERAM base", go_s, power_led_dsdt()),
+            ("Go S with LPBL at bit 7", go_s, go_s_dsdt(fields=lpbl_bit7)),
+            ("Go S with its region renamed", go_s, go_s_dsdt(region=b"ECMM")),
+            ("Go S with the Go 1's table", go_s, go1_dsdt()),
+            ("Go 1 with the Go S's table", go1, go_s_dsdt()),
+            ("Go 1 with LEDP where LEDM is (0x58 bit 0)", go1, go1_dsdt(fields=[(None, 0x58 * 8), (b"LEDP", 1)])),
+            ("Go 1 with LEDP two bits wide", go1, go1_dsdt(fields=GO1_POWER_LED_FIELDS[:-3] + [(b"LEDP", 2), (b"RGHD", 1)])),
+            ("Go 1 without LEDP", go1, go1_dsdt(fields=GO1_POWER_LED_FIELDS[:-3])),
+            ("Go 1 with LEDP twice", go1, go1_dsdt(fields=GO1_POWER_LED_FIELDS + [(b"LEDP", 1)])),
+            ("Go 1 region moved", go1, go1_dsdt(base=0xFE0B0400)),
+            ("Go 1 region too short", go1, go1_dsdt(length=0x52)),
+            ("not a Lenovo", dict(go1, vendor="OTHER"), go1_dsdt()),
+            ("machine type outside the beta", dict(product_family="Legion Go S 8ARP1", product_name="83Q2"), go_s_dsdt()),
+        ):
+            with self.subTest(reason), patch.object(rgb_backend, "settings", MemorySettings()):
+                self.console(dsdt, **dmi)
+                result = asyncio.run(rgb_backend.Plugin().set_power_led(False))
+                self.assertFalse(result["success"])
+                power = result["status"]["power_led"]
+                self.assertEqual((power["supported"], power["beta"]), (False, False))
+                self.assertEqual((self.mapped, self.register.value), ([], 0xFF))
+
+    def test_an_unconfirmed_write_restores_the_bit_and_reports_the_error(self):
+        memory = MemorySettings()
+        with patch.object(rgb_backend, "settings", memory):
+            self.console(go1_dsdt(), product_family="Legion Go 8APU1", product_name="83E1")
+            self.register.value = 0xFF & ~(1 << 5)  # on
+            writes = []
+            real_set = self.Register.__setitem__
+
+            def ec_drops_our_bit(register, index, value):  # the EC rewrites the byte with the old bit
+                writes.append(value)
+                real_set(register, index, value & ~(1 << 5) if len(writes) == 1 else value)
+            with patch.object(self.Register, "__setitem__", ec_drops_our_bit):
+                result = asyncio.run(rgb_backend.Plugin().set_power_led(False))
+            self.assertFalse(result["success"])
+            self.assertIn("did not confirm", result["error"])
+            self.assertEqual(writes[0], 0xFF, "only bit 5 was asked to change")
+            self.assertEqual(self.register.value, 0xFF & ~(1 << 5), "the original bit is back")
+            self.assertFalse(memory.data["state"]["power_led_managed"])
+            self.assertTrue(result["status"]["power_led"]["current"])
 
 
 if __name__ == "__main__":

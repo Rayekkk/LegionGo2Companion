@@ -74,6 +74,7 @@ class RgbRpcTests(unittest.TestCase):
         # Gate predicates and the /dev/mem boundary are faked; every write below is the real code.
         stack.enter_context(patch.object(rgb_backend, '_rgb_capability', return_value=(str(self.led), '')))
         stack.enter_context(patch.object(rgb_backend, '_power_capability', return_value=(True, '')))
+        stack.enter_context(patch.object(rgb_backend, '_power_layout', rgb_backend.POWER_LED_GO2))
         stack.enter_context(patch.object(rgb_backend, '_with_power_lock', side_effect=lambda operation: operation()))
         stack.enter_context(patch.object(rgb_backend, '_map_power_register',
                                          side_effect=lambda _write, operation: operation(self.register, 0)))

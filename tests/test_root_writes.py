@@ -170,7 +170,7 @@ class ImuWriteTests(TempTree):
 @unittest.skipUnless(POSIX, 'mmap of a device file needs POSIX')
 class PowerLedMmapTests(TempTree):
     MARKER = 0xA4  # other bits set in both nibbles, bit 0 clear (a stray `| 1` shows), bit 6 clear
-    BIT = rgb_backend.POWER_LED_MASK
+    BIT = rgb_backend.POWER_LED_GO2.mask
 
     def setUp(self):
         super().setUp()
@@ -183,8 +183,11 @@ class PowerLedMmapTests(TempTree):
         self.dsdt.write_bytes(power_led_dsdt())
         identity = {'product_family': rgb_backend.EXPECTED_FAMILY, 'product_name': rgb_backend.EXPECTED_PRODUCT,
                     'board_name': rgb_backend.EXPECTED_BOARD, 'bios_version': 'RRCN16WW'}
+        # The Go 2's layout moved onto a page of the fake /dev/mem; its DSDT says the same.
+        layout = rgb_backend.POWER_LED_GO2._replace(base=3 * self.page)
+        self.dsdt.write_bytes(power_led_dsdt(base=layout.base))
         for name, value in {
-            'POWER_LED_ADDRESS': self.address, 'DEV_MEM_PATH': str(self.devmem),
+            'POWER_LED_GO2': layout, '_power_layout': layout, 'DEV_MEM_PATH': str(self.devmem),
             'POWER_LOCK_PATH': str(self.root / 'power.lock'), 'DSDT_PATH': str(self.dsdt),
             '_power_capability_cache': None, '_power_capability_retry_at': 0.0,
         }.items():
@@ -294,20 +297,34 @@ class PowerLedMmapTests(TempTree):
         mapped.assert_not_called()
 
     def test_audited_physical_address_maps_the_right_page_and_byte(self):
-        address = 0xFEEC2300 + 0x10
-        size = address - address % self.page + self.page
-        try:
-            with open(self.devmem, 'r+b') as handle:
-                handle.truncate(size)  # sparse
-        except OSError as exc:
-            self.skipTest(f'cannot create a sparse {size}-byte file: {exc}')
-        self.address = address
-        with patch.object(rgb_backend, 'POWER_LED_ADDRESS', address):
-            self.set_byte(self.MARKER | self.BIT)
-            self.assertTrue(rgb_backend._write_power_led(True))
-        self.assertEqual(self.byte(), self.MARKER & ~self.BIT)
-        self.assertEqual(self.byte(address - 1), 0)
-        self.assertEqual(self.byte(address + 1), 0)
+        # Go 2 unchanged: 0xFEEC2310 bit 6. Beta: Go S 0xFE0B0310 bit 6, Go 1 0xFE0B0352 bit 5.
+        # setUp moved POWER_LED_GO2 onto the fake page; this is the real one, spelled out.
+        go2 = rgb_backend.PowerLedLayout(b'ERAM', 0xFEEC2300, 0x10, 6, b'LPBL')
+        for layout, address, bit in ((go2, 0xFEEC2310, 6),
+                                     (rgb_backend.POWER_LED_BETA['83L3'], 0xFE0B0310, 6),
+                                     (rgb_backend.POWER_LED_BETA['83N6'], 0xFE0B0310, 6),
+                                     (rgb_backend.POWER_LED_BETA['83E1'], 0xFE0B0352, 5)):
+            with self.subTest(address=hex(address)):
+                self.assertEqual((layout.address, layout.mask), (address, 1 << bit))
+                size = address - address % self.page + self.page
+                try:
+                    self.devmem.write_bytes(b'')
+                    with open(self.devmem, 'r+b') as handle:
+                        handle.truncate(size)  # sparse
+                except OSError as exc:
+                    self.skipTest(f'cannot create a sparse {size}-byte file: {exc}')
+                self.address = address
+                marker = 0xFF & ~(1 << bit)  # every other bit of the byte is set and must stay set
+                with patch.object(rgb_backend, '_power_capability', return_value=(True, '')), \
+                        patch.object(rgb_backend, '_power_layout', layout):
+                    self.set_byte(marker | 1 << bit)
+                    self.assertTrue(rgb_backend._write_power_led(True))
+                    self.assertEqual(self.byte(), marker)
+                    self.assertTrue(rgb_backend._read_power_led())
+                    self.assertTrue(rgb_backend._write_power_led(False))
+                self.assertEqual(self.byte(), 0xFF)
+                self.assertEqual(self.byte(address - 1), 0)
+                self.assertEqual(self.byte(address + 1), 0)
 
 
 if __name__ == '__main__':

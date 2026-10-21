@@ -124,10 +124,10 @@ def reap(children):
         child.wait(timeout=3)
 
 
-def power_led_dsdt(base=0xFEEC2300, space=0x00, length=0xFF, fields=None):
+def power_led_dsdt(base=0xFEEC2300, space=0x00, length=0xFF, fields=None, region=b"ERAM"):
     """Synthetic DSDT with the Go 2 power-LED layout: LPBL = ERAM byte 0x10 bit 6.
 
-    A decoy Field over another region also names LPBL; only ERAM may count.
+    A decoy Field over another region also names LPBL and LEDP; only `region` may count.
     """
     def encode(value):  # AML PkgLength, 1 or 2 bytes.
         return bytes([value]) if value < 64 else bytes([0x40 | value & 0x0F, value >> 4])
@@ -138,11 +138,17 @@ def power_led_dsdt(base=0xFEEC2300, space=0x00, length=0xFF, fields=None):
         fields = [(None, 0x80)] + [(name, 1) for name in
                                    (b"LSTE", b"LID2", b"EKTS", b"DISV", b"SMAF", b"S4RF", b"LPBL", b"OSRT")]
     elements = b"".join((b"\x00" if name is None else name) + encode(width) for name, width in fields)
-    decoy = b"GNVS\x01" + b"LPBL" + bytes([8])
+    decoy = b"GNVS\x01" + b"LPBL" + bytes([8]) + b"LEDP" + bytes([8])
     aml = (b"\x5b\x81" + pkglen(len(decoy)) + decoy
-           + b"\x5b\x80ERAM" + bytes([space]) + b"\x0c" + base.to_bytes(4, "little") + b"\x0b" + length.to_bytes(2, "little")
-           + b"\x5b\x81" + pkglen(len(elements) + 5) + b"ERAM\x11" + elements)
+           + b"\x5b\x80" + region + bytes([space]) + b"\x0c" + base.to_bytes(4, "little") + b"\x0b" + length.to_bytes(2, "little")
+           + b"\x5b\x81" + pkglen(len(elements) + 5) + region + b"\x11" + elements)
     return b"DSDT" + (36 + len(aml)).to_bytes(4, "little") + bytes(28) + aml
+
+
+# The Go 1 (83E1) ECMM bytes 0x50-0x52 as its DSDT declares them: LEDP is byte 0x52 bit 5.
+GO1_POWER_LED_FIELDS = [(None, 0x50 * 8), (b"ADPT", 1), (b"BAIN", 1), (b"LIDF", 1), (None, 4), (b"NVBT", 1),
+                        (b"B1ST", 8), (b"BTDP", 1), (None, 1), (None, 1), (None, 1), (b"ACAP", 1), (b"LEDP", 1),
+                        (b"LTHD", 1), (b"RGHD", 1)]
 
 
 def dns_stall_source(marker):

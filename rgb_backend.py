@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
-"""Low-overhead lighting control for the Lenovo Legion Go 2.
+"""Low-overhead lighting control for the Lenovo Legion Go family.
 
-Joystick-ring control uses the kernel's hid-lenovo-go LED-class ABI.  The
-power-button LED uses one MMIO bit that the machine's own DSDT names LPBL; it is
-disabled unless the model matches and the live DSDT still has that layout.
+Joystick-ring control uses the kernel's hid-lenovo-go(-s) LED-class ABI.  The
+power-button LED uses one MMIO bit that the machine's own DSDT names (LPBL; LEDP on
+the Go 1); it is disabled unless the model matches and the live DSDT still has that layout.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import os
 import stat
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import decky
 from diagnostics import event, transition
@@ -50,21 +50,42 @@ GO_S_RGB_LED_PATH = "/sys/class/leds/go_s:rgb:joystick_rings"
 GO_S_RGB_HID_IDS = ("1A86:E310", "1A86:E311")
 GO_S_RGB_DRIVER = "hid-lenovo-go-s"
 
-# Power-button MMIO is independently restricted to this model and the 83N1 (power_led_model;
+# Power-button MMIO is independently restricted to the models below (power_led_layout;
 # any BIOS version whose DSDT passes _power_led_layout_ok).
 EXPECTED_FAMILY = "Legion Go 8ASP2"
 EXPECTED_PRODUCT = "83N0"
 EXPECTED_BOARD = "LNVNB161216"
 
-# DSDT (RRCN16WW and later, checked live): OperationRegion ERAM at 0xFEEC2300, LPBL at offset
-# 0x10 bit 6.  Logic is inverted: zero is on and one is off.  This deliberately
-# does not use HueSync's older 0xFE0B0300/0x52 mapping, which does not match the
-# DSDT read from the user's Go 2.
-POWER_MMIO_BASE = 0xFEEC2300
-POWER_MMIO_OFFSET = 0x10
-POWER_LED_BIT = 6
-POWER_LED_ADDRESS = POWER_MMIO_BASE + POWER_MMIO_OFFSET
-POWER_LED_MASK = 1 << POWER_LED_BIT
+
+class PowerLedLayout(NamedTuple):
+    """The light is 1-bit Field `field` at bit `bit` of byte `offset` in
+    OperationRegion(`region`, SystemMemory, `base`). On every model 0 is on and 1 is off."""
+    region: bytes
+    base: int
+    offset: int
+    bit: int
+    field: bytes
+
+    @property
+    def address(self) -> int:
+        return self.base + self.offset
+
+    @property
+    def mask(self) -> int:
+        return 1 << self.bit
+
+
+# Go 2 (RRCN16WW and later, checked live): ERAM at 0xFEEC2300, LPBL at offset 0x10 bit 6.
+POWER_LED_GO2 = PowerLedLayout(b"ERAM", 0xFEEC2300, 0x10, 6, b"LPBL")
+# Beta (owner's decision D1), read from Lenovo's DSDTs, not yet tested on the consoles.
+# Go S (83L3 QCCN26WW, 83N6 S0CN27WW): the Go 2's LPBL, its ERAM at another base.
+# Go 1 (83E1 N3CN40WW, N3CN42WW): LEDP, which the WMI light 4 (GLT1/SLT2) maps to 0/1 as the
+# Go 2 maps LPBL. Its byte also holds EC status bits; only this bit is ever changed.
+POWER_LED_BETA = {
+    "83L3": PowerLedLayout(b"ERAM", 0xFE0B0300, 0x10, 6, b"LPBL"),
+    "83N6": PowerLedLayout(b"ERAM", 0xFE0B0300, 0x10, 6, b"LPBL"),
+    "83E1": PowerLedLayout(b"ECMM", 0xFE0B0300, 0x52, 5, b"LEDP"),
+}
 POWER_LOCK_PATH = "/run/lock/legiongo2companion-power-led.lock"
 DSDT_PATH = "/sys/firmware/acpi/tables/DSDT"
 DSDT_LIMIT = 4 << 20
@@ -107,6 +128,7 @@ _last_error = ""
 _power_capability_cache: tuple[bool, str] | None = None
 _power_capability_retry_at = 0.0
 _power_bios = ""
+_power_layout: PowerLedLayout | None = None  # Set only with the DSDT check that proved it.
 POWER_CAPABILITY_RETRY_S = 5.0
 
 
@@ -579,25 +601,26 @@ def _aml_integer(data: bytes, i: int) -> tuple[int, int]:
     return int.from_bytes(data[i + 1:i + 1 + size], "little"), 1 + size
 
 
-def _power_led_layout_ok(data: bytes) -> bool:
-    """The live DSDT still defines LPBL as bit 6 of SystemMemory 0xFEEC2310.
+def _power_led_layout_ok(data: bytes, layout: PowerLedLayout = POWER_LED_GO2) -> bool:
+    """The live DSDT still defines the light exactly where `layout` says (Go 2: LPBL, bit 6 of 0xFEEC2310).
 
-    One OperationRegion(ERAM, SystemMemory, 0xFEEC2300, >0x10) and exactly one
-    1-bit LPBL at ERAM bit 0x86 across every Field(ERAM). An element this parser
+    One OperationRegion(region, SystemMemory, base, >offset) and exactly one 1-bit
+    field at bit offset*8+bit across every Field(region). An element this parser
     does not know rejects the layout.
     """
     try:
         if data[:4] != b"DSDT" or int.from_bytes(data[4:8], "little") != len(data):
             return False
-        region = data.find(b"\x5b\x80ERAM")
-        if region < 0 or data.find(b"\x5b\x80ERAM", region + 1) >= 0:
+        opcode = b"\x5b\x80" + layout.region
+        region = data.find(opcode)
+        if region < 0 or data.find(opcode, region + 1) >= 0:
             return False
         i = region + 6
         if data[i] != 0x00:  # SystemMemory
             return False
         base, size = _aml_integer(data, i + 1)
         length, _ = _aml_integer(data, i + 1 + size)
-        if base != POWER_MMIO_BASE or length <= POWER_MMIO_OFFSET:
+        if base != layout.base or length <= layout.offset:
             return False
         found = []
         start = data.find(b"\x5b\x81")
@@ -607,7 +630,7 @@ def _power_led_layout_ok(data: bytes) -> bool:
             except IndexError:
                 break  # Opcode bytes at the very end of the table.
             name = start + 2 + count
-            if data[name:name + 4] == b"ERAM":
+            if data[name:name + 4] == layout.region:
                 end, p, bit = start + 2 + package, name + 5, 0
                 while p < end:
                     op = data[p]
@@ -620,7 +643,7 @@ def _power_led_layout_ok(data: bytes) -> bool:
                         p += 4
                     elif 0x41 <= op <= 0x5A or op == 0x5F:  # NamedField
                         width, count = _aml_pkglen(data, p + 4)
-                        if data[p:p + 4] == b"LPBL":
+                        if data[p:p + 4] == layout.field:
                             found.append((bit, width))
                         bit += width; p += 4 + count
                     else:
@@ -628,22 +651,29 @@ def _power_led_layout_ok(data: bytes) -> bool:
                 if p != end:
                     return False
             start = data.find(b"\x5b\x81", start + 2)
-        return found == [(POWER_MMIO_OFFSET * 8 + POWER_LED_BIT, 1)]
+        return found == [(layout.offset * 8 + layout.bit, 1)]
     except (IndexError, KeyError):
         return False
 
 
-def power_led_model(identity: dict[str, str] | None = None) -> bool:
+def power_led_layout(identity: dict[str, str] | None = None) -> PowerLedLayout | None:
     """The power-button light's model gate (DMI only); each use still proves the DSDT layout."""
     identity = identity if identity is not None else _read_identity()
     family, product = identity.get("product_family"), identity.get("product_name")
     # The 83N1's board name is unknown; its BIOS (RQCN17WW) has the 83N0's ERAM and LPBL bit for bit.
-    return ((family, product, identity.get("board_name")) == (EXPECTED_FAMILY, EXPECTED_PRODUCT, EXPECTED_BOARD)
-            or (family, product) == ("Legion Go 8AHP2", "83N1"))
+    if ((family, product, identity.get("board_name")) == (EXPECTED_FAMILY, EXPECTED_PRODUCT, EXPECTED_BOARD)
+            or (family, product) == ("Legion Go 8AHP2", "83N1")):
+        return POWER_LED_GO2
+    model = module_runtime.legion_device()[1]  # LENOVO and its machine type
+    return POWER_LED_BETA.get(model) if model == product else None
+
+
+def power_led_model(identity: dict[str, str] | None = None) -> bool:
+    return power_led_layout(identity) is not None
 
 
 def _power_capability() -> tuple[bool, str]:
-    global _power_capability_cache, _power_capability_retry_at, _power_bios
+    global _power_capability_cache, _power_capability_retry_at, _power_bios, _power_layout
     if _power_capability_cache is not None and (
             _power_capability_cache[0] or time.monotonic() < _power_capability_retry_at):
         return _power_capability_cache
@@ -652,7 +682,8 @@ def _power_capability() -> tuple[bool, str]:
     # Every retry still proves the model and the DSDT layout before MMIO access.
     _power_capability_retry_at = time.monotonic() + POWER_CAPABILITY_RETRY_S
     identity = _read_identity()
-    if not power_led_model(identity):
+    layout = power_led_layout(identity)
+    if layout is None:
         _power_capability_cache = (
             False, "Power-button light control is not available on this console.")
         return _power_capability_cache
@@ -672,7 +703,7 @@ def _power_capability() -> tuple[bool, str]:
     except OSError:
         _power_capability_cache = (False, "The BIOS ACPI table could not be read.")
         return _power_capability_cache
-    if not _power_led_layout_ok(data):
+    if not _power_led_layout_ok(data, layout):
         _power_capability_cache = (
             False, "Power-button light is unavailable: this BIOS uses a different ACPI layout for it.")
         return _power_capability_cache
@@ -682,6 +713,7 @@ def _power_capability() -> tuple[bool, str]:
         _power_capability_cache = (False, "The verified power-button interface is unavailable.")
         return _power_capability_cache
     _power_bios = identity.get("bios_version", "")
+    _power_layout = layout
     _power_capability_cache = (True, "")
     return _power_capability_cache
 
@@ -715,9 +747,12 @@ def _with_power_lock(operation: Callable[[], Any]) -> Any:
 
 
 def _map_power_register(write: bool, operation: Callable[[mmap.mmap, int], Any]) -> Any:
+    if _power_layout is None:
+        raise ValueError("The power-button light's layout is not verified.")
+    address = _power_layout.address
     page_size = mmap.PAGESIZE
-    map_base = POWER_LED_ADDRESS - (POWER_LED_ADDRESS % page_size)
-    page_offset = POWER_LED_ADDRESS - map_base
+    map_base = address - (address % page_size)
+    page_offset = address - map_base
     flags = os.O_RDWR if write else os.O_RDONLY
     flags |= os.O_SYNC | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(DEV_MEM_PATH, flags)
@@ -740,13 +775,14 @@ def _map_power_register(write: bool, operation: Callable[[mmap.mmap, int], Any])
 
 def _read_power_led() -> bool | None:
     supported, _ = _power_capability()
-    if not supported:
+    if not supported or _power_layout is None:
         return None
+    mask = _power_layout.mask
     try:
         value = _with_power_lock(
             lambda: _map_power_register(False, lambda mapped, offset: mapped[offset])
         )
-        return (value & POWER_LED_MASK) == 0
+        return (value & mask) == 0
     except (OSError, ValueError) as exc:
         event("rgb", "power_led_access", level="warning", error=exc,
               stage="read", attribute="power_led", repeat=60)
@@ -755,24 +791,25 @@ def _read_power_led() -> bool | None:
 
 def _write_power_led(enabled: bool) -> bool:
     supported, _ = _power_capability()
-    if not supported or type(enabled) is not bool:
+    if not supported or _power_layout is None or type(enabled) is not bool:
         return False
+    mask = _power_layout.mask
 
     def _write() -> bool:
         def _mapped(mapped: mmap.mmap, offset: int) -> bool:
             before = mapped[offset]
-            target = before & ~POWER_LED_MASK if enabled else before | POWER_LED_MASK
+            target = before & ~mask if enabled else before | mask
             if target != before:
                 mapped[offset] = target
             verify = mapped[offset]
-            if (verify & POWER_LED_MASK) == (target & POWER_LED_MASK):
+            if (verify & mask) == (target & mask):
                 return True
             # Restore only our bit, preserving any unrelated concurrent changes.
             current = mapped[offset]
             rollback = (
-                current | POWER_LED_MASK
-                if before & POWER_LED_MASK
-                else current & ~POWER_LED_MASK
+                current | mask
+                if before & mask
+                else current & ~mask
             )
             mapped[offset] = rollback
             return False
@@ -913,6 +950,7 @@ def _status() -> dict[str, Any]:
             "managed": state["power_led_managed"],
             "drift": power_drift,
             "bios": _power_bios if power_supported else "",
+            "beta": power_supported and _power_layout in POWER_LED_BETA.values(),
         },
         "recovery_required": state.get("pending") is not None,
         "error": _last_error,
