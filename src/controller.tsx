@@ -9,7 +9,7 @@ import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder } fro
 import { reportingText, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
   vectorText } from "../desktop/native/controller.mjs";
 
-export type GyroSource = "system" | "combined" | "left" | "right";
+type GyroSource = "system" | "combined" | "left" | "right";
 type Vector = { x: number | null; y: number | null; z: number | null };
 type Touchpad = { x: number | null; y: number | null; is_touching: boolean | null; raw_x?: number; raw_y?: number };
 

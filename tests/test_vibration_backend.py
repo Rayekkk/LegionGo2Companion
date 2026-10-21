@@ -277,7 +277,7 @@ class VibrationProfileTests(FakeDevice):
         self.assertEqual(self.persisted()['0']['settings'], vibe.DEFAULT_PROFILE)
         # Both UIs show this text as is; the Desktop app and Decky read it from vibration.mjs too.
         shared = (Path(__file__).resolve().parents[1] / 'desktop/native/vibration.mjs').read_text(encoding='utf-8')
-        self.assertIn(f'export const NOT_CONNECTED = "{vibe.NOT_CONNECTED}";', shared)
+        self.assertIn(f'const NOT_CONNECTED = "{vibe.NOT_CONNECTED}";', shared)
 
     async def test_profile_toggle_reports_committed_scope_when_hardware_apply_fails(self):
         self.running = '111'

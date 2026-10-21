@@ -32,9 +32,7 @@ export function normalise(t, caps, minW) {
 export const absolute = t => ({ spl: t.spl, sppt: t.spl + t.spptOff, fppt: t.spl + t.fpptOff });
 export const fromAbsolute = (spl, sppt, fppt) => ({ spl, spptOff: Math.max(0, sppt - spl), fpptOff: Math.max(0, fppt - spl) });
 
-/** Standard single-dial Custom mode uses the range in force: the firmware's, or the Extras range. */
-export const simpleCaps = caps => caps;
-
+/** Standard single-dial Custom mode: SPL within the range in force (the firmware's, or the Extras range). */
 export function simpleTuning(spl, caps, minW) {
   const bounded = clamp(spl, minW, caps.spl);
   return fromAbsolute(bounded, Math.min(bounded + 10, caps.sppt), Math.min(bounded + 15, caps.fppt));

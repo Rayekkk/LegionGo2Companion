@@ -33,7 +33,6 @@ export function offsetMax(spl: number, caps: Caps): { sppt: number; fppt: number
 export function normalise(t: Tuning, caps: Caps, minW: number): Tuning;
 export function absolute(t: Tuning): Caps;
 export function fromAbsolute(spl: number, sppt: number, fppt: number): Tuning;
-export function simpleCaps(caps: Caps, unlocked: boolean): Caps;
 export function simpleTuning(spl: number, caps: Caps, minW: number): Tuning;
 export function withSpl(t: Tuning, v: number, caps: Caps, minW: number): Tuning;
 export function withSppt(t: Tuning, v: number, caps: Caps): Tuning;

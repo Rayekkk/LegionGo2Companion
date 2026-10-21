@@ -146,7 +146,7 @@ RowLayout {
         // As in Decky: the saved name while its values still match, otherwise the preset these values are.
         powerPreset=customPicked?"custom":Tdp.resolvedPreset(w,sw,fw,source.preset || source.ac_preset || source.active_preset,presetTable());
         // Without Separate boost limits a Custom profile follows the single-dial rule, as in Decky.
-        powerDraft=!tdpAdvanced() && powerPreset==="custom"?Tdp.simpleTuning(w,customCaps(),tdpMin()):
+        powerDraft=!tdpAdvanced() && powerPreset==="custom"?Tdp.simpleTuning(w,tdpCaps(),tdpMin()):
             Tdp.fromAbsolute(w,sw,fw);
         if(s("get_game_profile").exists)acSeparate=!!s("get_game_profile").ac_separate;
         draftGame=app();
@@ -217,7 +217,7 @@ RowLayout {
     function notePresets() { return Tdp.shownPresets(presetTable(),s("get_caps").battery_presets,s("get_settings").separate_battery_presets===true,
         tdpScope!=="ac" && (gameUse()==="charger" || !acOnline())); }
     function choosePreset(value) {
-        if(value==="custom") { customPicked=true; powerPreset="custom"; if(!tdpAdvanced())powerDraft=Tdp.simpleTuning(powerDraft.spl,customCaps(),tdpMin()); return; }
+        if(value==="custom") { customPicked=true; powerPreset="custom"; if(!tdpAdvanced())powerDraft=Tdp.simpleTuning(powerDraft.spl,tdpCaps(),tdpMin()); return; }
         const preset=presetTable()[value];
         if(!preset)return;
         // A preset replaces a Custom draft without asking: the sliders exist only in Custom.
@@ -231,13 +231,12 @@ RowLayout {
         return {spl:Number(value?.spl || 5),sppt:Number(value?.sppt || 5),fppt:Number(value?.fppt || 5)}; }
     function tdpMin() { return Number(s("get_caps").min || 5); }
     function tdpAdvanced() { return s("get_settings").advanced_tdp_control!==false; }
-    function customCaps() { return tdpAdvanced()?tdpCaps():Tdp.simpleCaps(tdpCaps(),extrasActive()); }
     function boostRoom() { return Tdp.offsetMax(powerDraft.spl,tdpCaps()); }
     function boostNote(offset,room) { return Tdp.boostRoomNote(powerDraft.spl,offset,room); }
     // The slider handlers of the Decky panel: every edit leaves a valid FPPT >= SPPT >= SPL draft.
     function editPower(key,value) {
         powerNotice="";
-        const caps=customCaps();
+        const caps=tdpCaps();
         powerDraft=key==="sppt"?Tdp.withSppt(powerDraft,value,caps):key==="fppt"?Tdp.withFppt(powerDraft,value,caps):
             tdpAdvanced()?Tdp.withSpl(powerDraft,value,caps,tdpMin()):Tdp.simpleTuning(value,caps,tdpMin());
         powerDirty=true; powerPreset="custom"; customPicked=true;
@@ -245,7 +244,7 @@ RowLayout {
     function applyPower() {
         if (!profileReady()) { backend.error="Wait for a fresh game profile before applying this draft."; return; }
         if(tdpScope!=="global" && app()!==draftGame) { backend.error="The running game changed. Reload this profile before applying the draft."; return; }
-        const a=Tdp.absolute(powerPreset==="custom" && !tdpAdvanced()?Tdp.simpleTuning(powerDraft.spl,customCaps(),tdpMin()):powerDraft);
+        const a=Tdp.absolute(powerPreset==="custom" && !tdpAdvanced()?Tdp.simpleTuning(powerDraft.spl,tdpCaps(),tdpMin()):powerDraft);
         if(tdpScope==="ac") change("set_game_ac_profile",[app(),Math.round(a.spl*1000),Math.round(a.sppt*1000),Math.round(a.fppt*1000),acSeparate,powerPreset,stored()]);
         else change("apply_tdp",[Math.round(a.spl*1000),Math.round(a.sppt*1000),Math.round(a.fppt*1000),powerTarget(),powerPreset,expectedGame(),storedEdit()]);
     }
@@ -382,7 +381,7 @@ RowLayout {
                 notice("",()=>powerLoaded?"":"Loading power limits…"),
                 choices("Preset",()=>powerPreset,choosePreset,powerOptions,{kind:"options",visible:()=>powerLoaded,available:()=>!!s("get_caps").tdp_available && !!s("get_settings").enabled,
                     note:()=>Tdp.presetNote(powerPreset,notePresets())}),
-                number("Sustained power",()=>powerDraft.spl,v=>editPower("spl",v),tdpMin,()=>customCaps().spl,{kind:"range",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom",
+                number("Sustained power",()=>powerDraft.spl,v=>editPower("spl",v),tdpMin,()=>tdpCaps().spl,{kind:"range",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom",
                     note:()=>tdpAdvanced()?"":"Boost follows automatically."}),
                 number("Slow boost",()=>powerDraft.spptOff,v=>editPower("sppt",v),0,()=>boostRoom().sppt || 1,{kind:"range",prefix:"+",suffix:" W",visible:()=>powerLoaded && powerPreset==="custom" && tdpAdvanced(),
                     available:()=>boostRoom().sppt>0,note:()=>boostNote(powerDraft.spptOff,boostRoom().sppt)}),

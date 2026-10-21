@@ -19,6 +19,6 @@ export const driverNotice = status => status?.found === true ? null : ["Controll
 export const touchpadStrengthEditable = settings => settings?.touchpadEnabled === true;
 
 /** Backend reply to a change made while no controller is connected: the change is kept and applied once it connects. */
-export const NOT_CONNECTED = "Controller not connected. The change is saved and applies when it connects.";
+const NOT_CONNECTED = "Controller not connected. The change is saved and applies when it connects.";
 /** Message for a failed change. A saved change waiting for the controller reads exactly as in the Desktop app, without "<what>: ". */
 export const failureText = (what, error) => error === NOT_CONNECTED ? error : `${what}: ${error || "The driver rejected the change"}`;

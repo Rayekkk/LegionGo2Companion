@@ -24,7 +24,7 @@ import {
   absolute, BATTERY_PRESETS_LABEL, BATTERY_PRESETS_NOTE, boostNote, boostUsable, capsState, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote,
   eppPercent, eppTitle, eppUnavailable, eppValue, extrasConfirm, extrasNote, extrasShown, FALLBACK_MAX, FALLBACK_MIN,
   FALLBACK_STD, fromAbsolute, helperRetryShown, limitsText, normalise, offsetMax, powerSummary,
-  PRESET_LABELS, PRESET_ORDER, PRESETS, presetNote, resolvedPreset, scopeNote, simpleCaps, simpleTuning, sourceNote,
+  PRESET_LABELS, PRESET_ORDER, PRESETS, presetNote, resolvedPreset, scopeNote, simpleTuning, sourceNote,
   shownPresets, sourceText, tdpNotice, boostRoomNote, withFppt, withSpl, withSppt,
   type Caps, type CapsInfo, type CpuPowerControls, type PresetKey, type PresetTable, type TdpInfo, type Tuning,
 } from "../desktop/native/tdp.mjs";
@@ -785,7 +785,6 @@ const useTdpState = (tabShown: boolean) => {
   // A preset still settling when the page closes is dropped, like a draft.
 
   const caps    = extrasUnlocked && extrasAvailable ? maxCaps : stdCaps;
-  const customCaps = advancedTdpControl ? caps : simpleCaps(caps, extrasUnlocked && extrasAvailable);
   const active  = editingAc ? acTuning : tuning;
   const setActive = editingAc ? setAcTuning : setTuning;
 
@@ -808,12 +807,12 @@ const useTdpState = (tabShown: boolean) => {
     const p  = gp.profile;
     const ac = gp.ac_profile ?? { spl: p.spl, sppt: p.sppt, fppt: p.fppt, ac_preset: "" };
     const storedPreset = (p.preset as PresetKey | undefined) || undefined;
-    const battery = savedTuning(p, storedPreset, presets, advancedTdpControl, customCaps, minW);
+    const battery = savedTuning(p, storedPreset, presets, advancedTdpControl, caps, minW);
     clearDraft();
     setPerGame(true);
     setProfileExists(true);
     setTuning(battery.tuning);
-    setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, customCaps, minW).tuning);
+    setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, caps, minW).tuning);
     setAcSeparate(gp.ac_separate);
     // The editor starts on the source the console runs on now.
     setEditingAc(gp.ac_separate && acOnline);
@@ -867,7 +866,7 @@ const useTdpState = (tabShown: boolean) => {
           const selected = resolvedPreset(w, sw, fw, s.active_preset, machinePresets);
           const unlocked = eu && c.extras !== false;
           const view = s.advanced_tdp_control === false && selected === "custom"
-            ? simpleTuning(w, simpleCaps(unlocked ? c.max : c.std, unlocked), c.min)
+            ? simpleTuning(w, unlocked ? c.max : c.std, c.min)
             : fromAbsolute(w, sw, fw);
           setTuning(view);
           setGlobalProfile({ ...absolute(view), preset: s.active_preset || undefined });
@@ -1034,7 +1033,7 @@ const useTdpState = (tabShown: boolean) => {
     const adoptGlobal = async (expected: string) => {
       const s = await getSettings();
       if (!current(expected)) return;
-      const { preset: selected, tuning: view } = savedTuning(s, s.active_preset, presets, advancedTdpControl, customCaps, minW);
+      const { preset: selected, tuning: view } = savedTuning(s, s.active_preset, presets, advancedTdpControl, caps, minW);
       clearDraft();
       setPerGame(false);
       setAcSeparate(false);
@@ -1115,7 +1114,7 @@ const useTdpState = (tabShown: boolean) => {
     separateBattery, setSeparateBattery, batteryPresets, setSavedPreset, savedAcPreset, setSavedAcPreset, operationLoading, profilePending, setProfilePending,
     profileError, setProfileError, setProfileAttempt, loading, cpuBusy, setDirty, dirty, dirtyRef, draftBaseRef,
     setFailure, details, setDetails, cpuNote, setCpuNote, info, cpuBusyOwnersRef, onCpuBusyChange, beginOperation,
-    operationCurrent, finishOperation, readCaps, adoptCaps, caps, customCaps, active, setActive, clearDraft, done,
+    operationCurrent, finishOperation, readCaps, adoptCaps, caps, active, setActive, clearDraft, done,
     showError, failureFor, showGameProfile, adoptGlobalSettings, capsNow };
 };
 type TdpState = ReturnType<typeof useTdpState>;
@@ -1143,7 +1142,7 @@ const noticeSection = (s: TdpState) => {
 const powerSection = (s: TdpState) => {
   const { beginOperation, operationCurrent, finishOperation, done, showError, failureFor, clearDraft, dirtyRef,
     draftBaseRef, preset, setPreset, tuning, setTuning, acTuning, setAcTuning, active, setActive,
-    advancedTdpControl, caps, customCaps, minW, presets, editingAc, setEditingAc, perGame, setPerGame, game,
+    advancedTdpControl, caps, minW, presets, editingAc, setEditingAc, perGame, setPerGame, game,
     acSeparate, setAcSeparate, acOnline, tdpAvailable, enabled, setEnabled, setSavedPreset, savedPreset,
     setSavedAcPreset, savedAcPreset, globalProfile, setGlobalProfile, adoptGlobalSettings, showGameProfile,
     setProfileAttempt, profilePending, profileError, info, extrasUnlocked, stdCaps, cpuBusy, loading,
@@ -1169,7 +1168,7 @@ const powerSection = (s: TdpState) => {
     clearDraft();
     setPreset(key);
     if (key === "custom") {
-      if (!advancedTdpControl) setActive(simpleTuning(active.spl, customCaps, minW));
+      if (!advancedTdpControl) setActive(simpleTuning(active.spl, caps, minW));
       finishOperation(scope);
       return;
     }
@@ -1246,7 +1245,7 @@ const powerSection = (s: TdpState) => {
         if (!operationCurrent(op)) return;
         if (!result.success) throw new Error(result.stderr || "Could not change the charger settings.");
         setAcSeparate(next === "game_ac");
-        setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, customCaps, minW).tuning);
+        setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, caps, minW).tuning);
         setEditingAc(next === "game_ac" && acOnline);
         setSavedAcPreset(next === "game_ac" ? (ac.ac_preset ?? "") : undefined);
       }
@@ -1344,7 +1343,7 @@ const powerSection = (s: TdpState) => {
 
 const customLimitsSection = (s: TdpState) => {
   const { beginOperation, operationCurrent, finishOperation, done, showError, failureFor, clearDraft, dirty,
-    setDirty, dirtyRef, draftBaseRef, active, setActive, caps, customCaps, minW, advancedTdpControl, loading,
+    setDirty, dirtyRef, draftBaseRef, active, setActive, caps, minW, advancedTdpControl, loading,
     tdpAvailable, operationLoading, editingAc, perGame, game, acSeparate, setTuning, setAcTuning, setSavedPreset,
     setSavedAcPreset, setGlobalProfile } = s;
   const om      = offsetMax(active.spl, caps);
@@ -1355,9 +1354,9 @@ const customLimitsSection = (s: TdpState) => {
     setActive(next);
   };
   const handlers = {
-    onSpl: (v: number) => editActive(withSpl(active, v, customCaps, minW)),
-    onSppt: (v: number) => editActive(withSppt(active, v, customCaps)),
-    onFppt: (v: number) => editActive(withFppt(active, v, customCaps)),
+    onSpl: (v: number) => editActive(withSpl(active, v, caps, minW)),
+    onSppt: (v: number) => editActive(withSppt(active, v, caps)),
+    onFppt: (v: number) => editActive(withFppt(active, v, caps)),
   };
 
   // ── Apply (Custom mode only) ──────────────────────────────────────────────────
@@ -1365,7 +1364,7 @@ const customLimitsSection = (s: TdpState) => {
     const op = beginOperation();
     if (!op) return;
     const appId = (perGame && game) ? game.appId : "";
-    const target = advancedTdpControl ? active : simpleTuning(active.spl, customCaps, minW);
+    const target = advancedTdpControl ? active : simpleTuning(active.spl, caps, minW);
     const a = absolute(target);
     try {
       if (editingAc && appId) {
@@ -1398,10 +1397,10 @@ const customLimitsSection = (s: TdpState) => {
       <PanelSectionRow>
         <SliderField
           label={`Sustained power · ${active.spl} W`}
-          value={active.spl} min={minW} max={customCaps.spl} step={1}
+          value={active.spl} min={minW} max={caps.spl} step={1}
           disabled={loading || !tdpAvailable}
           onChange={advancedTdpControl ? handlers.onSpl
-            : (value) => editActive(simpleTuning(value, customCaps, minW))}
+            : (value) => editActive(simpleTuning(value, caps, minW))}
           description={advancedTdpControl ? undefined : "Boost follows automatically."}
         />
       </PanelSectionRow>
@@ -1441,7 +1440,7 @@ const customLimitsSection = (s: TdpState) => {
 const moreSection = (s: TdpState) => {
   const { beginOperation, operationCurrent, finishOperation, done, showError, failureFor, clearDraft, setFailure,
     readCaps, adoptCaps, capsNow, advancedTdpControl, setAdvancedTdpControl, extrasUnlocked, setExtrasUnlocked,
-    extrasAvailable, caps, stdCaps, minW, presets, tuning, setTuning, acTuning, setAcTuning, setPreset, perGame,
+    caps, stdCaps, minW, presets, tuning, setTuning, acTuning, setAcTuning, setPreset, perGame,
     setPerGame, setProfileExists, profileExists, setAcSeparate, acSeparate, setEditingAc, game, enabled,
     savedPreset, setSavedPreset, savedAcPreset, setSavedAcPreset, globalProfile, setGlobalProfile,
     adoptGlobalSettings, loading, tdpAvailable, operationLoading, details, setDetails, info, cpuNote,
@@ -1494,10 +1493,10 @@ const moreSection = (s: TdpState) => {
     const acCustom = resolvedPreset(charging.spl, charging.sppt, charging.fppt,
       savedAcPreset, presets) === "custom";
     const t = !advancedTdpControl && batteryCustom
-      ? simpleTuning(tuning.spl, simpleCaps(stdCaps, false), minW)
+      ? simpleTuning(tuning.spl, stdCaps, minW)
       : normalise(tuning, stdCaps, minW);
     const at = !advancedTdpControl && acCustom
-      ? simpleTuning(acTuning.spl, simpleCaps(stdCaps, false), minW)
+      ? simpleTuning(acTuning.spl, stdCaps, minW)
       : normalise(acTuning, stdCaps, minW);
     const tChanged = t.spl !== tuning.spl || t.spptOff !== tuning.spptOff ||
       t.fpptOff !== tuning.fpptOff;
@@ -1537,19 +1536,18 @@ const moreSection = (s: TdpState) => {
       return;
     }
     if (!checked) {
-      const limits = simpleCaps(caps, extrasUnlocked && extrasAvailable);
       const battery = absolute(tuning), charging = absolute(acTuning);
       if (resolvedPreset(battery.spl, battery.sppt, battery.fppt,
           perGame ? savedPreset : globalProfile.preset, presets) === "custom")
-        setTuning(simpleTuning(tuning.spl, limits, minW));
+        setTuning(simpleTuning(tuning.spl, caps, minW));
       if (resolvedPreset(charging.spl, charging.sppt, charging.fppt,
           savedAcPreset, presets) === "custom")
-        setAcTuning(simpleTuning(acTuning.spl, limits, minW));
+        setAcTuning(simpleTuning(acTuning.spl, caps, minW));
       setGlobalProfile((current) => {
         if (resolvedPreset(current.spl, current.sppt, current.fppt, current.preset, presets) !== "custom")
           return current;
         return { ...absolute(simpleTuning(current.spl,
-          simpleCaps(caps, extrasUnlocked && extrasAvailable), minW)), preset: current.preset };
+          caps, minW)), preset: current.preset };
       });
     } else {
       try {

@@ -490,9 +490,9 @@ run(async () => {
       assert.ok(a.spl >= 5 && a.spl <= a.sppt && a.sppt <= a.fppt, `order ${JSON.stringify(a)}`);
       assert.ok(a.spl <= c.spl && a.sppt <= c.sppt && a.fppt <= c.fppt, `ceilings ${JSON.stringify(a)}`);
     }
-    assert.deepEqual(T.absolute(T.simpleTuning(30, T.simpleCaps(caps.std, false), 5)), { spl: 30, sppt: 37, fppt: 45 });
+    assert.deepEqual(T.absolute(T.simpleTuning(30, caps.std, 5)), { spl: 30, sppt: 37, fppt: 45 });
     // A console whose firmware allows more than the Go 2 keeps its own range in the single-dial mode.
-    assert.deepEqual(T.absolute(T.simpleTuning(40, T.simpleCaps({ spl: 40, sppt: 43, fppt: 53 }, false), 5)), { spl: 40, sppt: 43, fppt: 53 });
+    assert.deepEqual(T.absolute(T.simpleTuning(40, { spl: 40, sppt: 43, fppt: 53 }, 5)), { spl: 40, sppt: 43, fppt: 53 });
     // "Above Lenovo's limit" warns only while 50 W is not allowed.
     const high = { spl: 40, sppt: 45, fppt: 50 };
     assert.equal(T.powerSummary(true, 'Game 1', 'Custom', high, 18.25, false, caps.std), "Game 1: Custom · 40 W · drawing 18.3 W · above Lenovo's limit");

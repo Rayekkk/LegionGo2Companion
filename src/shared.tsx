@@ -63,7 +63,7 @@ export const mutationQueue = () => {
 
 export type RunningApp = { appid: string | number; display_name?: string };
 /** A module fed by the game watcher; it keeps its own state, gating and RPC. */
-export type GameClient = { check(app: RunningApp | null): Promise<void>; resume(): void };
+type GameClient = { check(app: RunningApp | null): Promise<void>; resume(): void };
 
 const gameClients = new Set<GameClient>();
 let gameGeneration = 0;
