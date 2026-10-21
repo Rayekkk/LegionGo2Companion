@@ -340,6 +340,7 @@ class Plugin:
         self._inputplumber = None  # Restarts an InputPlumber that lost the controller (Legion Go family).
         self._inputplumber_recovery = None
         self._device_report = None  # The running save_device_report; concurrent requests share it.
+        self._report_collecting = None  # Its collection thread, which can outlive a timed-out request.
         self._guard_blocked = False
         self._guard_conflicts = []
         self._guard_error = ""
@@ -1190,20 +1191,23 @@ class Plugin:
         account = _session_account()
         if account is None:
             return {'success': False, 'error': 'The console user is unknown, so the report cannot be saved.'}
-        await self._ensure_device()
+        collecting = self._report_collecting
+        if collecting is None or collecting.done():  # Otherwise wait for the one still collecting.
+            await self._ensure_device()
+            try:
+                caps = await asyncio.wait_for(self._tdp.get_caps(), 5.0)
+            except Exception as exc:
+                caps = type(exc).__name__
+            recovery = self._inputplumber_recovery
+            facts = {'version': _plugin_version(), 'device': dict(self._device),
+                     'modules': await asyncio.to_thread(self._module_status),
+                     'inputplumber_restarts': recovery.restarts if recovery else None, 'tdp_caps': caps,
+                     'fan': {'supported': self._fan._supported, 'beta': self._fan._beta, 'error': self._fan._error},
+                     'log_dir': diagnostics.LOG_DIR, 'user': account.pw_name}
+            collecting = self._report_collecting = asyncio.ensure_future(asyncio.to_thread(
+                device_report.collect, facts, stopped=lambda: self._closing))
         try:
-            caps = await asyncio.wait_for(self._tdp.get_caps(), 5.0)
-        except Exception as exc:
-            caps = type(exc).__name__
-        recovery = self._inputplumber_recovery
-        facts = {'version': _plugin_version(), 'device': dict(self._device),
-                 'modules': await asyncio.to_thread(self._module_status),
-                 'inputplumber_restarts': recovery.restarts if recovery else None, 'tdp_caps': caps,
-                 'fan': {'supported': self._fan._supported, 'beta': self._fan._beta, 'error': self._fan._error},
-                 'log_dir': diagnostics.LOG_DIR, 'user': account.pw_name}
-        try:
-            text = await asyncio.wait_for(asyncio.to_thread(
-                device_report.collect, facts, stopped=lambda: self._closing), device_report.TOTAL_SECONDS + 5)
+            text = await asyncio.wait_for(asyncio.shield(collecting), device_report.TOTAL_SECONDS + 5)
             path = await asyncio.to_thread(device_report.save, text, account.pw_dir, account.pw_uid, account.pw_gid)
         except asyncio.TimeoutError:
             return {'success': False, 'error': 'Collecting the report took too long. Try again.'}

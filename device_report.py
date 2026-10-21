@@ -50,6 +50,11 @@ EDID_HEADER = b"\x00\xff\xff\xff\xff\xff\xff\x00"
 _MAC = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![0-9A-Fa-f])")
 _PRIVATE_LINE = re.compile(r"serial|uuid|asset|ssid", re.IGNORECASE)
 _HOME = re.compile(r"/home/[^/\s]+")
+# Kernel names that never carry an identifier; a HID device battery is named after HID_UNIQ (often a USB serial).
+_SUPPLY_NAME = re.compile(r"BAT\d*|AC\d*|ACAD|ADP\d*|ucsi-source-psy-[A-Za-z0-9:._-]+")
+_HWMON_NAME = re.compile(r"acpitz|k10temp|amdgpu|nvme|spd5118|lenovo_wmi_\w+|mt79\d\d_phy\d+|iwlwifi_\d+"
+                         r"|BAT\d*|AC\d*|ACAD|ADP\d*|ucsi_source_psy_\w+")
+RYZENADJ_SECONDS = 1.0  # With its 2 s kill wait, below the 4 s that TDP's restore waits for the ryzenadj lock.
 
 
 class _Unavailable(Exception):
@@ -101,9 +106,10 @@ def _driver(directory):
 
 
 class _Context:
-    def __init__(self, facts, deadline):
+    def __init__(self, facts, deadline, stopped=lambda: False):
         self.facts = facts
         self.deadline = deadline
+        self.stopped = stopped
 
     def command(self, argv):
         """stdout of a fixed program, inside both its own and the report's time limit."""
@@ -201,7 +207,7 @@ def _companion(context):
 
 def _firmware_attributes(context):
     lines = []
-    for attribute in _entries("/sys/class/firmware-attributes/*/attributes/*"):
+    for attribute in _entries("/sys/class/firmware-attributes/lenovo-wmi-other-*/attributes/*"):
         if time.monotonic() >= context.deadline:
             lines.append("unavailable: report time limit reached")
             break
@@ -220,15 +226,19 @@ def _firmware_attributes(context):
 
 def _power(context):
     lines = []
-    for supply in _entries("/sys/class/power_supply/*"):
+    for number, supply in enumerate(_entries("/sys/class/power_supply/*")):
         kind = _value(os.path.join(supply, "type"))
         fields = [f"type={kind}"]
+        name = os.path.basename(supply)
+        if not _SUPPLY_NAME.fullmatch(name) and _value(os.path.join(supply, "scope"), 16) == "Device":
+            lines.append(f"peripheral{number} {' '.join(fields)}")
+            continue
         if kind == "Mains":
             fields.append(f"online={_value(os.path.join(supply, 'online'), firmware=True)}")
-        if os.path.basename(supply).startswith("BAT"):
-            fields += [f"{name}={_value(os.path.join(supply, name), firmware=True)}" for name in BATTERY_FIELDS
-                       if os.path.exists(os.path.join(supply, name))]
-        lines.append(f"{os.path.basename(supply)}: {' '.join(fields)}")
+        if name.startswith("BAT"):
+            fields += [f"{field}={_value(os.path.join(supply, field), firmware=True)}" for field in BATTERY_FIELDS
+                       if os.path.exists(os.path.join(supply, field))]
+        lines.append(f"{name}: {' '.join(fields)}")
     return lines or ["none"]
 
 
@@ -237,12 +247,18 @@ _LIMIT_ROW = re.compile(r"\|\s*((?:STAPM|PPT|THM|TDC|EDC)[A-Z0-9 _]*LIMIT[A-Z0-9
 
 def _ryzenadj(context):
     # The pinned helper only, never downloaded here; its lock serialises SMU access with TDP.
+    tdp = (context.facts.get("modules") or {}).get("tdp") or {}
+    if not (tdp.get("enabled") and tdp.get("ready")):
+        return ["skipped: TDP control is off"]  # No SMU request while the user has TDP control off.
     if not tdp_backend._helper_verified():
         return ["not installed or not verified (the report does not download it)"]
-    if not tdp_backend._ryzenadj_lock.acquire(timeout=2.0):
-        return ["unavailable: the helper is busy"]
+    if context.stopped():
+        return ["unavailable: Companion is stopping"]
+    if not tdp_backend._ryzenadj_lock.acquire(blocking=False):  # Never delays a TDP apply or restore.
+        return ["unavailable: busy"]
     try:
-        code, out, error = tdp_backend._run_ryzenadj(["--info"], timeout=min(3.0, max(.5, context.deadline - time.monotonic())))
+        code, out, error = tdp_backend._run_ryzenadj(
+            ["--info"], timeout=min(RYZENADJ_SECONDS, max(.2, context.deadline - time.monotonic())))
     finally:
         tdp_backend._ryzenadj_lock.release()
     if code != 0 and "CPU Family" not in out:
@@ -318,7 +334,10 @@ def _fan(context):
     for monitor in _entries("/sys/class/hwmon/*"):
         files = sorted(os.path.basename(path) for path in glob.glob(os.path.join(monitor, "fan*"))
                        + glob.glob(os.path.join(monitor, "pwm*")))
-        line = f"{os.path.basename(monitor)} name={_value(os.path.join(monitor, 'name'), 64)}"
+        name = _value(os.path.join(monitor, "name"), 64)
+        if not (_HWMON_NAME.fullmatch(name) or name.startswith("unavailable")):
+            name = "<removed>"
+        line = f"{os.path.basename(monitor)} name={name}"
         if files:
             line += " files=" + ",".join(files)
             line += "".join(f" {name}={_value(os.path.join(monitor, name), 32, True)}"
@@ -452,7 +471,7 @@ def scrub(text, user=""):
 def collect(facts, seconds=TOTAL_SECONDS, stopped=lambda: False):
     """The report text. `facts`: version, device, modules, inputplumber_restarts, tdp_caps, fan, log_dir, user.
     `stopped()`: Companion is stopping, so no further section starts."""
-    context = _Context(facts, time.monotonic() + seconds)
+    context = _Context(facts, time.monotonic() + seconds, stopped)
     body = []
     for title, section in SECTIONS:
         body += ["", f"== {title} =="]
@@ -473,11 +492,18 @@ def save(text, home, uid, gid):
     """Write the report as a new file in the console user's Desktop folder, owned by that user; the path."""
     from companion_updates import open_user_dir
     directory, path = open_user_dir(home, uid, gid, "DESKTOP", "Desktop")
-    name = "LegionGoCompanion-device-report-" + datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y%m%d-%H%M%S") + ".txt"
+    stem = "LegionGoCompanion-device-report-" + datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y%m%d-%H%M%S")
     try:
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                     dir_fd=directory)
+        for attempt in range(1, 11):  # A second report in the same second gets -2, -3, ...
+            name = stem + (f"-{attempt}" if attempt > 1 else "") + ".txt"
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                             dir_fd=directory)
+                break
+            except FileExistsError:
+                if attempt == 10:
+                    raise
         try:
             os.fchown(fd, uid, gid)
             os.fchmod(fd, 0o644)

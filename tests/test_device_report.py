@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -38,7 +39,8 @@ def facts(**changes):
              "modules": {"fan": {"applicable": True, "enabled": True, "ready": False,
                                  "error": f"Settings in /home/{USER}/.config could not be read"},
                          "wifi": {"applicable": True, "enabled": True, "ready": False,
-                                  "error": "nmcli could not activate MyHomeNet"}},
+                                  "error": "nmcli could not activate MyHomeNet"},
+                         "tdp": {"applicable": True, "enabled": True, "ready": True}},
              "inputplumber_restarts": 1, "tdp_caps": {"tdp_available": True, "presets_estimated": False, "min": 5},
              "fan": {"supported": True, "beta": False, "error": ""}, "log_dir": "/nonexistent", "user": USER}
     value.update(changes)
@@ -116,6 +118,7 @@ class _Fixture(unittest.TestCase):
         for name, value in (("type", "integer"), ("current_value", "20"), ("min_value", "5"), ("max_value", "35")):
             self.write(f"{attributes}/ppt_pl1_spl/{name}", value + "\n")
         self.write(f"{attributes}/AssetTag/current_value", "ASSETTAG99\n")
+        self.write("/sys/class/firmware-attributes/thinklmi/attributes/BootOrder/current_value", "usb\n")
         self.write("/sys/firmware/acpi/platform_profile", "balanced\n")
         self.write("/sys/firmware/acpi/platform_profile_choices", "low-power balanced performance custom\n")
         for name, value in (("type", "Battery"), ("capacity", "80"), ("status", "Charging"), ("manufacturer", "SUNWODA"),
@@ -124,6 +127,9 @@ class _Fixture(unittest.TestCase):
             self.write(f"/sys/class/power_supply/BAT0/{name}", value + "\n")
         self.write("/sys/class/power_supply/ACAD/type", "Mains\n")
         self.write("/sys/class/power_supply/ACAD/online", "1\n")
+        for name, value in (("type", "Battery"), ("scope", "Device"), ("capacity", "60")):
+            self.write(f"/sys/class/power_supply/hid-USBSERIAL55-battery/{name}", value + "\n")
+        self.write("/sys/class/hwmon/hwmon7/name", "hid_USBSERIAL55_battery\n")
         for name, value in (("idVendor", "17ef"), ("idProduct", "61eb"), ("product", "Legion Controller"),
                             ("bcdDevice", "0101"), ("serial", "USBSERIAL55")):
             self.write(f"/sys/bus/usb/devices/1-3/{name}", value + "\n")
@@ -179,6 +185,7 @@ class ReportContent(_Fixture):
             self.assertIn(expected, text)
         self.assertNotIn("old_failure", text, "only the last 24 hours")
         self.assertNotIn("NVMe", text, "fwupd: only Legion/Lenovo plugins")
+        self.assertNotIn("BootOrder", text, "firmware attributes: lenovo-wmi-other only")
         if os.name == "posix":
             for expected in ("HID 0003:17EF:61EB.0001 name=Lenovo Legion Go 2 driver=hid-lenovo-go",
                              "  left_handle/: firmware_version", "  os_mode", "mode_index: dynamic custom",
@@ -247,7 +254,7 @@ class ReportContent(_Fixture):
                   "| EDC LIMIT VDD       |   140.000 | vrmmax-current     |\n")
         with patch.object(tdp_backend, "_helper_verified", return_value=True), \
                 patch.object(tdp_backend, "_run_ryzenadj", return_value=(0, output, "")) as helper:
-            lines = device_report._ryzenadj(device_report._Context({}, float("inf")))
+            lines = device_report._ryzenadj(device_report._Context(facts(), float("inf")))
         helper.assert_called_once()
         self.assertEqual(helper.call_args.args[0], ["--info"])
         self.assertEqual(lines, ["CPU Family: Strix Point", "STAPM LIMIT: 25.000", "PPT LIMIT FAST: 35.000",
@@ -255,8 +262,36 @@ class ReportContent(_Fixture):
         self.assertFalse(tdp_backend._ryzenadj_lock.locked())
         with patch.object(tdp_backend, "_helper_verified", return_value=False), \
                 patch.object(tdp_backend, "_run_ryzenadj") as helper:
-            device_report._ryzenadj(device_report._Context({}, float("inf")))
+            device_report._ryzenadj(device_report._Context(facts(), float("inf")))
         helper.assert_not_called()
+
+    def test_a_device_battery_name_never_reaches_the_report(self):
+        # Tested before scrub(): the kernel names it after HID_UNIQ, which need not contain "serial".
+        self.fake_console()
+        context = device_report._Context(facts(), float("inf"))
+        power, fan = "\n".join(device_report._power(context)), "\n".join(device_report._fan(context))
+        self.assertNotIn("USBSERIAL55", power + fan)
+        self.assertIn("peripheral2 type=Battery", power)
+        self.assertIn("ACAD: type=Mains", power)
+        self.assertIn("hwmon7 name=<removed>", fan)
+        self.assertIn("hwmon5 name=lenovo_wmi_other", fan)
+
+    def test_ryzenadj_never_holds_up_tdp(self):
+        with patch.object(tdp_backend, "_helper_verified", return_value=True), \
+                patch.object(tdp_backend, "_run_ryzenadj", return_value=(0, "CPU Family: x", "")) as helper:
+            off = facts(modules={"tdp": {"applicable": True, "enabled": False, "ready": False}})
+            self.assertEqual(device_report._ryzenadj(device_report._Context(off, float("inf"))),
+                             ["skipped: TDP control is off"])
+            closing = device_report._Context(facts(), float("inf"), stopped=lambda: True)
+            self.assertEqual(device_report._ryzenadj(closing), ["unavailable: Companion is stopping"])
+            helper.assert_not_called()
+            with tdp_backend._ryzenadj_lock:  # TDP is applying or restoring: the report does not wait.
+                self.assertEqual(device_report._ryzenadj(device_report._Context(facts(), float("inf"))),
+                                 ["unavailable: busy"])
+            helper.assert_not_called()
+            device_report._ryzenadj(device_report._Context(facts(), float("inf")))
+        # Worst-case lock hold: the run limit plus _spawn_ryzenadj's 2 s kill wait, inside the restore's 4 s wait.
+        self.assertLess(helper.call_args.kwargs["timeout"] + 2.0, 4.0)
 
     def test_scrub_removes_macs_private_lines_homes_and_the_user(self):
         text = device_report.scrub(f"a 00-11-22-33-44-55 b\nSerial: X\nbssid x\nkeep /home/{USER}/x\n{USER}'s deck\n"
@@ -306,8 +341,9 @@ class SaveFile(unittest.TestCase):
         with patch.object(device_report.datetime, "datetime") as clock:
             clock.now.return_value.strftime.return_value = "20261021-120000"
             (self.home / "Desktop" / "LegionGoCompanion-device-report-20261021-120000.txt").symlink_to(target)
-            with self.assertRaises(FileExistsError):
-                device_report.save("x", str(self.home), self.uid, self.gid)
+            path = device_report.save("x", str(self.home), self.uid, self.gid)
+            self.assertTrue(path.endswith("-20261021-120000-2.txt"), "same second: a new name")
+            self.assertTrue(device_report.save("y", str(self.home), self.uid, self.gid).endswith("-3.txt"))
         self.assertEqual(target.read_text(), "keep")
 
     def test_unknown_user_or_foreign_home_is_refused(self):
@@ -346,6 +382,31 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
             save.assert_called_once_with("text", "/home/" + USER, 1000, 1000)
             with patch.object(main, "_session_account", return_value=None):
                 self.assertFalse((await plugin.save_device_report())["success"])
+            await plugin._unload()
+
+    async def test_a_click_after_a_timed_out_one_shares_the_running_collection(self):
+        with tempfile.TemporaryDirectory() as settings, \
+                patch.object(main.decky, "DECKY_PLUGIN_SETTINGS_DIR", settings), \
+                patch.object(main, "_installed_standalone_plugins", return_value=[]):
+            plugin = main.Plugin()
+            plugin._applicable = {name: False for name in main.MODULE_NAMES}
+            plugin._device = {"console": None, "model": None}
+            plugin._tdp = types.SimpleNamespace(get_caps=AsyncMock(return_value={"tdp_available": False}))
+            account = types.SimpleNamespace(pw_name=USER, pw_dir="/home/" + USER, pw_uid=1000, pw_gid=1000)
+            release = threading.Event()
+            def slow(*_args, **_kwargs):
+                release.wait(5)
+                return "text"
+            with patch.object(main, "_session_account", return_value=account), \
+                    patch.object(device_report, "TOTAL_SECONDS", -4.8), \
+                    patch.object(device_report, "collect", side_effect=slow) as collect, \
+                    patch.object(device_report, "save", return_value="/home/x/Desktop/r.txt"):
+                self.assertFalse((await plugin.save_device_report())["success"], "timed out")
+                second = asyncio.ensure_future(plugin.save_device_report())
+                await asyncio.sleep(0.05)
+                release.set()
+                self.assertEqual(await second, {"success": True, "path": "/home/x/Desktop/r.txt"})
+            collect.assert_called_once()
             await plugin._unload()
 
 
