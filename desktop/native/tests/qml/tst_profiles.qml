@@ -609,9 +609,9 @@ TestCase {
             std:{spl:30,sppt:35,fppt:40},max:{spl:45,sppt:50,fppt:55}}});
         // get_extras_unlocked has not arrived (or failed): state() answers {}.
         const extended=field("tdp","Allow up to 50 W");
-        compare(extended.get(),false);compare(panel.powerLimit("spl"),30);
+        compare(extended.get(),false);compare(panel.tdpCaps().spl,30);
         fake.data=Object.assign({},fake.data,{get_extras_unlocked:true});
-        compare(extended.get(),true);compare(panel.powerLimit("spl"),45);
+        compare(extended.get(),true);compare(panel.tdpCaps().spl,45);
     }
     function confirmDialog() { const dialog=findChild(panel,"confirmDialog");verify(dialog!==null);return dialog; }
     function test_allowing50WattsAsksFirstButTurningItOffDoesNot() {

@@ -229,7 +229,6 @@ RowLayout {
     function extrasActive() { return s("get_extras_unlocked")===true && s("get_caps").extras!==false; }
     function tdpCaps() { const caps=s("get_caps"),value=extrasActive()?caps.max:caps.std;
         return {spl:Number(value?.spl || 5),sppt:Number(value?.sppt || 5),fppt:Number(value?.fppt || 5)}; }
-    function powerLimit(key) { return tdpCaps()[key]; }
     function tdpMin() { return Number(s("get_caps").min || 5); }
     function tdpAdvanced() { return s("get_settings").advanced_tdp_control!==false; }
     function customCaps() { return tdpAdvanced()?tdpCaps():Tdp.simpleCaps(tdpCaps(),extrasActive()); }
@@ -284,6 +283,7 @@ RowLayout {
     // What does not apply to this console is not shown: a module (Manage Modules included), controller firmware, the power button light.
     function shown(name) { return Modules.moduleShown(s("get_version")?.modules?.[name]); }
     function cardShown(owner) { return owner==="firmware"?s("get_version")?.device?.firmware!==false:shown(owner); }
+    // A card appearing or going rebuilds the page (handler below).
     readonly property string shownCards:["vibration","remap","controller","firmware"].filter(cardShown).join()
     onShownCardsChanged:rebuild()
     function moduleFields(name) {
