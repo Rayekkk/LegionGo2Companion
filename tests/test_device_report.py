@@ -15,11 +15,13 @@ from unittest.mock import AsyncMock, patch
 import support  # noqa: F401 - installs the fake decky module
 import device_report
 import main
+import module_runtime
 import tdp_backend
 
 USER = "rayuser"
 SECRETS = ("SERIAL123SECRET", "4C4C4544-0000-1111-2222-UUIDSECRET00", "BATSERIAL77", "USBSERIAL55",
-           "ASSETTAG99", "aa:bb:cc:dd:ee:ff", "12:34:56:78:9A:BC", "MyHomeNet", USER, "PANELSN1", "FWSERIAL3")
+           "ASSETTAG99", "aa:bb:cc:dd:ee:ff", "12:34:56:78:9A:BC", "MyHomeNet", USER, "PANELSN1", "FWSERIAL3",
+           "SECRETNAME")  # a HID device of another vendor is not listed at all
 
 
 def edid():
@@ -143,6 +145,7 @@ class _Fixture(unittest.TestCase):
             hid = "/sys/bus/hid/devices/0003:17EF:61EB.0001"
             self.write(f"{hid}/uevent", f"HID_ID=0003:000017EF:000061EB\nHID_NAME=Lenovo Legion Go 2\n"
                                         f"HID_UNIQ=aa:bb:cc:dd:ee:ff\nHID_PHYS=usb-0000:c4:00.3-3/input0\n")
+            self.write("/sys/bus/hid/devices/0003:046D:C52B.0009/uevent", "HID_NAME=Foreign Mouse SECRETNAME\n")
             self.write(f"{hid}/left_handle/firmware_version", "0x41a\n")
             self.write(f"{hid}/os_mode", "windows\n")
             drivers = self.root / "sys/bus/hid/drivers/hid-lenovo-go"
@@ -278,6 +281,30 @@ class ReportContent(_Fixture):
         self.assertIn("hwmon7 name=<removed>", fan)
         self.assertIn("hwmon5 name=lenovo_wmi_other", fan)
 
+    def test_firmware_backed_values_are_read_under_the_firmware_lock(self):
+        self.fake_console()
+        locked = {}
+        read = module_runtime.read_sysfs_text
+        def record(path, *args, **kwargs):
+            locked[os.path.relpath(path, self.root).replace(os.sep, "/")] = module_runtime.firmware_lock.locked()
+            return read(path, *args, **kwargs)
+        context = device_report._Context(facts(), float("inf"))
+        with patch.object(module_runtime, "read_sysfs_text", record):
+            device_report._power(context); device_report._fan(context); device_report._firmware_attributes(context)
+        for path in ("sys/class/hwmon/hwmon5/fan1_input", "sys/class/power_supply/BAT0/capacity",
+                     "sys/class/power_supply/ACAD/online", "sys/firmware/acpi/platform_profile",
+                     "sys/class/firmware-attributes/lenovo-wmi-other-0/attributes/ppt_pl1_spl/current_value"):
+            self.assertIs(locked.get(path), True, path)
+
+    def test_ryzenadj_runs_only_while_tdp_control_is_on_and_ready(self):
+        with patch.object(tdp_backend, "_helper_verified", return_value=True), \
+                patch.object(tdp_backend, "_run_ryzenadj", return_value=(0, "CPU Family: x", "")) as helper:
+            for enabled, ready in ((False, True), (True, False)):
+                state = facts(modules={"tdp": {"applicable": True, "enabled": enabled, "ready": ready}})
+                self.assertEqual(device_report._ryzenadj(device_report._Context(state, float("inf"))),
+                                 ["skipped: TDP control is off"])
+        helper.assert_not_called()
+
     def test_ryzenadj_never_holds_up_tdp(self):
         with patch.object(tdp_backend, "_helper_verified", return_value=True), \
                 patch.object(tdp_backend, "_run_ryzenadj", return_value=(0, "CPU Family: x", "")) as helper:
@@ -321,6 +348,11 @@ class SaveFile(unittest.TestCase):
         info = path.stat()
         self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), (self.uid, self.gid, 0o644))
         self.assertEqual(path.parent.stat().st_uid, self.uid)
+
+    def test_a_failed_write_leaves_no_partial_report(self):
+        with patch.object(device_report.os, "write", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            device_report.save("report\n", str(self.home), self.uid, self.gid)
+        self.assertEqual(list((self.home / "Desktop").iterdir()), [])
 
     def test_the_users_xdg_desktop_folder_is_used(self):
         config = self.home / ".config"
