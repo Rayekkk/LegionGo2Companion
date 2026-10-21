@@ -135,6 +135,45 @@ class FanPolicyTests(unittest.TestCase):
             bad=copy.deepcopy(DEFAULT_CURVE);bad[index][1]=bad[index-1][1]-1
             with self.assertRaises(ValueError):validate_curve(bad)
 
+    def test_settings_without_later_keys_load_with_their_defaults(self):
+        old=defaults(); del old['display_unit'], old['assign_tdp_presets']
+        loaded=validate_settings(old)
+        self.assertEqual((loaded['display_unit'],loaded['assign_tdp_presets']),('rpm',False))
+
+    def test_curve_points_must_be_integer_pairs(self):
+        for point in ([0.5,1500],(0,1500,1),5,'ab',None):
+            curve=copy.deepcopy(DEFAULT_CURVE); curve[0]=point
+            with self.subTest(point=point), self.assertRaises(ValueError): validate_curve(curve)
+
+    def test_speed_follows_the_line_between_curve_points(self):
+        c=[[20,1500],[40,2500],[50,3000],[60,3500],[70,4000],[80,4400],[90,4600],[100,4800]]
+        self.assertEqual(target_for(c,10),1500)
+        self.assertEqual(target_for(c,30),2000)
+        self.assertEqual(target_for(c,45),2750)
+        self.assertEqual(target_for(c,99),4780)
+
+    def test_cooling_on_a_curve_with_a_stop_reaches_a_real_stop_in_bounded_steps(self):
+        c=TEMPLATES['silent']; p=CurveControl(0,60,c); now=0; targets=[p.target]
+        for temperature in [60]*8+[50]*40+[40]*40+[30]*80:
+            now+=0.25; targets.append(p.step(c,temperature,now))
+        self.assertEqual(targets[-1],0)
+        self.assertTrue(all(valid_rpm(t) for t in targets))
+        self.assertTrue(all(a-b<=300 or b==0 for a,b in zip(targets,targets[1:])),targets)
+        self.assertFalse(p.is_stalled(0,now+60),'a requested stop is not a stalled fan')
+
+    def test_a_one_degree_dip_never_slows_the_fan(self):
+        c=TEMPLATES['silent']; p=CurveControl(0,60,c); now=0
+        def hold(temperature, expected, seconds=10):
+            nonlocal now
+            for _ in range(seconds*4):
+                now+=0.25; self.assertEqual(p.step(c,temperature,now),expected,(temperature,now))
+        hold(59,2100)  # right after start
+        p.force_max(now); hold(99,MAX_RPM)  # after the 100°C override
+        p.retarget(99,now)  # a curve change settles without a temperature fall
+        for _ in range(40): now+=0.25; p.step(c,99,now)
+        self.assertEqual(p.target,4760)
+        hold(98,4760)
+
     def test_a_stopped_tach_counts_as_a_stall_only_after_twelve_seconds(self):
         p=CurveControl(0,50)
         self.assertFalse(p.is_stalled(0,12));self.assertTrue(p.is_stalled(0,12.01))

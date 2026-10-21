@@ -20,14 +20,19 @@ class ModelPorts:
         if self.operations == self.fail_at:
             raise OSError('Injected EC interruption')
 
+    def data_port(self, port):
+        # Only the 0x4E/0x4F pair exists; its data port means something only behind the EC selectors.
+        if port not in (0x4E, 0x4F) or port == 0x4F and self.primary not in (0x2E, 0x2F):
+            raise AssertionError(f'I/O port {port:#x} accessed with primary selector {self.primary:#x}')
+
     def read(self, port):
-        self.interrupt()
+        self.interrupt(); self.data_port(port)
         if port == 0x4E: return self.primary
         if self.primary == 0x2E: return self.secondary
         return {0x10:self.lo,0x11:self.hi}.get(self.secondary, self.mem.get(self.hi<<8|self.lo,0))
 
     def write(self, port, value):
-        self.interrupt()
+        self.interrupt(); self.data_port(port)
         if port == 0x4E: self.primary = value
         elif self.primary == 0x2E: self.secondary = value
         elif self.secondary == 0x10: self.lo = value
@@ -54,7 +59,7 @@ class FanTransportTests(unittest.TestCase):
 
     def test_hundred_rpm_transitions_read_back_and_restore_selectors(self):
         p=ModelPorts(); e=EC(p); e.snapshot()
-        for rpm in list(range(MIN_RPM,MAX_RPM+1,100))+[1501,1502,3073,4799,0]+list(range(MAX_RPM,MIN_RPM-1,-100)):
+        for rpm in list(range(MIN_RPM,MAX_RPM+1,100))+[1501,1502,1791,3073,4351,4799,0]+list(range(MAX_RPM,MIN_RPM-1,-100)):
             e.set_target(rpm,lambda:False)
             self.assertEqual(e.word(0xC6C8),encode_target(rpm))
         self.assertTrue(all(a in (0xC6C8,0xC6C9) for a,v in p.writes))
@@ -108,6 +113,52 @@ class FanTransportTests(unittest.TestCase):
         self.assertNotEqual(intermediate,1600,'The withdrawn second write must not occur')
         e.release();self.assertEqual(e.word(0xC6C8),0)
 
+    def test_firmware_automatic_is_reached_only_by_release(self):
+        for current in (0, STOP_OVERRIDE, MIN_RPM, MAX_RPM):
+            with self.assertRaises(RuntimeError): transition_bytes(current, 0)
+
+    def test_release_from_a_running_speed_never_passes_through_a_stop(self):
+        for old in (1728, 3000, MAX_RPM):  # 1728 = 0x06C0, the lowest high byte released low byte first.
+            p=ModelPorts();p.mem.update({0xC6C8:old&255,0xC6C9:old>>8});e=EC(p)
+            e.release()
+            value=old; seen=[]
+            for addr,byte in p.writes:
+                value=(byte<<8|value&255) if addr==0xC6C9 else (value&0xff00|byte); seen.append(value)
+            self.assertEqual(seen[-1],0)
+            self.assertTrue(all(v==0 or MIN_RPM<=v<=MAX_RPM for v in seen),(old,seen))
+
+    def test_snapshot_accepts_any_ec_selector_and_leaves_a_foreign_one_untouched(self):
+        for secondary in (0x10,0x11,0x12):
+            p=ModelPorts();p.secondary=secondary;e=EC(p)
+            self.assertEqual(e.snapshot()['secondary'],secondary)
+            self.assertEqual((p.primary,p.secondary,p.hi,p.lo),(0xAA,secondary,0xC6,0xC9))
+        p=ModelPorts();p.secondary=0x07
+        with self.assertRaisesRegex(RuntimeError,'Unknown initial EC selector'): EC(p).snapshot()
+        self.assertEqual(p.primary,0xAA,'the firmware must get its own primary selector back')
+        self.assertEqual(p.writes,[])
+
+    @unittest.skipUnless(hasattr(os,'pread'),'POSIX positional I/O')
+    def test_port_io_touches_exactly_one_port(self):
+        import tempfile
+        from fan_ec import Ports
+        with tempfile.TemporaryFile() as dev:
+            dev.write(bytes(range(0x50)))
+            dev.flush()
+            ports=object.__new__(Ports);ports.fd=dev.fileno()
+            self.assertEqual(ports.read(0x4E),0x4E)
+            ports.write(0x4F,0xA5)
+            dev.seek(0);self.assertEqual(dev.read(),bytes(range(0x4F))+b'\xa5')
+            self.assertEqual(ports.read(0x4F),0xA5)
+
+    @unittest.skipUnless(hasattr(os,'pread'),'POSIX flock')
+    def test_a_transaction_snapshots_then_restores_the_firmware_selectors(self):
+        import tempfile
+        with tempfile.TemporaryFile() as lock:
+            p=ModelPorts();p.fd=lock.fileno();e=EC(p)
+            with e.transaction(): e.set_target(2000,lambda:False)
+            self.assertEqual((p.primary,p.secondary,p.hi,p.lo),(0xAA,0x12,0xC6,0xC9))
+            self.assertEqual(p.mem[0xC6C9]<<8|p.mem[0xC6C8],2000)
+
     def test_platform_is_the_exact_model_with_any_bios_or_ec_version(self):
         dmi={'sys_vendor':'LENOVO','product_name':'83N0','product_version':'Legion Go 8ASP2',
              'bios_version':'RRCN16WW','ec_firmware_release':'1.16','board_name':'LNVNB161216'}
@@ -122,6 +173,11 @@ class FanTransportTests(unittest.TestCase):
                 dmi[name]=value
             dmi.update(board_name='LNVNB000000')
             with self.assertRaises(RuntimeError): platform_check()  # Only the 83N1 stands in its BIOS line.
+        dmi.update(board_name='LNVNB161216')
+        for system,machine in (('Linux','aarch64'),('Windows','x86_64')):
+            with patch('fan_ec.platform.system',return_value=system), patch('fan_ec.platform.machine',return_value=machine), \
+                    patch('fan_ec.pathlib.Path.read_text',lambda p:dmi[p.name]), self.assertRaises(RuntimeError):
+                platform_check()
 
     def test_the_go_2_z2_is_admitted_as_beta_on_its_own_bios_line_only(self):
         dmi={'sys_vendor':'LENOVO','product_name':'83N1','product_version':'Legion Go 8AHP2',
