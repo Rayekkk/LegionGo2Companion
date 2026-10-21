@@ -820,9 +820,10 @@ class Plugin:
         decky.logger.info(f"[legiongo2companion] startup v{_plugin_version()}")
         if self._device.get('console') and self._inputplumber is None and not self._closing:
             # A system repair, independent of the modules; it never runs during controller maintenance.
+            # Its settled controller events also let a module that applies only now start.
             self._inputplumber_recovery = LostControllerRecovery(
                 lambda: self._closing or self._guard_blocked or bool(self._guard_error) or module_runtime.is_paused('controller'),
-                updater_running)
+                updater_running, lambda: module_runtime.background_task(self._controller_hotplug()))
             self._inputplumber = module_runtime.background_task(self._inputplumber_recovery.run())
         if self._guard_task is None:
             self._guard_task = asyncio.create_task(self._watch_conflicts())
@@ -955,6 +956,24 @@ class Plugin:
             module_runtime.resume_controller()
             await module_runtime.complete(self._start_modules(
                 tuple(name for name in MODULE_NAMES if name in module_runtime.CONTROLLER_MODULES)))
+        await self._publish_modules()
+
+    async def _controller_hotplug(self):
+        """A controller came or its driver bound: a module that did not apply at load may now (a Go
+        whose hid-lenovo-go bound after Decky started). It starts as at startup; none is ever stopped here."""
+        if not self._applicable or all(self._applicable.values()):
+            return
+        applicable, device = await asyncio.to_thread(self._detect_device)
+        async with self._guard_lock:
+            added = tuple(name for name in MODULE_NAMES if applicable.get(name) and not self._applies(name))
+            if not added or self._closing:
+                return
+            self._applicable.update(dict.fromkeys(added, True))
+            self._device['controller_driver'] = self._device.get('controller_driver') or device['controller_driver']
+            diagnostics.event('plugin', 'modules_now_applicable', modules=','.join(added))
+            # Before startup reaches its modules, it starts these with the rest.
+            if self._modules_started and not (self._guard_blocked or self._guard_error):
+                await module_runtime.complete(self._start_modules(added))
         await self._publish_modules()
 
     async def _desktop_get_logs(self):

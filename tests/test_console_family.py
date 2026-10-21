@@ -220,6 +220,25 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._battery._main.assert_awaited_once()
         self.assertIs(status["battery"]["applicable"], True)
 
+    async def test_a_module_that_applies_after_a_controller_event_starts_and_none_is_stopped(self):
+        driver = {"bound": False}
+        self.plugin._vibration.applicable = lambda: driver["bound"]
+        self.plugin._battery.applicable = lambda: not driver["bound"]  # would no longer apply: still kept
+        await self.plugin._migration()
+        await self.plugin._main()
+        self.plugin._vibration._main.assert_not_awaited()
+        driver["bound"] = True  # hid-lenovo-go bound to a Go's controller after Decky started
+        await self.plugin._controller_hotplug()
+        self.plugin._vibration._main.assert_awaited_once()
+        status = self.plugin._module_status()
+        self.assertEqual((status["vibration"]["applicable"], status["vibration"]["ready"]), (True, True))
+        self.assertIs(status["battery"]["applicable"], True)
+        self.plugin._battery._unload.assert_not_awaited()
+        self.plugin._fan._main.assert_not_awaited()
+        await self.plugin._controller_hotplug()  # nothing new: nothing starts twice
+        self.plugin._vibration._main.assert_awaited_once()
+        await self.plugin._unload()
+
     async def test_battery_never_reads_controllers_that_do_not_apply(self):
         self.plugin._controller.applicable = lambda: False  # Go S, a Go on the older controller firmware
         self.plugin._controller.get_battery_levels = AsyncMock()

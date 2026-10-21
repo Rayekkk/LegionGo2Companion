@@ -114,6 +114,21 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.checks.call_count >= 4)
         self.assertEqual(self.console.restarts(), [RESTART])
 
+    async def test_the_start_and_each_settled_controller_event_are_reported_once(self):
+        self.task.cancel()
+        settled = []
+        recovery = module.LostControllerRecovery(lambda: False, lambda: False, lambda: settled.append(1))
+        task = asyncio.create_task(recovery.run())
+        try:
+            await self.until(lambda: settled)  # The start's window.
+            self.assertEqual(len(settled), 1)
+            recovery._wake.set()  # A controller's udev event.
+            await self.until(lambda: len(settled) == 2)
+            self.assertEqual(len(settled), 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_steamos_enabled_runtime_unit_is_restarted(self):
         self.console.state["UnitFileState"] = "enabled-runtime"  # What SteamOS actually reports.
         await self.until(lambda: "controller_recovered_after_restart" in self.names())
@@ -354,8 +369,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.started = []
 
         class Watch:
-            def __init__(watch, blocked, updating):
-                watch.blocked = blocked
+            def __init__(watch, blocked, updating, settled):
+                watch.blocked, watch.settled = blocked, settled
                 self.started.append(watch)
 
             async def run(watch):

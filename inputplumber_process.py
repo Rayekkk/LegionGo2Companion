@@ -208,9 +208,11 @@ class LostControllerRecovery:
     a restart needs the lost state twice, CONFIRM_S apart, and stays within the limits. A check
     held by maintenance is repeated every HELD_RETRY_S, at most HELD_RETRIES times."""
 
-    def __init__(self, blocked: Callable[[], bool], updating: Callable[[], bool]) -> None:
+    def __init__(self, blocked: Callable[[], bool], updating: Callable[[], bool],
+                 settled: Callable[[], object] | None = None) -> None:
         self._blocked = blocked  # On the loop: closing, conflict guard, controller maintenance.
         self._updating = updating  # In a thread: a firmware updater process (fwupd itself is checked here).
+        self._settled = settled  # On the loop, without waiting: the start's or a controller event's window passed.
         self._wake = asyncio.Event()
         self._restarts: list[float] = []
         self._verify = False  # A restart was requested and InputPlumber has not shown the controller since.
@@ -251,6 +253,11 @@ class LostControllerRecovery:
                     held = 0
                 elif due is not None and loop.time() >= due:
                     due = None
+                    if self._settled is not None and trigger in ("start", "controller") and not held:
+                        try:
+                            self._settled()
+                        except Exception as exc:
+                            event("inputplumber", "controller_settled_failed", level="warning", error=exc, repeat=600)
                     try:
                         result = await self._check(trigger)
                         if result == "restarted":
