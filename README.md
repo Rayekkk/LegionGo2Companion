@@ -41,31 +41,49 @@ same controls are also available as a native [Desktop app](#desktop-app).
 
 | Requirement | Details |
 |---|---|
-| Device | Lenovo Legion Go 2 (best supported: **8ASP2 / 83N0**); Legion Go and Legion Go S in [early beta](#other-legion-go-consoles-early-beta) |
+| Device | Lenovo Legion Go 2 (best supported: **8ASP2 / 83N0**); Legion Go and Legion Go S in [early beta](#compatibility) |
 | System | SteamOS **Stable** (tested on 3.8.16 and 3.8.28) with [Decky Loader](https://decky.xyz) |
 | Desktop app (optional) | Nothing extra: it uses the Qt 6.9+ that comes with SteamOS 3.8 and newer |
 
 Compatibility was also checked on SteamOS 3.9.3 Beta. Each page explains when a control
 is unavailable on your console.
 
-### Other Legion Go consoles (early beta)
+### Compatibility
 
-Companion also runs on the **Legion Go** (83E1) and the **Legion Go S** (83L3, 83N6). It shows only the modules and options that apply to the console it runs on, also in
-Manage Modules. None of this has been tested on these consoles yet. A machine type that is not
-listed is placed by its product name (a Legion Go S, or the Legion Go 8APU1) and is never taken
-for a Legion Go 2; the types 83Q2 and 83Q3 are left out on purpose.
+The **Legion Go 2** is fully supported. The **Legion Go** (83E1) and the **Legion Go S** (83L3, 83N6)
+are an early beta: Companion shows only what applies to the console it runs on, also in Manage
+Modules, but none of it has been tested on these consoles yet. A machine type that is not listed
+is placed by its product name and is never taken for a Legion Go 2; the types 83Q2 and 83Q3 are
+left out on purpose.
 
-| Module | Legion Go | Legion Go S |
-|---|---|---|
-| TDP & CPU | With the firmware's limits | Same, without **Allow up to 50 W** |
-| Battery | When SteamOS offers the Long Life charge mode | Same |
-| Lighting (stick lights) | With the 2025 controller firmware | Yes |
-| Vibration, Gyro & touchpad | With the 2025 controller firmware | Hidden |
-| Wi-Fi (band policy with the MT7922 `mt7921e` driver) | Yes | Yes |
-| Fan Control, power-button light, Button mapping, Display, Controller firmware | Hidden | Hidden |
+| Feature | Legion Go 2 | Legion Go | Legion Go S |
+|---|:---:|:---:|:---:|
+| TDP & CPU (Boost, EPP) | ✅ | ✅ ¹ | ✅ ¹ |
+| Allow up to 50 W | ✅ | ✅ ¹ | ❌ |
+| Separate battery presets | ✅ | ✅ ¹ | ✅ ¹ |
+| Fan Control | ✅ ³ | ❌ | ❌ |
+| Vibration | ✅ | ✅ ² | ❌ |
+| Lighting (stick lights) | ✅ | ✅ ² | ✅ |
+| Power-button light | ✅ | ❌ | ❌ |
+| Button mapping | ✅ | ❌ | ❌ |
+| Gyro & touchpad | ✅ | ✅ ² | ❌ |
+| Battery protection | ✅ | ✅ ¹ | ✅ ¹ |
+| Display | ✅ | ❌ | ❌ |
+| Wi-Fi and band policy | ✅ | ✅ ¹ | ✅ ¹ |
+| Controller firmware | ✅ | ❌ | ❌ |
+| Device report | ✅ | ✅ | ✅ |
+| Desktop app | ✅ | ✅ | ✅ |
 
-The Legion Go's controllers on older firmware have no Linux driver for lighting, vibration or
-gyro, so Companion hides those modules there.
+¹ When SteamOS offers what the feature needs: the firmware's power limits for TDP, the Long
+Life charge mode for Battery, the MT7922 (`mt7921e`) Wi-Fi driver for the band policy.
+² With the 2025 controller firmware. The Legion Go's controllers on older firmware have no Linux
+driver for these, so Companion hides them; update the controllers in Legion Space to unlock them.
+³ On the Legion Go 2 Z2 (83N1) Fan Control is a beta, see below.
+
+Not offered on the Legion Go and Legion Go S on purpose: Fan Control and the power-button light
+need EC data that has only been verified on the Legion Go 2; Display's modes are for the Legion Go 2
+OLED panel (the other consoles use SteamOS's own display profiles); SteamOS handles the Legion Go's
+back buttons and the Legion Go S gyro natively.
 
 <details>
 <summary><b>Model compatibility and hardware checks</b></summary>
