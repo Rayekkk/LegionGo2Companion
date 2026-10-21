@@ -204,8 +204,9 @@ class FlowTests(unittest.TestCase):
     def test_install_needs_the_confirmed_token_of_the_current_download(self):
         state = self.downloaded()
         token = state.service.status()['token']
+        stale = 'no longer matches the download'  # the token refuses, not the host's power supply
         for wrong in ('', None, 'x' * 64, token.upper()):
-            with self.assertRaises(fw.FirmwareError):
+            with self.assertRaisesRegex(fw.FirmwareError, stale):
                 state.service.admit_install(wrong)
         # A new check replaces the download; the old confirmation is stale.
         with patch.object(catalog, 'check_catalog', return_value=feed()):
@@ -345,6 +346,51 @@ class FlowTests(unittest.TestCase):
         self.assertIn('Right controller: attach it', status['error'])
         self.assertIn('keep their new firmware', status['error'])
         self.assertNotIn('Nothing was installed', status['error'])
+
+    def test_console_power_needs_mains_or_thirty_percent_of_the_console_battery(self):
+        def power(**supplies):
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                for name, values in supplies.items():
+                    (root / name).mkdir()
+                    for key, value in values.items():
+                        (root / name / key).write_text(f'{value}\n')
+                with patch.object(fw, 'Path', lambda path: root if path == '/sys/class/power_supply' else Path(path)):
+                    return fw.console_power()
+        battery = lambda level, **more: dict(type='Battery', capacity=level, **more)
+        self.assertEqual(power(BAT0=battery(30)), (False, 30))
+        self.assertEqual(power(BAT0=battery(5), ACAD=dict(type='Mains', online=1)), (True, 5))
+        self.assertEqual(power(BAT1=battery(80, scope='System')), (False, 80))
+        self.assertEqual(power(BAT0=battery(100)), (False, 100))
+        for kind in ('USB', 'USB_C', 'USB_PD'):  # a USB-C charger
+            self.assertEqual(power(BAT0=battery(5), charger=dict(type=kind, online=1)), (True, 5))
+        for supplies in (dict(BAT0=battery(29)), dict(BAT0=battery(29), ACAD=dict(type='Mains', online=0)),
+                         dict(BAT0=battery(20), pad=battery(90, scope='Device')),  # a controller's battery
+                         dict(BAT0=battery(20), pad=dict(type='USB', online=1, scope='Device')),
+                         dict(BAT0=battery(80), BAT1=battery(80)), dict()):
+            with self.subTest(supplies=supplies), self.assertRaises(fw.FirmwareError):
+                power(**supplies)
+
+    def test_a_release_with_another_components_identity_is_refused(self):
+        left, right = fw.RELEASES['left'], fw.RELEASES['right']
+        for release in (replace(left, component='right'), replace(left, footer=right.footer),
+                        replace(left, label=right.label)):
+            with self.subTest(release=release), self.assertRaisesRegex(fw.FirmwareError, 'identity'):
+                fw.validate_image('left', b'', release)
+
+    def test_a_feed_candidate_needs_its_own_version_and_the_official_host(self):
+        candidate = {'version': '270101A', 'feed_version': 'v27.01.01.01',
+                     'url': 'https://s3.service.lenovo.com/legion/cms/package/future-left.bin'}
+        self.assertEqual(fw.candidate_release('left', candidate).version, '270101A')
+        for change in (dict(feed_version='v27.01.01.02'), dict(url='https://foreign.invalid/future-left.bin')):
+            with self.subTest(change=change), self.assertRaises(fw.FirmwareError):
+                fw.candidate_release('left', dict(candidate, **change))
+
+    def test_pads_need_thirty_percent(self):
+        read = lambda level: lambda: {'left': level, 'connection_left': 'attached'}
+        fw.pad_power(read(30), ('left',))
+        with self.assertRaisesRegex(fw.FirmwareError, 'at least 30%'):
+            fw.pad_power(read(29), ('left',))
 
     def test_receiver_only_install_does_not_read_the_pads(self):
         fw.pad_power(None, ('receiver',))
