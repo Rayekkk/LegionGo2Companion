@@ -3254,11 +3254,15 @@ class Plugin:
 
         await _offload(Plugin._refresh_setup)
 
-        # A stop that came during a slow step (see main.MODULE_START_LIMIT_S): apply nothing more.
-        stopped = functools.partial(module_runtime.stop_requested, "display")
-        if Plugin._state["reset_in_progress"] and not stopped():
+        def check_stop():
+            """A stop that came during a slow step (see main.MODULE_START_LIMIT_S): apply nothing more."""
+            if module_runtime.stop_requested("display"):
+                raise module_runtime.StartStopped("Display stopped while starting; nothing more was applied.")
+        check_stop()
+        if Plugin._state["reset_in_progress"]:
             await self.reset_settings()
-        reinstalled = None if stopped() else await _offload(Plugin._script_lost_to_update)
+            check_stop()
+        reinstalled = await _offload(Plugin._script_lost_to_update)
         if reinstalled is not None:
             mode = Plugin._state["panel_mode"]
             ok = not (await Plugin._apply_mode(mode, reinstall=True)).get("setup_error")
@@ -3268,6 +3272,7 @@ class Plugin:
 
         # Before the slower startup work: a game that creates its surface before
         # the forced-support flag is back loses HDR for its whole run.
+        check_stop()
         if Plugin._state.get("active_mode") == MODE_HYBRID:
             await _offload(Plugin._hybrid_pass)
 
@@ -3279,6 +3284,7 @@ class Plugin:
         # any display carrying a DisplayID 2.0 block, and dropping a block DXVK
         # never reads cannot cost anything.
         await _offload(Plugin._session_props, [ATOM_IS_EXTERNAL])
+        check_stop()
         await _offload(Plugin._edid_pass)
 
         bl_dir = (await _offload(_find_backlight)
@@ -3299,8 +3305,7 @@ class Plugin:
                 f"(max {Plugin._state['max_nits']} nits) on {desc}"
             )
 
-        if stopped():
-            return
+        check_stop()
         # The loop runs either way: the EDID half is not device specific, and the
         # setup gate needs re-checking so the panel updates itself after Setup.
         Plugin._prop_task = asyncio.create_task(_watch_properties())

@@ -543,6 +543,22 @@ class DisplayUpdateTests(ResetFixture, unittest.TestCase):
         self.assertEqual(failed.call_count, display.REINSTALL_ATTEMPTS)
         self.assertIs(self.persisted()['script_reinstall'], False, 'given up')
 
+    def test_a_stop_during_the_start_is_a_stopped_start_that_writes_nothing_more(self):
+        self.script.unlink()
+        self.store.replace({**self.saved, 'script_reinstall': True})  # an update's reinstall would follow
+        def stop_while_picking():
+            display.module_runtime.request_stop('display')  # Decky's stop lands during a slow step.
+            return True
+        self.addCleanup(display.module_runtime._stop_requested.discard, 'display')
+        self.patch(display, _pick_display=Mock(side_effect=stop_while_picking))
+        with self.assertRaises(display.module_runtime.StartStopped):
+            asyncio.run(display.Plugin()._main())
+        self.assertFalse(self.script.exists())
+        display.Plugin._hybrid_pass.assert_not_called()
+        display.Plugin._edid_pass.assert_not_called()
+        self.assertIsNone(display.Plugin._task)
+        self.assertIsNone(display.Plugin._prop_task)
+
     def test_update_never_replaces_a_script_found_in_its_place(self):
         self.update(lambda: self.script.write_bytes(b'-- hand tuned'))
         self.assertEqual(self.script.read_bytes(), b'-- hand tuned')
