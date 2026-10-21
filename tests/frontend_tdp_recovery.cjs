@@ -463,6 +463,10 @@ run(async () => {
     const shown = reopened.render();
     assert.equal(field(shown, 'Separate battery presets').props.checked, true);
     assert.ok(JSON.stringify(shown).includes('Balanced · 16 W (boost 16/30 W)'));
+    // Switched back in the Desktop app while the panel stays open: the next re-read shows it.
+    reopened.responses.get_settings = { ...settings, separate_battery_presets: false };
+    reopened.fire('interval', 10000); await settle();
+    assert.equal(field(reopened.render(), 'Separate battery presets').props.checked, false);
     reopened.unmount();
     const h = mount({ responses: { get_caps: { ...caps, wmi: false, extras: false, tdp_available: false } } });
     assert.equal(field(await ready(h), 'Separate battery presets'), undefined); h.unmount();

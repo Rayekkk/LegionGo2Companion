@@ -928,19 +928,25 @@ const useTdpState = (tabShown: boolean) => {
   }, [ready, visible, extrasAvailable, helperRetryAvailable]);
 
   // The Desktop app may change Separate battery presets meanwhile: re-read it on every
-  // later opening (initialization has just read it for the first one).
+  // later opening (initialization has just read it for the first one) and every ten seconds
+  // while the page is open.
   const batteryReadRef = useRef(false);
   useEffect(() => {
     if (!ready || !visible) return;
-    if (!batteryReadRef.current) { batteryReadRef.current = true; return; }
-    let active = true;
-    const operation = operationRef.current;
-    getSettings().then((s) => {
-      // A toggle from this page since the read has the newer answer.
-      if (active && !operationBusyRef.current && operation === operationRef.current)
-        setSeparateBattery(s.separate_battery_presets === true);
-    }).catch(() => undefined);
-    return () => { active = false; };
+    let active = true, reading = false;
+    const read = () => {
+      if (reading) return;
+      reading = true;
+      const operation = operationRef.current;
+      getSettings().then((s) => {
+        // A toggle from this page since the read has the newer answer.
+        if (active && !operationBusyRef.current && operation === operationRef.current)
+          setSeparateBattery(s.separate_battery_presets === true);
+      }).catch(() => undefined).finally(() => { reading = false; });
+    };
+    if (batteryReadRef.current) read(); else batteryReadRef.current = true;
+    const timer = setInterval(read, 10000);
+    return () => { active = false; clearInterval(timer); };
   }, [ready, visible]);
 
   // ── Game detection ────────────────────────────────────────────────────────────
