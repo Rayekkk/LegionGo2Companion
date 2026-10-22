@@ -16,7 +16,7 @@ import test_integration  # Shared Decky and Windows/POSIX compatibility fixture.
 
 import module_runtime
 import rgb_backend
-from support import GO1_POWER_LED_FIELDS, power_led_dsdt
+from support import GO1_POWER_LED_FIELDS, path_field, power_led_dsdt
 
 
 class MemorySettings:
@@ -734,6 +734,7 @@ class RgbBackendTests(unittest.TestCase):
             "unknown field element": power_led_dsdt(fields=[(None, 0x80)] + [(n, 1) for n in names[:5]] + [(b"\x02xyz", 1), (b"LPBL", 1), (b"OSRT", 1)]),
             "truncated table": power_led_dsdt()[:-1],
             "not a DSDT": b"SSDT" + power_led_dsdt()[4:],
+            "LPBL also in Field(\\_SB.EC0.ERAM)": path_field(power_led_dsdt(), b"\\\x2f\x03_SB_EC0_", b"LPBL"),
         }
         for reason, table in rejected.items():
             with self.subTest(reason):

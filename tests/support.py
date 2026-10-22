@@ -150,6 +150,13 @@ def power_led_dsdt(base=0xFEEC2300, space=0x00, length=0xFF, fields=None, region
     return b"DSDT" + (36 + len(aml)).to_bytes(4, "little") + bytes(28) + aml
 
 
+def path_field(table, prefix, field=b"BTSN"):
+    """`table` plus a Field naming ERAM through a path (`prefix` + ERAM) that holds `field` at byte 0x82."""
+    body = prefix + b"ERAM\x01" + b"\x00\x40\x41" + field + b"\x10"  # ReservedField of 0x410 bits, then field.
+    aml = table[36:] + b"\x5b\x81" + bytes([len(body) + 1]) + body
+    return b"DSDT" + (36 + len(aml)).to_bytes(4, "little") + bytes(28) + aml
+
+
 # The Go 1 (83E1) ECMM bytes 0x50-0x52 as its DSDT declares them: LEDP is byte 0x52 bit 5.
 GO1_POWER_LED_FIELDS = [(None, 0x50 * 8), (b"ADPT", 1), (b"BAIN", 1), (b"LIDF", 1), (None, 4), (b"NVBT", 1),
                         (b"B1ST", 8), (b"BTDP", 1), (None, 1), (None, 1), (None, 1), (b"ACAP", 1), (b"LEDP", 1),

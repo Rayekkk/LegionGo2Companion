@@ -638,7 +638,8 @@ def aml_region(data: bytes, region: bytes) -> tuple[int, int] | None:
 
 def aml_fields(data: bytes, region: bytes) -> list[tuple[bytes, int, int]] | None:
     """(name, bit offset, bit width) of every named field across every Field(region); None when an
-    element this parser does not know makes the offsets uncertain. Raises IndexError like aml_region."""
+    element this parser does not know makes the offsets uncertain or a Field names region through a path.
+    Raises IndexError like aml_region."""
     found = []
     start = data.find(b"\x5b\x81")
     while start >= 0:
@@ -647,7 +648,14 @@ def aml_fields(data: bytes, region: bytes) -> list[tuple[bytes, int, int]] | Non
         except IndexError:
             break  # Opcode bytes at the very end of the table.
         name = start + 2 + count
-        if data[name:name + 4] == region:
+        if data[name] in b"\\^./":  # A NamePath (\ ^ DualName MultiName) ending in `region`: its scope is unknown.
+            p = name
+            while data[p] in b"\\^":
+                p += 1
+            segments, p = {0x2E: (2, p + 1), 0x2F: (data[p + 1], p + 2), 0x00: (0, p)}.get(data[p], (1, p))
+            if segments and data[p + 4 * segments - 4:p + 4 * segments] == region:
+                return None
+        elif data[name:name + 4] == region:
             end, p, bit = start + 2 + package, name + 5, 0
             while p < end:
                 op = data[p]

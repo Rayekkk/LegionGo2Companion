@@ -399,6 +399,9 @@ class EcAndDsdt(_Fixture):
                                                     support.power_led_dsdt(region=b"SMA2", base=0x5A00, length=0x80)),
                                         [(EC_BASE, 0xFF)]),
             "unknown field element": (support.power_led_dsdt(base=EC_BASE, fields=[(b"\x02xyz", 8)]), []),
+            **{f"battery serial in Field({path})": (support.path_field(support.power_led_dsdt(base=EC_BASE), prefix), [])
+               for path, prefix in (("\\ERAM", b"\\"), ("^ERAM", b"^"), ("EC0.ERAM", b"\x2eEC0_"),
+                                    ("\\_SB.EC0.ERAM", b"\\\x2f\x03_SB_EC0_"))},
         }
         for reason, (table, expected) in cases.items():
             with self.subTest(reason):
@@ -407,6 +410,9 @@ class EcAndDsdt(_Fixture):
                 with patch.object(device_report, "_read_physical", side_effect=fake_read):
                     lines = device_report._ec(device_report._Context(self.go1(), float("inf")))
                 self.assertEqual(reads, expected, lines)
+                if reason.startswith("battery serial"):
+                    self.assertEqual(lines[0], "ERAM: skipped: its DSDT field map is not understood, "
+                                               "so private fields cannot be blanked")
                 if reason == "no EC window":
                     self.assertEqual(lines, ["skipped: the DSDT declares no EC memory window (ERAM or ECMM)"])
 
