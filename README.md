@@ -59,11 +59,11 @@ left out on purpose.
 | Feature | Legion Go 2 | Legion Go | Legion Go S |
 |---|:---:|:---:|:---:|
 | TDP & CPU (Boost, EPP) | ✅ | ✅ ¹ | ✅ ¹ |
-| Allow up to 50 W | ✅ / ⚠️ ³ | ⚠️ ¹ ⁵ | ➖ |
+| Allow up to 50 W | ✅ | ⚠️ ¹ ⁵ | ➖ |
 | Separate battery presets | ✅ | ✅ ¹ | ✅ ¹ |
 | Fan Control | ✅ / ⚠️ ³ | ❌ | ❌ |
-| Vibration | ✅ | ✅ ² | ✅ ⁴ |
-| Lighting (stick lights) | ✅ | ✅ ² | ✅ |
+| Vibration | ✅ | ✅ ² | ✅ ⁴ ⁶ |
+| Lighting (stick lights) | ✅ | ✅ ² | ✅ ⁶ |
 | Power-button light | ✅ | ✅ ⁴ | ✅ ⁴ |
 | Button mapping | ✅ | ➖ | ➖ |
 | Gyro & touchpad | ✅ | ✅ ² | ➖ |
@@ -84,6 +84,8 @@ driver for these, so Companion hides them; update the controllers in Legion Spac
 runs its fan self-test first, see below).
 ⁴ Beta: not tested on this console yet.
 ⁵ The 50 W boosts go above the firmware's own limits and have not been tested on this console.
+⁶ When SteamOS has the Legion Go S controller driver (`hid-lenovo-go-s`); without it Companion hides
+the module.
 
 Not supported yet on the Legion Go and Legion Go S: Fan Control, which needs EC data that has only
 been verified on the Legion Go 2, and controller firmware updates; on the Legion Go S also vibration
