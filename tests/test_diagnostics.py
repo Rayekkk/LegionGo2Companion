@@ -117,27 +117,43 @@ class EventTests(unittest.TestCase):
         for private in ('secret','abc','/home/name','192.168.1.5'):self.assertNotIn(private,text)
         self.assertIn('ValueError',text);self.assertIsNone(record.exc_info)
 
-    def test_asyncio_error_logged_while_an_event_holds_the_lock_does_not_deadlock(self):
+    def test_asyncio_error_logged_inside_another_record_on_the_same_thread_does_not_deadlock(self):
         # The garbage collector can finalize a failed task at any allocation, also inside another
-        # event's deduplication on the same thread: asyncio logs it and the filter records an event.
+        # event's deduplication or its sink's queue mutex: asyncio logs it and the filter records an event.
         try: raise RuntimeError('lost task')
         except RuntimeError as exc: info = (type(exc), exc, exc.__traceback__)
         record = logging.LogRecord('asyncio', 40, '', 0, 'Task exception was never retrieved', (), info)
+        fired = []
+        def collect():
+            if not fired:
+                fired.append(True)
+                diag._AsyncioFilter().filter(record)
         class Collecting(collections.OrderedDict):
-            fired = False
             def pop(self, *args):
-                if not self.fired:
-                    self.fired = True
-                    diag._AsyncioFilter().filter(record)
+                collect()
                 return super().pop(*args)
-        done = threading.Event()
-        def emit():
-            diag.event('fan', 'read_failed', level='warning', repeat=60)
-            done.set()
-        with patch.object(diag, '_seen', Collecting()):
-            threading.Thread(target=emit, daemon=True).start()
-            self.assertTrue(done.wait(2), 'event() deadlocked on its own lock')
-        self.assertEqual([r['event'] for r in self.records], ['asyncio_exception', 'read_failed'])
+        mutex = threading.Lock()  # like queue.Queue's own, held across put_nowait
+        def queued(text, level):
+            with mutex:
+                collect()
+                self.records.append(json.loads(text))
+        cases = {'event deduplication': (diag.event, ('fan', 'read_failed'), dict(level='warning', repeat=60),
+                                         patch.object(diag, '_seen', Collecting())),
+                 'transition deduplication': (diag.transition, ('fan', 'read_failed', 'failed'), dict(level='warning'),
+                                              patch.object(diag, '_seen', Collecting())),
+                 'sink queue': (diag.event, ('fan', 'read_failed'), dict(level='warning'),
+                                patch.object(diag, '_sink', queued))}
+        for case, (record_one, args, kwargs, inside) in cases.items():
+            with self.subTest(case):
+                fired.clear(); self.records.clear(); diag._seen.clear()
+                done = threading.Event()
+                def emit():
+                    record_one(*args, **kwargs)
+                    done.set()
+                with inside:
+                    threading.Thread(target=emit, daemon=True).start()
+                    self.assertTrue(done.wait(2), 'the thread deadlocked on its own lock')
+                self.assertEqual(sorted(r['event'] for r in self.records), ['asyncio_exception', 'read_failed'])
 
     def test_cancelled_callback_during_shutdown_is_not_logged_as_an_error(self):
         try:raise asyncio.CancelledError

@@ -53,9 +53,11 @@ _filter = None
 _asyncio_filter = None
 _seen = collections.OrderedDict()
 _early = collections.deque(maxlen=64)  # Import/__init__/_migration records until configure() has a sink.
-# Reentrant: a garbage-collected failed task is logged (_AsyncioFilter -> event) on whatever thread
-# allocated, possibly inside another event's deduplication; a plain Lock would freeze that thread.
+# A garbage-collected failed task is logged (_AsyncioFilter -> event) on whatever thread allocated, also
+# inside event() itself (its deduplication or the sink's queue mutex) or inside transition(). event() defers
+# such a record until its own finishes (_local); transition() relies on this lock being reentrant.
 _lock = threading.RLock()
+_local = threading.local()  # .pending: events raised on this thread while event() runs, else None
 _HOME = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -158,6 +160,19 @@ def _fallback(text, level):
 
 def event(component, action, /, *, level='info', error=None, repeat=0, **fields):
     """Emit a safe scalar summary. Logging failure never changes the operation."""
+    pending = getattr(_local, 'pending', None)
+    if pending is not None:
+        pending.append((component, action, level, error, repeat, fields))
+        return
+    _local.pending = [(component, action, level, error, repeat, fields)]
+    try:
+        while _local.pending:
+            _record(*_local.pending.pop(0))
+    finally:
+        _local.pending = None
+
+
+def _record(component, action, level, error, repeat, fields):
     try:
         if level == 'debug':
             return  # No per-attribute/sensor/RPC success traffic in normal logs.
