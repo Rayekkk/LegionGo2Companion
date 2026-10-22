@@ -670,35 +670,42 @@ class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HotplugMonitorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_one_failed_event_keeps_the_monitor_running(self):
-        events, readers, handled = [], [], []
+    async def monitor(self, events, handle):
+        """Run _monitor_hotplug over `events` ((action, sys_path) pairs) with a fake netlink monitor."""
+        pending, readers = [types.SimpleNamespace(action=a, sys_path=p) for a, p in events], []
         class Monitor:
             @classmethod
             def from_netlink(cls, _ctx): return cls()
             def filter_by(self, **_): pass
             def start(self): pass
             def fileno(self): return 99
-            def poll(self, _timeout): return events.pop(0) if events else None
+            def poll(self, _timeout): return pending.pop(0) if pending else None
         class Loop:  # Only the reader registration is replaced; the queue runs on the real loop.
             def add_reader(self, _fd, callback): readers.append(callback)
             def remove_reader(self, _fd): readers.clear()
+        with patch.object(vibe, '_PYUDEV', True),                 patch.object(vibe, '_pyudev', types.SimpleNamespace(Monitor=Monitor), create=True),                 patch.object(vibe, '_udev_ctx', None, create=True),                 patch.object(vibe, '_handle_device_added', new=handle),                 patch.object(vibe.module_runtime, 'is_paused', return_value=False),                 patch.object(vibe.asyncio, 'get_running_loop', return_value=Loop()):
+            task = asyncio.create_task(vibe._monitor_hotplug())
+            await asyncio.sleep(0)
+            readers[0]()
+            for _ in range(10): await asyncio.sleep(0)
+            self.assertFalse(task.done()); self.assertEqual(len(readers), 1)
+            task.cancel(); await asyncio.gather(task, return_exceptions=True)
+
+    async def test_one_failed_event_keeps_the_monitor_running(self):
+        handled = []
         async def handle(path, _action):
             handled.append(path)
             if len(handled) == 1: raise OSError('settings read failed')
-        with patch.object(vibe, '_PYUDEV', True), \
-                patch.object(vibe, '_pyudev', types.SimpleNamespace(Monitor=Monitor), create=True), \
-                patch.object(vibe, '_udev_ctx', None, create=True), \
-                patch.object(vibe, '_handle_device_added', new=handle), \
-                patch.object(vibe.module_runtime, 'is_paused', return_value=False), \
-                patch.object(vibe.asyncio, 'get_running_loop', return_value=Loop()):
-            task = asyncio.create_task(vibe._monitor_hotplug())
-            await asyncio.sleep(0)
-            events.extend(types.SimpleNamespace(action='change', sys_path=path) for path in ('/a', '/b'))
-            readers[0]()
-            for _ in range(10): await asyncio.sleep(0)
-            self.assertEqual(handled, ['/a', '/b'])
-            self.assertFalse(task.done()); self.assertEqual(len(readers), 1)
-            task.cancel(); await asyncio.gather(task, return_exceptions=True)
+        await self.monitor([('change', '/a'), ('change', '/b')], handle)
+        self.assertEqual(handled, ['/a', '/b'])
+
+    async def test_a_go_s_driver_rebind_on_the_same_path_restarts_its_setup_window(self):
+        for action in ('remove', 'unbind'):
+            with self.subTest(action), patch.object(vibe, '_device_path', None),                     patch.object(vibe, '_go_s_seen', (GO_S_HID, 1.0)):
+                await self.monitor([(action, '/sys/devices/usb1/0003:1A86:E310.0006')], AsyncMock())
+                self.assertEqual(vibe._go_s_seen, (GO_S_HID, 1.0), 'another interface leaves it')
+                await self.monitor([(action, GO_S_HID)], AsyncMock())
+                self.assertIsNone(vibe._go_s_seen)
 
 
 # ── Legion Go S (beta): raw frames instead of hid-lenovo-go attributes ────────

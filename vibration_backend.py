@@ -802,6 +802,7 @@ _HOTPLUG_ACTIONS = ("add", "bind", "change")
 
 
 async def _monitor_hotplug() -> None:
+    global _go_s_seen
     if not _PYUDEV:
         decky.logger.info("[lego-vibe] pyudev unavailable, hotplug monitor disabled")
         return
@@ -824,6 +825,8 @@ async def _monitor_hotplug() -> None:
     try:
         while True:
             action, sys_path = await queue.get()
+            if action in ('remove', 'unbind') and _go_s_seen is not None and _go_s_seen[0] == sys_path:
+                _go_s_seen = None  # a rebind on the same path runs the driver's setup again: wait it out again
             if module_runtime.is_paused('vibration'):
                 continue
             if action in _HOTPLUG_ACTIONS:
