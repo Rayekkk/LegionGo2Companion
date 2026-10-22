@@ -824,6 +824,9 @@ def _write_power_led(enabled: bool) -> bool:
 
     def _write() -> bool:
         def _mapped(mapped: mmap.mmap, offset: int) -> bool:
+            # shortcut: a read-modify-write of a byte the EC shares (Go 1 ECMM 0x52 also holds ACAP/LTHD/RGHD);
+            # a bit the EC flips within these microseconds is written back stale and the readback only proves
+            # the RAM. Fine for the beta; move to the BIOS's own ACPI method for the light if one is found.
             before = mapped[offset]
             target = before & ~mask if enabled else before | mask
             if target != before:
