@@ -441,18 +441,17 @@ def _go_s_frame(setting: str, value: int) -> bytes:
     return bytes((0x08, entry[0], value)).ljust(_GO_S_FRAME_SIZE, b"\0")
 
 
-def _go_s_send(node: str, number: str, frames: list[bytes]) -> bool:
-    """Write the frames to the hidraw node only if it is still that interface's character device."""
+def _go_s_send(node: str, number: str, frame: bytes) -> bool:
+    """Write the frame to the hidraw node only if it is still that interface's character device."""
     fd = os.open(node, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
                  | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         info = os.fstat(fd)
         if not stat.S_ISCHR(info.st_mode) or f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}" != number:
             return False
-        for frame in frames:
-            if os.write(fd, frame) != _GO_S_FRAME_SIZE:
-                return False
-            time.sleep(_GO_S_GAP_S)  # let the MCU finish before its next command
+        if os.write(fd, frame) != _GO_S_FRAME_SIZE:
+            return False
+        time.sleep(_GO_S_GAP_S)  # let the MCU finish before its next command
         return True
     finally:
         os.close(fd)
@@ -518,8 +517,14 @@ def _apply_go_s(values: dict) -> bool:
                       _go_s_frame("touchpad", 1 if values[PKEY_TP_EN] else 0)]
             if node is None:
                 raise OSError("The Go S controller has no hidraw node.")
-            with module_runtime.controller_config_lock:
-                ok = _go_s_send(*node, frames)
+            # O_NONBLOCK does not cover a hidraw output report: a hung MCU can hold each write for
+            # seconds, so the shared lock is taken per frame and RGB can reach the controller between them.
+            ok = True
+            for frame in frames:
+                with module_runtime.controller_config_lock:
+                    ok = _go_s_send(*node, frame)
+                if not ok:
+                    break
         except (OSError, ValueError) as exc:
             event("vibration", "go_s_write", level="error", error=exc, outcome="failed", repeat=60)
             return False

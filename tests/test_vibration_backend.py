@@ -794,12 +794,12 @@ class GoSInterfaceTests(unittest.TestCase):
     def test_a_node_that_is_not_that_character_device_is_never_written(self):
         regular = self.devices.parent / 'hidraw3'
         regular.write_bytes(b'')
-        self.assertFalse(vibe._go_s_send(str(regular), '240:3', go_s_frames(1, 1)))
+        self.assertFalse(vibe._go_s_send(str(regular), '240:3', go_s_frames(1, 1)[0]))
         self.assertEqual(regular.read_bytes(), b'')
         link = self.devices.parent / 'hidraw-link'
         link.symlink_to(regular)
         with self.assertRaises(OSError):
-            vibe._go_s_send(str(link), '240:3', go_s_frames(1, 1))
+            vibe._go_s_send(str(link), '240:3', go_s_frames(1, 1)[0])
 
 
 class GoSDevice(FakeDevice):
@@ -814,9 +814,10 @@ class GoSDevice(FakeDevice):
             self.sleeps.append(seconds)
             self.clock += seconds
 
-        def send(node, number, frames):
+        def send(node, number, frame):
             self.assertTrue(module_runtime.controller_config_lock._is_owned(), 'sent under the shared lock')
-            self.sent.append((node, number, list(frames)))
+            self.assertEqual((node, number), ('/dev/hidraw3', '240:3'))
+            self.sent.append(frame)
             return True
         self.clock_ns = types.SimpleNamespace(monotonic=lambda: self.clock, sleep=sleep)
         for name, value in {
@@ -838,10 +839,10 @@ class GoSApplyTests(GoSDevice):
     async def test_settings_are_sent_as_two_frames_once_the_interface_has_settled(self):
         self.assertTrue((await self.plugin.set_intensity(3))['success'])
         self.assertEqual(self.sleeps, [vibe._GO_S_SETTLE_S])
-        self.assertEqual(self.sent, [('/dev/hidraw3', '240:3', go_s_frames(3, 1))])
+        self.assertEqual(self.sent, go_s_frames(3, 1))
         self.assertTrue((await self.plugin.set_touchpad_enabled(False))['success'])
         self.assertEqual(self.sleeps, [vibe._GO_S_SETTLE_S], 'the window is waited once per interface')
-        self.assertEqual(self.sent[-1][2], go_s_frames(3, 0))
+        self.assertEqual(self.sent[-2:], go_s_frames(3, 0))
         self.assertEqual((self.writes, self.hardware()), ([], DRIVER), 'no hid-lenovo-go attribute is touched')
 
     async def test_no_interface_or_hhd_sends_nothing_and_the_choice_is_kept(self):
@@ -892,7 +893,25 @@ class GoSApplyTests(GoSDevice):
         release.set()
         worker.join(5)
         rgb.join(5)
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_each_frame_takes_the_shared_lock_on_its_own(self):
+        # A hung MCU can hold one hidraw write for seconds; RGB must be able to get in between frames.
+        self.configure()
+        vibe._go_s_seen = (GO_S_HID, self.clock - 10)
+        real, holds = module_runtime.controller_config_lock, []
+
+        class Counting:
+            def __enter__(lock):
+                real.acquire()
+                holds.append(len(self.sent))
+            def __exit__(lock, *_):
+                real.release()
+            def _is_owned(lock):
+                return real._is_owned()
+        with patch.object(module_runtime, 'controller_config_lock', Counting()):
+            self.assertTrue(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
+        self.assertEqual((holds, len(self.sent)), ([0, 1], 2))
 
     async def test_hotplug_and_wake_send_again_after_a_fresh_window(self):
         self.configure()
@@ -900,9 +919,9 @@ class GoSApplyTests(GoSDevice):
             await vibe._handle_device_added('/sys/devices/usb1/0003:1A86:E310.0004', 'change')  # another interface
             self.assertEqual(self.sent, [])
             await vibe._handle_device_added(GO_S_HID, 'bind')
-        self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S], 1))
+        self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S], 2))
         await self.plugin.reapply()  # a wake may have reset the controller
-        self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S] * 2, 2))
+        self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S] * 2, 4))
 
     async def test_the_drift_loop_sends_after_a_wake_and_never_periodically(self):
         self.configure()
@@ -917,7 +936,7 @@ class GoSApplyTests(GoSDevice):
         with patch.object(vibe, '_RESUME_CHECK_S', 0), patch.object(vibe, '_resume_detected', side_effect=resumed):
             with self.assertRaises(asyncio.CancelledError):
                 await self.plugin._drift_loop()
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.sent), 2)
 
     async def test_uninstall_sends_nothing_and_keeps_the_settings(self):
         await self.plugin.set_intensity(0)
@@ -970,7 +989,7 @@ class GoSUnconfiguredTests(GoSDevice):
     async def test_the_first_change_sends_and_is_remembered(self):
         result = await self.plugin.set_intensity(1)
         self.assertEqual((result['success'], result['configured']), (True, True))
-        self.assertEqual([frames for _node, _number, frames in self.sent], [go_s_frames(1, 1)])
+        self.assertEqual(self.sent, go_s_frames(1, 1))
         self.assertIs(self.store.getSetting('go_s_configured'), True)
         self.assertIs((await self.plugin.get_settings())['configured'], True)
 
@@ -981,7 +1000,7 @@ class GoSUnconfiguredTests(GoSDevice):
                 self.store.setSetting('go_s_configured', None)
                 self.sent.clear()
                 result = await change(self.plugin)
-                self.assertEqual((result['success'], result['configured'], len(self.sent)), (True, True, 1))
+                self.assertEqual((result['success'], result['configured'], len(self.sent)), (True, True, 2))
                 self.assertIs(self.store.getSetting('go_s_configured'), True)
 
     async def test_a_rejected_change_does_not_count(self):
@@ -995,11 +1014,11 @@ class GoSUnconfiguredTests(GoSDevice):
         self.sent.clear()
         vibe._go_s_seen = None  # a new module start: the interface window is waited out again
         self.assertTrue(await asyncio.to_thread(vibe._apply_settings, vibe._active_values(), None, True))
-        self.assertEqual([frames for _node, _number, frames in self.sent], [go_s_frames(3, 1)])
+        self.assertEqual(self.sent, go_s_frames(3, 1))
         with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
             await vibe._handle_device_added(GO_S_HID, 'bind')
         await self.plugin.reapply()
-        self.assertEqual(len(self.sent), 3)
+        self.assertEqual(len(self.sent), 6)
 
 
 class GoSRegressionTests(FakeDevice):
