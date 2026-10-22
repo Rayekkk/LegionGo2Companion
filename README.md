@@ -164,7 +164,7 @@ check **Manage Modules** and **Display**, where setup or a Gaming Mode restart m
 Downloading does not install the update. Decky removes the old version first, so Companion
 hands the hardware back for a moment; the new version applies your settings again when it
 starts. Display reinstalls its script and asks for a Gaming Mode restart only when the script
-changed or a restart was already due (always after an update from 2.2.x), and an open Desktop
+changed or a restart was already due (always after an update from 2.1.0 or 2.2.x), and an open Desktop
 app restarts in the new version. The update from 2.2.x or older still loses the gyro source,
 battery protection, lighting control and Wi-Fi band policy once; set them again afterwards.
 
@@ -257,7 +257,7 @@ now (Global or the game, the preset, the power limit and the live APU power).
 > **Allow up to 50 W** (under **More**) raises the boost limits beyond Lenovo's normal range.
 > Sustained power stays at the firmware's limit (35 W on the Legion Go 2); the processor does not
 > accept more. The console gets hotter and louder and the battery drains faster. It downloads and verifies the `ryzenadj`
-> helper from GitHub the first time you turn it on.
+> helper from GitHub the first time you turn it on, and keeps it across updates.
 
 <details>
 <summary><b>Custom limits, boosts and game profiles in detail</b></summary>
