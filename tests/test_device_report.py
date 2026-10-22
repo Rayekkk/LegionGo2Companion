@@ -343,6 +343,9 @@ def two_regions(first, second):
 class EcAndDsdt(_Fixture):
     def setUp(self):
         super().setUp()
+        mmio = patch.object(device_report, "EC_MMIO", range(0x2000, 0x3000))  # the fake /dev/mem's EC page
+        mmio.start()
+        self.addCleanup(mmio.stop)
         memory = bytearray(0x3000)
         for i in range(0xFF):
             memory[EC_BASE + i] = (i * 7 + 1) & 0xFF
@@ -399,6 +402,7 @@ class EcAndDsdt(_Fixture):
                                                     support.power_led_dsdt(region=b"SMA2", base=0x5A00, length=0x80)),
                                         [(EC_BASE, 0xFF)]),
             "unknown field element": (support.power_led_dsdt(base=EC_BASE, fields=[(b"\x02xyz", 8)]), []),
+            "window outside the EC's MMIO block": (support.power_led_dsdt(base=0x1300), []),
             **{f"battery serial in Field({path})": (support.path_field(support.power_led_dsdt(base=EC_BASE), prefix), [])
                for path, prefix in (("\\ERAM", b"\\"), ("^ERAM", b"^"), ("EC0.ERAM", b"\x2eEC0_"),
                                     ("\\_SB.EC0.ERAM", b"\\\x2f\x03_SB_EC0_"))},
@@ -413,6 +417,8 @@ class EcAndDsdt(_Fixture):
                 if reason.startswith("battery serial"):
                     self.assertEqual(lines[0], "ERAM: skipped: its DSDT field map is not understood, "
                                                "so private fields cannot be blanked")
+                if reason == "window outside the EC's MMIO block":
+                    self.assertEqual(lines[0], "ERAM: skipped: unexpected address 0x1300, outside the EC's MMIO block")
                 if reason == "no EC window":
                     self.assertEqual(lines, ["skipped: the DSDT declares no EC memory window (ERAM or ECMM)"])
 

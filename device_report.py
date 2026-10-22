@@ -70,6 +70,9 @@ DSDT_LIMIT = 512 << 10  # Lenovo's Legion Go DSDTs are 83-116 KiB (41-51 KiB com
 # SystemMemory regions of the EC device (GPIO, CMOS, eSPI registers) are never read.
 EC_WINDOWS = (b"ERAM", b"ECMM")
 EC_EXTRA = (b"EFAN", b"SMA2")
+# The family's EC windows live in the AMD FCH MMIO block (Go 2 0xFEEC2300, Go 1 and Go S 0xFE0B0300); a DSDT
+# placing one anywhere else (RAM, a PCI BAR) is not read.
+EC_MMIO = range(0xFE000000, 0xFF000000)
 # Blanked bytes: a field named like a serial number (BTSN, SNUM, SER*) or a unique ID (*UID*), and any field
 # wider than 32 bits (SMBus and battery buffers that can hold a serial or name string).
 _EC_PRIVATE = re.compile(rb"SN|SER|UID")
@@ -548,6 +551,10 @@ def _ec(context):
     for name, base, length in regions:
         if not 0 < length <= 256 or base % mmap.PAGESIZE + length > mmap.PAGESIZE:
             lines.append(f"{name.decode('ascii', 'replace')}: skipped: unexpected size 0x{length:X}")
+            continue
+        if base not in EC_MMIO:
+            lines.append(f"{name.decode('ascii', 'replace')}: skipped: unexpected address 0x{base:X}, "
+                         "outside the EC's MMIO block")
             continue
         try:
             lines += _ec_dump(data, name, base, length)
