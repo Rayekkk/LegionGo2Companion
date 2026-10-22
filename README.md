@@ -62,7 +62,7 @@ left out on purpose.
 | Allow up to 50 W | ✅ | ✅ ¹ | ➖ |
 | Separate battery presets | ✅ | ✅ ¹ | ✅ ¹ |
 | Fan Control | ✅ ³ | ❌ | ❌ |
-| Vibration | ✅ | ✅ ² | ❌ |
+| Vibration | ✅ | ✅ ² | ✅ ⁴ |
 | Lighting (stick lights) | ✅ | ✅ ² | ✅ |
 | Power-button light | ✅ | ✅ ⁴ | ✅ ⁴ |
 | Button mapping | ✅ | ➖ | ➖ |
@@ -85,7 +85,7 @@ driver for these, so Companion hides them; update the controllers in Legion Spac
 
 Not supported yet on the Legion Go and Legion Go S: Fan Control, which needs EC data that has only
 been verified on the Legion Go 2, and controller firmware updates; on the Legion Go S also vibration
-strength, which its Linux controller driver does not offer yet. Not needed there: Display's modes
+modes, touchpad strength and the test buzz. Not needed there: Display's modes
 are for the Legion Go 2 OLED panel (the other consoles use SteamOS's own display profiles); SteamOS
 handles the Legion Go's back buttons and the Legion Go S gyro natively; the Legion Go S needs no
 button mapping, and its firmware already allows more than 50 W. The
@@ -219,7 +219,7 @@ while lighting control stays active to keep them off after wake.
 |---|---|
 | TDP | Restores the platform profile, CPU Boost and EPP found before Companion first changed them; without them, Balanced, Boost on and `balance_performance` |
 | Fan Control | Returns the fan to firmware automatic. Curves, assignments and units are kept; turning the module on again does not start the curve |
-| Vibration | Restores the vibration settings found before Companion first changed them, otherwise the driver defaults |
+| Vibration | Restores the vibration settings found before Companion first changed them, otherwise the driver defaults; on the Legion Go S the values Companion set stay, as they cannot be read |
 | Lighting, Button mapping, Gyro & touchpad, Battery | Restores the previous state for controls Companion still manages |
 | Wi-Fi | Restores the configuration Companion changed; Wi-Fi may briefly reconnect |
 | Display | Withdraws display adjustments and its script; Gaming Mode may need a restart |
@@ -373,7 +373,9 @@ readback, turns it off at once. If the page says **Another app controls the fan*
 
 Set **Vibration strength** for both handles (Off, Low, Medium, High) and a **Vibration mode**
 pattern (for example FPS, Racing, Standard, SPG or RPG). **Touchpad vibration** and
-**Touchpad strength** are separate. **Test vibration** plays a short buzz.
+**Touchpad strength** are separate. **Test vibration** plays a short buzz. On the Legion Go S
+(beta) only **Vibration strength** and **Touchpad vibration** are offered; the controller cannot
+report them, so the page shows what Companion set.
 
 <a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration mode and touchpad feedback controls" width="360"></a>
 
