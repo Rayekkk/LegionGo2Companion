@@ -636,6 +636,8 @@ class Plugin:
 
     async def _finish_late_start(self, name, start, began):
         await asyncio.wait({start})
+        if not start.cancelled():
+            start.exception()  # Already recorded; retrieving it keeps asyncio from logging it again.
         # A failure was already recorded in health and logged as module_start_failed,
         # a stopped start (not ready, no error) as module_start_stopped.
         if self._module_health.get(name, {}).get('ready'):
