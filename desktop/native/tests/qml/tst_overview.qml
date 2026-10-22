@@ -100,6 +100,9 @@ TestCase {
         compare(findChild(view,"overviewPreset").text,"Off · Lenovo defaults");
         fake.data=Object.assign({},fake.data,{vibe_get_settings:{settings:{level:2,mode:0}},vibe_get_capabilities:{intensity:["off","low","medium","high"],mode:["fps","racing"]}});
         compare(findChild(view,"overviewVibration").value,"Medium · FPS");
+        // The Legion Go S beta has no vibration modes.
+        fake.data=Object.assign({},fake.data,{get_version:Object.assign({},fake.data.get_version,{device:{console:"gos"}})});
+        compare(findChild(view,"overviewVibration").value,"Medium");
     }
     function test_whatDoesNotApplyToThisConsoleIsHidden() {
         const names=["overviewBattery","overviewPerformance","overviewPreset","overviewTemperature","overviewPower","overviewFan","overviewPowerLimit",

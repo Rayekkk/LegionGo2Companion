@@ -15,6 +15,11 @@ export const modeShort = raw => MODE_SHORT[raw] ?? modeLabel(raw).slice(0, 5);
 /** [title, detail] while vibe_get_driver_status does not report the hid-lenovo-go driver; null once found. */
 export const driverNotice = status => status?.found === true ? null : ["Controller driver not found", "Needs SteamOS 3.8 or newer."];
 
+/** The Legion Go S (get_version.device, beta): only strength and touchpad vibration on/off; no modes, touchpad strength or test. */
+export const strengthOnly = device => device?.console === "gos";
+/** Shown on the Legion Go S beside the "Beta" badge. */
+export const BETA_TEXT = "Beta on this console: Companion sends these settings to the controller but cannot read them back, so the page shows what Companion set.";
+
 /** Touchpad strength only applies while touchpad vibration is on. */
 export const touchpadStrengthEditable = settings => settings?.touchpadEnabled === true;
 

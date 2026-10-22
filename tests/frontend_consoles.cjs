@@ -82,6 +82,22 @@ run(async () => {
     }
   }
   {
+    // The Legion Go S (beta): strength and touchpad vibration with the Beta row; a Go 2 keeps every control.
+    const responses = { vibe_is_ready: () => ({ ready: true, error: '' }), vibe_get_capabilities: () => ({ mode: ['fps', 'racing'] }),
+      vibe_get_settings: () => ({ settings: { level: 2, mode: 0, touchpadIntensity: 2, touchpadEnabled: true }, app_id: '0', profile_id: '0', overwrite: false }),
+      vibe_get_driver_status: () => ({ found: true, paths: ['fixture'], method: 'led', ids: '1a86:e310' }) };
+    for (const strengthOnly of [false, true]) {
+      const h = mount('vibration.tsx', { component: 'VibrationPage', responses });
+      h.render({ strengthOnly }); await settle(); const tree = h.render({ strengthOnly });
+      assert.ok(label(tree, 'Vibration strength') && label(tree, 'Touchpad vibration') && button(tree, 'Reset to defaults'));
+      for (const name of ['Vibration mode', 'Touchpad strength']) assert.equal(!!label(tree, name), !strengthOnly, name);
+      assert.equal(!!button(tree, 'Test vibration'), !strengthOnly, 'the test buzz needs the Go 2 force feedback');
+      assert.equal(label(tree, 'Beta')?.props.description, strengthOnly ? 'Beta on this console: Companion sends these settings '
+        + 'to the controller but cannot read them back, so the page shows what Companion set.' : undefined);
+      h.unmount();
+    }
+  }
+  {
     const h = mount('battery.tsx', { component: 'BatteryPage', responses: {
       battery_get_status: () => ({ success: true, supported: true, managed: false, enabled: false, capacity: 80, options: ['Standard', 'Long_Life'] }),
       battery_get_controller_levels: () => ({ available: true, left: 50, right: 60 }) } });

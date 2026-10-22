@@ -359,6 +359,7 @@ RowLayout {
     }
     function forms() {
         const vibeReady=()=>!!s("vibe_is_ready").ready;
+        const vibeFull=()=>!Vibe.strengthOnly(s("get_version")?.device);  // the Go S beta: strength and touchpad on/off only
         const cpu=()=>s("get_cpu_power_controls");
         // Charger CPU settings are saved into the game's charger split, so they wait until it exists.
         const cpuScopeReady=()=>String(cpu().profile?.app_id || "")===powerTarget() && !!cpu().profile?.ac_profile===(tdpScope==="ac") &&
@@ -422,12 +423,13 @@ RowLayout {
                 notice("",()=>{const missing=backend.age("vibe_get_driver_status")<Infinity && Vibe.driverNotice(s("vibe_get_driver_status"));return missing?missing[0]+". "+missing[1]:"";}),
                 switcher("Per-game profile",()=>s("vibe_get_settings").overwrite,"vibe_set_profile_overwrite",v=>[app(),v,""],{available:()=>vibeReady() && !!app(),
                     note:()=>!app()?"Start a game to give it its own settings.":s("vibe_get_settings").overwrite?"This game has its own settings.":"This game uses the global settings."}),
+                field("","paragraph",()=>Vibe.BETA_TEXT,()=>{},{name:"Vibration beta",badge:"Beta",visible:()=>!vibeFull()}),
                 choices("Vibration strength",()=>s("vibe_get_settings").settings?.level,v=>change("vibe_set_intensity",vibeArgs(v)),vibeLevels,{kind:"options",available:vibeReady}),
-                choices("Vibration mode",()=>s("vibe_get_settings").settings?.mode,v=>change("vibe_set_rumble_mode",vibeArgs(v)),vibeModes,{kind:"options",note:"A vibration pattern tuned for a game type.",available:vibeReady}),
+                choices("Vibration mode",()=>s("vibe_get_settings").settings?.mode,v=>change("vibe_set_rumble_mode",vibeArgs(v)),vibeModes,{kind:"options",note:"A vibration pattern tuned for a game type.",available:vibeReady,visible:vibeFull}),
                 switcher("Touchpad vibration",()=>s("vibe_get_settings").settings?.touchpadEnabled,"vibe_set_touchpad_enabled",vibeArgs,{available:vibeReady}),
                 choices("Touchpad strength",()=>s("vibe_get_settings").settings?.touchpadIntensity,v=>change("vibe_set_touchpad_intensity",vibeArgs(v)),vibeLevels,
-                    {kind:"options",available:()=>vibeReady() && Vibe.touchpadStrengthEditable(s("vibe_get_settings").settings)}),
-                action("Test vibration","vibe_test_vibration",()=>[500],{note:"A short buzz with the current settings.",available:vibeReady}),
+                    {kind:"options",available:()=>vibeReady() && Vibe.touchpadStrengthEditable(s("vibe_get_settings").settings),visible:vibeFull}),
+                action("Test vibration","vibe_test_vibration",()=>[500],{note:"A short buzz with the current settings.",available:vibeReady,visible:vibeFull}),
                 action("Reset to defaults","vibe_reset_to_default",()=>[s("vibe_get_settings").app_id,s("vibe_get_settings").profile_id],{available:vibeReady}),
                 action("Reapply settings","vibe_reapply",null,{bar:true,available:vibeReady})
             ]}],

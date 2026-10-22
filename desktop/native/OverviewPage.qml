@@ -38,7 +38,7 @@ ColumnLayout {
     function vibrationLevel() {
         const settings=vibration.settings || {},caps=s("vibe_get_capabilities");
         if(settings.level===undefined)return "—";
-        const mode=(caps.mode?.length ? caps.mode : Vibe.FALLBACK_MODES)[settings.mode];
+        const mode=!Vibe.strengthOnly(device) && (caps.mode?.length ? caps.mode : Vibe.FALLBACK_MODES)[settings.mode];
         return (Vibe.LEVELS[settings.level] || "—")+(mode?" · "+Vibe.modeLabel(mode):"");
     }
     readonly property var gyroLabels:Gyro.SOURCE_LABELS

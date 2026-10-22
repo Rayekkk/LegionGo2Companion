@@ -30,6 +30,7 @@ import { ControllerPage, getControllerStatus, controllerSummary, type Controller
 import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { confirmAction, errorText, infoRow } from "./shared";
+import { strengthOnly } from "../desktop/native/vibration.mjs";
 import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, consoleDetecting, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
 type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
@@ -414,13 +415,15 @@ const tdpSummary = (settings?: TdpSettings) => settings ? overviewSummary(settin
 const VIBE_LEVELS = ["Off", "Low", "Medium", "High"];
 const VIBE_MODES = ["FPS", "Racing", "Standard", "SPG", "RPG"];
 
-const vibrationSummary = (overview: Overview) => {
+/** goS: the Legion Go S beta has no vibration modes. */
+const vibrationSummary = (overview: Overview, goS = false) => {
   if (overview.driver && !overview.driver.found) return "Controller driver not detected";
   const settings = overview.vibration?.settings;
   if (!settings) return "Handles, touchpad and per-game profiles";
   const touchpad = settings.touchpadEnabled === true ? "On"
     : settings.touchpadEnabled === false ? "Off" : "Unknown";
-  return `${VIBE_LEVELS[settings.level ?? 2] ?? "Custom"} · ${VIBE_MODES[settings.mode ?? 0] ?? "Custom"} · Touchpad ${touchpad}`;
+  const mode = goS ? "" : ` · ${VIBE_MODES[settings.mode ?? 0] ?? "Custom"}`;
+  return `${VIBE_LEVELS[settings.level ?? 2] ?? "Custom"}${mode} · Touchpad ${touchpad}`;
 };
 
 const displaySummary = (state?: DisplayState) => {
@@ -569,7 +572,7 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
       {Object.values(modules).some(state => state?.maintenance) && infoRow("Controller controls paused", "Firmware maintenance is in progress. Saved controller settings have not been changed.")}
       {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}{startingRow("tdp")}
       {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}{startingRow("fan")}
-      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview))} onClick={() => openSection("vibration")} />}{startingRow("vibration")}
+      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview, strengthOnly(device)))} onClick={() => openSection("vibration")} />}{startingRow("vibration")}
       {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb, device.power_led !== false))} onClick={() => openSection("rgb")} />}{startingRow("rgb")}
       {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title={moduleLabels.remap} {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}{startingRow("remap")}
       {startingRow("controller")}
@@ -603,7 +606,7 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
     {activeSection === "modules" && <ModulesPage modules={modules} device={device} />}
     {activeSection === "tdp" && <TdpPage visible={onScreen} />}
     {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
-    {activeSection === "vibration" && <VibrationPage />}
+    {activeSection === "vibration" && <VibrationPage strengthOnly={strengthOnly(device)} />}
     {activeSection === "display" && <DisplayPage visible={onScreen} />}
     {activeSection === "wifi" && <WifiPage visible={onScreen} />}
     {activeSection === "rgb" && <RgbPage visible={onScreen} powerLight={device.power_led !== false} />}

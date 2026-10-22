@@ -20,7 +20,7 @@ import {
 } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
-import { driverNotice, failureText, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
+import { BETA_TEXT, driverNotice, failureText, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -222,7 +222,8 @@ const DEFAULT_SETTINGS: VibeSettings = {
 
 const mutations = mutationQueue();
 
-const LGoVibeControl = () => {
+/** strengthOnly: the Legion Go S beta (strengthOnly(get_version.device)). */
+const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) => {
   const [settings, setSettings] = useState<VibeSettings>(DEFAULT_SETTINGS);
   const [modes, setModes] = useState<string[]>(FALLBACK_MODES);
   const [driver, setDriver] = useState<DriverStatus | null>(null);
@@ -610,11 +611,13 @@ const LGoVibeControl = () => {
   const driverFound = driver?.found ?? false;
   const missingDriver = driverNotice(driver);
   const gameRunning = appId !== DEFAULT_APP;
+  const driverLabel = strengthOnly ? "hid-lenovo-go-s" : "hid-lenovo-go";
 
   return (
     <div style={styles.container}>
       <PanelSection title="Vibration">
         {missingDriver && infoRow(missingDriver[0], missingDriver[1])}
+        {strengthOnly && infoRow("Beta", BETA_TEXT)}
         <PanelSectionRow>
           <ToggleField
             label="Per-game profile"
@@ -638,7 +641,7 @@ const LGoVibeControl = () => {
             onChange={handleLevel}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
+        {!strengthOnly && <PanelSectionRow>
           <SliderField
             label="Vibration mode"
             description="A vibration pattern tuned for a game type."
@@ -651,7 +654,7 @@ const LGoVibeControl = () => {
             notchLabels={modes.map((raw, notchIndex) => ({ notchIndex, label: modeShort(raw) }))}
             onChange={handleMode}
           />
-        </PanelSectionRow>
+        </PanelSectionRow>}
       </PanelSection>
 
       <PanelSection title="Touchpad">
@@ -663,7 +666,7 @@ const LGoVibeControl = () => {
             onChange={handleTpToggle}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
+        {!strengthOnly && <PanelSectionRow>
           <SliderField
             label="Touchpad strength"
             value={settings.touchpadIntensity}
@@ -675,11 +678,11 @@ const LGoVibeControl = () => {
             disabled={profileChanging || !touchpadStrengthEditable(settings)}
             onChange={handleTpIntensity}
           />
-        </PanelSectionRow>
+        </PanelSectionRow>}
       </PanelSection>
 
       <PanelSection title="More">
-        <PanelSectionRow>
+        {!strengthOnly && <PanelSectionRow>
           <ButtonItem
             layout="below"
             description="A short buzz with the current settings."
@@ -688,7 +691,7 @@ const LGoVibeControl = () => {
           >
             {testing ? "Vibrating…" : "Test vibration"}
           </ButtonItem>
-        </PanelSectionRow>
+        </PanelSectionRow>}
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={handleReset} disabled={applying || testing}>
             Reset to defaults
@@ -696,8 +699,8 @@ const LGoVibeControl = () => {
         </PanelSectionRow>
         {detailsRows(showDetails, () => setShowDetails(value => !value), [
           ["Driver", driverFound
-            ? `hid-lenovo-go${driver?.method ? ` · ${driver.method}` : ""}${driver?.ids ? ` · ${driver.ids}` : ""}`
-            : "hid-lenovo-go not detected"],
+            ? `${driverLabel}${driver?.method ? ` · ${driver.method}` : ""}${driver?.ids ? ` · ${driver.ids}` : ""}`
+            : `${driverLabel} not detected`],
           ["Endpoints", <span style={{ display: "block", maxWidth: "100%", overflowWrap: "anywhere" }}>
             {driver?.paths?.join(" · ") || "No endpoint reported"}
           </span>],
