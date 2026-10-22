@@ -1,6 +1,6 @@
 # 2.3.0
 
-Unreleased.
+Released 2026-10-22.
 
 Companion now runs, as an early beta, on the first Legion Go and the Legion Go S, and updating Companion no longer wipes most of your settings. Nothing changes on a Legion Go 2 83N0 except what is listed below.
 
