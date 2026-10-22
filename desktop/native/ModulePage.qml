@@ -634,13 +634,19 @@ RowLayout {
             ]
             Rectangle {
                 visible:section.modelData.owner==="firmware"; Layout.fillWidth:true
+                objectName:"firmwareRiskNotice"
                 implicitHeight:firmwareWarning.implicitHeight+24; radius:8
                 color:Qt.rgba(theme.danger.r,theme.danger.g,theme.danger.b,0.10)
                 border.color:Qt.rgba(theme.danger.r,theme.danger.g,theme.danger.b,0.45)
-                Label {
+                RowLayout {
                     id:firmwareWarning; anchors { left:parent.left; right:parent.right; verticalCenter:parent.verticalCenter; margins:12 }
-                    textFormat:Text.PlainText; text:"Experimental feature. Use at your own risk."
-                    color:theme.danger; font.pixelSize:13; font.weight:Font.DemiBold; wrapMode:Text.WordWrap
+                    spacing:12
+                    UiIcon { name:"warning"; color:theme.danger; Layout.preferredWidth:22; Layout.preferredHeight:22; Layout.alignment:Qt.AlignTop }
+                    ColumnLayout {
+                        Layout.fillWidth:true; spacing:4
+                        Label { textFormat:Text.PlainText; text:Firmware.RISK_NOTICE.title; color:theme.danger; font.pixelSize:theme.fontSmall; font.weight:Font.DemiBold }
+                        Label { objectName:"firmwareRiskText"; textFormat:Text.PlainText; text:Firmware.RISK_NOTICE.text; color:theme.danger; font.pixelSize:theme.fontTiny; wrapMode:Text.WordWrap; Layout.fillWidth:true }
+                    }
                 }
             }
             Label { textFormat:Text.PlainText; text:modelData.note || ""; visible:text.length>0 && section.open; wrapMode:Text.WordWrap; color:theme.muted; font.pixelSize:theme.fontSmall; Layout.fillWidth:true }

@@ -3,7 +3,7 @@ import { callable, toaster } from "@decky/api";
 import { ButtonItem, ConfirmModal, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 import { errorText, infoRow } from "./shared";
-import { BUSY_LABELS as busyPhases, installConfirm, PHASE_LABELS as phaseLabel } from "../desktop/native/firmware.mjs";
+import { BUSY_LABELS as busyPhases, installConfirm, PHASE_LABELS as phaseLabel, RISK_NOTICE } from "../desktop/native/firmware.mjs";
 
 type FirmwareComponent = { id: string; label: string; installed: string; available: string; newer: boolean; downloaded: boolean };
 type FirmwareStatus = { phase: string; message: string; error: string; component: string; install_enabled: boolean;
@@ -148,8 +148,8 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
   const rows = (state?.components || []).filter(c => c && (c.installed || c.available));
   return <PanelSection title="Controller firmware">
     <PanelSectionRow><div style={{ background: "rgba(236, 99, 112, 0.12)", border: "1px solid rgba(236, 99, 112, 0.45)", borderRadius: 10, padding: "4px 12px" }}>
-      <Field focusable label={<span style={{ color: "#ff9ca6" }}>Experimental feature</span>}
-        description={<span style={{ color: "#ff9ca6" }}>Use at your own risk.</span>} />
+      <Field focusable label={<span style={{ color: "#ff9ca6", fontWeight: 600 }}>{RISK_NOTICE.title}</span>}
+        description={<span style={{ color: "#ff9ca6" }}>{RISK_NOTICE.text}</span>} />
     </div></PanelSectionRow>
     {infoRow(fresh ? phaseLabel[phase] : state ? "Status unavailable" : "Controller firmware",
       fresh ? state?.error || state?.message || "" : "Wait for a fresh firmware status before updating.")}
