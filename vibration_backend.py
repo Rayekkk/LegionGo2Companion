@@ -17,6 +17,7 @@ import asyncio
 import struct
 import fcntl
 import functools
+import stat
 import threading
 from safe_settings import CorruptSettings, SettingsManager
 
@@ -122,6 +123,24 @@ _EVIOCRMFF    = 0x40044581
 _EV_FF        = 0x15
 _FF_RUMBLE    = 0x50
 
+# Legion Go S (beta): hid-lenovo-go-s has no vibration attributes, so strength and
+# touchpad vibration go to its configuration interface as raw output reports.
+GO_S_LED = "/sys/class/leds/go_s:rgb:joystick_rings"
+GO_S_DRIVER = "hid-lenovo-go-s"
+GO_S_HID_IDS = (("1a86", "e310"), ("1a86", "e311"))  # xinput, dinput; never the FE10 bootloader
+GO_S_DRIVERS_DIR = "/sys/bus/hid/drivers/" + GO_S_DRIVER
+SYS_DEVICES = "/sys/devices/"
+_GO_S_USAGE_PAGE = b"\x06\xa0\xff"  # report descriptor item: vendor usage page 0xFFA0
+_GO_S_FRAME_SIZE = 64
+# The only frames Companion sends to the Go S controller: SET motor config (0x08) with
+# strength (sub 0x01, 0-3) or touchpad vibration (sub 0x03, 0-1); the rest is zero.
+# Any other command can switch the controller mode, remap buttons or reach the bootloader.
+_GO_S_FRAMES = {"strength": (0x01, (0, 1, 2, 3)), "touchpad": (0x03, (0, 1))}
+# The driver's probe and its setup commands lock the MCU if anything else writes then.
+_GO_S_SETTLE_S = 2.0
+_GO_S_GAP_S = 0.02
+_go_s_seen: tuple[str, float] | None = None  # (interface, monotonic time Companion first found it)
+
 
 # ── Device discovery ───────────────────────────────────────────────────────────
 
@@ -159,6 +178,10 @@ def _discover() -> tuple[str | None, str | None]:
 
 def _get_device_path() -> str | None:
     global _device_path, _discovery_method
+    if _is_go_s():
+        _device_path = _go_s_device()
+        _discovery_method = "led" if _device_path else None
+        return _device_path
     if _device_path is not None:
         if os.path.exists(os.path.join(_device_path, _SIGNATURE_ATTR)):
             return _device_path
@@ -169,7 +192,7 @@ def _get_device_path() -> str | None:
 
 def _forget_device() -> None:
     """Drop the cached device path and everything derived from it."""
-    global _device_path, _discovery_method, _last_applied_values
+    global _device_path, _discovery_method, _last_applied_values, _go_s_seen
     if _device_path is not None:
         _invalidate_cache(_device_path)
         _capabilities_cache.pop(_device_path, None)
@@ -177,6 +200,7 @@ def _forget_device() -> None:
     _discovery_method = None
     _last_applied_values = None
     _ff_device_cache["node"] = None
+    _go_s_seen = None  # a resume may have reset the controller: wait out its setup again
 
 
 def _device_ids(sys_path: str) -> tuple[str, str] | None:
@@ -329,6 +353,8 @@ def _apply_settings(values: dict, sys_path: str | None = None,
                     force: bool = False) -> bool:
     """Write a full profile to the hardware. Every attribute is attempted."""
     global _last_applied_values
+    if _is_go_s():
+        return _apply_go_s(values)
     # Explicit withdrawal/uninstall can reach this with driver defaults rather
     # than a loaded profile. They must also preserve unrecoverable user state.
     with _settings_lock:
@@ -356,6 +382,128 @@ def _apply_settings(values: dict, sys_path: str | None = None,
         success = all(results)
         _last_applied_values = copy.deepcopy(values) if success else None
         return success
+
+
+# ── Legion Go S (beta): raw frames to the hid-lenovo-go-s interface ───────────
+
+@functools.cache  # the console does not change while the plugin runs
+def _is_go_s() -> bool:
+    return module_runtime.legion_device()[0] == "gos"
+
+
+def _go_s_device() -> str | None:
+    """The HID device behind the Go S joystick-ring LED, once its driver has set it up; else None.
+
+    Found from the LED rather than by id, so it is the configuration interface the driver
+    serves and never the bootloader or another interface of the same controller.
+    """
+    if not os.path.lexists(GO_S_LED):
+        return None
+    real = os.path.realpath(GO_S_LED)
+    if not real.startswith(SYS_DEVICES) or "/leds/" not in real:
+        return None
+    hid = real.split("/leds/", 1)[0]
+    if _device_ids(hid) not in GO_S_HID_IDS:
+        return None
+    if os.path.basename(os.path.realpath(os.path.join(hid, "driver"))) != GO_S_DRIVER:
+        return None
+    if not os.path.isfile(os.path.join(hid, "touchpad", "linux_mode")):
+        return None  # the driver adds its attributes only after its own setup
+    try:
+        with open(os.path.join(hid, "report_descriptor"), "rb") as handle:
+            if _GO_S_USAGE_PAGE not in handle.read(4096):
+                return None
+    except OSError:
+        return None
+    return hid
+
+
+def _go_s_hidraw(hid: str) -> tuple[str, str] | None:
+    """(/dev node, "major:minor") of the interface's only hidraw node."""
+    try:
+        names = os.listdir(os.path.join(hid, "hidraw"))
+        if len(names) != 1 or not re.fullmatch(r"hidraw[0-9]+", names[0]):
+            return None
+        number = module_runtime.read_sysfs_text(os.path.join(hid, "hidraw", names[0], "dev"), 16)
+    except (OSError, UnicodeError):
+        return None
+    return ("/dev/" + names[0], number) if re.fullmatch(r"[0-9]+:[0-9]+", number) else None
+
+
+def _go_s_frame(setting: str, value: int) -> bytes:
+    """One allowlisted 64-byte frame; anything else raises before a byte is sent."""
+    entry = _GO_S_FRAMES.get(setting) if isinstance(setting, str) else None
+    if entry is None or type(value) is not int or value not in entry[1]:
+        raise ValueError(f"Not a Go S vibration frame: {setting!r}={value!r}")
+    return bytes((0x08, entry[0], value)).ljust(_GO_S_FRAME_SIZE, b"\0")
+
+
+def _go_s_send(node: str, number: str, frames: list[bytes]) -> bool:
+    """Write the frames to the hidraw node only if it is still that interface's character device."""
+    fd = os.open(node, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISCHR(info.st_mode) or f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}" != number:
+            return False
+        for frame in frames:
+            if os.write(fd, frame) != _GO_S_FRAME_SIZE:
+                return False
+            time.sleep(_GO_S_GAP_S)  # let the MCU finish before its next command
+        return True
+    finally:
+        os.close(fd)
+
+
+def _hhd_running() -> bool:
+    """hhd configures this same controller interface whenever it opens it."""
+    for path in glob.glob("/proc/[0-9]*/comm"):
+        try:
+            with open(path, encoding="ascii", errors="replace") as handle:
+                if handle.read(32).strip() == "hhd":
+                    return True
+        except OSError:
+            continue  # the process ended
+    return False
+
+
+def _apply_go_s(values: dict) -> bool:
+    """Send strength and touchpad vibration. Success is the write; the controller cannot be read back."""
+    global _last_applied_values, _go_s_seen
+    with _apply_lock:
+        _last_applied_values = None
+        hid = _go_s_device()
+        if hid is None:
+            return False
+        now = time.monotonic()
+        if _go_s_seen is None or _go_s_seen[0] != hid:
+            _go_s_seen = (hid, now)
+        wait = _go_s_seen[1] + _GO_S_SETTLE_S - now
+        if wait > 0:
+            time.sleep(wait)
+            if module_runtime.stop_requested('vibration') or _go_s_device() != hid:
+                return False
+        if _hhd_running():
+            event("vibration", "go_s_write", level="warning", reason="hhd_running",
+                  outcome="skipped", repeat=60)
+            return False
+        node = _go_s_hidraw(hid)
+        try:
+            frames = [_go_s_frame("strength", values[PKEY_LEVEL]),
+                      _go_s_frame("touchpad", 1 if values[PKEY_TP_EN] else 0)]
+            if node is None:
+                raise OSError("The Go S controller has no hidraw node.")
+            with module_runtime.controller_config_lock:
+                ok = _go_s_send(*node, frames)
+        except (OSError, ValueError) as exc:
+            event("vibration", "go_s_write", level="error", error=exc, outcome="failed", repeat=60)
+            return False
+        if not ok:
+            event("vibration", "go_s_write", level="error", reason="short_write_or_node_changed",
+                  outcome="failed", repeat=60)
+            return False
+        _last_applied_values = copy.deepcopy(values)
+        return True
 
 
 # ── Profile store - the single source of truth for settings ────────────────────
@@ -687,7 +835,13 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
     if module_runtime.is_paused('vibration'):
         return
     attribute = os.path.join(sys_path, _SIGNATURE_ATTR)
-    if not os.path.exists(attribute):
+    go_s = _is_go_s()
+
+    def present() -> bool:
+        # The Go S has no rumble attribute: its interface is the one behind the joystick-ring LED.
+        return _go_s_device() == sys_path if go_s else os.path.exists(attribute)
+
+    if not present():
         # Only 'add' and 'bind' can race the driver's probe. A 'change' on a
         # device that has no rumble_intensity is simply not our device, and
         # waiting on it would stall every other queued event for a second -
@@ -696,7 +850,7 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
             return
         for _ in range(10):
             await asyncio.sleep(0.1)
-            if os.path.exists(attribute):
+            if present():
                 break
         else:
             return
@@ -734,8 +888,10 @@ class Plugin:
 
     @staticmethod
     def applicable() -> bool:
-        """The Go 2, and a Go 1 on the controller firmware hid-lenovo-go serves; the Go S driver has no rumble."""
+        """The Go 2, a Go 1 on the controller firmware hid-lenovo-go serves, and (beta) a Go S with hid-lenovo-go-s."""
         console = module_runtime.legion_device()[0]
+        if console == "gos":
+            return os.path.isdir(GO_S_DRIVERS_DIR) and os.path.lexists(GO_S_LED)
         return console == "go2" or (console == "go1" and module_runtime.kernel_controller())
 
     # Surfaced through is_ready() so a failed start shows up in the panel
@@ -744,6 +900,7 @@ class Plugin:
 
     async def _drift_loop(self):
         last_check = time.monotonic()
+        periodic = not _is_go_s()  # nothing to compare on the Go S: it cannot be read back
         while True:
             await asyncio.sleep(_RESUME_CHECK_S)
             if module_runtime.is_paused('vibration'):
@@ -756,7 +913,7 @@ class Plugin:
                     last_check = time.monotonic()
                     continue
                 now = time.monotonic()
-                if now - last_check < _DRIFT_INTERVAL_S:
+                if not periodic or now - last_check < _DRIFT_INTERVAL_S:
                     continue
 
                 def _verify() -> bool:
@@ -828,6 +985,10 @@ class Plugin:
 
         _apply_lock serialises this with any hotplug apply still running in a worker.
         """
+        if _is_go_s():
+            # Its own values were never readable, so Companion has nothing to put back.
+            event("vibration", "restore", level="info", stage="uninstall", restored=False, outcome="skipped")
+            return
         restored = await _offload(_restore_baseline)
         event("vibration", "restore", level="info" if restored else "warning",
               stage="uninstall", restored=bool(restored),
@@ -999,6 +1160,8 @@ class Plugin:
 
     async def test_vibration(self, duration_ms: int = 500) -> dict:
         global _ff_busy
+        if _is_go_s():
+            return {"success": False, "error": "Test vibration is not available on this console."}
         if _ff_busy:
             # Dropping the request beats queueing a pile of buzzes behind a
             # slider the user is still dragging.

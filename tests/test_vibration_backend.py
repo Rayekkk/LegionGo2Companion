@@ -13,6 +13,7 @@ import io
 import builtins
 import copy
 import types
+import os
 
 import support  # noqa: F401 - installs the fake decky module
 from safe_settings import AtomicSettingsManager
@@ -698,6 +699,237 @@ class HotplugMonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(handled, ['/a', '/b'])
             self.assertFalse(task.done()); self.assertEqual(len(readers), 1)
             task.cancel(); await asyncio.gather(task, return_exceptions=True)
+
+
+# ── Legion Go S (beta): raw frames instead of hid-lenovo-go attributes ────────
+
+GO_S_HID = '/sys/devices/usb1/0003:1A86:E310.0005'
+
+
+def go_s_frames(level, touchpad):
+    return [bytes([0x08, 0x01, level]) + bytes(61), bytes([0x08, 0x03, touchpad]) + bytes(61)]
+
+
+class GoSFrameTests(unittest.TestCase):
+    def test_only_the_two_allowlisted_frames_can_be_built(self):
+        self.assertEqual(set(vibe._GO_S_FRAMES), {'strength', 'touchpad'})
+        built = [vibe._go_s_frame('strength', level) for level in range(4)]
+        built += [vibe._go_s_frame('touchpad', on) for on in (0, 1)]
+        self.assertEqual(built, [go_s_frames(level, 0)[0] for level in range(4)] + [go_s_frames(0, on)[1] for on in (0, 1)])
+        for frame in built:
+            self.assertEqual((len(frame), frame[0]), (64, 0x08), 'never a frame the kernel reads as a report id 0')
+        for setting, value in (('strength', 4), ('strength', -1), ('touchpad', 2), ('strength', True),
+                               ('touchpad', False), ('strength', 1.0), ('strength', '1'), ('mode', 0),
+                               ('notify', 1), ('', 0), (None, 0), (b'strength', 1), (0x01, 1)):
+            with self.subTest(setting=setting, value=value), self.assertRaises(ValueError):
+                vibe._go_s_frame(setting, value)
+
+
+@unittest.skipUnless(os.name == 'posix', 'needs sysfs-like symlinks')
+class GoSInterfaceTests(unittest.TestCase):
+    """The interface is found from the joystick-ring LED, on a fake sysfs tree."""
+
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        root = Path(stack.enter_context(tempfile.TemporaryDirectory())).resolve()
+        self.devices, self.drivers = root / 'devices', root / 'drivers'
+        for driver in ('hid-lenovo-go-s', 'hid-generic'):
+            (self.drivers / driver).mkdir(parents=True)
+        self.led = root / 'class' / 'go_s:rgb:joystick_rings'
+        self.led.parent.mkdir()
+        for name, value in {'GO_S_LED': str(self.led), 'SYS_DEVICES': str(self.devices) + '/',
+                            'GO_S_DRIVERS_DIR': str(self.drivers / 'hid-lenovo-go-s')}.items():
+            stack.enter_context(patch.object(vibe, name, value))
+
+    def interface(self, name='0003:1A86:E310.0005', driver='hid-lenovo-go-s',
+                  descriptor=b'\x06\xa0\xff\x09\x01\xa1\x01', attributes=True, hidraw=('hidraw3',)):
+        hid = self.devices / 'usb1' / name
+        (hid / 'leds' / 'go_s:rgb:joystick_rings').mkdir(parents=True)
+        (hid / 'driver').symlink_to(self.drivers / driver)
+        if attributes:
+            (hid / 'touchpad').mkdir()
+            (hid / 'touchpad' / 'linux_mode').write_text('relative\n')
+        (hid / 'report_descriptor').write_bytes(descriptor)
+        for node in hidraw:
+            (hid / 'hidraw' / node).mkdir(parents=True)
+            (hid / 'hidraw' / node / 'dev').write_text('240:3\n')
+        if self.led.is_symlink():
+            self.led.unlink()
+        self.led.symlink_to(hid / 'leds' / 'go_s:rgb:joystick_rings')
+        return str(hid)
+
+    def test_the_led_leads_to_the_configuration_interface_and_its_hidraw_node(self):
+        hid = self.interface()
+        self.assertEqual(vibe._go_s_device(), hid)
+        self.assertEqual(vibe._go_s_hidraw(hid), ('/dev/hidraw3', '240:3'))
+        self.assertIsNone(vibe._go_s_hidraw(self.interface(name='0003:1A86:E311.0006', hidraw=('hidraw3', 'hidraw4'))))
+
+    def test_bootloader_foreign_driver_unfinished_setup_or_other_interface_is_refused(self):
+        for case, options in (('bootloader', dict(name='0003:1A86:FE10.0007')),
+                              ('foreign id', dict(name='0003:17EF:61EB.0008')),
+                              ('foreign driver', dict(name='0003:1A86:E310.0009', driver='hid-generic')),
+                              ('driver attributes missing', dict(name='0003:1A86:E310.000A', attributes=False)),
+                              ('not the 0xFFA0 interface', dict(name='0003:1A86:E310.000B', descriptor=b'\x05\x01\x09\x05'))):
+            with self.subTest(case):
+                self.interface(**options)
+                self.assertIsNone(vibe._go_s_device())
+
+    def test_applies_only_with_the_driver_loaded_and_its_led(self):
+        with patch.object(module_runtime, 'legion_device', return_value=('gos', '83L3')):
+            self.assertFalse(vibe.Plugin.applicable(), 'no LED')
+            self.assertIsNone(vibe._go_s_device())
+            self.interface()
+            self.assertTrue(vibe.Plugin.applicable())
+            with patch.object(vibe, 'GO_S_DRIVERS_DIR', str(self.drivers / 'missing')):
+                self.assertFalse(vibe.Plugin.applicable(), 'driver not loaded')
+
+    def test_a_node_that_is_not_that_character_device_is_never_written(self):
+        regular = self.devices.parent / 'hidraw3'
+        regular.write_bytes(b'')
+        self.assertFalse(vibe._go_s_send(str(regular), '240:3', go_s_frames(1, 1)))
+        self.assertEqual(regular.read_bytes(), b'')
+        link = self.devices.parent / 'hidraw-link'
+        link.symlink_to(regular)
+        with self.assertRaises(OSError):
+            vibe._go_s_send(str(link), '240:3', go_s_frames(1, 1))
+
+
+class GoSDevice(FakeDevice):
+    """The Go S path, faked only where it meets the controller: found, sent to, hhd."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent, self.sleeps = [], []
+        self.present, self.hhd = GO_S_HID, False
+
+        def sleep(seconds):
+            self.sleeps.append(seconds)
+            self.clock += seconds
+
+        def send(node, number, frames):
+            self.assertTrue(module_runtime.controller_config_lock._is_owned(), 'sent under the shared lock')
+            self.sent.append((node, number, list(frames)))
+            return True
+        self.clock_ns = types.SimpleNamespace(monotonic=lambda: self.clock, sleep=sleep)
+        for name, value in {
+            'time': self.clock_ns, '_is_go_s': Mock(return_value=True), '_go_s_seen': None, '_device_path': None,
+            '_go_s_device': Mock(side_effect=lambda: self.present),
+            '_go_s_hidraw': Mock(return_value=('/dev/hidraw3', '240:3')),
+            '_go_s_send': Mock(side_effect=send), '_hhd_running': Mock(side_effect=lambda: self.hhd),
+        }.items():
+            self.stack.enter_context(patch.object(vibe, name, value))
+        self.addCleanup(module_runtime.begin_start, 'vibration')
+
+
+class GoSApplyTests(GoSDevice):
+    async def test_settings_are_sent_as_two_frames_once_the_interface_has_settled(self):
+        self.assertTrue((await self.plugin.set_intensity(3))['success'])
+        self.assertEqual(self.sleeps, [vibe._GO_S_SETTLE_S])
+        self.assertEqual(self.sent, [('/dev/hidraw3', '240:3', go_s_frames(3, 1))])
+        self.assertTrue((await self.plugin.set_touchpad_enabled(False))['success'])
+        self.assertEqual(self.sleeps, [vibe._GO_S_SETTLE_S], 'the window is waited once per interface')
+        self.assertEqual(self.sent[-1][2], go_s_frames(3, 0))
+        self.assertEqual((self.writes, self.hardware()), ([], DRIVER), 'no hid-lenovo-go attribute is touched')
+
+    async def test_no_interface_or_hhd_sends_nothing_and_the_choice_is_kept(self):
+        self.present = None
+        result = await self.plugin.set_intensity(1)
+        self.assertEqual((result['success'], result['error']), (False, vibe.NOT_CONNECTED))
+        self.assertEqual(self.persisted()['0']['settings']['level'], 1)
+        self.present, self.hhd = GO_S_HID, True
+        self.assertFalse(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
+        self.assertEqual(self.sent, [])
+
+    def test_a_stored_value_outside_the_allowlist_never_reaches_the_controller(self):
+        vibe._go_s_seen = (GO_S_HID, self.clock - 10)
+        self.assertFalse(vibe._apply_settings({**vibe.DEFAULT_PROFILE, 'level': 7}))
+        self.assertEqual(self.sent, [])
+
+    def test_a_new_interface_or_a_stop_during_the_window_gets_nothing(self):
+        def replaced(seconds):
+            self.sleeps.append(seconds)
+            self.present = '/sys/devices/usb1/0003:1A86:E310.0006'
+        self.clock_ns.sleep = replaced
+        self.assertFalse(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
+        self.clock_ns.sleep = lambda seconds: module_runtime.request_stop('vibration')
+        self.assertFalse(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
+        self.assertEqual(self.sent, [])
+
+    def test_frames_wait_for_an_rgb_transaction_on_the_shared_controller_lock(self):
+        import rgb_backend
+        self.assertIs(rgb_backend._apply_lock, module_runtime.controller_config_lock)
+        vibe._go_s_seen = (GO_S_HID, self.clock - 10)
+        held, release = threading.Event(), threading.Event()
+
+        def rgb_transaction():
+            with rgb_backend._apply_lock:
+                held.set()
+                release.wait(5)
+        rgb = threading.Thread(target=rgb_transaction)
+        rgb.start()
+        held.wait(5)
+        worker = threading.Thread(target=vibe._apply_settings, args=(dict(vibe.DEFAULT_PROFILE),))
+        worker.start()
+        worker.join(0.2)
+        self.assertTrue(worker.is_alive())
+        self.assertEqual(self.sent, [])
+        release.set()
+        worker.join(5)
+        rgb.join(5)
+        self.assertEqual(len(self.sent), 1)
+
+    async def test_hotplug_and_wake_send_again_after_a_fresh_window(self):
+        with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
+            await vibe._handle_device_added('/sys/devices/usb1/0003:1A86:E310.0004', 'change')  # another interface
+            self.assertEqual(self.sent, [])
+            await vibe._handle_device_added(GO_S_HID, 'bind')
+        self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S], 1))
+        await self.plugin.reapply()  # a wake may have reset the controller
+        self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S] * 2, 2))
+
+    async def test_the_drift_loop_sends_after_a_wake_and_never_periodically(self):
+        checks = []
+
+        def resumed():
+            checks.append(None)
+            self.clock += 60  # past the periodic interval each time
+            if len(checks) > 3:
+                raise asyncio.CancelledError
+            return len(checks) == 3
+        with patch.object(vibe, '_RESUME_CHECK_S', 0), patch.object(vibe, '_resume_detected', side_effect=resumed):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.plugin._drift_loop()
+        self.assertEqual(len(self.sent), 1)
+
+    async def test_uninstall_sends_nothing_and_keeps_the_settings(self):
+        await self.plugin.set_intensity(0)
+        sent = list(self.sent)
+        with patch.object(vibe, '_restore_baseline') as restore:
+            await self.plugin._uninstall()
+        restore.assert_not_called()
+        self.assertEqual(self.sent, sent)
+        self.assertEqual(self.persisted()['0']['settings']['level'], 0)
+
+    async def test_the_test_buzz_is_not_offered(self):
+        with patch.object(vibe, '_find_ff_device') as find:
+            self.assertFalse((await self.plugin.test_vibration())['success'])
+        find.assert_not_called()
+
+
+class GoSRegressionTests(FakeDevice):
+    async def test_the_go_2_keeps_its_attribute_path_and_never_builds_a_frame(self):
+        vibe._is_go_s.cache_clear()
+        self.addCleanup(vibe._is_go_s.cache_clear)
+        with patch.object(module_runtime, 'legion_device', return_value=('go2', '83N0')), \
+                patch.object(vibe, '_go_s_device') as found, patch.object(vibe, '_go_s_send') as send:
+            vibe._migrate()  # a fresh install records the driver values before the first write
+            self.assertTrue((await self.plugin.set_intensity(0))['success'])
+            self.assertEqual(self.intensity(), 'off')
+            await self.plugin._uninstall()
+        self.assertEqual(self.intensity(), 'high', 'uninstall restored the driver value it found')
+        found.assert_not_called()
+        send.assert_not_called()
 
 
 if __name__ == '__main__':

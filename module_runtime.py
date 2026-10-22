@@ -46,6 +46,10 @@ class _FirmwareLock:
 # Mutex [ECMT]"). Hold only around one firmware-backed sysfs write, innermost,
 # from worker threads only: never take another lock or block on I/O beyond it.
 firmware_lock = _FirmwareLock()
+# The controller MCU answers one configuration command at a time and the Go S driver
+# matches no reply to its request. RGB's sysfs transactions (each access is a command)
+# and Vibration's raw Go S frames hold this lock so their commands never interleave.
+controller_config_lock = threading.RLock()
 CONTROLLER_MODULES = frozenset({'controller', 'remap', 'rgb', 'vibration'})
 _controller_paused = False
 _controller_generation = 0

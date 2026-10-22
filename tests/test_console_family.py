@@ -17,6 +17,7 @@ import fan_ec
 import main
 import module_runtime
 import rgb_backend
+import vibration_backend
 import wifi_backend
 
 GO1 = dict(product_name="83E1", product_version="Legion Go 8APU1", product_family="Legion Go 8APU1")
@@ -40,8 +41,8 @@ EVERYTHING = {"fan", "vibration", "display", "wifi", "rgb", "remap", "battery", 
 EXPECTED = {  # TDP reports its own applicability (tdp_backend).
     "Go 1, 2025 controller firmware": {"vibration", "wifi", "rgb", "battery", "controller"},
     "Go 1, older controller firmware": {"wifi", "battery"},
-    "Go S": {"wifi", "rgb", "battery"},
-    "Go S without charge modes": {"wifi", "rgb"},
+    "Go S": {"vibration", "wifi", "rgb", "battery"},  # vibration: beta, hid-lenovo-go-s
+    "Go S without charge modes": {"vibration", "wifi", "rgb"},
     "Go 2 83N0": EVERYTHING,
     "Go 2 83N1": EVERYTHING,
     "Lenovo outside the family": {"wifi"},
@@ -110,6 +111,7 @@ class ApplicabilityTests(unittest.TestCase):
             leds = {name: root / name for name in ("go", "go_s")}
             if led:
                 leds[led].write_text("")
+            (root / "drivers" / ("hid-lenovo-go-s" if led == "go_s" else "hid-lenovo-go")).mkdir(parents=True)
             def detect():
                 if not charge:
                     raise battery_backend.BatteryError("No charge modes.")
@@ -119,6 +121,8 @@ class ApplicabilityTests(unittest.TestCase):
                 (battery_backend, dict(SYS_ROOT=root, _detect=detect)),
                 (controller_backend, dict(DMI_ROOT=identity)),
                 (rgb_backend, dict(RGB_LED_PATH=str(leds["go"]), GO_S_RGB_LED_PATH=str(leds["go_s"]))),
+                (vibration_backend, dict(GO_S_LED=str(leds["go_s"]),
+                                         GO_S_DRIVERS_DIR=str(root / "drivers" / "hid-lenovo-go-s"))),
                 (fan_ec.platform, dict(system=lambda: "Linux", machine=lambda: "x86_64")),
                 (main, dict(firmware_applies=functools.partial(controller_firmware.applies, root))),
             ):

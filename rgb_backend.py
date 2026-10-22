@@ -121,7 +121,7 @@ settings = SettingsManager(
 )
 
 _settings_lock = threading.RLock()
-_apply_lock = threading.RLock()
+_apply_lock = module_runtime.controller_config_lock  # shared with Vibration's Go S frames
 _drift_task: asyncio.Task | None = None
 _resume_detected = module_runtime.ResumeWatch()
 _last_error = ""
@@ -931,7 +931,8 @@ def _transaction(
 def _status() -> dict[str, Any]:
     state = _load_state()
     path, rgb_reason = _rgb_capability()
-    rgb_current = _read_rgb_snapshot(path) if path else None
+    with _apply_lock:  # each read is a controller command too
+        rgb_current = _read_rgb_snapshot(path) if path else None
     power_supported, power_reason = _power_capability()
     power_current = _read_power_led() if power_supported else None
     rgb_drift = False
