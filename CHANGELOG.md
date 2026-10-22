@@ -17,9 +17,8 @@ Companion now runs, as an early beta, on the first Legion Go and the Legion Go S
 
 ### Changed
 
-- **Updates keep your settings:** the gyro source, battery protection, lighting control and Wi-Fi band policy survive an update (the band policy is applied once Wi-Fi has reconnected). **Display** reinstalls the script for the panel mode you set up and asks for a Gaming Mode restart only when the running Gaming Mode does not already use that exact script (always after updating from 2.1.0 or 2.2.x).
+- **Updates keep your settings:** the gyro source, battery protection, lighting control and Wi-Fi band policy survive an update (the band policy is applied once Wi-Fi has reconnected). **Display** reinstalls the script for the panel mode you set up and asks for a Gaming Mode restart only when the running Gaming Mode does not already use that exact script (always after updating from 2.1.0 or 2.2.x). After updating from 2.1.0, whose script sat in /root where Gaming Mode never read it, Display installs it in the right place itself and removes the old copy; no Setup is needed.
 - **TDP presets** now come from each console's BIOS table, so every console in the family gets its own firmware limits.
-- **Display** no longer moves the display script installed by 2.1.0. After updating straight from 2.1.0, Display opens Setup with the saved panel mode, which you confirm once, followed by a Gaming Mode restart.
 
 ### Fixed
 
