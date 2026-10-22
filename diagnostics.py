@@ -53,7 +53,9 @@ _filter = None
 _asyncio_filter = None
 _seen = collections.OrderedDict()
 _early = collections.deque(maxlen=64)  # Import/__init__/_migration records until configure() has a sink.
-_lock = threading.Lock()
+# Reentrant: a garbage-collected failed task is logged (_AsyncioFilter -> event) on whatever thread
+# allocated, possibly inside another event's deduplication; a plain Lock would freeze that thread.
+_lock = threading.RLock()
 _HOME = os.path.dirname(os.path.abspath(__file__))
 
 
