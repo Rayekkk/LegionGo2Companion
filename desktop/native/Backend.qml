@@ -47,12 +47,14 @@ QtObject {
         return !name || !!entry && entry.applicable!==false && entry.enabled!==false && entry.ready===true && !entry.pending && !entry.maintenance;
     }
     function moduleError(name) { for(const method of Object.keys(readErrors))if(owner(method)===name && readErrors[method])return readErrors[method];return ""; }
+    // The request id; -1 when nothing was sent (no onFinished follows).
     function issue(method, args, mutation, blocking, poll, then) {
-        if (!transport || (host && !host.installed)) return;
+        if (!transport || (host && !host.installed)) return -1;
         const id = transport.call(method, args || [], mutation || false);
         const copy = Object.assign({}, requests);
         copy[id] = {method:method, args:args || [], mutation:!!mutation, blocking:!!blocking, generation:generation, started:now(), poll:!!poll, then:then || null};
         requests = copy;
+        return id;
     }
     // then: {method, args} sent only after this mutation succeeds. It lives here, not in a page,
     // so leaving the page cannot drop or retarget the second half of one user choice.
@@ -67,8 +69,8 @@ QtObject {
     }
     function saveDeviceReport() {
         if(reportSaving || !connected || (host && !host.installed))return;
-        reportSaving=true; reportText="";
-        issue("save_device_report",[],true,false);
+        reportText="";
+        reportSaving=issue("save_device_report",[],true,false)>=0;
     }
     function panelMethods() {
         if(page === "controller") {
@@ -154,11 +156,11 @@ QtObject {
     property Connections connection: Connections {
         target: backend.transport
         function onFinished(id, method, result, problem) {
+            if(method==="save_device_report") { backend.reportSaving=false;backend.reportText=Updates.deviceReportResult(problem?{success:false,error:problem}:result); }
             const request = backend.requests[id];
             if (!request) return;
             const copy = Object.assign({},backend.requests); delete copy[id]; backend.requests = copy;
             if (request.blocking) backend.busy = false;
-            if(method==="save_device_report") { backend.reportSaving=false;backend.reportText=Updates.deviceReportResult(problem?{success:false,error:problem}:result); }
             if(backend.host && !backend.host.installed) {
                 backend.connected=false;
                 if(request.mutation)backend.mutationDone(method,result,false);

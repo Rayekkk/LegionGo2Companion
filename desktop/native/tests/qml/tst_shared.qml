@@ -507,6 +507,8 @@ TestCase {
         verify(!model.reportSaving);compare(model.reportText,"Saved to /home/deck/Desktop/report.txt");
         model.saveDeviceReport();response(1,null,"Backend unavailable.");
         verify(!model.reportSaving);compare(model.reportText,"Backend unavailable.");
+        model.transport=null;model.saveDeviceReport();
+        verify(!model.reportSaving,"nothing was sent, so the button stays usable");
     }
     function test_invalidDesktopContextCannotKeepPreviousGameOrModeFresh() {
         model.snapshots=Object.assign({},model.snapshots,{desktop_context:{app_id:"42",gamescope:false}});
