@@ -5,11 +5,16 @@
 Import this before `main` or any backend.
 """
 import contextlib
+import faulthandler
 import sys
 import tempfile
 import types
 from pathlib import Path
 
+
+# A hung run ends with every thread's stack instead of stalling (the suite takes ~2 min, CI allows 10).
+# A wait_for cannot bound a stuck _unload: it resists cancellation, and so does the test loop's teardown.
+faulthandler.dump_traceback_later(480, exit=True)
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_ROOT = Path(tempfile.mkdtemp(prefix="legiongo2companion-tests-"))
