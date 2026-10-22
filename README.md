@@ -59,9 +59,9 @@ left out on purpose.
 | Feature | Legion Go 2 | Legion Go | Legion Go S |
 |---|:---:|:---:|:---:|
 | TDP & CPU (Boost, EPP) | ✅ | ✅ ¹ | ✅ ¹ |
-| Allow up to 50 W | ✅ | ✅ ¹ | ➖ |
+| Allow up to 50 W | ✅ / ⚠️ ³ | ⚠️ ¹ ⁵ | ➖ |
 | Separate battery presets | ✅ | ✅ ¹ | ✅ ¹ |
-| Fan Control | ✅ ³ | ❌ | ❌ |
+| Fan Control | ✅ / ⚠️ ³ | ❌ | ❌ |
 | Vibration | ✅ | ✅ ² | ✅ ⁴ |
 | Lighting (stick lights) | ✅ | ✅ ² | ✅ |
 | Power-button light | ✅ | ✅ ⁴ | ✅ ⁴ |
@@ -70,18 +70,20 @@ left out on purpose.
 | Battery protection | ✅ | ✅ ¹ | ✅ ¹ |
 | Display | ✅ | ➖ | ➖ |
 | Wi-Fi and band policy | ✅ | ✅ ¹ | ✅ ¹ |
-| Controller firmware | ✅ | ❌ | ❌ |
+| Controller firmware | ✅ / ⚠️ ³ | ❌ | ❌ |
 | Device report | ✅ | ✅ | ✅ |
 | Desktop app | ✅ | ✅ | ✅ |
 
-✅ supported · ➖ not needed on this console · ❌ not supported yet
+✅ supported · ⚠️ beta with a higher risk · ➖ not needed on this console · ❌ not supported yet
 
 ¹ When SteamOS offers what the feature needs: the firmware's power limits for TDP, the Long
 Life charge mode for Battery, the MT7922 (`mt7921e`) Wi-Fi driver for the band policy.
 ² With the 2025 controller firmware. The Legion Go's controllers on older firmware have no Linux
 driver for these, so Companion hides them; update the controllers in Legion Space to unlock them.
-³ On the Legion Go 2 Z2 (83N1) Fan Control is a beta, see below.
+³ ✅ on the Legion Go 2 (83N0); ⚠️ on the Legion Go 2 Z2 (83N1), where it has not been tested yet (Fan Control
+runs its fan self-test first, see below).
 ⁴ Beta: not tested on this console yet.
+⁵ The 50 W boosts go above the firmware's own limits and have not been tested on this console.
 
 Not supported yet on the Legion Go and Legion Go S: Fan Control, which needs EC data that has only
 been verified on the Legion Go 2, and controller firmware updates; on the Legion Go S also vibration
