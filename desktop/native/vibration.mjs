@@ -19,6 +19,8 @@ export const driverNotice = status => status?.found === true ? null : ["Controll
 export const strengthOnly = device => device?.console === "gos";
 /** Shown on the Legion Go S beside the "Beta" badge. */
 export const BETA_TEXT = "Beta on this console: Companion sends these settings to the controller but cannot read them back, so the page shows what Companion set.";
+/** The Go S is sent nothing until its owner changes a setting here (get_settings.configured === false), so Legion Space's values stay. */
+export const betaText = settings => settings?.configured === false ? `${BETA_TEXT} Companion sends nothing until you change a setting here.` : BETA_TEXT;
 
 /** Touchpad strength only applies while touchpad vibration is on. */
 export const touchpadStrengthEditable = settings => settings?.touchpadEnabled === true;

@@ -423,7 +423,7 @@ RowLayout {
                 notice("",()=>{const missing=backend.age("vibe_get_driver_status")<Infinity && Vibe.driverNotice(s("vibe_get_driver_status"));return missing?missing[0]+". "+missing[1]:"";}),
                 switcher("Per-game profile",()=>s("vibe_get_settings").overwrite,"vibe_set_profile_overwrite",v=>[app(),v,""],{available:()=>vibeReady() && !!app(),
                     note:()=>!app()?"Start a game to give it its own settings.":s("vibe_get_settings").overwrite?"This game has its own settings.":"This game uses the global settings."}),
-                field("","paragraph",()=>Vibe.BETA_TEXT,()=>{},{name:"Vibration beta",badge:"Beta",visible:()=>!vibeFull()}),
+                field("","paragraph",()=>Vibe.betaText(s("vibe_get_settings")),()=>{},{name:"Vibration beta",badge:"Beta",visible:()=>!vibeFull()}),
                 choices("Vibration strength",()=>s("vibe_get_settings").settings?.level,v=>change("vibe_set_intensity",vibeArgs(v)),vibeLevels,{kind:"options",available:vibeReady}),
                 choices("Vibration mode",()=>s("vibe_get_settings").settings?.mode,v=>change("vibe_set_rumble_mode",vibeArgs(v)),vibeModes,{kind:"options",note:"A vibration pattern tuned for a game type.",available:vibeReady,visible:vibeFull}),
                 switcher("Touchpad vibration",()=>s("vibe_get_settings").settings?.touchpadEnabled,"vibe_set_touchpad_enabled",vibeArgs,{available:vibeReady}),

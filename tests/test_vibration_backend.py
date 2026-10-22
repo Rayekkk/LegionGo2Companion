@@ -821,6 +821,11 @@ class GoSDevice(FakeDevice):
             self.stack.enter_context(patch.object(vibe, name, value))
         self.addCleanup(module_runtime.begin_start, 'vibration')
 
+    def configure(self):
+        """As if the owner had already changed a setting here."""
+        self.store.setSetting('go_s_configured', True)
+        self.store.commit()
+
 
 class GoSApplyTests(GoSDevice):
     async def test_settings_are_sent_as_two_frames_once_the_interface_has_settled(self):
@@ -842,11 +847,13 @@ class GoSApplyTests(GoSDevice):
         self.assertEqual(self.sent, [])
 
     def test_a_stored_value_outside_the_allowlist_never_reaches_the_controller(self):
+        self.configure()
         vibe._go_s_seen = (GO_S_HID, self.clock - 10)
         self.assertFalse(vibe._apply_settings({**vibe.DEFAULT_PROFILE, 'level': 7}))
         self.assertEqual(self.sent, [])
 
     def test_a_new_interface_or_a_stop_during_the_window_gets_nothing(self):
+        self.configure()
         def replaced(seconds):
             self.sleeps.append(seconds)
             self.present = '/sys/devices/usb1/0003:1A86:E310.0006'
@@ -859,6 +866,7 @@ class GoSApplyTests(GoSDevice):
     def test_frames_wait_for_an_rgb_transaction_on_the_shared_controller_lock(self):
         import rgb_backend
         self.assertIs(rgb_backend._apply_lock, module_runtime.controller_config_lock)
+        self.configure()
         vibe._go_s_seen = (GO_S_HID, self.clock - 10)
         held, release = threading.Event(), threading.Event()
 
@@ -880,6 +888,7 @@ class GoSApplyTests(GoSDevice):
         self.assertEqual(len(self.sent), 1)
 
     async def test_hotplug_and_wake_send_again_after_a_fresh_window(self):
+        self.configure()
         with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
             await vibe._handle_device_added('/sys/devices/usb1/0003:1A86:E310.0004', 'change')  # another interface
             self.assertEqual(self.sent, [])
@@ -889,6 +898,7 @@ class GoSApplyTests(GoSDevice):
         self.assertEqual((self.sleeps, len(self.sent)), ([vibe._GO_S_SETTLE_S] * 2, 2))
 
     async def test_the_drift_loop_sends_after_a_wake_and_never_periodically(self):
+        self.configure()
         checks = []
 
         def resumed():
@@ -917,6 +927,74 @@ class GoSApplyTests(GoSDevice):
         find.assert_not_called()
 
 
+class GoSUnconfiguredTests(GoSDevice):
+    """V1: the Go S gets nothing until its owner changes a setting here, so Legion Space's values stay."""
+
+    def assertNothingSent(self):
+        self.assertEqual((self.sent, self.sleeps), ([], []))
+
+    async def test_start_hotplug_wake_and_the_drift_loop_send_nothing(self):
+        plugin = self.plugin
+        with patch.object(vibe.Plugin, '_setup_error', None), patch.object(vibe._resume_detected, 'last', None),                 patch.object(vibe, '_monitor_task', None), patch.object(vibe, '_drift_task', None),                 patch.object(vibe.module_runtime, 'suspend_offset', return_value=0),                 patch.object(vibe, '_monitor_hotplug', new=AsyncMock()), patch.object(plugin, '_drift_loop', new=AsyncMock()):
+            try:
+                await plugin._main()
+                self.assertTrue((await plugin.is_ready())['ready'])
+            finally:
+                await plugin._unload()
+        with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
+            await vibe._handle_device_added(GO_S_HID, 'bind')
+            await vibe._handle_device_added(GO_S_HID, 'change')
+        self.assertTrue((await plugin.reapply())['success'])
+        self.assertTrue((await plugin.set_active_app('111'))['success'])
+        checks = []
+
+        def resumed():
+            checks.append(None)
+            if len(checks) > 2:
+                raise asyncio.CancelledError
+            return True
+        with patch.object(vibe, '_RESUME_CHECK_S', 0), patch.object(vibe, '_resume_detected', side_effect=resumed):
+            with self.assertRaises(asyncio.CancelledError):
+                await plugin._drift_loop()
+        self.assertNothingSent()
+        self.assertIsNone(self.store.getSetting('go_s_configured'))
+        self.assertIs((await plugin.get_settings())['configured'], False)
+
+    async def test_the_first_change_sends_and_is_remembered(self):
+        result = await self.plugin.set_intensity(1)
+        self.assertEqual((result['success'], result['configured']), (True, True))
+        self.assertEqual([frames for _node, _number, frames in self.sent], [go_s_frames(1, 1)])
+        self.assertIs(self.store.getSetting('go_s_configured'), True)
+        self.assertIs((await self.plugin.get_settings())['configured'], True)
+
+    async def test_every_kind_of_user_change_counts(self):
+        for change in (lambda p: p.set_touchpad_enabled(False), lambda p: p.reset_to_default(),
+                       lambda p: p.set_profile_overwrite('111', True, 'Game')):
+            with self.subTest(change=change):
+                self.store.setSetting('go_s_configured', None)
+                self.sent.clear()
+                result = await change(self.plugin)
+                self.assertEqual((result['success'], result['configured'], len(self.sent)), (True, True, 1))
+                self.assertIs(self.store.getSetting('go_s_configured'), True)
+
+    async def test_a_rejected_change_does_not_count(self):
+        result = await self.plugin.set_intensity(True)
+        self.assertFalse(result['success'])
+        self.assertIsNone(self.store.getSetting('go_s_configured'))
+        self.assertNothingSent()
+
+    async def test_after_a_restart_with_the_flag_the_choice_is_sent_again(self):
+        await self.plugin.set_intensity(3)
+        self.sent.clear()
+        vibe._go_s_seen = None  # a new module start: the interface window is waited out again
+        self.assertTrue(await asyncio.to_thread(vibe._apply_settings, vibe._active_values(), None, True))
+        self.assertEqual([frames for _node, _number, frames in self.sent], [go_s_frames(3, 1)])
+        with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
+            await vibe._handle_device_added(GO_S_HID, 'bind')
+        await self.plugin.reapply()
+        self.assertEqual(len(self.sent), 3)
+
+
 class GoSRegressionTests(FakeDevice):
     async def test_the_go_2_keeps_its_attribute_path_and_never_builds_a_frame(self):
         vibe._is_go_s.cache_clear()
@@ -926,6 +1004,8 @@ class GoSRegressionTests(FakeDevice):
             vibe._migrate()  # a fresh install records the driver values before the first write
             self.assertTrue((await self.plugin.set_intensity(0))['success'])
             self.assertEqual(self.intensity(), 'off')
+            self.assertIs((await self.plugin.get_settings())['configured'], True, 'only a Go S ever holds settings back')
+            self.assertIsNone(self.store.getSetting('go_s_configured'))
             await self.plugin._uninstall()
         self.assertEqual(self.intensity(), 'high', 'uninstall restored the driver value it found')
         found.assert_not_called()

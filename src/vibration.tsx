@@ -20,7 +20,7 @@ import {
 } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
-import { BETA_TEXT, driverNotice, failureText, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
+import { betaText, driverNotice, failureText, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -33,6 +33,7 @@ interface VibeSettings {
 
 interface SettingsResponse {
   settings: VibeSettings;
+  configured?: boolean;
   app_id: string;
   profile_id: string;
   overwrite: boolean;
@@ -230,6 +231,9 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
   const [appId, setAppId] = useState(DEFAULT_APP);
   const [gameName, setGameName] = useState("");
   const [perGameOn, setPerGameOn] = useState(false);
+  // Go S: the backend sends nothing until its owner first changes a setting (reported as configured: false).
+  const [unsent, setUnsent] = useState(false);
+  const userChanged = useRef(false);
 
   const [loading, setLoading] = useState(true);
   const [setupErr, setSetupErr] = useState<string | null>(null);
@@ -306,6 +310,7 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
     setSettings(res.settings);
     setAppId(res.app_id);
     setPerGameOn(res.overwrite);
+    setUnsent(res.configured === false && !userChanged.current);
     setGameName(AppWatcher.displayName());
   }, []);
 
@@ -430,6 +435,8 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
   const applyField = useCallback(
     async (key: string, optimistic: Partial<VibeSettings>, call: (app: string, profile: string) => Promise<ApplyResponse>) => {
       if (!mounted.current || controlActionPending.current) return;
+      userChanged.current = true;
+      setUnsent(false);
       vibeReadEpoch += 1;
       const seq = ++editSeq.current;
       const revision = gameRevision.current;
@@ -494,6 +501,8 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
   const handleReset = useCallback(async () => {
     if (!mounted.current || controlActionPending.current) return;
     controlActionPending.current = true;
+    userChanged.current = true;
+    setUnsent(false);
     setProfileChanging(true);
     const expectedApp = appId, expectedProfile = perGameOn ? appId : DEFAULT_APP;
     const revision = gameRevision.current;
@@ -544,6 +553,8 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
     async (val: boolean) => {
       if (!mounted.current || controlActionPending.current) return;
       controlActionPending.current = true;
+      userChanged.current = true;
+      setUnsent(false);
       setProfileChanging(true);
       const revision = gameRevision.current;
       flushPendingWrites();
@@ -617,7 +628,7 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
     <div style={styles.container}>
       <PanelSection title="Vibration">
         {missingDriver && infoRow(missingDriver[0], missingDriver[1])}
-        {strengthOnly && infoRow("Beta", BETA_TEXT)}
+        {strengthOnly && infoRow("Beta", betaText({ configured: !unsent }))}
         <PanelSectionRow>
           <ToggleField
             label="Per-game profile"

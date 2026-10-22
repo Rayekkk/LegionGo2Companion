@@ -96,6 +96,17 @@ run(async () => {
         + 'to the controller but cannot read them back, so the page shows what Companion set.' : undefined);
       h.unmount();
     }
+    // Until its owner changes a setting the Go S is sent nothing, and the Beta row says so (Decky and Desktop share the text).
+    const SENT = 'Beta on this console: Companion sends these settings to the controller but cannot read them back, so the page shows what Companion set.';
+    const UNSENT = `${SENT} Companion sends nothing until you change a setting here.`;
+    const unsent = mount('vibration.tsx', { component: 'VibrationPage', responses: { ...responses,
+      vibe_get_settings: () => ({ ...responses.vibe_get_settings(), configured: false }), vibe_set_intensity: () => ({ success: true }) } });
+    unsent.render({ strengthOnly: true }); await settle();
+    assert.equal(label(unsent.render({ strengthOnly: true }), 'Beta')?.props.description, UNSENT);
+    label(unsent.render({ strengthOnly: true }), 'Vibration strength').props.onChange(3);
+    await settle();
+    assert.equal(label(unsent.render({ strengthOnly: true }), 'Beta')?.props.description, SENT, 'the first change drops the second sentence');
+    unsent.unmount();
   }
   {
     const h = mount('battery.tsx', { component: 'BatteryPage', responses: {

@@ -8,5 +8,6 @@ export function modeShort(raw: string): string;
 export function driverNotice(status: { found?: boolean } | null | undefined): [string, string] | null;
 export function strengthOnly(device?: { console?: string | null } | null): boolean;
 export const BETA_TEXT: string;
+export function betaText(settings?: { configured?: boolean } | null): string;
 export function touchpadStrengthEditable(settings?: { touchpadEnabled?: boolean } | null): boolean;
 export function failureText(what: string, error?: string): string;

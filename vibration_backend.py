@@ -76,6 +76,9 @@ SETTINGS_KEY_GAME_PROFILES = "game_profiles"
 # Driver values found before the first write: {"pending": True} until captured,
 # {} when unknown (an existing install), else {attribute: value}.
 SETTINGS_KEY_BASELINE      = "baseline"
+# Legion Go S: True once its owner has changed a vibration setting here. Until then Companion
+# sends the controller nothing, so what Legion Space set is not overwritten.
+SETTINGS_KEY_GO_S_CONFIGURED = "go_s_configured"
 _PROFILE_ATTRS = ('rumble_intensity', 'left_handle/rumble_mode', 'right_handle/rumble_mode',
                   'touchpad/vibration_intensity', 'touchpad/vibration_enabled')
 
@@ -467,9 +470,31 @@ def _hhd_running() -> bool:
     return False
 
 
+def _go_s_configured() -> bool:
+    """False only on a Go S whose owner has not changed a setting here yet."""
+    if not _is_go_s():
+        return True
+    with _settings_lock:
+        _read_valid_settings()
+        return settings.getSetting(SETTINGS_KEY_GO_S_CONFIGURED, False) is True
+
+
+def _go_s_configure(payload: dict | None = None) -> None:
+    """The owner changed a setting: from now on the Go S is sent it, and again on start, hotplug and wake."""
+    with _settings_lock:
+        if not _go_s_configured():
+            settings.setSetting(SETTINGS_KEY_GO_S_CONFIGURED, True)
+            settings.commit()
+    if payload is not None:
+        payload["configured"] = True
+
+
 def _apply_go_s(values: dict) -> bool:
     """Send strength and touchpad vibration. Success is the write; the controller cannot be read back."""
     global _last_applied_values, _go_s_seen
+    if not _go_s_configured():  # before _apply_lock: lock order is settings, then apply
+        _last_applied_values = None
+        return True  # nothing to send yet, and nothing wrong
     with _apply_lock:
         _last_applied_values = None
         hid = _go_s_device()
@@ -626,6 +651,7 @@ def _profile_context() -> tuple[dict, dict]:
     running = _running_app_id()
     app_id = _resolve_app_id(profiles, running)
     return profiles, {
+        "configured": _go_s_configured(),  # False: a Go S that is still sent nothing
         "settings":   _active_values(profiles, running),
         "app_id":     running,
         "profile_id": app_id,
@@ -1043,6 +1069,7 @@ class Plugin:
                     or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
                 return {"success": False, "error": "Active profile changed; reload and try again", **payload}
             values = _update_active(field, value, profiles=profiles, profile_id=payload["profile_id"])
+            _go_s_configure(payload)
             if _apply_settings(values):
                 return {"success": True, **payload, "settings": values}
             if _get_device_path() is None:
@@ -1086,6 +1113,7 @@ class Plugin:
                                                  "settings": {}})
             entry["settings"] = dict(DEFAULT_PROFILE)
             _save_profiles(profiles)
+            _go_s_configure(payload)
             ok = _apply_settings(entry["settings"], force=True)
             result = {"success": ok, **payload, "settings": entry["settings"]}
             if not ok and _get_device_path() is None:
@@ -1143,11 +1171,12 @@ class Plugin:
             if name:
                 entry["name"] = name
             _save_profiles(profiles)
+            _go_s_configure()
             running = context["app_id"]
             profile_id = _resolve_app_id(profiles, running)
             values = _active_values(profiles, running)
             ok = _apply_settings(values)
-            return {"success": ok, "settings": values, "app_id": running,
+            return {"success": ok, "settings": values, "app_id": running, "configured": True,
                     "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
         return await _offload(_do)
 
