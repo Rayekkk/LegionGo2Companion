@@ -262,6 +262,30 @@ class CpuProfileTests(unittest.TestCase):
         self.assert_hardware(False, 'performance')
         self.assertEqual(self.payload()['settings']['epp'], 'performance')
 
+    def test_refused_second_policy_rolls_back_the_first(self):
+        self.seed({}, epp='performance')
+        self.hardware(False, 'performance')
+        writer, written = tdp._write_cpu_power_text, []
+        def second_refused(path, value):
+            written.append(path)
+            if len(written) == 2:
+                raise OSError('isolated write failure')  # refused before it took effect
+            writer(path, value)
+        with patch.object(tdp, '_write_cpu_power_text', side_effect=second_refused):
+            result = asyncio.run(self.plugin.set_epp('power'))
+        self.assertFalse(result['success'])
+        self.assertIn('previous state restored', result['error'])
+        self.assertEqual([p.read_text() for p in self.epp_paths], ['performance'] * 2)
+
+    def test_a_policy_already_at_the_choice_is_not_a_failure(self):
+        self.seed({}, epp='performance')
+        self.hardware(False, 'performance')
+        self.epp_paths[0].write_text('power')
+        self.assertTrue(asyncio.run(self.plugin.set_epp('power'))['success'])
+        self.epp_paths[1].write_text('performance')
+        self.assertTrue(asyncio.run(self.plugin.set_epp('performance'))['success'])
+        self.assertEqual([p.read_text() for p in self.epp_paths], ['performance'] * 2)
+
     def test_epp_persistence_failure_never_touches_the_hardware(self):
         self.seed({}, epp='performance')
         self.hardware(False, 'performance')

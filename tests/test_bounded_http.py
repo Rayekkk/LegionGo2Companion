@@ -314,5 +314,27 @@ class HelperDownloadTests(unittest.TestCase):
                 helper.download_to(tdp.RYZENADJ_URL, output, timeout=30, cancel=cancel.is_set)
         self.assertEqual(output.getvalue(), b'')
 
+    def test_size_limit_counts_the_whole_stream_not_one_chunk(self):
+        for size, allowed in ((8, True), (9, False)):
+            with self.subTest(size=size):
+                class Response(io.BytesIO):
+                    def read1(self, _size):
+                        return self.read(3)  # many small chunks, each under the limit
+                response, output, helper = Response(b'x' * size), io.BytesIO(), self.helper()
+                with patch.object(tdp_updater, 'MAX_DOWNLOAD_BYTES', 8), \
+                        patch.object(helper, 'open_url', return_value=response):
+                    if allowed:
+                        self.assertEqual(helper.download_to(tdp.RYZENADJ_URL, output, timeout=30), 8)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'size limit'):
+                            helper.download_to(tdp.RYZENADJ_URL, output, timeout=30)
+                self.assertLessEqual(len(output.getvalue()), 8)
+
+    def test_an_expired_deadline_never_opens_a_connection(self):
+        with patch.object(tdp_updater, 'open_http') as opened, \
+                self.assertRaisesRegex(TimeoutError, 'total time limit'):
+            self.helper().open_url(tdp.RYZENADJ_URL, 3, deadline=tdp_updater.time.monotonic() - 1)
+        opened.assert_not_called()
+
 
 if __name__ == "__main__": unittest.main()

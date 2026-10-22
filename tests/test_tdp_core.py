@@ -222,6 +222,15 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (18, 22, 30))
         self.assertEqual(self.applies(), [])
 
+    def test_bounce_takes_the_lowest_profile_the_firmware_offers(self):
+        for choices, bounce in (('performance balanced custom', 'balanced'), ('quiet custom', 'quiet')):
+            with self.subTest(choices=choices):
+                self.choices.write_text(choices)
+                self.profile.write_text('performance')
+                self.profile_writes.clear()
+                self.assertTrue(tdp._apply_limits(18000, 22000, 30000)['success'])
+                self.assertEqual(self.profile_writes, [bounce, 'custom'])
+
     def test_firmware_apply_in_custom_writes_in_place_when_it_latches(self):
         self.profile.write_text('custom')
         self.assertTrue(tdp._apply_limits(18000, 22000, 30000)['success'])
@@ -322,6 +331,42 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.ppts(), (5, 5, 5))
         self.assertTrue(tdp._apply_limits(20000, 10000, 15000)['success'])
         self.assertEqual(self.ppts(), (20, 20, 20))
+        self.assertTrue(tdp._apply_limits(20000, 30000, 25000)['success'])
+        self.assertEqual(self.ppts(), (20, 25, 25))  # the slow boost never passes the fast one
+
+    def test_clamp_keeps_the_order_above_each_firmware_floor(self):
+        self.firmware_range((35, 37, 45), mins=(5, 12, 8))
+        self.assertTrue(tdp._apply_limits(5000, 5000, 5000)['success'])
+        self.assertEqual(self.ppts(), (5, 12, 12))
+
+    def test_unreadable_saved_limits_load_as_the_defaults(self):
+        self.seed(spl='abc', sppt=20000, fppt=25000, enabled='yes', extras_unlocked='true',
+                  active_spl=45000, active_sppt=48000, active_fppt=50000)  # 2.2.0 saved SPL above 35 W
+        state = tdp._load_settings()
+        self.assertEqual((state['spl'], state['sppt'], state['fppt']), (16000, 25000, 30000))
+        self.assertEqual((state['enabled'], state['extras_unlocked']), (True, False))  # never unlocked by a typo
+        self.assertEqual((state['active_spl'], state['active_sppt'], state['active_fppt']),
+                         (35000, 48000, 50000))
+
+    def test_a_misread_firmware_ceiling_is_not_a_range(self):
+        spl_min = self.firmware / tdp.WMI_ATTRS['spl'] / 'min_value'
+        spl_max = self.firmware / tdp.WMI_ATTRS['spl'] / 'max_value'
+        for low, high, sane in (('5', '100', True), ('5', '5', True), ('30', '30', True),
+                                ('5', '101', False), ('0', '4', False), ('31', '30', False)):
+            with self.subTest(min=low, max=high):
+                spl_min.write_text(low)
+                spl_max.write_text(high)
+                self.assertEqual(bool(tdp._wmi_caps()), sane)
+        spl_min.write_text('5')
+        spl_max.write_text('101')
+        tdp._apply_limits(60000, 60000, 60000)
+        self.assertEqual(self.ppts(), (10, 10, 10))  # never 60 W through a 101 W "ceiling"
+
+    def test_presets_stay_inside_a_lower_firmware_ceiling(self):
+        self.firmware_range((18, 30, 32))
+        presets = self.rpc('get_caps')['presets']
+        self.assertEqual(presets['performance'], {'spl': 18, 'sppt': 30, 'fppt': 32})
+        self.assertEqual(presets['max'], {'spl': 18, 'sppt': 30, 'fppt': 32})
 
     def test_extras_select_the_firmware_custom_mode_before_ryzenadj(self):
         self.helper_ready()
@@ -553,6 +598,31 @@ class TdpCoreTests(unittest.TestCase):
         self.assertFalse(result['success'])
         self.assertIn('unsafe RyzenAdj directory', result['stderr'])
         self.assertEqual(list(elsewhere.iterdir()), [])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX permissions')
+    def test_a_helper_others_can_change_is_never_run(self):
+        self.helper_ready()
+        for path in (self.bin, self.bin.parent):
+            with self.subTest(path=path.name):
+                mode = path.stat().st_mode & 0o777
+                path.chmod(mode | 0o022)
+                self.assertFalse(tdp._apply_limits(30000, 45000, 50000, extras=True)['success'])
+                path.chmod(mode)
+        self.assertEqual(self.applies(), [])
+        self.assertTrue(tdp._apply_limits(30000, 45000, 50000, extras=True)['success'])
+
+    def test_a_download_cancelled_after_verification_installs_nothing(self):
+        self.bin.unlink()
+        self.publish_helper()
+        finished, download = [], tdp.updater.download_to.side_effect
+
+        def download_then_cancel(*args, **options):
+            download(*args, **options)
+            finished.append(True)  # Extras turned off while the archive was checked
+        tdp.updater.download_to.side_effect = download_then_cancel
+        with self.assertRaises(InterruptedError):
+            tdp._download_ryzenadj(cancel=lambda: bool(finished))
+        self.assertEqual(list(self.bin.parent.iterdir()), [])
 
     # Startup and capabilities ----------------------------------------------
 
@@ -804,6 +874,29 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(self.rpc('apply_tdp', 40000, 43000, 53000, preset_name='custom')['success'])
         self.assertEqual(self.ppts(), (40, 43, 53))
 
+    def test_single_dial_custom_on_a_presets_spl_still_derives_its_boosts(self):
+        self.seed(advanced_tdp_control=False)
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['success'])
+        self.assertEqual(self.ppts(), (16, 26, 31))  # Balanced's values, chosen on the Custom dial
+        self.set_ppts(10, 10, 10)
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000)['success'])  # no name: the saved Custom
+        self.assertEqual(self.ppts(), (16, 26, 31))
+        self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000, 'preset': 'custom'}},
+                  advanced_tdp_control=False)
+        self.app = '123'
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, '123')['success'])
+        self.assertEqual(self.ppts(), (16, 26, 31))
+
+    def test_a_games_battery_sliders_run_on_battery_and_its_charger_values_on_the_charger(self):
+        self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000, 'ac_separate': True,
+                           'ac_spl': 30000, 'ac_sppt': 35000, 'ac_fppt': 40000}})
+        self.app = '123'
+        self.assertTrue(self.rpc('apply_tdp', 14000, 18000, 22000, '123')['success'])
+        self.assertEqual(self.ppts(), (14, 18, 22))
+        self.ac = True
+        self.assertTrue(self.rpc('apply_tdp', 14000, 18000, 22000, '123')['success'])
+        self.assertEqual(self.ppts(), (30, 35, 40))
+
     def test_presets_and_limits_stay_inside_the_firmware_minimums(self):
         self.firmware_range((35, 37, 45), mins=(10, 16, 18))
         presets = self.rpc('get_caps')['presets']
@@ -874,6 +967,30 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual((game['ac_spl'], game['ac_sppt'], game['ac_fppt'], game['ac_preset']),
                          (30000, 37000, 45000, 'custom'))
         self.assertEqual(self.ppts(), (35, 37, 45))
+
+    def test_locking_extras_during_a_game_runs_the_games_clamped_limits(self):
+        self.helper_ready()
+        self.seed({'123': {'spl': 25000, 'sppt': 45000, 'fppt': 50000}},
+                  extras_unlocked=True, spl=15000, sppt=20000, fppt=25000)
+        self.app = '123'
+        self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
+        self.assertEqual(self.ppts(), (25, 37, 45))
+
+    def test_a_games_charger_profile_is_saved_on_battery_and_runs_only_on_the_charger(self):
+        self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000}})
+        self.app = '123'
+        tdp._check_and_enforce()
+        for args in (('123', '30000', 35000, 40000, True), ('123', 30000, 35000, 40000, 'yes'),
+                     ('123', 30000, 35000, 40000, True, '', 'no'), ('not an app', 30000, 35000, 40000, True)):
+            with self.subTest(args=args):
+                self.assertFalse(self.rpc('set_game_ac_profile', *args)['success'])
+        self.assertTrue(self.rpc('set_game_ac_profile', '123', 30000, 35000, 40000, True)['success'])
+        game = self.saved('game_profiles')['123']
+        self.assertEqual((game['ac_spl'], game['ac_sppt'], game['ac_fppt']), (30000, 35000, 40000))
+        self.assertEqual(self.ppts(), (12, 15, 20))  # on battery: the battery values keep running
+        self.ac = True
+        self.assertTrue(self.rpc('set_game_ac_profile', '123', 28000, 33000, 38000, True)['success'])
+        self.assertEqual(self.ppts(), (28, 33, 38))
 
     # Rollback when a change cannot be saved --------------------------------
 
@@ -1042,6 +1159,21 @@ class TdpCoreTests(unittest.TestCase):
         self.choose('balanced', '123')
         self.assertEqual(self.ppts(), (16, 16, 30))
         self.assertEqual(self.saved('game_profiles')['123']['sppt'], 25000)
+
+    def test_a_charger_custom_never_hides_the_battery_preset_of_a_game(self):
+        self.seed({'123': {'spl': 16000, 'sppt': 25000, 'fppt': 30000, 'preset': 'balanced',
+                           'ac_separate': True, 'ac_spl': 12000, 'ac_sppt': 18000, 'ac_fppt': 22000,
+                           'ac_preset': 'custom'}},
+                  separate_battery_presets=True)
+        self.app = '123'
+        tdp._check_and_enforce()
+        self.assertEqual(self.ppts(), (16, 16, 30))
+
+    def test_battery_values_follow_the_values_when_the_saved_preset_name_is_stale(self):
+        self.seed(active_preset='balanced', spl=20000, sppt=32000, fppt=35000,
+                  separate_battery_presets=True)
+        self.assertTrue(self.rpc('reapply')['success'])
+        self.assertEqual(self.ppts(), (20, 20, 35))  # Performance's values: its battery values
 
     def test_battery_presets_stay_inside_the_firmware_range(self):
         self.firmware_range((35, 37, 45), mins=(10, 12, 18))
@@ -1283,6 +1415,19 @@ class TdpCoreTests(unittest.TestCase):
                 self.assertEqual(self.profile.read_text(), 'custom')
                 shutil.rmtree(self.firmware, ignore_errors=True)
         self.assertEqual(self.ryzenadj, [])
+
+    def test_release_without_a_platform_profile_hands_back_through_ryzenadj_only_on_a_go_2(self):
+        shutil.rmtree(self.root / 'platform-profile')
+        self.helper_ready()
+        for machine, success, runs in (('83E1', True, []), ('83N0', True, [['--max-performance']])):
+            with self.subTest(machine=machine):
+                self.machine = machine
+                with tdp._mutation_lock:
+                    self.assertEqual(tdp._restore_defaults_locked()['success'], success)
+                self.assertEqual(self.applies(), runs)
+        self.info_failure = b'Unable to init ryzenadj\n'
+        with tdp._mutation_lock:
+            self.assertFalse(tdp._restore_defaults_locked()['success'])
 
     def test_release_restores_managed_cpu_controls(self):
         boost, epp = self.cpu_controls()
