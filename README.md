@@ -78,12 +78,17 @@ left out on purpose.
 
 ¹ When SteamOS offers what the feature needs: the firmware's power limits for TDP, the Long
 Life charge mode for Battery, the MT7922 (`mt7921e`) Wi-Fi driver for the band policy.
+
 ² With the 2025 controller firmware. The Legion Go's controllers on older firmware have no Linux
 driver for these, so Companion hides them; update the controllers in Legion Space to unlock them.
+
 ³ ✅ on the Legion Go 2 (83N0); ⚠️ on the Legion Go 2 Z2 (83N1), where it has not been tested yet (Fan Control
 runs its fan self-test first, see below).
+
 ⁴ Beta: not tested on this console yet.
+
 ⁵ The 50 W boosts go above the firmware's own limits and have not been tested on this console.
+
 ⁶ When SteamOS has the Legion Go S controller driver (`hid-lenovo-go-s`); without it Companion hides
 the module.
 
