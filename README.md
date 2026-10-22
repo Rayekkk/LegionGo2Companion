@@ -62,7 +62,7 @@ left out on purpose.
 | Allow up to 50 W | ✅ | ✅ ¹ | ➖ |
 | Separate battery presets | ✅ | ✅ ¹ | ✅ ¹ |
 | Fan Control | ✅ ³ | ❌ | ❌ |
-| Vibration | ✅ | ✅ ² | ➖ |
+| Vibration | ✅ | ✅ ² | ❌ |
 | Lighting (stick lights) | ✅ | ✅ ² | ✅ |
 | Power-button light | ✅ | ✅ ⁴ | ✅ ⁴ |
 | Button mapping | ✅ | ➖ | ➖ |
@@ -84,10 +84,11 @@ driver for these, so Companion hides them; update the controllers in Legion Spac
 ⁴ Beta: not tested on this console yet.
 
 Not supported yet on the Legion Go and Legion Go S: Fan Control, which needs EC data that has only
-been verified on the Legion Go 2, and controller firmware updates. Not needed there: Display's modes
+been verified on the Legion Go 2, and controller firmware updates; on the Legion Go S also vibration
+strength, which its Linux controller driver does not offer yet. Not needed there: Display's modes
 are for the Legion Go 2 OLED panel (the other consoles use SteamOS's own display profiles); SteamOS
-handles the Legion Go's back buttons and the Legion Go S gyro natively; the Legion Go S has no
-vibration to set, needs no button mapping, and its firmware already allows more than 50 W. The
+handles the Legion Go's back buttons and the Legion Go S gyro natively; the Legion Go S needs no
+button mapping, and its firmware already allows more than 50 W. The
 power-button light uses the same firmware field as on the Legion Go 2, at the place each console's
 own BIOS describes, and stays hidden when the BIOS does not describe it exactly so.
 
