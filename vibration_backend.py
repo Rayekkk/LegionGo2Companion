@@ -76,9 +76,9 @@ SETTINGS_KEY_GAME_PROFILES = "game_profiles"
 # Driver values found before the first write: {"pending": True} until captured,
 # {} when unknown (an existing install), else {attribute: value}.
 SETTINGS_KEY_BASELINE      = "baseline"
-# Legion Go S: True once its owner has changed a vibration setting here. Until then Companion
-# sends the controller nothing, so what Legion Space set is not overwritten.
-SETTINGS_KEY_GO_S_CONFIGURED = "go_s_configured"
+# Legion Go S: which of strength and touchpad vibration its owner has changed here. Only those are
+# ever sent, so what Legion Space set for the others is not overwritten.
+SETTINGS_KEY_GO_S_SET = "go_s_set"
 _PROFILE_ATTRS = ('rumble_intensity', 'left_handle/rumble_mode', 'right_handle/rumble_mode',
                   'touchpad/vibration_intensity', 'touchpad/vibration_enabled')
 
@@ -139,6 +139,7 @@ _GO_S_FRAME_SIZE = 64
 # strength (sub 0x01, 0-3) or touchpad vibration (sub 0x03, 0-1); the rest is zero.
 # Any other command can switch the controller mode, remap buttons or reach the bootloader.
 _GO_S_FRAMES = {"strength": (0x01, (0, 1, 2, 3)), "touchpad": (0x03, (0, 1))}
+_GO_S_SETTINGS = (PKEY_LEVEL, PKEY_TP_EN)  # in frame order
 # The driver's probe and its setup commands lock the MCU if anything else writes then.
 _GO_S_SETTLE_S = 2.0
 _GO_S_GAP_S = 0.02
@@ -353,11 +354,13 @@ _offload = functools.partial(module_runtime.offload, 'vibration', _settings_lock
 
 
 def _apply_settings(values: dict, sys_path: str | None = None,
-                    force: bool = False) -> bool:
-    """Write a full profile to the hardware. Every attribute is attempted."""
+                    force: bool = False, new: tuple = ()) -> bool:
+    """Write a full profile to the hardware. Every attribute is attempted.
+
+    new: on the Go S, settings the owner is changing now, sent besides those changed before."""
     global _last_applied_values
     if _is_go_s():
-        return _apply_go_s(values)
+        return _apply_go_s(values, new)
     # Explicit withdrawal/uninstall can reach this with driver defaults rather
     # than a loaded profile. They must also preserve unrecoverable user state.
     with _settings_lock:
@@ -469,29 +472,39 @@ def _hhd_running() -> bool:
     return False
 
 
-def _go_s_configured() -> bool:
-    """False only on a Go S whose owner has not changed a setting here yet."""
+def _go_s_set() -> list[str]:
+    """The Go S settings its owner has changed here; on other consoles every setting is sent."""
     if not _is_go_s():
-        return True
+        return list(_GO_S_SETTINGS)
     with _settings_lock:
         _read_valid_settings()
-        return settings.getSetting(SETTINGS_KEY_GO_S_CONFIGURED, False) is True
+        stored = settings.getSetting(SETTINGS_KEY_GO_S_SET, [])
+    return [key for key in _GO_S_SETTINGS if isinstance(stored, list) and key in stored]
 
 
-def _go_s_configure(payload: dict | None = None) -> None:
-    """The owner changed a setting: from now on the Go S is sent it, and again on start, hotplug and wake."""
+def _go_s_configured() -> bool:
+    """False only on a Go S whose owner has not changed a setting here yet."""
+    return bool(_go_s_set())
+
+
+def _go_s_remember(fields, payload: dict | None = None) -> None:
+    """The owner changed these settings: from now on the Go S is sent them, also on start, hotplug and wake."""
+    if not _is_go_s():
+        return
     with _settings_lock:
-        if not _go_s_configured():
-            settings.setSetting(SETTINGS_KEY_GO_S_CONFIGURED, True)
+        stored = _go_s_set()
+        if not set(fields) <= set(stored):
+            settings.setSetting(SETTINGS_KEY_GO_S_SET, [key for key in _GO_S_SETTINGS if key in stored or key in fields])
             settings.commit()
     if payload is not None:
         payload["configured"] = True
 
 
-def _apply_go_s(values: dict) -> bool:
-    """Send strength and touchpad vibration. Success is the write; the controller cannot be read back."""
+def _apply_go_s(values: dict, new: tuple = ()) -> bool:
+    """Send the settings the owner has changed (and `new`). Success is the write; the controller cannot be read back."""
     global _last_applied_values, _go_s_seen
-    if not _go_s_configured():  # before _apply_lock: lock order is settings, then apply
+    fields = [key for key in _GO_S_SETTINGS if key in new or key in _go_s_set()]  # lock order: settings, then apply
+    if not fields:
         _last_applied_values = None
         return True  # nothing to send yet, and nothing wrong
     with _apply_lock:
@@ -513,8 +526,8 @@ def _apply_go_s(values: dict) -> bool:
             return False
         node = _go_s_hidraw(hid)
         try:
-            frames = [_go_s_frame("strength", values[PKEY_LEVEL]),
-                      _go_s_frame("touchpad", 1 if values[PKEY_TP_EN] else 0)]
+            frames = [_go_s_frame("strength", values[PKEY_LEVEL]) if key == PKEY_LEVEL
+                      else _go_s_frame("touchpad", 1 if values[PKEY_TP_EN] else 0) for key in fields]
             if node is None:
                 raise OSError("The Go S controller has no hidraw node.")
             # O_NONBLOCK does not cover a hidraw output report: a hung MCU can hold each write for
@@ -1077,11 +1090,12 @@ class Plugin:
                     or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
                 return {"success": False, "error": "Active profile changed; reload and try again", **payload}
             values = _update_active(field, value, profiles=profiles, profile_id=payload["profile_id"])
-            _go_s_configure(payload)
-            if _apply_settings(values):
+            if _apply_settings(values, new=(field,)):
+                _go_s_remember((field,), payload)
                 return {"success": True, **payload, "settings": values}
             if _get_device_path() is None:
                 # No controller yet: keep the choice; hotplug applies it, as before.
+                _go_s_remember((field,), payload)
                 return {"success": False, **payload, "settings": values, "error": NOT_CONNECTED}
             # Rejected: save and re-write the previous value so both UIs show what the controller has.
             values = _update_active(field, payload["settings"][field], profile_id=payload["profile_id"])
@@ -1096,11 +1110,15 @@ class Plugin:
 
     async def set_rumble_mode(self, mode_idx: int, expected_app_id=None, expected_profile_id=None) -> dict:
         """Set the vibration pattern; the firmware plays its own demo, so none is added here."""
+        if _is_go_s():
+            return {"success": False, "error": "Vibration modes are not available on this console."}
         if type(mode_idx) is not int:
             return {"success": False, "error": "mode must be an integer"}
         return await self._set_field(PKEY_MODE, max(0, min(63, mode_idx)), expected_app_id, expected_profile_id)
 
     async def set_touchpad_intensity(self, level: int, expected_app_id=None, expected_profile_id=None) -> dict:
+        if _is_go_s():
+            return {"success": False, "error": "Touchpad vibration strength is not available on this console."}
         if type(level) is not int:
             return {"success": False, "error": "level must be an integer"}
         return await self._set_field(PKEY_TP_INT, max(0, min(3, int(level))), expected_app_id, expected_profile_id)
@@ -1121,10 +1139,12 @@ class Plugin:
                                                  "settings": {}})
             entry["settings"] = dict(DEFAULT_PROFILE)
             _save_profiles(profiles)
-            _go_s_configure(payload)
-            ok = _apply_settings(entry["settings"], force=True)
+            ok = _apply_settings(entry["settings"], force=True, new=_GO_S_SETTINGS)
+            offline = not ok and _get_device_path() is None
+            if ok or offline:
+                _go_s_remember(_GO_S_SETTINGS, payload)
             result = {"success": ok, **payload, "settings": entry["settings"]}
-            if not ok and _get_device_path() is None:
+            if offline:
                 result["error"] = NOT_CONNECTED
             return result
         return await _offload(_do)
@@ -1179,12 +1199,11 @@ class Plugin:
             if name:
                 entry["name"] = name
             _save_profiles(profiles)
-            _go_s_configure()
             running = context["app_id"]
             profile_id = _resolve_app_id(profiles, running)
             values = _active_values(profiles, running)
             ok = _apply_settings(values)
-            return {"success": ok, "settings": values, "app_id": running, "configured": True,
+            return {"success": ok, "settings": values, "app_id": running, "configured": context["configured"],
                     "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
         return await _offload(_do)
 

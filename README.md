@@ -377,8 +377,8 @@ Set **Vibration strength** for both handles (Off, Low, Medium, High) and a **Vib
 pattern (for example FPS, Racing, Standard, SPG or RPG). **Touchpad vibration** and
 **Touchpad strength** are separate. **Test vibration** plays a short buzz. On the Legion Go S
 (beta) only **Vibration strength** and **Touchpad vibration** are offered; the controller cannot
-report them, so the page shows what Companion set. Companion sends nothing to that controller until
-you change a setting here, so the values from Legion Space stay until then.
+report them, so the page shows what Companion set. Companion sends that controller only the settings
+you change here, so the values from Legion Space stay for the others.
 
 <a href="docs/screenshots/vibration.png"><img src="docs/screenshots/vibration.png" alt="Vibration mode and touchpad feedback controls" width="360"></a>
 

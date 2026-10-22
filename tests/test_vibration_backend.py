@@ -830,19 +830,19 @@ class GoSDevice(FakeDevice):
         self.addCleanup(module_runtime.begin_start, 'vibration')
 
     def configure(self):
-        """As if the owner had already changed a setting here."""
-        self.store.setSetting('go_s_configured', True)
+        """As if the owner had already changed both settings here."""
+        self.store.setSetting('go_s_set', ['level', 'touchpadEnabled'])
         self.store.commit()
 
 
 class GoSApplyTests(GoSDevice):
-    async def test_settings_are_sent_as_two_frames_once_the_interface_has_settled(self):
+    async def test_settings_are_sent_as_frames_once_the_interface_has_settled(self):
         self.assertTrue((await self.plugin.set_intensity(3))['success'])
         self.assertEqual(self.sleeps, [vibe._GO_S_SETTLE_S])
-        self.assertEqual(self.sent, go_s_frames(3, 1))
+        self.assertEqual(self.sent, go_s_frames(3, 1)[:1], 'only the setting the owner changed')
         self.assertTrue((await self.plugin.set_touchpad_enabled(False))['success'])
         self.assertEqual(self.sleeps, [vibe._GO_S_SETTLE_S], 'the window is waited once per interface')
-        self.assertEqual(self.sent[-2:], go_s_frames(3, 0))
+        self.assertEqual(self.sent[1:], go_s_frames(3, 0), 'now both: each was changed here')
         self.assertEqual((self.writes, self.hardware()), ([], DRIVER), 'no hid-lenovo-go attribute is touched')
 
     async def test_no_interface_or_hhd_sends_nothing_and_the_choice_is_kept(self):
@@ -850,6 +850,7 @@ class GoSApplyTests(GoSDevice):
         result = await self.plugin.set_intensity(1)
         self.assertEqual((result['success'], result['error']), (False, vibe.NOT_CONNECTED))
         self.assertEqual(self.persisted()['0']['settings']['level'], 1)
+        self.assertEqual(self.store.getSetting('go_s_set'), ['level'], 'sent once the controller connects')
         self.present, self.hhd = GO_S_HID, True
         self.assertFalse(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
         self.assertEqual(self.sent, [])
@@ -983,42 +984,58 @@ class GoSUnconfiguredTests(GoSDevice):
             with self.assertRaises(asyncio.CancelledError):
                 await plugin._drift_loop()
         self.assertNothingSent()
-        self.assertIsNone(self.store.getSetting('go_s_configured'))
+        self.assertIsNone(self.store.getSetting('go_s_set'))
         self.assertIs((await plugin.get_settings())['configured'], False)
 
-    async def test_the_first_change_sends_and_is_remembered(self):
+    async def test_the_first_change_sends_only_that_setting_and_is_remembered(self):
         result = await self.plugin.set_intensity(1)
         self.assertEqual((result['success'], result['configured']), (True, True))
-        self.assertEqual(self.sent, go_s_frames(1, 1))
-        self.assertIs(self.store.getSetting('go_s_configured'), True)
+        self.assertEqual(self.sent, go_s_frames(1, 1)[:1], "Legion Space's touchpad vibration stays")
+        self.assertEqual(self.store.getSetting('go_s_set'), ['level'])
         self.assertIs((await self.plugin.get_settings())['configured'], True)
+        self.sent.clear()
+        self.assertTrue((await self.plugin.set_touchpad_enabled(False))['success'])
+        self.assertEqual(self.sent, go_s_frames(1, 0))
+        self.assertEqual(self.store.getSetting('go_s_set'), ['level', 'touchpadEnabled'])
 
-    async def test_every_kind_of_user_change_counts(self):
-        for change in (lambda p: p.set_touchpad_enabled(False), lambda p: p.reset_to_default(),
-                       lambda p: p.set_profile_overwrite('111', True, 'Game')):
-            with self.subTest(change=change):
-                self.store.setSetting('go_s_configured', None)
-                self.sent.clear()
-                result = await change(self.plugin)
-                self.assertEqual((result['success'], result['configured'], len(self.sent)), (True, True, 2))
-                self.assertIs(self.store.getSetting('go_s_configured'), True)
+    async def test_touchpad_vibration_alone_and_a_reset_send_what_they_change(self):
+        self.assertTrue((await self.plugin.set_touchpad_enabled(False))['success'])
+        self.assertEqual(self.sent, go_s_frames(2, 0)[1:], "Legion Space's strength stays")
+        self.assertEqual(self.store.getSetting('go_s_set'), ['touchpadEnabled'])
+        self.sent.clear()
+        result = await self.plugin.reset_to_default()
+        self.assertEqual((result['success'], result['configured'], self.sent), (True, True, go_s_frames(2, 1)))
+        self.assertEqual(self.store.getSetting('go_s_set'), ['level', 'touchpadEnabled'])
 
-    async def test_a_rejected_change_does_not_count(self):
-        result = await self.plugin.set_intensity(True)
-        self.assertFalse(result['success'])
-        self.assertIsNone(self.store.getSetting('go_s_configured'))
+    async def test_a_game_profile_alone_changes_nothing_on_the_controller(self):
+        result = await self.plugin.set_profile_overwrite('111', True, 'Game')
+        self.assertEqual((result['success'], result['configured']), (True, False))
+        self.assertIsNone(self.store.getSetting('go_s_set'))
         self.assertNothingSent()
 
-    async def test_after_a_restart_with_the_flag_the_choice_is_sent_again(self):
+    async def test_a_rejected_or_unsent_change_does_not_count(self):
+        self.assertFalse((await self.plugin.set_intensity(True))['success'])
+        for result in (await self.plugin.set_rumble_mode(1), await self.plugin.set_touchpad_intensity(1)):
+            self.assertEqual((result['success'], result['error'].endswith('not available on this console.')),
+                             (False, True))
+        self.assertIsNone(self.persisted(), 'nothing is stored either')
+        self.assertIsNone(self.store.getSetting('go_s_set'))
+        self.assertNothingSent()
+        self.hhd = True  # the interface is there but the frame is not sent
+        self.assertFalse((await self.plugin.set_intensity(1))['success'])
+        self.assertIsNone(self.store.getSetting('go_s_set'))
+        self.assertEqual(self.sent, [])
+
+    async def test_after_a_restart_only_the_settings_changed_here_are_sent_again(self):
         await self.plugin.set_intensity(3)
         self.sent.clear()
         vibe._go_s_seen = None  # a new module start: the interface window is waited out again
         self.assertTrue(await asyncio.to_thread(vibe._apply_settings, vibe._active_values(), None, True))
-        self.assertEqual(self.sent, go_s_frames(3, 1))
+        self.assertEqual(self.sent, go_s_frames(3, 1)[:1])
         with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
             await vibe._handle_device_added(GO_S_HID, 'bind')
         await self.plugin.reapply()
-        self.assertEqual(len(self.sent), 6)
+        self.assertEqual(self.sent, go_s_frames(3, 1)[:1] * 3)
 
 
 class GoSRegressionTests(FakeDevice):
@@ -1031,7 +1048,7 @@ class GoSRegressionTests(FakeDevice):
             self.assertTrue((await self.plugin.set_intensity(0))['success'])
             self.assertEqual(self.intensity(), 'off')
             self.assertIs((await self.plugin.get_settings())['configured'], True, 'only a Go S ever holds settings back')
-            self.assertIsNone(self.store.getSetting('go_s_configured'))
+            self.assertIsNone(self.store.getSetting('go_s_set'))
             await self.plugin._uninstall()
         self.assertEqual(self.intensity(), 'high', 'uninstall restored the driver value it found')
         found.assert_not_called()
