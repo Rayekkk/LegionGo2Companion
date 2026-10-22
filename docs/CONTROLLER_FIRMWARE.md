@@ -48,6 +48,9 @@ follows it:
 (installed, available, newer, downloaded), `install_enabled`, `install_reason`
 and the confirmation `token`.
 
+Both UIs show the same red risk notice (`RISK_NOTICE` in `desktop/native/firmware.mjs`) above the
+buttons until a real update to a newer version has been verified; then delete it.
+
 1. **Check** (read-only). Installed versions come from the `hid-lenovo-go`
    sysfs attributes: root `firmware_version` (receiver), `left_handle/` and
    `right_handle/`. Gates: DMI LENOVO / 83N0 / Legion Go 8ASP2 or 83N1 / Legion Go 8AHP2, exactly one

@@ -19,6 +19,7 @@ Companion now runs, as an early beta, on the first Legion Go and the Legion Go S
 
 - **Updates keep your settings:** the gyro source, battery protection, lighting control and Wi-Fi band policy survive an update (the band policy is applied once Wi-Fi has reconnected). **Display** reinstalls the script for the panel mode you set up and asks for a Gaming Mode restart only when the running Gaming Mode does not already use that exact script (always after updating from 2.1.0 or 2.2.x). After updating from 2.1.0, whose script sat in /root where Gaming Mode never read it, Display installs it in the right place itself and removes the old copy; no Setup is needed.
 - **TDP presets** now come from each console's BIOS table, so every console in the family gets its own firmware limits.
+- **Controller firmware:** the updater, in the panel and the Desktop app, now shows a red **Risk notice** above its buttons: it is the only Companion feature that could damage the hardware, and it has been tested only by reinstalling the firmware already installed, not by updating to a newer version. The notice goes away once the next real controller update has been verified.
 
 ### Fixed
 
