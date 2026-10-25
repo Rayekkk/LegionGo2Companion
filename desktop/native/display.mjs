@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Display rules and texts, shared by the Desktop app and the Decky panel (src/display.tsx imports this file).
+// Display texts, shared by the Desktop app and the Decky panel (src/display.tsx imports this file).
 
-export const RESET_RETRY = "Retry display reset";
+export const EDID_FIX_LABEL = "Fix HDR brightness in games";
+export const EDID_FIX_NOTE = "Games see the screen's real HDR brightness. Restart the game after changing.";
 
-/** Why every display control is paused, as [title, detail], or null. Only the reset stays available. */
-export function displayPaused(state) {
-  if (state?.settings_error) return ["Display controls are paused", state.settings_error];
-  if (state?.reset_in_progress) return ["Display controls are paused",
-    state.reset_error || "An earlier reset did not finish. Retry to restore the display and remove the Companion script."];
-  return null;
+/** SteamOS older than 3.9 has no native profile for this screen; the HDR fix works either way. */
+export const steamosNotice = state => state?.steamos_update_needed
+  ? "Update SteamOS to 3.9 or newer, which supports this screen natively. The HDR brightness fix below still works." : "";
+
+/** What the HDR brightness fix is doing now. */
+export function edidStatus(state) {
+  if (!state?.edid_fix) return "Off";
+  if (!state.edid_patched) return "Not active yet";
+  return Number(state.edid_game_nits) > 0 ? `On · games see ${Number(state.edid_game_nits).toFixed(0)} nits` : "On";
 }
-
-/** The HDR brightness slider needs the installed fix, a panel it can drive and no pending restart. */
-export const brightnessShown = state => !!state?.setup_done && !!state.panel_ok && !state.restart_pending;
-
-/** First-run mode choices wait for the Gaming Mode restart that finishes a reset. */
-export const firstRunLocked = state => !state?.panel_mode && !!state?.reset_restart_pending;

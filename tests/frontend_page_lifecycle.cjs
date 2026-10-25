@@ -39,8 +39,8 @@ run(async () => {
     h.unmount();
   }
   for (const spec of [
-    { file: 'display.tsx', component: 'DisplayPage', read: 'display_get_state', initial: display, next: { ...display, enabled: false },
-      label: 'Brightness slider in HDR', method: 'display_set_enabled', value: false },
+    { file: 'display.tsx', component: 'DisplayPage', read: 'display_get_state', initial: display, next: { ...display, edid_fix: false },
+      label: 'Fix HDR brightness in games', method: 'display_set_edid_fix', value: false },
     { file: 'rgb.tsx', component: 'RgbPage', read: 'rgb_get_status', initial: rgb, next: { ...rgb, settings: { ...rgb.settings, control_enabled: false } },
       label: 'Enable lighting control', method: 'rgb_set_control_enabled', value: false },
     { file: 'remap.tsx', component: 'RemapPage', read: 'remap_get_status', initial: remap, next: { ...remap, desktop_action: 'f3' },

@@ -41,8 +41,6 @@ RowLayout {
     property string applyingModule:""
     property real tick:backend.now()
     property bool controllerDetails:false
-    property bool displaySwitch:false
-    property bool displayDetails:false
     property var wifiCheck:null
     onTdpScopeChanged: { powerNotice=""; backend.cpuApp=powerTarget(); backend.cpuAc=tdpScope==="ac"; }
     // Several cards share two equal columns on a wide page: in Decky order each card goes to the
@@ -303,9 +301,8 @@ RowLayout {
         if(entry.kind==="text" || entry.kind==="paragraph")return true;
         // Restore original lighting stays available: the backend finishes the recovery first or refuses.
         if(owner==="rgb" && s("rgb_get_status").recovery_required && !entry.restore)return false;
-        // As in Decky: a display settings error or an unfinished reset pauses everything but the reset.
-        // A reset cannot read unreadable settings either, so only an unfinished reset keeps it available.
-        if(owner==="display" && Display.displayPaused(display()) && (!entry.restore || !!display().settings_error))return false;
+        // As in Decky: unreadable display settings pause the switch.
+        if(owner==="display" && !!display().settings_error)return false;
         const gate=s("get_version");
         return !!gate && typeof gate==="object" && !Array.isArray(gate) && gate.blocked===false &&
             backend.age("get_version")<8 && backend.connected && !backend.busy &&
@@ -316,34 +313,6 @@ RowLayout {
     function testRunning() { return !!backend.diagnosticToken; }
     function testSample(stream) { return s("controller_get_diagnostics")[stream]?.sample || {}; }
     function streamText(name) { return Gyro.streamText(s("controller_get_diagnostics")[name]); }
-    readonly property var displayModes:({hybrid:"Hybrid",pq:"PQ",gamma22:"Gamma 2.2"})
-    // Same one upside and one downside per mode as the Decky panel.
-    readonly property var displayTradeoffs:({
-        hybrid:"+ Gamma 2.2 for everyday use and PQ only while a game is presenting HDR, so neither one is given up.\n− Each switch between HDR and SDR briefly blanks the screen.",
-        pq:"+ HDR reaches the panel's full 1100 nit peak, at the absolute levels the content was mastered for.\n− The panel ignores its brightness control, so dimming only fades the image and shadows wash out to grey.",
-        gamma22:"+ The system brightness slider drives the panel directly, so black stays black at any level.\n− HDR is tone mapped against the panel's ~471 nit ceiling, so bright highlights lose their punch."})
-    function displayModeNow() {
-        const state=s("display_get_state"),mode=state.panel_mode;
-        return mode==="hybrid"?"Now: Hybrid"+(state.gamescope_reachable?" (screen in "+(state.hdr_now?"PQ":"Gamma 2.2")+")":""):"Now: "+(displayModes[mode] || pretty(mode));
-    }
-    function displayPausedText() { const paused=Display.displayPaused(display());return paused?paused[0]+". "+paused[1]:""; }
-    function resetDisplay() {
-        // Finishing an interrupted reset needs no second question, as in Decky.
-        if(display().reset_in_progress)change("display_reset_settings");
-        else confirm("display_reset_settings",[],"Companion removes its display changes and restores your previous display script, if there was one. Gaming Mode may need a restart.","Reset display fix?","Reset",true);
-    }
-    function displayRestartPending() { return !!display().restart_pending || !!display().reset_restart_pending; }
-    // First run: every mode with its trade-off, Hybrid recommended; later: only the other two.
-    function displayModeChoices() {
-        const current=display().panel_mode;
-        return ["hybrid","pq","gamma22"].filter(id=>id!==current).map(id=>({id:id,detail:displayTradeoffs[id],
-            label:current?"Use "+displayModes[id]:id==="hybrid"?"Hybrid (recommended)":displayModes[id]}));
-    }
-    function confirmDisplaySetup(mode) {
-        confirm("display_run_setup",[mode],"If you already have a display script for this screen, it's kept as a .backup file. Gaming Mode needs a restart afterwards.","Install display fix for "+(displayModes[mode] || pretty(mode))+"?","Install");
-    }
-    function pickDisplayMode(mode) { displaySwitch=false; if(!display().panel_mode)confirmDisplaySetup(mode);else change("display_set_panel_mode",[mode]); }
-    function restartGamingMode() { confirm("display_restart_session",[],"Steam and any running game will close and reopen. Save your game first.","Restart Gaming Mode?","Restart"); }
     function wifi() { return s("wifi_get_status"); }
     // Like Decky: check the action against the status shown, then verify it in the next status read.
     function wifiRun(action,method,args) {
@@ -497,43 +466,13 @@ RowLayout {
                 action(Battery.RESET_LABEL,"battery_reset_charging_mode",null,{note:Battery.RESET_NOTE,visible:()=>Battery.resetShown(battery())}),
                 action("Restore previous charging mode","battery_release_control",null,{bar:true,visible:()=>!!battery().managed || !!battery().recovery_pending})
             ]}],
-            display:[
-                {title:"Display",column:0,visible:()=>nativeDisplay(),fields:[
-                    notice("",displayPausedText),
-                    notice("",()=>confirmedNativeDisplay()?"SteamOS supports this screen. Companion's display fix is off. The HDR game fix below still works.":display().native_support_reason || "Native display support was detected earlier. Waiting for confirmation."),
-                    notice("",()=>display().native_cleanup_error || (display().native_cleanup_pending?"Removing Companion's earlier display changes.":"")),
-                    field("Restart Gaming Mode","button",()=>"Restart Gaming Mode",restartGamingMode,{visible:()=>!!display().native_restart_pending && !!s("desktop_context").gamescope}),
-                    notice("",()=>display().native_restart_pending && !s("desktop_context").gamescope?"Takes effect when you return to Gaming Mode.":"")
-                ]},
-                {title:"Display fix",column:0,visible:()=>!nativeDisplay(),barTitle:"Troubleshooting",fields:[
-                    notice("",displayPausedText),
-                    notice("",()=>display().setup_error || ""),
-                    field("Restart Gaming Mode","button",()=>"Restart Gaming Mode",restartGamingMode,{visible:()=>displayRestartPending() && !!s("desktop_context").gamescope,
-                        note:()=>display().restart_error?display().restart_error+". Restart from the Steam menu (Power → Switch to Desktop and back) or reboot.":"Steam closes and reopens."}),
-                    notice("",()=>displayRestartPending() && !s("desktop_context").gamescope?"Takes effect when you return to Gaming Mode.":""),
-                    // As in Decky: the mode is a decision already made, so its alternatives stay folded away.
-                    field("","button",()=>displaySwitch?"Cancel":"Change display mode",()=>{ displaySwitch=!displaySwitch; },{name:"Change display mode",note:displayModeNow,visible:()=>!!display().panel_mode && !!display().setup_done}),
-                    choices("Display mode",()=>display().panel_mode,pickDisplayMode,displayModeChoices,{kind:"options",visible:()=>!display().panel_mode || (displaySwitch && !!display().setup_done),
-                        available:()=>!Display.firstRunLocked(display()),
-                        note:()=>display().panel_mode?"":"Choose one. You can change it later."}),
-                    field("Install display fix","button",()=>"Install display fix",()=>confirmDisplaySetup(display().panel_mode || "hybrid"),{visible:()=>!!display().panel_mode && !display().setup_done,
-                        note:()=>"Display script needed ("+(displayModes[display().panel_mode] || pretty(display().panel_mode))+"). "+(display().setup_note || "Install it to use this mode.")}),
-                    switcher("Brightness slider in HDR",()=>display().enabled,"display_set_enabled",null,{visible:()=>Display.brightnessShown(display()),
-                        note:()=>"Lets the Steam brightness slider dim the screen in PQ."+(!display().enabled?"":display().active?" Working now ("+watts(display().nits)+" nits).":" Not needed in the current mode.")}),
-                    field("","button",()=>displayDetails?"Hide details":"Show details",()=>{ displayDetails=!displayDetails; },{name:"Display details"}),
-                    text("Panel",()=>display().panel_desc || "—",{visible:()=>displayDetails}),
-                    // What the brightness forwarding is doing; "0 nits" while nothing is forwarded would mislead.
-                    text("Brightness",()=>display().reason || "—",{visible:()=>displayDetails}),
-                    // As in Decky: nothing to reset before a mode is chosen (the HDR game fix has its own switch).
-                    field("Reset display fix","button",()=>display().reset_in_progress?Display.RESET_RETRY:"Reset display fix",resetDisplay,
-                        {bar:true,danger:true,restore:true,visible:()=>!!display().panel_mode || !!display().reset_in_progress})
-                ]},
-                {title:"HDR info for games",column:1,fields:[
-                    switcher("Fix HDR brightness in games",()=>display().edid_fix,"display_set_edid_fix",null,{note:"Games see the screen's real HDR brightness. Restart the game after changing."}),
-                    text("Status",()=>!display().edid_fix?"Off":display().edid_patched && Number(display().edid_game_nits)>0?"On · games see "+watts(display().edid_game_nits)+" nits":display().edid_patched?"On":"Not active yet"),
-                    notice("",()=>display().edid_reason || "")
-                ]}
-            ],
+            display:[{title:"Display",fields:[
+                notice("",()=>display().settings_error || ""),
+                notice("",()=>Display.steamosNotice(display())),
+                switcher(Display.EDID_FIX_LABEL,()=>display().edid_fix,"display_set_edid_fix",null,{note:Display.EDID_FIX_NOTE}),
+                text("Status",()=>Display.edidStatus(display())),
+                notice("",()=>display().edid_reason || "")
+            ]}],
             wifi:[{title:"Wi-Fi",fields:[
                 notice("",()=>{const notice=Wifi.wifiNotice(wifi());return wifi().error || wifi().message || (notice?notice[0]+". "+notice[1]:"");}),
                 text("Network",()=>Wifi.networkName(wifi()),{note:()=>Wifi.linkText(wifi())}),
@@ -562,8 +501,6 @@ RowLayout {
     // As in Decky: the last successful check, named by its result.
     function updateStatus() { const check=s("updates_check");return Updates.updateStatus(check,check.current_version || s("get_version").version || "—"); }
     function display() { return s("display_get_state"); }
-    function nativeDisplay() { const state=s("display_get_state");return state.native_support_detected===true || state.native_cleanup_pending===true; }
-    function confirmedNativeDisplay() { const state=s("display_get_state");return state.native_support_detected===true && String(state.native_support_reason || "").indexOf("Gamescope includes the native Legion Go 2 display profile.")===0; }
     // Firmware keeps its single action button in a row below its readouts.
     function inBar(card,entry) { return entry.kind==="button" && (!!entry.bar || card.owner==="firmware"); }
     function rebuild() {
@@ -573,7 +510,7 @@ RowLayout {
         for(const owner of owners) merged=merged.concat((sections[owner] || []).map(card=>Object.assign({owner:owner},card)));
         cards=merged.filter(card=>cardShown(card.owner)).map((card,index)=>Object.assign({column:index%2},card));
     }
-    onPageChanged: { if(editGame) { editGame=""; backend.editApp=""; } tdpScope="global"; powerDirty=false; customPicked=false; controllerDetails=false; displaySwitch=false; displayDetails=false; wifiCheck=null; loadPower(); rebuild(); }
+    onPageChanged: { if(editGame) { editGame=""; backend.editApp=""; } tdpScope="global"; powerDirty=false; customPicked=false; controllerDetails=false; wifiCheck=null; loadPower(); rebuild(); }
     Component.onCompleted: { loadPower(); rebuild(); }
     Timer { interval:500; repeat:true; running:backend.windowActive; onTriggered:panel.tick=backend.now() }
     Connections {

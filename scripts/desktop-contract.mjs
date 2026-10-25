@@ -10,7 +10,7 @@ for(const file of ['index','tdp','fan','vibration','rgb','remap','controller','b
   for(const match of code.matchAll(/callable\s*<[\s\S]*?>\s*\(\s*"([a-z_]+)"/g))methods.add(match[1]);
 }
 // Steam foreground-app hints need Steam's view; the rest is unused by the native app.
-for(const name of ['set_active_app','vibe_set_active_app','is_ready','modules_restart_session'])methods.delete(name);
+for(const name of ['set_active_app','vibe_set_active_app','is_ready'])methods.delete(name);
 // Read-only public RPCs that only the native app shows.
 for(const name of ['list_game_profiles'])methods.add(name);
 const data=JSON.stringify([...methods].sort(),null,2)+'\n';

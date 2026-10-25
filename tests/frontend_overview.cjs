@@ -1,4 +1,4 @@
-const { assert, run, settle, find, harness, findSection, rgb, remap, display, wifi, nativeDisplay } = require('./frontend_page_harness.cjs');
+const { assert, run, settle, find, harness, findSection, rgb, remap, display, wifi } = require('./frontend_page_harness.cjs');
 run(async () => {
   const overviewFailures = [];
   const modules = Object.fromEntries(['tdp', 'fan', 'vibration', 'display', 'wifi', 'rgb', 'remap', 'battery', 'controller']
@@ -210,32 +210,20 @@ run(async () => {
     assert.equal(section(h, 'Vibration').description, 'Controller driver not detected');
     assert.match(section(h, 'Vibration').statusNote, /Retrying/);
   });
-  for (const field of ['settings_error', 'setup_error']) {
-    await testOverview(`OLED ${field} replaces its earlier healthy summary`, async h => {
-      answerOverview(h); await settle(); h.advance(10000); h.fire();
-      h.respond('display_get_state', { ...display, [field]: 'Display controls need attention' });
-      answerOverview(h); await settle();
-      assert.equal(section(h, 'Display').description, 'Display controls need attention');
-      h.advance(10000); h.fire(); answerOverview(h); await settle();
-      assert.notEqual(section(h, 'Display').description, 'Display controls need attention');
-    });
-  }
+  await testOverview('display settings_error replaces its earlier healthy summary', async h => {
+    answerOverview(h); await settle(); h.advance(10000); h.fire();
+    h.respond('display_get_state', { ...display, settings_error: 'Display controls need attention' });
+    answerOverview(h); await settle();
+    assert.equal(section(h, 'Display').description, 'Display controls need attention');
+    h.advance(10000); h.fire(); answerOverview(h); await settle();
+    assert.notEqual(section(h, 'Display').description, 'Display controls need attention');
+  });
   for (const [state, expected] of [
-    [nativeDisplay, 'SteamOS display support'],
-    [{ ...nativeDisplay, edid_patched: true }, 'SteamOS display support · HDR game fix on'],
-    [{ ...nativeDisplay, native_cleanup_pending: true }, 'Display fix cleanup pending'],
-    [{ ...nativeDisplay, native_restart_pending: true }, 'Restart Gaming Mode to finish'],
-    [{ ...nativeDisplay, native_cleanup_pending: true, native_cleanup_error: 'Cleanup could not be verified' }, 'Cleanup could not be verified'],
-    [{ ...nativeDisplay, settings_error: 'Display settings unavailable' }, 'Display settings unavailable'],
+    [display, 'HDR game fix on'],
+    [{ ...display, edid_patched: false }, 'HDR game fix not active yet'],
+    [{ ...display, edid_fix: false, edid_patched: false }, 'HDR game fix off'],
+    [{ ...display, steamos_update_needed: true }, 'Update SteamOS to 3.9 · HDR game fix on'],
   ]) {
-    await testOverview(`native display summary: ${expected}`, async h => {
-      h.respond('display_get_state', { ...state, setup_error: 'Obsolete setup warning' });
-      answerOverview(h); await settle();
-      assert.equal(section(h, 'Display').description, expected);
-    });
-  }
-  for (const [state, expected] of [[{ ...display, edid_patched: true }, 'PQ · HDR game fix on'],
-    [{ ...display, panel_mode: null, setup_done: false }, 'Choose a display mode']]) {
     await testOverview(`display summary: ${expected}`, async h => {
       h.respond('display_get_state', state); answerOverview(h); await settle();
       assert.equal(section(h, 'Display').description, expected);

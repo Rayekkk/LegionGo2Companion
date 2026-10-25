@@ -46,17 +46,10 @@ function findSection(node, title, action = 'onClick') {
     const found = findSection(child, title, action); if (found) return found;
   }
 }
-function findModeChoice(node) {
-  if (!node || typeof node !== 'object') return;
-  if (typeof node.type === 'function' && node.type.name === 'ModeChoice') return node;
-  for (const child of Array.isArray(node) ? node : [node.props?.children]) {
-    const result = findModeChoice(child); if (result) return result;
-  }
-}
 const rgb = { success: true, settings: { configured: true, control_enabled: true, rings_enabled: true, effect: 'monocolor',
   hue: 255, saturation: 100, brightness: 50, speed: 50 }, rgb: { supported: true, effects: [] }, power_led: { supported: false } };
 const remap = { supported: true, enabled: true, desktop_action: 'f1', page_action: 'f2', actions: [{ id: 'f1', label: 'F1' }, { id: 'f3', label: 'F3' }] };
-const display = { panel_mode: 'pq', active_mode: 'pq', setup_done: true, panel_ok: true, enabled: true, edid_fix: true };
+const display = { edid_fix: true, edid_patched: true, edid_game_nits: 1107.4, edid_reason: 'applied, games read the real values' };
 const wifi = { success: true, connected: true, settings: { device_family: 'legion_go_2', driver: 'mt7921e', band_policy: 'five_six_no_24' }, live: {wifi_backend:'iwd', connection_state:'connected', connection_uuid:'fixture-profile', ssid:'Target', frequency:'5260'} };
 const cases = [
   ['display.tsx', 'DisplayPage', 'display_get_state', display],
@@ -64,7 +57,4 @@ const cases = [
   ['remap.tsx', 'RemapPage', 'remap_get_status', remap],
   ['wifi.tsx', 'WifiPage', 'wifi_get_status', wifi],
 ];
-const nativeDisplay = { ...display, panel_mode: null, active_mode: null, setup_done: false,
-  native_support_detected: true, native_support_reason: 'Complete upstream display support is present.',
-  native_cleanup_pending: false, native_cleanup_error: '', native_restart_pending: false };
-module.exports = { assert, run, settle, find, findButton, harness, findSection, findModeChoice, rgb, remap, display, wifi, cases, nativeDisplay };
+module.exports = { assert, run, settle, find, findButton, harness, findSection, rgb, remap, display, wifi, cases };

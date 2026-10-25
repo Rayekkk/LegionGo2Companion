@@ -12,7 +12,7 @@ const MODULE_DESCRIPTIONS = {
   remap: "The two extra buttons on the left controller.",
   controller: "Gyro source and controller test.",
   battery: "Charge limit of about 80%.",
-  display: "OLED brightness and HDR fixes. Changes need a Gaming Mode restart.",
+  display: "Games see the screen's real HDR brightness.",
   wifi: "Wi-Fi band preference.",
 };
 

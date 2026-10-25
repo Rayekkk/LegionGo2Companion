@@ -29,7 +29,7 @@ import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySumma
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
-import { confirmAction, errorText, infoRow } from "./shared";
+import { errorText, infoRow } from "./shared";
 import { strengthOnly } from "../desktop/native/vibration.mjs";
 import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, consoleDetecting, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
@@ -43,7 +43,6 @@ type Device = {console?: string | null; model?: string | null; firmware?: boolea
 const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => moduleShown(modules[key]) && modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
-const restartModulesSession = callable<[], {success: boolean; message?: string; error?: string}>("modules_restart_session");
 
 interface TdpSettings {
   enabled?: boolean;
@@ -64,17 +63,10 @@ interface VibeSettingsResponse {
 interface DriverStatus { found?: boolean }
 
 interface DisplayState {
-  native_support_detected?: boolean;
-  native_support_reason?: string;
-  native_cleanup_pending?: boolean;
-  native_cleanup_error?: string;
-  native_restart_pending?: boolean;
-  panel_mode?: "gamma22" | "pq" | "hybrid" | null;
-  setup_done?: boolean;
-  active?: boolean;
+  steamos_update_needed?: boolean;
+  edid_fix?: boolean;
   edid_patched?: boolean;
   settings_error?: string;
-  setup_error?: string;
 }
 
 interface Overview {
@@ -299,12 +291,7 @@ const refreshOverview = () => {
 const overviewDescription = (overview: Overview, module: ModuleKey, description: string) => {
   if (module === "fan") return description; // Keep measured numbers separate from fault status.
   const sources = overviewSources.filter(source => source.module === module);
-  if (module === "display") {
-    const display = overview.display;
-    const native = display?.native_support_detected || display?.native_cleanup_pending;
-    const error = display?.settings_error || (native ? display?.native_cleanup_error : display?.setup_error);
-    if (error) return error;
-  }
+  if (module === "display" && overview.display?.settings_error) return overview.display.settings_error;
   // A returned error/recovery state is a fresh report, not a rejected RPC.
   // Never replace it with an earlier healthy cache or a generic retry message.
   for (const source of sources) {
@@ -427,22 +414,14 @@ const vibrationSummary = (overview: Overview, goS = false) => {
 };
 
 const displaySummary = (state?: DisplayState) => {
-  const hdrFix = state?.edid_patched ? " · HDR game fix on" : "";
-  if (state?.native_support_detected || state?.native_cleanup_pending) {
-    if (state.native_cleanup_error) return "Display fix cleanup needs attention";
-    if (state.native_cleanup_pending) return "Display fix cleanup pending";
-    if (state.native_restart_pending) return "Restart Gaming Mode to finish";
-    return `SteamOS display support${hdrFix}`;
-  }
-  if (!state?.setup_done) return "Choose a display mode";
-  const mode = state.panel_mode === "gamma22" ? "Gamma 2.2" : state.panel_mode === "pq" ? "PQ" : "Hybrid";
-  return `${mode}${hdrFix}`;
+  const fix = !state?.edid_fix ? "HDR game fix off" : state.edid_patched ? "HDR game fix on" : "HDR game fix not active yet";
+  return state?.steamos_update_needed ? `Update SteamOS to 3.9 · ${fix}` : fix;
 };
 
 const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, device }) => {
-  const [busy, setBusy] = useState<ModuleKey | "restart" | null>(null);
+  const [busy, setBusy] = useState<ModuleKey | null>(null);
   // The failed control shows its error until the next action.
-  const [error, setError] = useState<{key: ModuleKey | "restart"; text: string} | null>(null);
+  const [error, setError] = useState<{key: ModuleKey; text: string} | null>(null);
   const writing = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -457,19 +436,9 @@ const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, d
       void refreshGuard();
     } finally { writing.current = false; if (mounted.current) setBusy(null); }
   };
-  const restart = async () => {
-    if (!mounted.current || writing.current) return;
-    writing.current = true; setBusy("restart"); setError(null);
-    try {
-      const result = await restartModulesSession();
-      if (!result.success && mounted.current) fail("restart", result.error || result.message || "Gaming Mode restart failed.");
-    } catch {
-      if (mounted.current) fail("restart", "Could not confirm the Gaming Mode restart.");
-    } finally { writing.current = false; if (mounted.current) setBusy(null); }
-  };
-  const fail = (key: ModuleKey | "restart", text: string) => {
+  const fail = (key: ModuleKey, text: string) => {
     setError({key, text});
-    toaster.toast({title: key === "restart" ? "Gaming Mode" : moduleLabels[key], body: text});
+    toaster.toast({title: moduleLabels[key], body: text});
   };
   return <PanelSection title="Manage Modules">
     {infoRow("Choose your modules", "Turning a module off stops it and hides it. Its settings are kept.")}
@@ -481,10 +450,6 @@ const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, d
       {startRetryShown(modules[name]) &&
         <ButtonItem layout="below" disabled={busy !== null} onClick={() => void change(name, true)}>Retry {moduleLabels[name]} start</ButtonItem>}
     </PanelSectionRow>)}
-    {/* The last row stays enabled; restart() ignores presses while another change runs. */}
-    {modules.display?.note && <PanelSectionRow><ButtonItem layout="below" description={error?.key === "restart" ? error.text : undefined}
-      onClick={() => confirmAction("Restart Gaming Mode?", "Steam and any running game will close and reopen. Save your game first.",
-        "Restart", () => void restart())}>{busy === "restart" ? "Restarting…" : "Restart Gaming Mode"}</ButtonItem></PanelSectionRow>}
   </PanelSection>;
 };
 

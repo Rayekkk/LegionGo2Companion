@@ -562,34 +562,20 @@ TestCase {
         fake.data=Object.assign({},fake.data,{controller_get_status:{available:true,gyro_source:"left",controlled:true}});
         verify(source.note().indexOf("Not confirmed")<0);
     }
-    function test_displayPausesOnSettingsErrorOrUnfinishedReset() {
+    function test_displayKeepsOnlyTheHdrFixAndAsksForSteamOs39() {
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{display:{ready:true}}},
-            display_get_state:{settings_error:"Settings unreadable.",panel_mode:"pq",setup_done:true,panel_ok:true,edid_fix:true}});
-        compare(card("Display fix").fields[0].get(),"Display controls are paused. Settings unreadable.");
-        verify(!panel.fieldEnabled("display",field("display","Fix HDR brightness in games")));
-        verify(!panel.fieldEnabled("display",displayField("Brightness slider in HDR")));
-        verify(!panel.fieldEnabled("display",displayField("Reset display fix")),"a reset cannot read unreadable settings either, as in Decky");
-        fake.data=Object.assign({},fake.data,{display_get_state:{reset_in_progress:true,reset_error:"",panel_mode:"pq"}});
-        const reset=displayField("Reset display fix");compare(reset.get(),"Retry display reset");
-        reset.set();compare(fake.calls[0].method,"display_reset_settings","finishing a reset asks nothing more, as in Decky");
-        fake.data=Object.assign({},fake.data,{display_get_state:{setup_done:false,panel_mode:null,reset_restart_pending:true}});
-        verify(!displayField("Reset display fix").visible(),"nothing to reset before a mode is chosen");
-        verify(!displayField("Display mode").available(),"first-run choices wait for the restart that finishes a reset");
-        fake.data=Object.assign({},fake.data,{display_get_state:{setup_done:true,panel_mode:"pq",panel_ok:true,restart_pending:true}});
-        verify(!displayField("Brightness slider in HDR").visible(),"not while a restart is pending");
-    }
-    function test_nativeDisplayHidesLegacyControlsButKeepsIndependentEdid() {
-        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{display:{ready:true}}},display_get_state:{native_support_detected:true,native_support_reason:"Gamescope includes the native Legion Go 2 display profile. Companion's display fix is no longer needed.",edid_fix:true}});
+            display_get_state:{steamos_update_needed:true,edid_fix:true,edid_patched:true,edid_game_nits:1107.4,edid_reason:"applied"}});
         panel.page="display";
-        const upstream=card("Display"),legacy=card("Display fix");
-        verify(upstream.visible());verify(!legacy.visible());
-        compare(upstream.fields[1].get(),"SteamOS supports this screen. Companion's display fix is off. The HDR game fix below still works.");
-        const edid=field("display","Fix HDR brightness in games");verify(edid.available());verify(panel.fieldEnabled("display",edid));
+        const display=card("Display"),edid=field("display","Fix HDR brightness in games");
+        compare(display.fields[1].get(),"Update SteamOS to 3.9 or newer, which supports this screen natively. The HDR brightness fix below still works.");
+        compare(field("display","Status").get(),"On · games see 1107 nits");
+        verify(panel.fieldEnabled("display",edid));
         edid.set(false);compare(fake.calls[0].method,"display_set_edid_fix");compare(fake.calls[0].args[0],false);
-        fake.data=Object.assign({},fake.data,{display_get_state:{native_support_detected:true,native_support_reason:"Native support was detected earlier."}});
-        compare(upstream.fields[1].get(),"Native support was detected earlier.");verify(!legacy.visible());
-        fake.data=Object.assign({},fake.data,{display_get_state:{native_support_detected:false,setup_done:true}});
-        verify(!upstream.visible());verify(legacy.visible());verify(field("display","Brightness slider in HDR").available());
+        fake.data=Object.assign({},fake.data,{display_get_state:{steamos_update_needed:false,edid_fix:false}});
+        compare(display.fields[1].get(),"");compare(field("display","Status").get(),"Off");
+        fake.data=Object.assign({},fake.data,{display_get_state:{settings_error:"Settings unreadable.",edid_fix:true}});
+        compare(display.fields[0].get(),"Settings unreadable.");
+        verify(!panel.fieldEnabled("display",edid),"unreadable settings pause the switch, as in Decky");
     }
     function wifiState(settings,live,extra) {
         fake.data=Object.assign({},fake.data,{wifi_get_status:Object.assign({success:true,connected:true,
@@ -687,44 +673,5 @@ TestCase {
         confirmDialog().accept();compare(fake.calls[2].args[0],"six_ghz_only");compare(fake.calls[2].args[1],false);confirmDialog().close();
         wifiState({band_policy:"five_six_no_24"},{});
         field("wifi","Reconnect to 5/6 GHz").set();compare(fake.calls[3].method,"wifi_rescan_and_reconnect");
-    }
-    function test_displayResetAndRestartUseTheSharedConfirmations() {
-        fake.data=Object.assign({},fake.data,{desktop_context:{app_id:"",gamescope:true},display_get_state:{setup_done:true,panel_mode:"hybrid"}});
-        field("display","Reset display fix").set();compare(fake.calls.length,0);
-        compare(confirmDialog().title,"Reset display fix?");verify(confirmDialog().danger);confirmDialog().accept();
-        compare(fake.calls[0].method,"display_reset_settings");confirmDialog().close();
-        field("display","Restart Gaming Mode").set();compare(confirmDialog().title,"Restart Gaming Mode?");compare(confirmDialog().okText,"Restart");
-        confirmDialog().close();
-        field("display","Install display fix").set();compare(confirmDialog().title,"Install display fix for Hybrid?");
-        confirmDialog().accept();compare(fake.calls[1].method,"display_run_setup");compare(fake.calls[1].args[0],"hybrid");
-    }
-    function displayField(name) {
-        const entry=card("Display fix").fields.find(item=>(item.name || item.label)===name);
-        verify(entry!==undefined,"Display field: "+name);return entry;
-    }
-    function test_displayFollowsDeckyCompactModeChoiceAndBrightnessReason() {
-        const reason="hybrid mode - the panel switches itself, nothing to forward";
-        fake.data=Object.assign({},fake.data,{desktop_context:{app_id:""},display_get_state:{setup_done:true,panel_mode:"hybrid",active:false,nits:0,enabled:true,
-            gamescope_reachable:true,hdr_now:false,reason:reason,panel_desc:"Panel"}});
-        compare(displayField("Brightness").get(),reason,"Nothing forwarded is not 0 nits");
-        compare(displayField("Brightness slider in HDR").note(),"Lets the Steam brightness slider dim the screen in PQ. Not needed in the current mode.");
-        const change=displayField("Change display mode"),modes=displayField("Display mode");
-        compare(change.note(),"Now: Hybrid (screen in Gamma 2.2)");compare(change.get(),"Change display mode");
-        verify(!modes.visible(),"The other modes stay folded away");
-        change.set();verify(modes.visible());compare(change.get(),"Cancel");
-        compare(modes.choices().map(c=>c.label).join(),"Use PQ,Use Gamma 2.2");
-        verify(modes.choices().every(c=>c.detail.indexOf("+ ")===0 && c.detail.indexOf("
-− ")>0));
-        modes.set("pq");compare(fake.calls[0].method,"display_set_panel_mode");compare(fake.calls[0].args[0],"pq");
-        verify(!modes.visible(),"Picking a mode folds the list again");
-        verify(!displayField("Restart Gaming Mode").visible(),"Restart only when one is pending");
-        fake.data=Object.assign({},fake.data,{desktop_context:{app_id:"",gamescope:true},display_get_state:{setup_done:false,panel_mode:null}});
-        verify(modes.visible());verify(!change.visible());verify(!displayField("Install display fix").visible());
-        compare(modes.choices()[0].label,"Hybrid (recommended)");
-        modes.set("gamma22");compare(fake.calls.length,1,"First setup installs a script: it asks first");
-        compare(confirmDialog().title,"Install display fix for Gamma 2.2?");confirmDialog().accept();
-        compare(fake.calls[1].method,"display_run_setup");compare(fake.calls[1].args[0],"gamma22");confirmDialog().close();
-        fake.data=Object.assign({},fake.data,{display_get_state:{setup_done:true,panel_mode:"pq",restart_pending:true}});
-        verify(displayField("Restart Gaming Mode").visible());
     }
 }
