@@ -350,6 +350,60 @@ class RgbBackendTests(unittest.TestCase):
         self.assertLessEqual(healthy[0], 55, "controller return must be retried promptly")
         self.assertTrue(all(45 <= b - a <= 75 for a, b in zip(healthy, healthy[1:])), healthy)
 
+    def test_start_forces_a_controlled_ring_once_and_leaves_an_uncontrolled_one(self):
+        for control in (True, False):
+            with self.subTest(control=control), tempfile.TemporaryDirectory() as raw:
+                make_led(Path(raw))
+                state = copy.deepcopy(rgb_backend.DEFAULT_STATE)
+                state.update(configured=True, control_enabled=control, rings_enabled=True,
+                             original_rgb=rgb_backend._read_rgb_snapshot(raw))
+                self.assertTrue(rgb_backend._apply_rgb_snapshot(raw, rgb_backend._target_for_state(state, raw)))
+
+                async def start():
+                    plugin = rgb_backend.Plugin()
+                    await plugin._main()
+                    await plugin._unload()
+                with (
+                    patch.object(rgb_backend, "settings", MemorySettings(state)),
+                    patch.object(rgb_backend, "_rgb_capability", return_value=(raw, "")),
+                    patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
+                    led_writes(raw) as writes,
+                ):
+                    asyncio.run(start())
+                # Everything already matched: a write here is the forced pass alone.
+                self.assertEqual(writes, ["profile", "speed", "multi_intensity", "brightness", "effect", "mode", "enabled"]
+                                 if control else [])
+
+    def test_a_wake_window_ends_with_one_forced_ring_pass(self):
+        now, calls = [0.0], []
+        plugin = rgb_backend.Plugin()
+
+        async def offload(function, **kwargs):
+            calls.append((now[0], kwargs))
+            return {"control_enabled": True} if function is rgb_backend._load_state else True
+
+        async def advance(seconds):
+            now[0] += seconds
+            if now[0] > 60:
+                raise asyncio.CancelledError
+        with (
+            patch.object(rgb_backend, "time", types.SimpleNamespace(monotonic=lambda: now[0])),
+            patch.object(rgb_backend.asyncio, "sleep", side_effect=advance),
+            patch.object(rgb_backend, "_offload", side_effect=offload),
+            patch.object(rgb_backend, "_resume_detected", return_value=False),
+            patch.object(plugin, "get_status", return_value={}),
+        ):
+            async def wake():
+                await plugin.reapply()
+                await plugin._drift_loop()
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(wake())
+        forced = [at for at, kwargs in calls if kwargs.get("force_ring")]
+        self.assertEqual(len(forced), 1, calls)
+        self.assertGreaterEqual(forced[0], rgb_backend.STARTUP_SETTLE_S)
+        self.assertEqual([at for at, kwargs in calls if not kwargs and at > forced[0]], [],
+                         "then the normal interval again")
+
     def test_resume_retries_missing_controller_and_force_reapplies_saved_on_or_off(self):
         for enabled in (True, False):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as raw:

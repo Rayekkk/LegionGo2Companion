@@ -988,7 +988,8 @@ def _status() -> dict[str, Any]:
     }
 
 
-def _reconcile(*, force: bool = False) -> bool:
+def _reconcile(*, force: bool = False, force_ring: bool = False) -> bool:
+    """force_ring rewrites only a controlled ring: a waking controller can read back stale values."""
     global _last_error
     with _apply_lock:
         if not _recover_pending():
@@ -1011,8 +1012,8 @@ def _reconcile(*, force: bool = False) -> bool:
                     drifted = not _rgb_matches(state, current, path)
                 except (OSError, ValueError):
                     drifted = True
-                if force or drifted:
-                    if not _apply_rgb_target(state, force=force):
+                if force or force_ring or drifted:
+                    if not _apply_rgb_target(state, force=force or force_ring):
                         ok = False
                         failure = "ring_write_unconfirmed"
                         _last_error = "The joystick-ring settings could not be applied."
@@ -1066,9 +1067,12 @@ class Plugin:
                     continue
                 now = time.monotonic()
                 settling = now < getattr(self, "_settle_until", 0.0)
+                wake_end = not settling and getattr(self, "_settle_force", False)  # set by reapply
+                if wake_end:
+                    self._settle_force = False
                 interval = retry_delay if retry_pending else DRIFT_INTERVAL_S
-                if settling or now - last_check >= interval:
-                    confirmed = await _offload(_reconcile)
+                if settling or wake_end or now - last_check >= interval:
+                    confirmed = await (_offload(_reconcile, force_ring=True) if wake_end else _offload(_reconcile))
                     retry_pending = not confirmed
                     if confirmed or settling:
                         retry_delay = RESUME_CHECK_S
@@ -1088,7 +1092,7 @@ class Plugin:
             # The controller may appear or reset after Decky starts. Keep a
             # bounded settling window even if the very first read was successful.
             self._settle_until = time.monotonic() + STARTUP_SETTLE_S
-            if not await _offload(_reconcile):
+            if not await _offload(_reconcile, force_ring=True):
                 decky.logger.warning("[lego-rgb] startup state not yet confirmed; retrying during controller initialization")
             _drift_task = module_runtime.background_task(self._drift_loop())
             decky.logger.info("[lego-rgb] lighting module ready")
@@ -1282,6 +1286,7 @@ class Plugin:
     @module_runtime.controller_operation('rgb')
     async def reapply(self) -> dict[str, Any]:
         self._settle_until = time.monotonic() + STARTUP_SETTLE_S
+        self._settle_force = True  # and once more as the window ends
         deadline = time.monotonic() + REAPPLY_WAIT_S
         while True:
             state = await _offload(_load_state)
