@@ -31,7 +31,7 @@ same controls are also available as a native [Desktop app](#desktop-app).
 | [Vibration](#vibration) | Set handle vibration and touchpad feedback, also per game |
 | [Lighting](#lighting) | Set the stick-light effect, colour, brightness and speed, and switch the power-button light |
 | [Button mapping](#button-mapping) | Give the two extra buttons on the left controller your own actions |
-| [Gyro & touchpad](#gyro--touchpad) | Choose which controller's gyro Steam uses and test the gyro and touchpad |
+| [Gyro & touchpad](#gyro--touchpad) | Choose which controller's gyro Steam uses, test the gyro and touchpad, and set when the detached controllers turn off |
 | [Controller firmware](#controller-firmware) | Update the controllers and their receiver with Lenovo's firmware (experimental) |
 | [Battery](#battery) | Limit charging to about 80% and see the console and both controller batteries |
 | [Display](#display) | Fix the HDR brightness games read; on older SteamOS also choose the screen mode |
@@ -67,6 +67,7 @@ left out on purpose.
 | Power-button light | ✅ | ✅ ⁴ | ✅ ⁴ |
 | Button mapping | ✅ | ➖ | ➖ |
 | Gyro & touchpad | ✅ | ✅ ² | ➖ |
+| Controller sleep | ✅ | ✅ ² ⁴ | ➖ |
 | Battery protection | ✅ | ✅ ¹ | ✅ ¹ |
 | Display | ✅ | ➖ | ➖ |
 | Wi-Fi and band policy | ✅ | ✅ ¹ | ✅ ¹ |
@@ -460,6 +461,12 @@ Choose the **Gyro source**: **Left controller**, **Right controller**, **Both co
 **Start controller test** shows live gyro and touchpad readings for 30 seconds, from the
 controllers and as Steam receives them, so you can see whether input reaches Steam. A game
 still needs gyro or touchpad assignments in its Steam Input layout.
+
+**Controller sleep → Turn off after** sets how long the detached controllers wait without use
+before they turn themselves off: **Never**, 5, 10, 15, 30, 45 or 60 minutes, the same for both
+(the choices Legion Space offers). Until you pick one, Companion changes nothing and shows
+**Controller default**. After a wake or a reconnect it sets the time again only on a controller
+that reports another one. The section appears only when both controllers have the timer.
 
 <details>
 <summary><b>Gyro and test details</b></summary>
