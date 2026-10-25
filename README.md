@@ -654,6 +654,7 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | The gyro test works but the game does not react | Check that game's Steam Input layout. |
 | The controllers stopped working, often after sleep | Companion restarts SteamOS's InputPlumber by itself when it has lost the controllers (at most once per 10 minutes, and three times until Decky or the console restarts); if they still do not respond, restart the console. |
 | Battery stays above 80% with protection on | Normal: protection stops charging, it does not discharge the battery. |
+| Battery: the charging mode cannot be read | The firmware has fast charging and battery protection on together. Use **Reset charging mode to Standard** on the Battery page. |
 | A game still reads old HDR values | Turn on **Fix HDR brightness in games** and restart the game. |
 | Wi-Fi stays on 2.4 GHz | Check the live band; use **Reconnect to 5/6 GHz** when offered. A setting cannot create a missing 5/6 GHz network. |
 | No Wi-Fi with Only 5/6 GHz or Only 6 GHz | Choose **Automatic** or **Prefer 5/6 GHz**. |

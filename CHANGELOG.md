@@ -1,3 +1,13 @@
+# 2.3.1
+
+Unreleased.
+
+### Fixed
+
+- **Vibration:** while a controller sleeps or stops answering, Companion no longer keeps resending your vibration settings to it, which could make it buzz now and then. After a wake it retries only the settings that did not take, and its periodic check slows down from every 30 seconds to every 5 minutes until the controller answers or is reconnected.
+- **Battery:** when the firmware turns on fast charging and battery protection at the same time, the charging mode cannot be read. The page now says so instead of showing "Invalid argument" and offers **Reset charging mode to Standard**; your saved protection choice is applied again afterwards.
+- **Stick lights:** your lighting is set again once when Companion starts and once more shortly after a wake, so it no longer stays wrong when the controller wakes with stale values.
+
 # 2.3.0
 
 Released 2026-10-22.
