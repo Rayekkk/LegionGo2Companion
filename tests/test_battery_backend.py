@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import errno
 import json
 import os
 import sys
@@ -315,6 +316,52 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["requested_enabled"])
         self.assertFalse(result["enabled"])
         self.assertEqual(self.current(), "Standard")  # A status read never enforces.
+
+    def mode_conflict(self):
+        """ideapad-laptop with Rapid Charge and Conservation both on: charge_types reads EINVAL until a write."""
+        read, conflict = battery._read_attr, {"on": True}
+
+        def read_attr(path, limit=512):
+            if conflict["on"] and path.name == "charge_types":
+                raise OSError(errno.EINVAL, "Invalid argument")
+            return read(path, limit)
+
+        def write(path, mode):
+            conflict["on"] = False
+            self.write_mode(path, mode)
+        self.writer.side_effect = write
+        return patch.object(battery, "_read_attr", side_effect=read_attr)
+
+    async def test_an_unreadable_mode_is_explained_and_a_reset_restores_the_saved_choice(self):
+        await self.plugin.set_enabled(True)
+        with self.mode_conflict(), patch.object(battery, "event") as logged:
+            await self.plugin._main()
+            status = await self.plugin.get_status()
+            self.assertEqual((status["supported"], status["mode_conflict"]), (False, True))
+            self.assertEqual((status["reason"], status["error"]), (battery.MODE_CONFLICT,) * 2)
+            self.assertEqual(self.writes, ["Long_Life"], "nothing is written without the click")
+            result = await self.plugin.reset_charging_mode()
+        self.assertTrue(result["success"])
+        self.assertEqual(self.writes, ["Long_Life", "Standard", "Long_Life"], "Standard, then the saved choice as at start")
+        self.assertEqual((result["status"]["mode_conflict"], result["status"]["enabled"], result["status"]["error"]),
+                         (False, True, ""))
+        self.assertEqual(self.plugin._load()["baseline"], "Fast")
+        self.assertIn("mode_reset", [call.args[1] for call in logged.call_args_list])
+
+    async def test_a_reset_while_unmanaged_only_writes_standard(self):
+        with self.mode_conflict():
+            await self.plugin._main()
+            result = await self.plugin.reset_charging_mode()
+        self.assertTrue(result["success"])
+        self.assertEqual(self.writes, ["Standard"])
+        self.assertEqual((result["status"]["current_mode"], result["status"]["managed"]), ("Standard", False))
+
+    async def test_a_reset_is_refused_while_the_mode_can_be_read(self):
+        await self.plugin._main()
+        result = await self.plugin.reset_charging_mode()
+        self.assertFalse(result["success"])
+        self.assertIn("can be read", result["error"])
+        self.assertEqual((self.writes, self.current()), ([], "Fast"))
 
     async def run_watch_clock(self, duration, *, wake=True):
         clock = {'now': 0.0}

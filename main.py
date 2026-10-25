@@ -1523,6 +1523,9 @@ class Plugin:
     async def battery_release_control(self):
         return await self._battery.release_control()
 
+    async def battery_reset_charging_mode(self):
+        return await self._battery.reset_charging_mode()
+
     # Gyro selection and bounded, passive controller diagnostics --------------
 
     async def controller_get_status(self):

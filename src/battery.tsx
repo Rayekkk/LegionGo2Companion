@@ -10,7 +10,7 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { detailsRows, infoRow, mutationQueue, statusPlaceholder } from "./shared";
-import { controllersText, levelText, protectionChecked, protectionLocked, protectionNote } from "../desktop/native/battery.mjs";
+import { controllersText, levelText, protectionChecked, protectionLocked, protectionNote, RESET_DONE, RESET_LABEL, RESET_NOTE, resetShown } from "../desktop/native/battery.mjs";
 
 export interface BatteryStatus {
   success: boolean;
@@ -26,6 +26,7 @@ export interface BatteryStatus {
   options?: string[];
   current_mode?: string | null;
   recovery_pending?: boolean;
+  mode_conflict?: boolean;
 }
 
 export interface ControllerBatteryStatus {
@@ -52,6 +53,7 @@ export const getBatteryStatus = async () => {
 export const getControllerBatteryLevels = callable<[], ControllerBatteryStatus>("battery_get_controller_levels");
 const setBatteryEnabled = callable<[boolean], BatteryResult>("battery_set_enabled");
 const releaseBatteryControl = callable<[], BatteryResult>("battery_release_control");
+const resetChargingMode = callable<[], BatteryResult>("battery_reset_charging_mode");
 
 const unavailableControllerBatteries = (): ControllerBatteryStatus => ({
   available: false,
@@ -90,7 +92,7 @@ export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   // The last change's failure stays on its control until the next change.
-  const [failed, setFailed] = useState<{ control: "toggle" | "restore"; text: string } | null>(null);
+  const [failed, setFailed] = useState<{ control: "toggle" | "restore" | "reset"; text: string } | null>(null);
   const [details, setDetails] = useState(false);
   const mounted = useRef(false);
   const isVisible = useRef(visible);
@@ -170,7 +172,7 @@ export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ 
     };
   }, [refresh, visible]);
 
-  const apply = useCallback(async (operation: () => Promise<BatteryResult>, message: string, control: "toggle" | "restore") => {
+  const apply = useCallback(async (operation: () => Promise<BatteryResult>, message: string, control: "toggle" | "restore" | "reset") => {
     if (!mounted.current || !isVisible.current || saving.current) return;
     saving.current = true;
     const previousRead = readInFlight.current;
@@ -222,6 +224,10 @@ export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ 
     </> : !status.supported ? infoRow("Battery protection unavailable",
       status.reason || "A compatible battery charging interface was not detected.")
       : error && infoRow("Battery status not updated", error)}
+    {resetShown(status) && <PanelSectionRow>
+      <ButtonItem layout="below" disabled={busy} description={failed?.control === "reset" ? failed.text : RESET_NOTE}
+        onClick={() => void apply(() => resetChargingMode(), RESET_DONE, "reset")}>{RESET_LABEL}</ButtonItem>
+    </PanelSectionRow>}
     {infoRow(`Battery ${capacity}${status.charging_status ? ` · ${status.charging_status}` : ""}`,
       controllersShown ? `Controllers: ${controllersText(controllers)}` : undefined)}
     {status.supported && <PanelSectionRow>

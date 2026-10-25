@@ -158,6 +158,17 @@ run(async()=>{
   h.setVisible(true);await settle();h.render();assert.equal(count(h,'battery_get_status'),initialReads+1);
   h.unmount();assert.equal(h.timers.size,0);
 
+  // An unreadable mode (fast charging and protection both on) offers a reset, only then.
+  assert.equal(button(h,'Reset charging mode to Standard'),undefined);
+  const conflict=base({supported:false,enabled:null,current_mode:null,mode_conflict:true,
+    reason:'The firmware reports fast charging and battery protection as both on, so the charging mode cannot be read.'});
+  h=harness(conflict);await h.ready();
+  assert.match(content(h.tree),/so the charging mode cannot be read/);
+  h.methods.battery_reset_charging_mode=()=>({success:true,status:base({current_mode:'Standard'})});
+  button(h,'Reset charging mode to Standard').props.onClick();await settle();h.render();
+  assert.equal(count(h,'battery_reset_charging_mode'),1);assert.equal(h.toasts.at(-1).body,'Charging mode reset to Standard.');
+  assert.equal(button(h,'Reset charging mode to Standard'),undefined,'gone once the mode can be read');h.unmount();
+
   // The rules both UIs share (src/battery.tsx and the Desktop ModulePage.qml import the same module).
   const B=await import(require('node:url').pathToFileURL(require('node:path').join(__dirname,'../desktop/native/battery.mjs')).href);
   assert.equal(B.protectionChecked(base({managed:true,enabled:false,requested_enabled:true})),true,'the saved choice while Companion manages charging');
@@ -167,6 +178,7 @@ run(async()=>{
   assert.equal(B.protectionLocked(base()),false);
   assert.match(B.protectionNote(base({enabled:null})),/Current state unknown\.$/);
   assert.equal(B.controllersText({left:80.4,right:250,connection_left:'detached'}),'left 80% (detached) · right —','impossible levels are not shown');
+  assert.equal(B.resetShown(base({mode_conflict:true})),true);assert.equal(B.resetShown(base()),false,'the reset is offered only for an unreadable mode');
   assert.equal(B.levelText(-1),'—');assert.equal(B.levelText(null),'—');
   console.log('Battery UI keeps actual/saved states distinct, reports rollback/recovery, prevents stale saves, and stops hidden polling.');
 });

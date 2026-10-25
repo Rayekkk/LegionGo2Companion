@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import os
 import re
 import stat
@@ -37,6 +38,18 @@ settings = SettingsManager("battery_settings", decky.DECKY_PLUGIN_SETTINGS_DIR)
 
 class BatteryError(RuntimeError):
     pass
+
+
+MODE_CONFLICT = ("The firmware reports fast charging and battery protection as both on, "
+                 "so the charging mode cannot be read.")
+
+
+class ModeConflict(BatteryError):
+    """charge_types cannot be read: ideapad-laptop returns EINVAL when Rapid Charge and Conservation are both on."""
+
+    def __init__(self, path: Path):
+        super().__init__(MODE_CONFLICT)
+        self.path = path
 
 
 def _checked_path(path: Path) -> Path:
@@ -108,7 +121,13 @@ def _detect() -> dict[str, Any]:
                            "More than one system battery was found; no battery was selected.")
     battery = batteries[0]
     attribute = battery / "charge_types"
-    options, current = _parse_modes(_read_attr(attribute))
+    try:
+        raw = _read_attr(attribute)
+    except OSError as exc:
+        if exc.errno == errno.EINVAL:
+            raise ModeConflict(attribute) from exc
+        raise
+    options, current = _parse_modes(raw)
     if not _checked_path(attribute).stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
         raise BatteryError("The kernel exposes battery charging modes as read-only.")
     return {"path": attribute, "battery": battery, "options": options, "current": current}
@@ -235,6 +254,7 @@ class Plugin:
                 "charging_status": None, "capacity": None, "reason": "",
                 "error": self._error, "backend": "charge_types", "options": [],
                 "current_mode": None, "baseline": None, "recovery_pending": False,
+                "mode_conflict": False,
             }
             try:
                 state = self._load()
@@ -254,7 +274,7 @@ class Plugin:
                     out["capacity"] = int(capacity)
                 out["charging_status"] = _optional_attr(device["battery"] / "status")
             except Exception as exc:
-                out["reason"] = str(exc)
+                out.update(reason=str(exc), mode_conflict=isinstance(exc, ModeConflict))
             if self._error:
                 out["success"] = False
             return out
@@ -360,6 +380,31 @@ class Plugin:
             self._error = ""
             return self._status()
 
+    def _reset_charging_mode(self) -> dict[str, Any]:
+        """Owner's explicit way out of ModeConflict: write Standard (the kernel turns both off), then start over."""
+        with self._lock:
+            try:
+                _detect()
+            except ModeConflict as conflict:
+                path = conflict.path
+            else:
+                raise BatteryError("The charging mode can be read, so it was not reset.")
+            try:
+                _write_mode(path, "Standard")
+                try:
+                    current = _detect()["current"]
+                except ModeConflict:
+                    current = None
+                if current != "Standard":
+                    raise BatteryError("The battery did not confirm the Standard charging mode.")
+            except Exception as exc:
+                event("battery", "mode_reset", level="warning", error=exc, outcome="failed")
+                raise
+            event("battery", "mode_reset", outcome="confirmed")
+            self._error = ""
+            self._repair()  # as at start: a saved choice is applied again
+            return self._status()
+
     def _repair(self) -> None:
         with self._lock:
             if not self._running:
@@ -454,6 +499,14 @@ class Plugin:
     async def set_enabled(self, enabled: bool):
         try:
             status = await self._thread(self._set, enabled)
+            return {"success": True, "status": status}
+        except Exception as exc:
+            self._error = str(exc)
+            return {"success": False, "error": str(exc), "status": await self.get_status()}
+
+    async def reset_charging_mode(self):
+        try:
+            status = await self._thread(self._reset_charging_mode)
             return {"success": True, "status": status}
         except Exception as exc:
             self._error = str(exc)

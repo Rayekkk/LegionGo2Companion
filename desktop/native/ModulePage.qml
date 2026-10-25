@@ -491,6 +491,7 @@ RowLayout {
                 switcher("Battery protection",()=>Battery.protectionChecked(battery()),"battery_set_enabled",null,{available:()=>!Battery.protectionLocked(battery()),
                     note:()=>Battery.protectionNote(battery())}),
                 notice("",()=>battery().current_mode?"Charging mode reported: "+battery().current_mode:""),
+                action(Battery.RESET_LABEL,"battery_reset_charging_mode",null,{note:Battery.RESET_NOTE,visible:()=>Battery.resetShown(battery())}),
                 action("Restore previous charging mode","battery_release_control",null,{bar:true,visible:()=>!!battery().managed || !!battery().recovery_pending})
             ]}],
             display:[

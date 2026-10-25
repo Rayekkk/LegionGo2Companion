@@ -196,7 +196,7 @@ QtObject {
                 if(method.startsWith("firmware_")) {
                     const errors=Object.assign({},backend.readErrors);errors.firmware_get_status="";backend.readErrors=errors;
                 }
-                else if (method === "battery_set_enabled" || method === "battery_release_control") {
+                else if (method === "battery_set_enabled" || method === "battery_release_control" || method === "battery_reset_charging_mode") {
                     if (result.status) { key = "battery_get_status"; result = result.status; }
                 }
                 // RGB writes return the new status: hue and saturation are sent together,

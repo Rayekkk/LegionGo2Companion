@@ -20,6 +20,12 @@ export const protectionChecked = status => status?.managed && typeof status.requ
 /** The switch waits for a known actual state and for a pending recovery (Restore previous charging mode). */
 export const protectionLocked = status => !status?.supported || typeof status.enabled !== "boolean" || status.recovery_pending === true;
 
+/** The firmware has fast charging and protection on together, so the mode cannot be read: offered only then. */
+export const resetShown = status => status?.mode_conflict === true;
+export const RESET_LABEL = "Reset charging mode to Standard";
+export const RESET_NOTE = "Turns off fast charging and battery protection. Your saved protection choice is then applied again.";
+export const RESET_DONE = "Charging mode reset to Standard.";
+
 export function protectionNote(status) {
   const waiting = status?.managed && typeof status.requested_enabled === "boolean" && status.requested_enabled !== status.enabled;
   return `Stops charging at about 80% to protect the battery.${typeof status?.enabled !== "boolean" ? " Current state unknown."

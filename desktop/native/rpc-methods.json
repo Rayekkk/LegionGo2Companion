@@ -3,6 +3,7 @@
   "battery_get_controller_levels",
   "battery_get_status",
   "battery_release_control",
+  "battery_reset_charging_mode",
   "battery_set_enabled",
   "controller_get_diagnostics",
   "controller_get_status",
