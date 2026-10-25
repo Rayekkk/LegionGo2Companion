@@ -84,7 +84,6 @@ const CONTENTS = [
   "scripts/build-native.py",
   "scripts/verify-package.py",
   "scripts/package.mjs",
-  "gamescope",
   "pyudev",
   "dist",
 ];

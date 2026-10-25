@@ -60,7 +60,7 @@ def states():
         'firmware_get_status':{'stage':'image_validation','flash_available':False,'catalog_date':'2026-10-12','catalog_live':False,'installed_versions':None,'reason':'Device transfer is not enabled. Linux transport and recovery checks are pending.','job':{'id':'','phase':'idle','component':'','error':''}},
         'battery_get_status':{'success':True,'supported':True,'managed':False,'enabled':False,'capacity':75,'charging_status':'Discharging','current_mode':'Standard'},
         'battery_get_controller_levels':{'available':True,'left':80,'right':85},
-        'display_get_state':{'setup_done':True,'panel_mode':'pq','enabled':False,'edid_fix':True,'panel_desc':'Offline OLED fixture','gamescope_reachable':False,'reason':'Waiting for Gaming Mode'},
+        'display_get_state':{'steamos_update_needed':False,'edid_fix':True,'edid_patched':False,'edid_game_nits':0.0,'edid_reason':'Waiting for Gaming Mode'},
         'wifi_get_status':{'success':True,'connected':True,'settings':{'driver':'mt7921e','band_policy':'off'},'live':{'ssid':'Offline fixture','frequency':'5180 MHz','wifi_backend':'iwd'}},
         'updates_check':{'success':True,'current_version':'2.1.0','latest_version':'2.1.0','update_available':False,'download_available':False},
     }
