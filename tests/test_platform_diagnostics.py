@@ -65,7 +65,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
         plugin._client.close.assert_called_once()
 
     def test_unsafe_edid_and_recovery_log_transitions_without_poll_noise(self):
-        case = self.fixture(edid_fixture.NativeDisplayEdidTests)
+        case = self.fixture(edid_fixture.EdidFixTests)
         with patch.object(display, '_published_edid_is_safe', return_value=False):
             for _ in range(7): display.Plugin._edid_pass()
         self.assertEqual(len(self.events('display', 'edid_recovery')), 1)
@@ -77,7 +77,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertNotIn(str(case.edid), json.dumps(self.records))
 
     def test_failed_edid_intent_reports_stage_once_then_clears_on_recovery(self):
-        case = self.fixture(edid_fixture.NativeDisplayEdidTests)
+        case = self.fixture(edid_fixture.EdidFixTests)
         with patch.object(case.store, 'replace', side_effect=PermissionError('Fixture settings are read only')):
             for _ in range(4): display.Plugin._edid_pass()
         self.assertEqual(case.edid.read_bytes(), case.original)
@@ -90,7 +90,7 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertIn('ready', [row['context']['status'] for row in self.events('display', 'edid_recovery_store')])
 
     def test_foreign_edid_restore_reports_once_and_preserves_contents(self):
-        case = self.fixture(edid_fixture.NativeDisplayEdidTests)
+        case = self.fixture(edid_fixture.EdidFixTests)
         display.Plugin._edid_pass()
         case.edid.write_bytes(b'foreign connector bytes')
         for _ in range(7): self.assertTrue(display.Plugin._edid_restore())

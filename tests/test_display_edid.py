@@ -39,24 +39,7 @@ def edid_fixture(product=0x4301, luminance_code=100):
     return original, expected
 
 
-DISPLAY_STATES = (
-    ('no_mode_or_script', {}),
-    ('mode_without_setup', {'panel_mode': 'hybrid'}),
-    ('legacy_restart', {'panel_mode': 'pq', 'restart_pending': True}),
-    ('native_cleanup', {'native_support_detected': True, 'native_cleanup_pending': True}),
-    ('native_cleanup_error', {'native_support_detected': True, 'native_cleanup_pending': True,
-                              'native_cleanup_error': 'Could not remove the old script.'}),
-    ('native_restart', {'native_support_detected': True, 'native_restart_pending': True}),
-    ('native_complete', {'native_support_detected': True}),
-    ('pending_without_detection', {'native_cleanup_pending': True}),
-    ('native_after_interrupted_reset', {'native_support_detected': True,
-                                       'native_cleanup_pending': True,
-                                       'native_cleanup_error': 'Cleanup is retrying.',
-                                       'reset_in_progress': True}),
-)
-
-
-class NativeDisplayEdidTests(unittest.TestCase):
+class EdidFixTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -65,23 +48,13 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.original, self.expected = edid_fixture()
         self.edid.write_bytes(self.original)
         self.backup = self.root / 'edid-original.bin'
-        self.script = self.root / 'lenovo.legiongo2.oled.lua'
         self.store = AtomicSettingsManager('display_settings', str(self.root / 'settings'))
         self.state = dict(display.Plugin._state)
-        self.initial = dict(self.state, panel_mode=None, active_mode=None, setup_done=False,
-                            enabled=False, active=False, restart_pending=False,
-                            reset_in_progress=False, reset_restart_pending=False,
-                            settings_error='', native_support_detected=False,
-                            native_support_reason='', native_cleanup_pending=False,
-                            native_cleanup_error='', native_restart_pending=False,
-                            edid_fix=True, edid_patched=False, edid_game_nits=0.0,
-                            edid_reason='')
         self.published = self.edid
-        for name, value in {'settings': self.store, 'INSTALLED_SCRIPT': str(self.script),
-                            'EDID_BACKUP': str(self.backup)}.items():
+        for name, value in {'settings': self.store, 'EDID_BACKUP': str(self.backup)}.items():
             self.stack.enter_context(patch.object(display, name, value))
         for name, value in {'_state': self.state, '_edid_original': None, '_edid_path': '',
-                            '_session_retry_after': 0.0, '_session_note': ''}.items():
+                            '_session_retry_after': 0.0}.items():
             self.stack.enter_context(patch.object(display.Plugin, name, value))
         # Only X properties/session identity are mocked. Path validation, parsing,
         # conditional writes, original backups and settings commits stay real.
@@ -91,14 +64,11 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.stack.enter_context(patch.object(
             display, '_display_owner', return_value=self.edid.stat().st_uid))
         self.plugin = display.Plugin()
-        self.configure({})
+        self.configure()
 
-    def configure(self, fields, enabled=True):
-        self.state.clear()
-        self.state.update(self.initial, **fields)
-        self.state['edid_fix'] = enabled
-        self.saved = {**display.DEFAULT_SETTINGS, 'panel_mode': self.state['panel_mode'],
-                      'edid_fix': enabled, 'reset_in_progress': self.state['reset_in_progress']}
+    def configure(self, enabled=True):
+        self.state.update(edid_fix=enabled, edid_patched=False, edid_game_nits=0.0, edid_reason='')
+        self.saved = {'edid_fix': enabled, 'edid_write_pending': None, 'edid_patched_identity': None}
         self.store.replace(self.saved)
         self.edid.write_bytes(self.original)
         self.backup.unlink(missing_ok=True)
@@ -124,44 +94,34 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.assertEqual(display.Plugin._edid_path, str(path))
         self.assertTrue(self.state['edid_patched'])
         self.assertEqual(self.state['edid_game_nits'], round(50 * 2 ** (luminance_code / 32), 1))
-        self.assertFalse(self.script.exists())
         for offset in range(0, len(expected), 128):
             self.assertEqual(sum(expected[offset:offset + 128]) & 0xFF, 0)
         self.assertEqual(expected[126], 1)
         self.assertEqual(expected[128:], original[128:256], 'CTA HDR data is unchanged.')
 
-    def test_pass_patches_without_legacy_setup_through_native_handover(self):
-        for name, fields in DISPLAY_STATES:
-            with self.subTest(state=name):
-                self.configure(fields)
-                display.Plugin._edid_pass()
-                self.assert_patched()
-                self.assertEqual(self.persisted(), {**self.saved, 'edid_patched_identity': self.owned()})
-                for key, value in fields.items():
-                    self.assertEqual(self.state[key], value)
-                self.read_props.assert_called_once_with([display.ATOM_EDID_PATH])
-                display.Plugin._edid_pass()
-                self.assert_patched()
+    def test_pass_patches_the_published_edid_and_records_what_it_owns(self):
+        display.Plugin._edid_pass()
+        self.assert_patched()
+        self.assertEqual(self.persisted(), {**self.saved, 'edid_patched_identity': self.owned()})
+        self.read_props.assert_called_once_with([display.ATOM_EDID_PATH])
+        display.Plugin._edid_pass()
+        self.assert_patched()
 
-    def test_toggle_persists_and_restores_independently_of_native_handover(self):
-        for name, fields in DISPLAY_STATES:
-            with self.subTest(state=name):
-                self.configure(fields, enabled=False)
-                result = asyncio.run(self.plugin.set_edid_fix(True))
-                self.assertTrue(result['edid_fix'])
-                self.assert_patched()
-                self.assertEqual(self.persisted(), {**self.saved, 'edid_fix': True, 'edid_patched_identity': self.owned()})
-                result = asyncio.run(self.plugin.set_edid_fix(False))
-                self.assertFalse(result['edid_fix'])
-                self.assertFalse(result['edid_patched'])
-                self.assertEqual(self.persisted(), self.saved)
-                self.assertEqual(self.edid.read_bytes(), self.original)
-                self.assertIsNone(display.Plugin._edid_original)
-                self.assertFalse(self.backup.exists())
-                self.assertFalse(self.script.exists())
-
+    def test_toggle_persists_and_restores_the_original(self):
+        self.configure(enabled=False)
+        result = asyncio.run(self.plugin.set_edid_fix(True))
+        self.assertTrue(result['edid_fix'])
+        self.assert_patched()
+        self.assertEqual(self.persisted(), {**self.saved, 'edid_fix': True, 'edid_patched_identity': self.owned()})
+        result = asyncio.run(self.plugin.set_edid_fix(False))
+        self.assertFalse(result['edid_fix'])
+        self.assertFalse(result['edid_patched'])
+        self.assertEqual(self.persisted(), self.saved)
+        self.assertEqual(self.edid.read_bytes(), self.original)
+        self.assertIsNone(display.Plugin._edid_original)
+        self.assertFalse(self.backup.exists())
+        
     def test_disabled_pass_restores_only_the_owned_edid(self):
-        self.configure({'native_support_detected': True, 'native_cleanup_pending': True})
         display.Plugin._edid_pass()
         self.assert_patched()
         self.state['edid_fix'] = False
@@ -174,7 +134,6 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.assertFalse(self.persisted()['edid_fix'])
 
     def test_disabling_preserves_an_edid_replaced_by_the_connector(self):
-        self.configure({'native_support_detected': True})
         display.Plugin._edid_pass()
         replacement, _ = edid_fixture(product=0x9999, luminance_code=128)
         self.edid.write_bytes(replacement)
@@ -212,7 +171,7 @@ class NativeDisplayEdidTests(unittest.TestCase):
         for failure in (PermissionError('read access denied'), OSError('read I/O failed')):
             for phase in ('open', 'read'):
                 with self.subTest(failure=type(failure).__name__, phase=phase):
-                    self.configure({})
+                    self.configure()
                     display.Plugin._edid_pass()
                     self.assert_patched()
                     class FailedRead:
@@ -252,8 +211,7 @@ class NativeDisplayEdidTests(unittest.TestCase):
         self.assertFalse(self.state['edid_patched'])
         self.assertEqual(self.backup.read_bytes(), self.original)
 
-    def test_dock_and_undock_follow_new_published_paths_without_setup(self):
-        self.configure({'native_support_detected': True, 'native_restart_pending': True})
+    def test_dock_and_undock_follow_new_published_paths(self):
         display.Plugin._edid_pass()
         self.assert_patched()
         external = self.root / 'published-external-edid.bin'
@@ -274,18 +232,11 @@ class NativeDisplayEdidTests(unittest.TestCase):
                          'Restoration must not write to the previous connector path.')
         self.assertFalse(self.backup.exists())
 
-    def test_legacy_reset_still_pauses_edid_until_reset_finishes(self):
-        self.configure({'reset_in_progress': True})
-        display.Plugin._edid_pass()
-        self.assertEqual(self.edid.read_bytes(), self.original)
-        self.assertFalse(self.backup.exists())
-        self.read_props.assert_not_called()
-
 
 class PublishedEdidOpenTests(unittest.TestCase):
     """Root opens of the X-published path never follow links, block or over-read."""
-    setUp = NativeDisplayEdidTests.setUp
-    configure = NativeDisplayEdidTests.configure
+    setUp = EdidFixTests.setUp
+    configure = EdidFixTests.configure
 
     def run_bounded(self, fn, *args):
         result = []
@@ -328,7 +279,7 @@ class PublishedEdidOpenTests(unittest.TestCase):
         checked = display._published_edid_is_safe
         for swap in ('fifo', 'symlink'):
             with self.subTest(swap=swap):
-                self.configure({})
+                self.configure()
                 def safe_then_swap(path, opened_stat=None):
                     verdict = checked(path, opened_stat)
                     if opened_stat is None and not os.path.islink(path) and os.path.isfile(path):
@@ -344,9 +295,9 @@ class PublishedEdidOpenTests(unittest.TestCase):
 
 
 class DisplayWriteRecoveryTests(unittest.TestCase):
-    setUp = NativeDisplayEdidTests.setUp
-    configure = NativeDisplayEdidTests.configure
-    assert_patched = NativeDisplayEdidTests.assert_patched
+    setUp = EdidFixTests.setUp
+    configure = EdidFixTests.configure
+    assert_patched = EdidFixTests.assert_patched
 
     def interrupt_patch(self, rollback_fails=True, restore=False):
         real_open = display._open_regular
@@ -430,7 +381,7 @@ class DisplayWriteRecoveryTests(unittest.TestCase):
         for same_path in (False, True):
             for restart in (False, True):
                 with self.subTest(same_path=same_path, restart=restart):
-                    self.configure({})
+                    self.configure()
                     target = self.replace_with_trimmed(same_path, restart)
                     display.Plugin._edid_pass(); display.Plugin._edid_pass()
                     self.assertFalse(self.state['edid_patched'])
@@ -441,7 +392,7 @@ class DisplayWriteRecoveryTests(unittest.TestCase):
     def test_an_interrupted_first_patch_never_hands_its_backup_to_a_replaced_file(self):
         for restart in (False, True):
             with self.subTest(restart=restart):
-                self.configure({})
+                self.configure()
                 self.interrupt_patch()  # first patch: no identity existed before it
                 self.assertIsNotNone(self.store.getSetting('edid_write_pending'))
                 staged = self.root / 'staged.bin'
@@ -637,13 +588,6 @@ class EdidParsingTests(unittest.TestCase):
         self.assertIsNone(display._cta_max_luminance(undefined))
         self.assertIsNone(display._cta_max_luminance(undefined[:128]))
 
-    def test_panel_id_is_decoded_only_from_a_valid_header(self):
-        original, _ = edid_fixture()
-        self.assertEqual(display._decode_panel_id(original), ('SDC', 0x4301))
-        self.assertIn(display._decode_panel_id(original), display.KNOWN_PANELS)
-        self.assertIsNone(display._decode_panel_id(original[:1] + b'\0' + original[2:]))
-        self.assertIsNone(display._decode_panel_id(original[:127]))
-
 
 class MalformedEdidTests(unittest.TestCase):
     def test_truncated_cta_data_block_is_no_data_not_an_exception(self):
@@ -658,36 +602,6 @@ class MalformedEdidTests(unittest.TestCase):
         base[0:8] = bytes([0, 255, 255, 255, 255, 255, 255, 0])
         base[0x7E] = 1
         self.assertIsNone(display._cta_max_luminance(bytes(base) + bytes(cta)))
-
-    def test_failing_edid_pass_does_not_starve_hybrid_or_repeat_the_gate(self):
-        import asyncio
-        counts = {"gate": 0, "hybrid": 0}
-
-        def gate():
-            counts["gate"] += 1
-            return False
-
-        def hybrid():
-            counts["hybrid"] += 1
-
-        def edid():
-            raise IndexError("index out of range")
-
-        state = dict(display.Plugin._state, active_mode="hybrid")
-
-        async def run():
-            task = asyncio.create_task(display.Plugin()._loop(""))
-            await asyncio.sleep(1.3)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        with patch.object(display.Plugin, "_state", state),                 patch.object(display.Plugin, "_refresh_setup", side_effect=lambda: None),                 patch.object(display.Plugin, "_refresh_gate", side_effect=gate),                 patch.object(display.Plugin, "_hybrid_pass", side_effect=hybrid),                 patch.object(display.Plugin, "_edid_pass", side_effect=edid),                 patch.object(display.Plugin, "native_display_active", return_value=True):
-            asyncio.run(run())
-        self.assertGreater(counts["hybrid"], 0)
-        self.assertLessEqual(counts["gate"], 1)
 
 
 if __name__ == '__main__':
