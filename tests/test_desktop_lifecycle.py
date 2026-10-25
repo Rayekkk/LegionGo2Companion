@@ -182,7 +182,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         plugin = main.Plugin()
         plugin._check_guard = AsyncMock()
         plugin._tdp = Mock(set_panel_active=AsyncMock(), get_settings=AsyncMock(return_value={'spl': 15000}))
-        plugin._display = Mock(get_state=AsyncMock(return_value={'enabled': True}), restart_session=AsyncMock())
+        plugin._display = Mock(get_state=AsyncMock(return_value={'edid_fix': True}))
         return plugin
 
     async def test_decky_and_desktop_share_one_real_fan_state_and_revision(self):
@@ -228,21 +228,6 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         plugin._tdp.set_panel_active.assert_awaited_with(False)
         with self.assertRaises(ValueError):
             await plugin._desktop_panel_active('yes')
-
-    async def test_no_gamescope_never_restarts_desktop_session(self):
-        plugin = self.plugin()
-        with patch.object(main.display_backend, '_gamescope_start_time', return_value=None):
-            result = await plugin._desktop_display_restart()
-            self.assertIn('Gaming Mode', result['restart_error'])
-        plugin._display.restart_session.assert_not_awaited()
-
-    async def test_gamescope_restart_retains_existing_rpc_guards(self):
-        plugin = self.plugin()
-        plugin._closing = True
-        with patch.object(main.display_backend, '_gamescope_start_time', return_value=123):
-            with self.assertRaises(RuntimeError):
-                await plugin._desktop_display_restart()
-        plugin._display.restart_session.assert_not_awaited()
 
     async def test_start_installs_once_and_unload_removes_session_only(self):
         plugin = self.plugin()

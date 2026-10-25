@@ -2,21 +2,17 @@
 # Copyright (c) 2026 Rayekkk
 # https://github.com/Rayekkk/LeGo2BrightnessFix
 
-"""Legacy display support and independent EDID correction under gamescope.
+"""HDR brightness fix for games under gamescope.
 
-Native Legion Go 2 support in gamescope retires only the Lua/brightness/Hybrid
-workaround; the EDID correction stays independent of it.
+DXVK's vendored libdisplay-info discards the whole EDID when it refuses a
+DisplayID 2.0 block, so games see placeholder metadata (1499/799 nits, P3)
+instead of the panel's 1107/476 nits. Dropping the DisplayID extension from
+gamescope's published copy fixes that; DXVK never reads DisplayID. A stopgap
+until DXVK is fixed (Plugin._edid_pass).
 
-1. Brightness (Plugin._refresh_gate): in PQ the Samsung AMS881KB01-0 ignores
-   the eDP AUX backlight (millinits, max 471000) that Steam's slider writes.
-   With no HDR content nothing else listens, so the level is forwarded to
-   GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS, which uses the same unit.
-
-2. EDID (Plugin._edid_pass): DXVK's vendored libdisplay-info discards the whole
-   EDID when it refuses a DisplayID 2.0 block, so games see placeholder metadata
-   (1499/799 nits, P3) instead of the panel's 1107/476 nits. Dropping the
-   DisplayID extension from gamescope's published copy fixes that; DXVK never
-   reads DisplayID. A stopgap until DXVK is fixed.
+SteamOS 3.9 drives the Legion Go 2 panel itself (gamescope's native profile).
+Companion 1.0 to 2.3.0 shipped its own display script for older SteamOS; every
+start removes what is left of it (_remove_old_scripts, _drop_retired_settings).
 """
 
 import asyncio
@@ -24,16 +20,12 @@ import copy
 from diagnostics import event as diagnostic_event, transition as diagnostic_transition
 import errno
 import functools
-import glob
 import hashlib
-import math
 import os
 import posixpath
 from system_process import PYTHON, run, system_env as _system_env
-import select
 import signal
 import stat
-import struct
 import subprocess
 import threading
 import time
@@ -55,28 +47,10 @@ LOG = "[lego2brightnessfix]"
 
 
 # gamescope publishes these on the root window of its Xwayland display.
-ATOM_SDR_NITS = "GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS"
-ATOM_HDR_OUT = "GAMESCOPE_HDR_OUTPUT_FEEDBACK"
-ATOM_HDR_APP = "GAMESCOPE_COLOR_APP_WANTS_HDR_FEEDBACK"
 ATOM_EDID_PATH = "GAMESCOPE_DISPLAY_EDID_PATH"
-ATOM_IS_EXTERNAL = "GAMESCOPE_DISPLAY_IS_EXTERNAL"
+ATOM_IS_EXTERNAL = "GAMESCOPE_DISPLAY_IS_EXTERNAL"  # only on the gamescope control root
 
-# Hybrid drives these two. HDR_ENABLED switches the output between PQ and gamma
-# 2.2 live. The Vulkan layer reads HDR_OUTPUT_FEEDBACK once per surface and hides
-# HDR formats when it is 0; gamescope publishes it as (output HDR OR this debug
-# flag), so holding the flag at 1 lets games ask for HDR while still in gamma 2.2.
-ATOM_HDR_ENABLED = "GAMESCOPE_DISPLAY_HDR_ENABLED"
-ATOM_FORCE_HDR_SUPPORT = "GAMESCOPE_DEBUG_FORCE_HDR_SUPPORT"
-
-WATCHED_ATOMS = (
-    ATOM_SDR_NITS,
-    ATOM_HDR_OUT,
-    ATOM_HDR_APP,
-    ATOM_EDID_PATH,
-    ATOM_IS_EXTERNAL,
-    ATOM_HDR_ENABLED,
-    ATOM_FORCE_HDR_SUPPORT,
-)
+WATCHED_ATOMS = (ATOM_EDID_PATH,)
 _prop_cache: dict[str, str] = {}
 _prop_cache_display: str | None = None
 _prop_cache_ready = False
@@ -88,142 +62,50 @@ DISPLAY = ":0"          # replaced at startup by _pick_display()
 X11_SOCKET_DIR = "/tmp/.X11-unix"
 DISPLAY_FALLBACK = (":0", ":1")
 
-# sysfs_notify() on `actual_brightness` wakes us whenever the level is set, so
-# nothing polls. It is only the doorbell: it lags (and can read the minimum
-# mid-transition), so the value always comes from `brightness`.
-NOTIFY_ATTR = "actual_brightness"
-
-# Poll rate only where the kernel notification is unavailable.
-POLL_FALLBACK_S = 0.25
-
-# A fresh gate read costs an xprop spawn; the gate only moves when a game starts
-# or stops, so a second or two late is fine. The EDID check rides along.
+# gamescope rewrites the published EDID on every connector change (dock, undock),
+# so the check repeats. The path comes from the watcher's cache, not a spawn.
 GATE_INTERVAL_S = 2.0
 WATCHER_RECOVERY_S = 30.0  # Longer than a Gamescope restart.
 # Desktop Mode has no gamescope atoms: while no gamescope-wl runs, X probes back
 # off (doubling) to this; a returning gamescope-wl is probed at once.
 ABSENT_PROBE_MAX_S = 32.0
 
-# How long HDR content can sit on a gamma 2.2 output before Hybrid switches to
-# PQ. Served from the watcher's cache; only live admission reads spawn xprop.
-HYBRID_INTERVAL_S = 0.5
-HARDWARE_RETRY_S = 10.0
-
-# Enter PQ at once, but leave it only after continuous SDR (swapchain rebuilds and
-# loading screens flash SDR) and a minimum PQ residency. Both ride the Hybrid poll.
-HYBRID_PQ_MIN_HOLD_S = 3.0
-HYBRID_SDR_DEBOUNCE_S = 2.0
-
-# Each HDR_ENABLED write is a blanking modeset: after a few corrections that did
-# not stick, stand off rather than strobe the panel against another writer.
-HDR_FIGHT_LIMIT = 4
-HDR_BACKOFF_S = 60.0
-HDR_FIGHT_WINDOW_S = 30.0  # corrections to one target closer than this are one argument
-
-# Panels known to ignore the backlight while in PQ, by EDID manufacturer and
-# product code. Keeping this a list rather than "any internal panel" is the whole
-# safety story for the brightness half: on a panel that does honour the
-# backlight, forwarding the level a second time would dim the image twice.
-KNOWN_PANELS = {
-    ("SDC", 0x4301): "Lenovo Legion Go 2 (Samsung AMS881KB01-0)",
-}
-
-# gamescope's own default for the atom, used if we somehow cannot read the value
-# that was there before we touched it.
-FALLBACK_BASELINE_NITS = 203.0
-
-# gamescope reads $XDG_CONFIG_HOME/gamescope/scripts only at startup, and every
-# mode depends on the script's EOTF, so installing it gates the plugin. As root,
-# _bind_script_dir() rebinds these paths to gamescope's user and writes go through
-# display_script_io.py as that user. LEGACY_SCRIPT_DIR (/root, where 2.1.0 and
-# earlier installed it unseen) is only cleaned.
+# Companion 1.0-2.3.0 installed one of these under SCRIPT_NAME in gamescope's
+# user script dir (2.1.0 and earlier also, unseen, under /root). SHA-256 of the
+# LF bytes of the PQ and gamma 2.2 scripts; nothing else there is ours to remove.
 SCRIPT_NAME = "lenovo.legiongo2.oled.lua"
+OLD_SCRIPT_SHA256 = frozenset({
+    "eea882283c9d3b13456aba526750393ad80b4cba96593741dbd3c393e982a13a",  # pq
+    "7c6781dfb699c042f654ab876a6e37bd224a0edb3f27f48d3a09b1c71ca29e04",  # gamma22
+})
+# As root, _bind_script_dir() rebinds these paths to gamescope's user and file
+# changes go through display_script_io.py as that user.
 LEGACY_SCRIPT_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
     "gamescope", "scripts",
 )
 SCRIPT_DIR = LEGACY_SCRIPT_DIR
 INSTALLED_SCRIPT = os.path.join(SCRIPT_DIR, SCRIPT_NAME)
-SCRIPT_USER = None  # (config dir, uid, gid) that script writes run as
+SCRIPT_USER = None  # (config dir, uid, gid) that script changes run as
 SCRIPT_IO = os.path.join(PLUGIN_DIR, "display_script_io.py")
 _script_binding = None  # what SCRIPT_DIR was resolved from
 
-# Three ways to run this panel, none of them free:
-#
-#   pq       absolute encoding, the panel's full 1100 nit peak, but it ignores
-#            the hardware brightness control, so dimming can only scale the
-#            content down and the near-black floor stays put.
-#   gamma22  the hardware control works again, black stays black at any level,
-#            but HDR is tone mapped by gamescope against the ~471 nit ceiling
-#            of the eDP AUX luminance control.
-#   hybrid   gamma 2.2 by default, PQ only while a game is presenting HDR.
-#
-# Hybrid deliberately installs the PQ script. GetNativeColorimetry() only ever
-# selects PQ output when IsHDR10() holds, and that needs eotf = pq in the display
-# definition - a gamma22 script would pin the output to gamma 2.2 forever and no
-# atom could move it. So the script says PQ and the runtime atom decides.
-MODE_PQ = "pq"
-MODE_G22 = "gamma22"
-MODE_HYBRID = "hybrid"
-MODES = (MODE_PQ, MODE_G22, MODE_HYBRID)
-
-BUNDLED_SCRIPTS = {
-    MODE_PQ: os.path.join(PLUGIN_DIR, "gamescope", "lenovo.legiongo2.oled.pq.lua"),
-    MODE_G22: os.path.join(PLUGIN_DIR, "gamescope",
-                           "lenovo.legiongo2.oled.gamma22.lua"),
-}
-MODE_SCRIPT = {MODE_PQ: MODE_PQ, MODE_G22: MODE_G22, MODE_HYBRID: MODE_PQ}
-
-# The PQ script every release up to 2.2.0 installed under SCRIPT_NAME (still the
-# bundled one today). Once the bundled PQ changes it must stay recognisable:
-# treating it as third-party would overwrite the user's real .backup.
-LEGACY_SCRIPT_SHA256 = {
-    "eea882283c9d3b13456aba526750393ad80b4cba96593741dbd3c393e982a13a": MODE_PQ,
-}
-
-# Rebound by _select_mode() only, so the mode choice lives in one place.
-BUNDLED_SCRIPT = BUNDLED_SCRIPTS[MODE_PQ]
-
-
-def _select_mode(mode) -> str:
-    """Point the script helpers at the variant this mode needs."""
-    global BUNDLED_SCRIPT
-    mode = mode if mode in MODES else MODE_PQ
-    BUNDLED_SCRIPT = BUNDLED_SCRIPTS[MODE_SCRIPT[mode]]
-    return mode
-
-
-# The original bytes must outlive a reload, so uninstall can still restore them.
-EDID_BACKUP = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "edid-original.bin")
+# The original bytes must outlive a reload, so turning the fix off can still
+# restore them. Root reads them back, so they live outside the settings folder
+# Decky hands to the user; 2.3.0 and earlier kept them in OLD_EDID_BACKUP.
+EDID_BACKUP = "/var/lib/legiongo2companion/edid-original.bin"
+OLD_EDID_BACKUP = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "edid-original.bin")
 
 EDID_BLOCK = 128
+EDID_HEADER = b"\x00\xff\xff\xff\xff\xff\xff\x00"
 EXT_TAG_CTA = 0x02
 EXT_TAG_DISPLAYID = 0x70
-REINSTALL_ATTEMPTS = 3  # Starts that may try to put back a script our uninstall removed.
 
-# panel_mode stays None (setup screen) until the user picks: no mode is a safe default.
+# Every other key in display_settings.json belonged to the retired display script.
 DEFAULT_SETTINGS = {
-    "enabled": True,
     "edid_fix": True,
-    "panel_mode": None,
-    "active_mode": None,
-    "brightness_baseline": None,
-    "brightness_baseline_session": None,
-    "hdr_baseline": None,
-    "hdr_baseline_session": None,
-    "reset_in_progress": False,
-    "reset_session": None,
-    "native_retired": False,
-    "native_cleanup": None,
-    "native_restart_session": None,
-    "native_cleanup_note": "",
     "edid_write_pending": None,
     "edid_patched_identity": None,
-    "script_reinstall": False,  # our uninstall removed the script; the next start puts it back
-    "script_reinstall_attempts": None,  # starts that tried; REINSTALL_ATTEMPTS failures give up
-    # What the running session had loaded when it was removed: {"session", "sha256", "restart_pending"};
-    # after a silent reinstall, {"session", "sha256"} of the bytes that session still runs.
-    "script_reinstall_loaded": None,
 }
 
 settings = SettingsManager(
@@ -238,40 +120,8 @@ _offload = functools.partial(module_runtime.offload, 'display')
 
 # -- EDID parsing --
 
-def _read_internal_edid() -> bytes:
-    """Raw EDID of the internal panel, or b'' when there is none to read."""
-    for path in sorted(glob.glob("/sys/class/drm/card*-eDP-*/edid")):
-        try:
-            with _open_regular(path) as f:
-                data = _read_capped(f)
-            if len(data) >= EDID_BLOCK:
-                return data
-        except OSError:
-            continue
-    return b""
-
-
-def _decode_panel_id(edid: bytes):
-    """(manufacturer, product code) from the EDID base block, or None."""
-    if len(edid) < EDID_BLOCK or edid[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
-        return None
-    packed = (edid[8] << 8) | edid[9]
-    letters = "".join(
-        chr(((packed >> shift) & 0x1F) + ord("A") - 1) for shift in (10, 5, 0)
-    )
-    product = edid[10] | (edid[11] << 8)
-    return letters, product
-
-
-def _identify_panel():
-    """(matched, description). `matched` gates the brightness half."""
-    ident = _decode_panel_id(_read_internal_edid())
-    if ident is None:
-        return False, "no internal panel EDID"
-    name = KNOWN_PANELS.get(ident)
-    if name:
-        return True, name
-    return False, f"unrecognised panel {ident[0]} 0x{ident[1]:04X}"
+def _valid_edid(data) -> bool:
+    return bool(data) and len(data) % EDID_BLOCK == 0 and data[:8] == EDID_HEADER
 
 
 def _blocks(edid: bytes):
@@ -340,67 +190,6 @@ def _strip_displayid(edid: bytes):
     return bytes(out)
 
 
-# -- Backlight --
-
-def _find_backlight() -> str:
-    """Directory of the internal panel's backlight, preferring the amdgpu one."""
-    candidates = sorted(glob.glob("/sys/class/backlight/*"))
-    for path in candidates:
-        if os.path.basename(path).startswith("amdgpu_bl"):
-            return path
-    return candidates[0] if candidates else ""
-
-
-def _read_int(path: str):
-    try:
-        with open(path) as f:
-            return int(f.read().strip())
-    except (OSError, ValueError):
-        return None
-
-
-def _open_notify(bl_dir: str):
-    """File descriptor armed for the kernel's change notification, or None.
-
-    sysfs only reports a change relative to a completed read, so the attribute
-    has to be read once up front to arm it.
-    """
-    path = os.path.join(bl_dir, NOTIFY_ATTR)
-    fd = None
-    try:
-        fd = os.open(path, os.O_RDONLY)
-        os.read(fd, 64)
-        return fd
-    except OSError:
-        if fd is not None:
-            os.close(fd)
-        return None
-
-
-def _wait_for_change(fd, timeout_s: float) -> None:
-    """Block until the backlight changes or `timeout_s` elapses.
-
-    Falls back to a short sleep where the notification is not available, which
-    turns the caller back into a poll loop without needing a second code path.
-    """
-    timeout_s = max(0.0, timeout_s)
-    if fd is None:
-        time.sleep(min(timeout_s, POLL_FALLBACK_S))
-        return
-    poller = select.poll()
-    poller.register(fd, select.POLLPRI | select.POLLERR)
-    try:
-        if poller.poll(timeout_s * 1000.0):
-            # Re-arm: the notification only fires once per completed read.
-            os.lseek(fd, 0, os.SEEK_SET)
-            try:
-                os.read(fd, 64)
-            except OSError:
-                pass
-    finally:
-        poller.unregister(fd)
-
-
 # -- gamescope atoms --
 
 def _display_owner(display=None):
@@ -444,9 +233,9 @@ def _is_root() -> bool:
     return get_euid is not None and get_euid() == 0
 
 
-def _run_xprop(args, display, timeout, check=False, text=True):
-    return run(_xprop_command(args), timeout, env=_xprop_env(display), stdin=None, check=check,
-               capture_output=True, text=text, **_xprop_user(display))
+def _run_xprop(args, display, timeout):
+    return run(_xprop_command(args), timeout, env=_xprop_env(display), stdin=None,
+               capture_output=True, text=True, **_xprop_user(display))
 
 
 def _xprop_user(display=None) -> dict:
@@ -504,21 +293,11 @@ def _cached_props(names) -> dict | None:
     with _prop_cache_lock:
         if not _prop_cache_ready or _prop_cache_display != DISPLAY:
             return None
-        props = {name: _prop_cache[name] for name in names if name in _prop_cache}
-        # Same rule as _read_props_uncached: the watcher replays HDR_APP as
-        # "not found" until the first HDR content, which on the internal panel is SDR.
-        if (ATOM_HDR_APP in names and ATOM_HDR_APP not in props
-                and _as_int(_prop_cache.get(ATOM_IS_EXTERNAL)) == 0):
-            props[ATOM_HDR_APP] = "0"
-        return props
+        return {name: _prop_cache[name] for name in names if name in _prop_cache}
 
 
 def _read_props_uncached(names, display=None) -> dict:
-    """Raw text of each atom on the gamescope root window, in one xprop call.
-
-    Everything this plugin needs comes from the same read, so the string atom
-    rides along with the numeric ones rather than costing a second process.
-    """
+    """Raw text of each atom on the gamescope root window, in one xprop call."""
     try:
         result = _run_xprop(["-root"] + list(names), display, 3)
     except (OSError, subprocess.SubprocessError):
@@ -526,18 +305,10 @@ def _read_props_uncached(names, display=None) -> dict:
     if result.returncode != 0:  # partial output proves neither ownership nor absence
         return {}
     values = {}
-    hdr_app_absent = False
     for line in result.stdout.splitlines():
-        if line.partition(":")[0] == ATOM_HDR_APP and line.endswith(("not found.", "no such atom on any window.")):
-            hdr_app_absent = True
         for name in names:
             if line.startswith(name + "(") and "= " in line:
                 values[name] = line.split("= ", 1)[1].strip()
-    # Gamescope publishes HDR_APP only on change, so before the first HDR
-    # transition it is missing: on the internal panel that means SDR content.
-    if (hdr_app_absent and ATOM_HDR_APP not in values
-            and _as_int(values.get(ATOM_IS_EXTERNAL)) == 0):
-        values[ATOM_HDR_APP] = "0"
     return values
 
 
@@ -619,13 +390,6 @@ async def _watch_properties() -> None:
         await asyncio.sleep(0.5)
 
 
-def _as_int(raw):
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
 def _as_path(raw):
     """The quoted value of a UTF8_STRING property, or None."""
     if not raw or '"' not in raw:
@@ -675,56 +439,9 @@ def _pick_display() -> bool:
     return True
 
 
-def _as_float(raw):
-    """gamescope stores floats bit-cast into a CARDINAL."""
-    raw = _as_int(raw)
-    return None if raw is None else struct.unpack("f", struct.pack("I", raw & 0xFFFFFFFF))[0]
+# -- files --
 
-
-def _float_raw(value: float) -> int:
-    """A float the way gamescope stores it: bit-cast into a CARDINAL."""
-    return struct.unpack("I", struct.pack("f", float(value)))[0]
-
-
-def _write_atom_int(name: str, value: int) -> bool:
-    """Set a CARDINAL atom on the root window gamescope is listening on."""
-    try:
-        _run_xprop(["-root", "-f", name, "32c", "-set", name, str(int(value))],
-                   None, 3, check=True, text=False)
-        return True
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def _write_nits(nits: float) -> bool:
-    return _write_atom_int(ATOM_SDR_NITS, _float_raw(nits))
-
-
-def _millinits_to_nits(raw: int) -> float:
-    """Map the kernel's eDP AUX millinits to gamescope's nits."""
-    return raw / 1000.0
-
-
-_script_bytes_cache = {}
-
-
-def _read_script_bytes(path: str):
-    try:
-        info = os.stat(path, follow_symlinks=False)
-        signature = (info.st_dev, info.st_ino, info.st_uid, info.st_size,
-                     info.st_mtime_ns, info.st_ctime_ns)
-    except OSError:
-        _script_bytes_cache.pop(path, None)
-        return None
-    cached = _script_bytes_cache.get(path)
-    if cached is not None and cached[0] == signature:
-        return cached[1]
-    data = _read_bytes(path)
-    _script_bytes_cache[path] = (signature, data)
-    return data
-
-
-# An EDID is at most 256 blocks of 128 bytes; the Lua scripts are a few KiB.
+# An EDID is at most 256 blocks of 128 bytes; the old Lua scripts are a few KiB.
 MAX_FILE_BYTES = 32 * 1024
 
 
@@ -773,96 +490,86 @@ def _read_bytes(path: str):
         return None
 
 
-def _script_variant(data):
-    """Return the EOTF variant we shipped, ignoring checkout line endings."""
-    if data is None:
-        return None
-    normalised = data.replace(b"\r\n", b"\n")
-    for mode, path in BUNDLED_SCRIPTS.items():
-        bundled = _read_script_bytes(path)
-        if bundled is not None and normalised == bundled.replace(b"\r\n", b"\n"):
-            return mode
-    # Release zips come from a Windows checkout or Linux CI: only line endings may
-    # differ, so an edited script never matches the legacy allowlist.
-    return (LEGACY_SCRIPT_SHA256.get(hashlib.sha256(data).hexdigest())
-            or LEGACY_SCRIPT_SHA256.get(hashlib.sha256(normalised).hexdigest()))
-
-
-def _is_our_script(data) -> bool:
-    """True for any variant we ship, so a mode swap never backs up our own script."""
-    return _script_variant(data) is not None
-
-
-def _loaded_script_variant(started=None):
-    """Variant the current gamescope could have loaded, or None if unknowable.
-
-    A file written after gamescope started cannot describe the running session.
-    The Plugin class remembers the last known answer across later mode changes,
-    so switching pq -> gamma22 -> pq does not ask for a meaningless restart.
-    """
-    started = _gamescope_start_time() if started is None else started
-    started = None if started is None else _session_wall_clock(started)
-    if started is None:
-        return None
+def _write_file_atomically(path: str, data: bytes) -> bool:
+    """Durably replace a regular file without following staging/target links."""
     try:
-        if os.path.getmtime(INSTALLED_SCRIPT) > started:
-            return None
+        # Gamescope runs unprivileged and must be able to read a restored script.
+        safe_settings._atomic_write_bytes(path, data, mode=0o644)
+        return True
+    except (OSError, safe_settings.UnsafeSettingsPath):
+        return False
+
+
+# -- the original EDID, kept by root --
+
+def _private_dir(create: bool = False) -> str:
+    """EDID_BACKUP's directory, only while it is ours alone: a real directory, our uid, no group/other access."""
+    directory = os.path.dirname(EDID_BACKUP)
+    if create:
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            pass
+    info = os.lstat(directory)
+    get_euid = getattr(os, "geteuid", None)  # absent on the Windows test host
+    if not stat.S_ISDIR(info.st_mode) or (
+            get_euid is not None and (info.st_uid != get_euid() or info.st_mode & 0o077)):
+        raise OSError(errno.EPERM, "unsafe EDID backup directory", directory)
+    return directory
+
+
+def _read_edid_backup(path: str, *, owned: bool):
+    """A saved original EDID, or None. `owned` also requires the file to be ours."""
+    try:
+        with _open_regular(path) as handle:
+            get_euid = getattr(os, "geteuid", None)
+            if owned and get_euid is not None and os.fstat(handle.fileno()).st_uid != get_euid():
+                return None
+            data = _read_capped(handle)
     except OSError:
         return None
-    return _script_variant(_read_script_bytes(INSTALLED_SCRIPT))
+    return data if _valid_edid(data) else None
 
 
-def _script_status() -> tuple:
-    """(installed, note). `installed` means our exact script is already in place."""
-    ours = _read_script_bytes(BUNDLED_SCRIPT)
-    if ours is None:
-        return False, "the bundled display script is missing from the plugin"
-    theirs = _read_script_bytes(INSTALLED_SCRIPT)
-    if theirs is None:
-        return False, "no display script installed for this panel"
-    if theirs == ours:
-        return True, "display script installed"
-    return False, "a different display script is installed and will be replaced"
+def _save_edid_backup(data: bytes) -> bool:
+    try:
+        _private_dir(create=True)
+        safe_settings._atomic_write_bytes(EDID_BACKUP, data)  # 0600
+        return True
+    except (OSError, safe_settings.UnsafeSettingsPath):
+        return False
 
 
-def _install_script() -> tuple:
-    """Put our script in place, backing up anything already there. (ok, note)."""
-    ours = _read_script_bytes(BUNDLED_SCRIPT)
-    if ours is None:
-        return False, "the bundled display script is missing from the plugin"
-    if not _bind_script_dir():
-        return False, "could not find the Gaming Mode user; open Gaming Mode and try again"
-    _remove_legacy_scripts()
-    if SCRIPT_USER is None:
-        try:
-            os.makedirs(SCRIPT_DIR, exist_ok=True)
-        except OSError as e:
-            diagnostic_event('display', 'script_install_failed', level='error', error=e, stage='directory', repeat=60)
-            return False, f"could not create {SCRIPT_DIR}: {e}"
+def _load_edid_backup():
+    """The saved original EDID; a copy left in the settings folder by 2.3.0 or earlier moves to EDID_BACKUP."""
+    try:
+        _private_dir()
+        data = _read_edid_backup(EDID_BACKUP, owned=True)
+    except OSError:
+        data = None
+    old = _read_edid_backup(OLD_EDID_BACKUP, owned=False)
+    if old is None:
+        return data
+    if data is None:
+        if not _save_edid_backup(old):
+            return old  # The old copy stays until it is safely moved.
+        data = old
+        decky.logger.info(f"{LOG} moved the original EDID out of the settings folder")
+    try:
+        os.unlink(OLD_EDID_BACKUP)
+    except OSError:
+        pass
+    return data
 
-    existing = _read_script_bytes(INSTALLED_SCRIPT)
-    if existing == ours:
-        # Rewriting would move the mtime that _restart_needed() reads.
-        return True, "installed"
 
-    if existing is not None and not _is_our_script(existing):
-        # Back up a foreign script; never our own variant, which would bury it.
-        backup = INSTALLED_SCRIPT + ".backup"
-        if not _script_write(backup, existing):
-            return False, "could not back up the existing display script"
-
-    if not _script_write(INSTALLED_SCRIPT, ours):
-        return False, f"could not write {INSTALLED_SCRIPT}"
-    return True, "installed"
-
+# -- gamescope session --
 
 _gamescope_pid = None
 _gamescope_scan_after = 0.0
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
 
-# Session identities start above any epoch time, so stamps saved by 2.1
-# (the epoch mtime of /proc/<pid>) stay recognisable; see Plugin._same_session.
+# Session identities start above any epoch time (2.1 saved epoch stamps).
 _IDENTITY_BASE = 1e11
 
 
@@ -873,17 +580,6 @@ def _boot_offset():
             return _IDENTITY_BASE + int(handle.read().strip().replace("-", "")[:6], 16) * 1000.0
     except (OSError, ValueError):
         return _IDENTITY_BASE
-
-
-def _session_wall_clock(started):
-    """Epoch time at which the session identified by `started` began, or None."""
-    # starttime and /proc/uptime both count from boot, suspend included.
-    try:
-        with open("/proc/uptime") as handle:
-            uptime = float(handle.read().split()[0])
-    except (OSError, ValueError, IndexError):
-        return None
-    return time.time() - uptime + (started - _boot_offset())
 
 
 def _gamescope_start_time():
@@ -930,6 +626,8 @@ def _gamescope_start_time():
             continue
     return None
 
+
+# -- old display script cleanup --
 
 def _gamescope_config_dir(pid):
     """(config dir, uid, gid) that gamescope `pid` reads its scripts under."""
@@ -1020,8 +718,24 @@ def _script_unlink(path: str) -> None:
         raise OSError(errno.EIO, "could not remove the file", path)
 
 
+def _is_our_script(data) -> bool:
+    """True only for a script Companion shipped; release zips may carry CRLF line endings."""
+    return data is not None and any(hashlib.sha256(variant).hexdigest() in OLD_SCRIPT_SHA256
+                                    for variant in (data, data.replace(b"\r\n", b"\n")))
+
+
+def _unlink_if_unchanged(path: str, data: bytes) -> None:
+    """Remove our file, but not one replaced since it was checked."""
+    if _read_bytes(path) != data:
+        raise OSError(errno.EAGAIN, "the file changed while it was being removed", path)
+    try:
+        _script_unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def _remove_legacy_scripts() -> None:
-    """Drop our own copies from the /root dir older releases installed to."""
+    """Drop our own copies from the /root dir 2.1.0 and earlier installed to."""
     if SCRIPT_DIR == LEGACY_SCRIPT_DIR:
         return
     for leaf in (SCRIPT_NAME, SCRIPT_NAME + ".backup"):
@@ -1033,147 +747,38 @@ def _remove_legacy_scripts() -> None:
                 pass
 
 
-def _restart_needed(loaded_variant) -> bool:
-    """True when the running gamescope did not load the selected script."""
-    started = _gamescope_start_time()
-    if started is None:
-        # Cannot tell, so do not nag.
-        return False
-    wanted = _script_variant(_read_script_bytes(BUNDLED_SCRIPT))
-    if wanted is not None:
-        return loaded_variant != wanted
-    # A script outside the variant table (development builds): fall back to mtime.
-    started = _session_wall_clock(started)
-    try:
-        return started is not None and started < os.path.getmtime(INSTALLED_SCRIPT)
-    except OSError:
-        return False
+def _remove_old_scripts(restore_backup: bool):
+    """Remove the display script 2.3.0 and earlier installed. What was done, or None to retry.
 
-
-def _uninstall_script() -> str:
-    """Remove our script (restoring a displaced one) so uninstall cannot strand PQ."""
+    `restore_backup` (no native profile, SteamOS 3.8) puts back the user's own
+    script that Setup kept as .backup; with the native profile it would override
+    SteamOS, so it stays where it is.
+    """
     if not _bind_script_dir():
-        return "could not find the Gaming Mode user's display script folder"
+        return None
     _remove_legacy_scripts()
     backup = INSTALLED_SCRIPT + ".backup"
-    current = _read_script_bytes(INSTALLED_SCRIPT)
-
+    current = _read_bytes(INSTALLED_SCRIPT)
+    if current is None and os.path.lexists(INSTALLED_SCRIPT):
+        return "kept an unreadable display script"
     if current is not None and not _is_our_script(current):
-        # Someone replaced it after we installed; leave their choice alone.
-        return "left a third-party display script in place"
-
+        return "kept a third-party display script"
     saved = _read_bytes(backup)
-    if saved is not None:
-        if _script_write(INSTALLED_SCRIPT, saved):
-            try:
-                _script_unlink(backup)
-            except OSError:
-                pass
-            return "restored the display script that was there before"
-        return "could not restore the previous display script"
-
+    if _is_our_script(saved):
+        _unlink_if_unchanged(backup, saved)
+        saved = None
+    if restore_backup and saved is not None:
+        if not _script_write(INSTALLED_SCRIPT, saved):
+            raise OSError(errno.EIO, "could not restore the previous display script", INSTALLED_SCRIPT)
+        _unlink_if_unchanged(backup, saved)
+        return "restored the previous display script"
     if current is not None:
-        try:
-            _script_unlink(INSTALLED_SCRIPT)
-            return "removed the display script"
-        except OSError:
-            return "could not remove the display script"
-    return "no display script to remove"
+        _unlink_if_unchanged(INSTALLED_SCRIPT, current)
+        return "removed the old display script"
+    return "nothing to remove"
 
 
-def _restart_session() -> tuple:
-    """Restart Game Mode so gamescope picks the script up. (ok, note).
-
-    Absolute paths: the loader gives no useful PATH.
-    """
-    env = _system_env()
-    owner = _display_owner()
-    account = _account(owner)
-    if account is None and pwd is not None:
-        try:
-            candidate = pwd.getpwnam("deck")
-            if candidate is not None and os.path.exists(
-                    f"/run/user/{candidate.pw_uid}/bus"):
-                account = candidate
-                owner = candidate.pw_uid
-        except (KeyError, AttributeError):
-            pass
-
-    runtime = f"/run/user/{owner}" if owner is not None else None
-    if runtime:
-        env["XDG_RUNTIME_DIR"] = runtime
-        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime}/bus"
-    if account is not None:
-        env["HOME"] = account.pw_dir
-        env["USER"] = account.pw_name
-        env["LOGNAME"] = account.pw_name
-
-    def session_command(argv):
-        if (account is not None and _is_root() and account.pw_uid != 0
-                and os.path.exists("/usr/bin/runuser")):
-            return [
-                "/usr/bin/runuser", "-u", account.pw_name, "--",
-                "/usr/bin/env",
-                f"HOME={account.pw_dir}",
-                f"USER={account.pw_name}",
-                f"LOGNAME={account.pw_name}",
-                f"XDG_RUNTIME_DIR={runtime}",
-                f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus",
-                *argv,
-            ]
-        return argv
-
-    attempts = (
-        (["/usr/bin/systemctl", "--user", "restart", "gamescope-session.target"],
-         "systemctl"),
-        # Valve's own session switcher, in case the unit layout ever changes.
-        (["/usr/bin/steamos-session-select", "gamescope"], "steamos-session-select"),
-    )
-
-    failures = []
-    for argv, name in attempts:
-        if not os.path.exists(argv[0]):
-            failures.append(f"{name} not found")
-            continue
-        try:
-            r = run(session_command(argv), 20, env=env, stdin=None, capture_output=True, text=True)
-        except (OSError, subprocess.SubprocessError) as e:
-            diagnostic_event('display', 'session_restart_attempt_failed', level='error',
-                             error=e, operation=name, repeat=60)
-            failures.append(f"{name}: {e}")
-            continue
-        if r.returncode == 0:
-            return True, f"restarting via {name}"
-        diagnostic_event('display', 'session_restart_attempt_failed', level='error',
-                         operation=name, returncode=r.returncode, repeat=60)
-        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:]
-        failures.append(f"{name}: {tail[0] if tail else 'exited %d' % r.returncode}")
-
-    return False, "; ".join(failures) or "no restart method available"
-
-
-def _write_file_atomically(path: str, data: bytes) -> bool:
-    """Durably replace a regular file without following staging/target links."""
-    try:
-        # Gamescope runs unprivileged and must be able to read installed Lua/EDID.
-        safe_settings._atomic_write_bytes(path, data, mode=0o644)
-        return True
-    except (OSError, safe_settings.UnsafeSettingsPath):
-        return False
-
-
-def _restore_file_snapshot(path: str, existed: bool, data) -> bool:
-    """Best-effort rollback of one display-script file captured before a transaction."""
-    if existed:
-        return data is not None and _script_write(path, data)
-    try:
-        _script_unlink(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return False
-    return True
-
+# -- EDID ownership and recovery --
 
 def _published_edid_is_safe(path: str, opened_stat=None) -> bool:
     """Only modify a regular EDID file owned by the gamescope session user.
@@ -1358,372 +963,28 @@ def _rewrite_file_if_unchanged(path: str, expected: bytes,
         return "failed"
 
 
-def _gate_block_reason(mode: str, state: dict) -> str | None:
-    """Why a loaded display mode must not forward the slider right now, or None."""
-    if mode == MODE_G22:
-        # The panel honours its hardware brightness control in gamma 2.2, so
-        # there is nothing to forward and adding to it would dim twice.
-        return "gamma 2.2 mode - the system slider drives the panel directly"
-    if mode == MODE_HYBRID:
-        # Same story while it sits in gamma 2.2, and once it flips to PQ
-        # there is HDR content up and Steam owns the gain atoms.
-        return "hybrid mode - the panel switches itself, nothing to forward"
-    if not state["panel_ok"]:
-        # Forwarding the level on a panel that does honour its backlight
-        # would dim the image twice.
-        return "display not on the affected list"
-    if not state["enabled"]:
-        return "turned off"
-    return None
-
-
-def _hybrid_reading(props: dict) -> tuple[bool, bool, bool]:
-    """(game asks for HDR, panel reads as PQ, mode input unknown) from one Hybrid read."""
-    forced = bool(_as_int(props.get(ATOM_FORCE_HDR_SUPPORT)))
-    enabled = _as_int(props.get(ATOM_HDR_ENABLED))
-    unknown = enabled is None and forced
-    if enabled is None and not forced:
-        # gamescope does not publish this input until somebody writes it.
-        # Before we force HDR advertisement, output feedback is the only
-        # observation of the actual starting mode.
-        enabled = _as_int(props.get(ATOM_HDR_OUT)) or 0
-    # Once force is present, output feedback is intentionally synthetic. An
-    # absent input atom is therefore unknown, not gamma 2.2: the caller writes
-    # the requested mode so an interrupted earlier hand-off cannot strand PQ.
-    is_hdr = bool(_as_int(props.get(ATOM_HDR_OUT))) if unknown else bool(enabled)
-    return bool(_as_int(props.get(ATOM_HDR_APP))), is_hdr, unknown
-
-
 class Plugin:
-    # The panel logic (KNOWN_PANELS, Lua scripts) is the Go 2's OLED.
+    # Companion's display support is for the Go 2's OLED; SteamOS 3.9 has its profile.
     applicable = staticmethod(module_runtime.is_legion_go_2)
 
-    # Everything the panel reports back to the UI.
+    # Everything the page reports back to the UI.
     _state = {
-        # Setup gate - nothing else is shown until a mode is chosen and its
-        # display script is in place
-        "panel_mode": None,       # None until the user picks one
-        "active_mode": None,      # what the running gamescope session is using
-        "setup_done": False,
-        "setup_note": "checking",
-        "setup_error": "",
         "settings_error": "",
-        "restart_pending": False,
-        "restart_error": "",
-        "reset_in_progress": False,
-        "reset_restart_pending": False,
-        "reset_error": "",
-        "reset_note": "",
-        "native_support_detected": False,
-        "native_support_reason": "",
-        "native_cleanup_pending": False,
-        "native_cleanup_error": "",
-        "native_restart_pending": False,
-        # Hybrid half - idle in the other two modes
-        "hybrid_reason": "",
-        "hdr_now": False,         # is the panel in PQ right now
-        "gamescope_reachable": False,
-        "panel_ok": False,
-        "panel_desc": "",
-        "backlight": "",
-        "enabled": True,
-        "active": False,          # currently forwarding
-        "reason": "starting up",
-        "nits": 0.0,              # what we last wrote
-        "max_nits": 0.0,
-        # EDID half
+        "steamos_update_needed": False,  # no native panel profile: SteamOS older than 3.9
         "edid_fix": True,
         "edid_patched": False,
         "edid_reason": "starting up",
         "edid_game_nits": 0.0,    # peak luminance games will read
     }
-    _baseline = None              # atom value before we first touched it
-    _last_written = None
     _edid_original = None         # untouched bytes, for putting back
     _edid_path = None
     _task = None
     _prop_task = None
-    _hdr_fights = 0               # corrections in a row that did not stick
-    _hdr_fight_target = None      # target and time of the last correction
-    _hdr_fight_at = 0.0
-    _hdr_backoff_until = 0.0
-    _hdr_baseline = None          # HDR mode as we first found it, for putting back
-    _session_note = ""
-    _loaded_script_variant = None
-    _gamescope_started_at = None
+    _cleanup_done = False         # the old display script was dealt with this start
     _session_retry_after = 0.0
     _session_retry_delay = GATE_INTERVAL_S  # grows only while gamescope-wl is gone
-    _hybrid_suspended_external = False
-    _hybrid_pq_hold_until = 0.0
-    _hybrid_sdr_since = None
-    _edid_recheck_until = 0.0
-    # Re-entrant on purpose: methods that take these locks also call each other while holding them.
-    _runtime_lock = threading.RLock()
+    # Re-entrant on purpose: methods that take it also call each other while holding it.
     _edid_lock = threading.RLock()
-    _mode_lock = asyncio.Lock()
-    _native_probe_after = 0.0
-    _native_probe_session = None
-    _native_detection = {}
-
-    @staticmethod
-    def native_display_active() -> bool:
-        """Whether legacy display writes are fenced; EDID remains independent."""
-        return bool(Plugin._state.get("native_support_detected")
-                    or Plugin._state.get("native_cleanup_pending")
-                    or Plugin._state.get("native_restart_pending")
-                    or settings.getSetting("native_retired", False) is True
-                    or settings.getSetting("native_cleanup", None) is not None)
-
-    @staticmethod
-    def _native_store(values: dict) -> None:
-        # Unlike advisory runtime metadata, the handoff journal must be durable
-        # before any owned file or atom can be changed.
-        with _settings_lock:
-            settings.read()
-            Plugin._require_settings()
-            payload = dict(settings.settings)
-            payload.update(values)
-            settings.replace(payload)
-
-    @staticmethod
-    def _native_remove_scripts() -> list[str]:
-        if not _bind_script_dir():
-            raise RuntimeError("Could not find the Gaming Mode user's display script folder.")
-        _remove_legacy_scripts()
-        notes = []
-        for path, label in ((INSTALLED_SCRIPT, "display script"),
-                            (INSTALLED_SCRIPT + ".backup", "display-script backup")):
-            if not os.path.lexists(path):
-                continue
-            if os.path.islink(path) or not stat.S_ISREG(os.lstat(path).st_mode):
-                notes.append(f"Preserved an unowned {label}.")
-                continue
-            data = _read_bytes(path)
-            if data is None:
-                raise RuntimeError(f"Could not read the {label} safely.")
-            if not _is_our_script(data):
-                note = f"Preserved a third-party {label}; it was not restored or replaced."
-                if path == INSTALLED_SCRIPT:
-                    note += " It may override the system display profile."
-                notes.append(note)
-                continue
-            # Do not delete a file replaced after its ownership was checked.
-            if _read_bytes(path) != data:
-                raise RuntimeError(f"The {label} changed during native display cleanup.")
-            _script_unlink(path)
-        return notes
-
-    @staticmethod
-    def _native_write_atom(name: str, value: int, session) -> None:
-        if not Plugin._same_session(session, _gamescope_start_time()):
-            raise RuntimeError("Gaming Mode changed during native cleanup; recovery will retry.")
-        if (not _write_atom_int(name, value)
-                or _as_int(_read_props_uncached([name]).get(name)) != value):
-            raise RuntimeError(f"Gamescope did not confirm restoration of {name}.")
-
-    @staticmethod
-    def _native_cleanup_locked(journal: dict, session) -> None:
-        if (not isinstance(journal, dict) or journal.get("version") != 1
-                or not isinstance(journal.get("brightness"), dict)
-                or not isinstance(journal.get("hdr"), dict)):
-            raise RuntimeError("The native display cleanup journal is invalid; recovery was preserved.")
-        # The restart marker is persisted before deleting Lua: a Decky reload
-        # cannot infer what the current gamescope loaded from a now-missing file.
-        notes = Plugin._native_remove_scripts()
-        if notes:
-            Plugin._state["native_support_reason"] += " " + " ".join(notes)
-        brightness, hdr = journal["brightness"], journal["hdr"]
-        owns_runtime = bool(brightness.get("owned") or hdr.get("owned"))
-        original_session = journal.get("session")
-        if owns_runtime and session is None:
-            raise RuntimeError("Gaming Mode session is unknown; native cleanup will retry without changing display atoms.")
-        if owns_runtime and original_session is None:
-            # A session first observed after an unknown one is not proof that
-            # gamescope restarted. Fence this session until a verified change.
-            Plugin._native_store({"native_cleanup": {**journal, "session": session,
-                                                       "wait_for_new_session": True},
-                                  "native_restart_session": {"session": session}})
-            raise RuntimeError("Previous display ownership is unknown. Restart Gaming Mode to finish native cleanup.")
-        if owns_runtime and Plugin._same_session(original_session, session):
-            if journal.get("wait_for_new_session"):
-                raise RuntimeError("Previous display ownership is unknown. Restart Gaming Mode to finish native cleanup.")
-            names = [ATOM_IS_EXTERNAL, ATOM_SDR_NITS, ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT]
-            Plugin._session_props(names)
-            # The property watcher can lag a concurrent Steam update. Ownership
-            # must be compared with live values immediately before restoration.
-            props = _read_props_uncached(names)
-            external = _as_int(props.get(ATOM_IS_EXTERNAL))
-            if external not in (0, 1):
-                raise RuntimeError("The active display is unknown; native cleanup will retry without changing its mode.")
-            if external == 0 and brightness.get("owned"):
-                target = brightness.get("baseline")
-                if type(target) not in (int, float) or not math.isfinite(target) or target <= 0:
-                    raise RuntimeError("The previous brightness baseline is unavailable. Restart Gaming Mode to finish native cleanup.")
-                live = _as_float(_as_int(props.get(ATOM_SDR_NITS)))
-                expected = brightness.get("expected")
-                if live is None:
-                    raise RuntimeError("The current brightness value could not be read; native cleanup will retry.")
-                if abs(live - target) > 0.01:
-                    if expected is None:
-                        raise RuntimeError("Brightness ownership cannot be confirmed after reload. Restart Gaming Mode to finish native cleanup.")
-                    if abs(live - expected) <= 0.01:
-                        Plugin._native_write_atom(ATOM_SDR_NITS, _float_raw(target), session)
-                    # An external writer replaced our last value: leave it alone.
-            if hdr.get("owned"):
-                if hdr.get("force_owned"):
-                    forced = _as_int(props.get(ATOM_FORCE_HDR_SUPPORT))
-                    if forced is None:
-                        raise RuntimeError("HDR support ownership could not be read; native cleanup will retry.")
-                    if forced == 1:
-                        Plugin._native_write_atom(ATOM_FORCE_HDR_SUPPORT, 0, session)
-                        Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
-                if external == 0:
-                    target = hdr.get("baseline")
-                    if type(target) is not bool:
-                        raise RuntimeError("The previous HDR baseline is unavailable. Restart Gaming Mode to finish native cleanup.")
-                    live = _as_int(props.get(ATOM_HDR_ENABLED))
-                    if live is None:
-                        raise RuntimeError("The current HDR mode could not be read; native cleanup will retry.")
-                    expected = hdr.get("expected")
-                    if bool(live) != target:
-                        if expected is None:
-                            raise RuntimeError("HDR ownership cannot be confirmed after reload. Restart Gaming Mode to finish native cleanup.")
-                        if live == expected:
-                            Plugin._native_write_atom(ATOM_HDR_ENABLED, int(target), session)
-        # A different gamescope owns fresh atoms. Never apply old baselines to it.
-        Plugin._native_store({"native_cleanup": None, "native_retired": True,
-                              "native_cleanup_note": " ".join(notes),
-                              "active_mode": None, "brightness_baseline": None,
-                              "brightness_baseline_session": None, "hdr_baseline": None,
-                              "hdr_baseline_session": None, "reset_in_progress": False,
-                              "reset_session": None})
-        Plugin._baseline = None
-        Plugin._hdr_baseline = None
-        Plugin._last_written = None
-        Plugin._state.update(active=False, active_mode=None, setup_done=False,
-                             restart_pending=False, native_cleanup_pending=False,
-                             native_cleanup_error="", reset_in_progress=False,
-                             reset_restart_pending=False, reset_error="")
-        Plugin._reset_hybrid_timing()
-        Plugin._hdr_argument_over()
-
-    @staticmethod
-    def _refresh_native_support(force=False) -> None:
-        with Plugin._runtime_lock:
-            try:
-                Plugin._require_settings()
-                session = _gamescope_start_time()
-                now = time.monotonic()
-                if (force or now >= Plugin._native_probe_after
-                        or Plugin._native_probe_session != session):
-                    Plugin._native_detection = display_native.detect_native_display_support()
-                    Plugin._native_probe_after = now + 30.0
-                    Plugin._native_probe_session = session
-                    decky.logger.debug(f"{LOG} native display probe: {Plugin._native_detection.get('reason', '')}")
-                detection = Plugin._native_detection
-                diagnostic_transition('display', 'native_support', detection.get('status', 'unknown'),
-                                      supported=detection.get('supported') is True, initial=False,
-                                      reason=detection.get('reason', 'unknown'))
-                journal = settings.getSetting("native_cleanup", None)
-                retired = settings.getSetting("native_retired", False) is True
-                supported = detection.get("supported") is True
-                if detection.get("status") == "absent" and journal is None:
-                    marker = settings.getSetting("native_restart_session", None)
-                    legacy_session = (session is not None and isinstance(marker, dict)
-                                      and marker.get("session") is not None
-                                      and not Plugin._same_session(marker["session"], session))
-                    if retired and not legacy_session:
-                        # Replacing the installed package does not replace the
-                        # executable already running in this Gaming Mode session.
-                        if marker is None or (isinstance(marker, dict) and marker.get("session") is None
-                                              and session is not None):
-                            Plugin._native_store({"native_restart_session": {"session": session}})
-                        Plugin._state.update(native_support_detected=True, native_cleanup_pending=False,
-                                             native_cleanup_error="", native_restart_pending=True,
-                                             native_support_reason="Restart Gaming Mode after changing the installed gamescope version before enabling legacy display controls.")
-                        return
-                    if retired or settings.getSetting("native_restart_session", None) is not None:
-                        Plugin._native_store({"native_retired": False, "native_restart_session": None})
-                    Plugin._state.update(native_support_detected=False, native_cleanup_pending=False,
-                                         native_cleanup_error="", native_restart_pending=False,
-                                         native_support_reason="")
-                    return
-                active = supported or retired or journal is not None
-                reason = ("Gamescope includes the native Legion Go 2 display profile. "
-                          "Companion's display fix is no longer needed." if supported else
-                          "Native support was detected earlier. It cannot currently be verified, "
-                          "so the retired display fix remains disabled." if active else "")
-                Plugin._state.update(native_support_detected=active,
-                                     native_support_reason=(reason + " "
-                                         + settings.getSetting("native_cleanup_note", "")).strip(),
-                                     native_cleanup_pending=journal is not None)
-                if not active:
-                    return
-                Plugin._state["active"] = False
-                Plugin._state["setup_done"] = False
-                Plugin._state["reason"] = "Native gamescope display support; Companion brightness and Hybrid fixes are retired."
-                if journal is None and not retired:
-                    # Recover baselines only from the session that captured them.
-                    previous_mode = (Plugin._state.get("active_mode")
-                                     or settings.getSetting("active_mode", None))
-                    previous_session = Plugin._gamescope_started_at
-                    Plugin._sync_loaded_script()
-                    brightness = Plugin._baseline
-                    if type(brightness) not in (int, float) or not math.isfinite(brightness) or brightness <= 0:
-                        brightness = None
-                    hdr = Plugin._hdr_baseline if type(Plugin._hdr_baseline) is bool else None
-                    own_script = _is_our_script(_read_script_bytes(INSTALLED_SCRIPT))
-                    pq_ownership = (previous_mode == MODE_PQ
-                                    and (own_script or Plugin._loaded_script_variant == MODE_PQ))
-                    # Unknown legacy runtime state cannot justify writing a
-                    # default, but its ownership still requires a session change.
-                    possible_brightness = previous_mode == MODE_PQ and own_script
-                    journal = {"version": 1, "session": session,
-                               "brightness": {"owned": brightness is not None or Plugin._last_written is not None or possible_brightness,
-                                              "baseline": brightness, "expected": Plugin._last_written},
-                               "hdr": {"owned": hdr is not None or pq_ownership,
-                                       "force_owned": hdr is not None, "baseline": hdr,
-                                       "expected": (int(Plugin._state.get("hdr_now", False))
-                                                    if Plugin._same_session(previous_session, session) else None)}}
-                    # Presence proves installation, not that this session loaded
-                    # the system profile. Require one session change on the first
-                    # handover, without depending on gamescope binary internals.
-                    Plugin._state["native_cleanup_pending"] = True
-                    Plugin._native_store({"native_cleanup": journal,
-                                          "native_restart_session": {"session": session}})
-                if journal is not None:
-                    Plugin._native_cleanup_locked(journal, session)
-                marker = settings.getSetting("native_restart_session", None)
-                pending = isinstance(marker, dict)
-                if pending and session is not None:
-                    previous = marker.get("session")
-                    if previous is None:
-                        Plugin._native_store({"native_restart_session": {"session": session}})
-                    elif not Plugin._same_session(previous, session) and supported:
-                        Plugin._native_store({"native_restart_session": None})
-                        pending = False
-                Plugin._state["native_restart_pending"] = pending
-                Plugin._state["native_cleanup_error"] = ""
-                Plugin._state["active_mode"] = None
-                Plugin._state["active"] = False
-                Plugin._state["setup_done"] = False
-                diagnostic_transition('display', 'native_cleanup', 'ready', pending=False)
-            except Exception as error:
-                diagnostic_transition('display', 'native_cleanup', 'deferred', level='warning', error=error,
-                                      stage='handoff', pending=True)
-                # Native ownership withdrawal must never stop the independent
-                # EDID pass or permit legacy writers to resume after a failure.
-                if Plugin.native_display_active():
-                    Plugin._state["native_cleanup_pending"] = True
-                    Plugin._state["native_cleanup_error"] = str(error)
-                    Plugin._state["native_restart_pending"] = settings.getSetting("native_restart_session", None) is not None
-                else:
-                    Plugin._state["native_support_reason"] = str(error)
-
-    async def cleanup_native_display(self) -> dict:
-        async with Plugin._mode_lock:
-            await module_runtime.complete(_offload(Plugin._refresh_native_support, True))
-        return dict(Plugin._state)
 
     @staticmethod
     def _require_settings() -> None:
@@ -1731,7 +992,6 @@ class Plugin:
         if error:
             message = f"Display settings could not be recovered. Restore a valid settings copy and restart Decky. {error}"
             Plugin._state["settings_error"] = message
-            Plugin._state["setup_error"] = message
             raise CorruptSettings(message)
 
     @staticmethod
@@ -1742,9 +1002,14 @@ class Plugin:
 
     @staticmethod
     def _store_settings(values: dict, *, required: bool = False) -> None:
-        """Persist one transaction; recovery baselines must succeed before writes."""
+        """Persist one transaction; recovery records must succeed before writes."""
         try:
-            Plugin._native_store(values)
+            with _settings_lock:
+                settings.read()
+                Plugin._require_settings()
+                payload = dict(settings.settings)
+                payload.update(values)
+                settings.replace(payload)
         except CorruptSettings:
             raise
         except Exception as e:
@@ -1753,103 +1018,72 @@ class Plugin:
             diagnostic_event('display', 'store_settings_failed', level='warning', error=e, repeat=60)
 
     @staticmethod
-    def _set_active_mode(mode) -> None:
-        mode = mode if mode in MODES else None
-        Plugin._state["active_mode"] = mode
-        Plugin._store_settings({"active_mode": mode})
+    def _drop_retired_settings() -> None:
+        """Forget what 2.3.0 and earlier saved for the display script, brightness and Hybrid."""
+        with _settings_lock:
+            settings.read()
+            Plugin._require_settings()
+            kept = {key: value for key, value in settings.settings.items() if key in DEFAULT_SETTINGS}
+            if kept != settings.settings:
+                settings.replace(kept)
 
     @staticmethod
-    def _same_session(saved, current) -> bool:
+    def _refresh_native() -> str:
+        """Probe the system panel profile; without it SteamOS needs an update."""
+        detection = display_native.detect_native_display_support()
+        status = detection.get("status", "inconclusive")
+        diagnostic_transition('display', 'native_support', status, supported=status == "supported",
+                              initial=False, reason=detection.get('reason', 'unknown'))
+        Plugin._state["steamos_update_needed"] = status == "absent"
+        return status
+
+    @staticmethod
+    def _cleanup_old_display_fix() -> bool:
+        """Remove the display script of 2.3.0 and earlier; True once done for this start."""
+        status = Plugin._refresh_native()
+        if status not in ("supported", "absent"):
+            return False  # Whether to restore the user's .backup depends on the profile: ask again.
         try:
-            saved, current = float(saved), float(current)
-        except (TypeError, ValueError):
+            outcome = _remove_old_scripts(restore_backup=status == "absent")
+        except Exception as exc:
+            diagnostic_event('display', 'old_script_cleanup_failed', level='warning', error=exc, repeat=60)
             return False
-        if saved < _IDENTITY_BASE <= current:
-            # A 2.1 stamp: /proc/<pid> was first looked up while that process ran.
-            start = _session_wall_clock(current)
-            return start is not None and start - 1.0 <= saved <= time.time() + 1.0
-        return abs(saved - current) < 0.01
+        if outcome is None:
+            return False  # gamescope's user is not known yet
+        if outcome != "nothing to remove":
+            decky.logger.info(f"{LOG} {outcome}")
+            diagnostic_event('display', 'old_script_cleanup', outcome=outcome)
+        return True
 
     @staticmethod
-    def _sync_loaded_script() -> None:
-        """Notice a new gamescope and bind runtime state to what it loaded."""
-        _bind_script_dir()
-        started = _gamescope_start_time()
-        if started is None or Plugin._same_session(
-                Plugin._gamescope_started_at, started):
-            return
-
-        Plugin._gamescope_started_at = started
-        Plugin._loaded_script_variant = _loaded_script_variant(started)
-        if Plugin._loaded_script_variant is None:
-            # Written after this session started, but by a silent reinstall of the bytes it runs.
-            kept = settings.getSetting("script_reinstall_loaded", None)
-            data = _read_script_bytes(INSTALLED_SCRIPT)
-            if (isinstance(kept, dict) and kept.get("restart_pending") is not True and data is not None
-                    and Plugin._same_session(kept.get("session"), started)
-                    and kept.get("sha256") == hashlib.sha256(data).hexdigest()):
-                Plugin._loaded_script_variant = _script_variant(data)
-        # Atoms belong to the gamescope process. Never carry ownership of a
-        # value written to the previous process into this fresh session.
-        Plugin._last_written = None
-        Plugin._state["active"] = False
-        Plugin._state["restart_error"] = ""
-        Plugin._hybrid_suspended_external = False
-        Plugin._reset_hybrid_timing()
-        Plugin._hdr_argument_over()
-
-        # Both baselines belong to one X/gamescope session. Recover them across a
-        # Decky reload, but never carry them into a new session whose atoms reset.
-        Plugin._baseline = None
-        if Plugin._same_session(settings.getSetting("brightness_baseline_session", None), started):
-            saved = settings.getSetting("brightness_baseline", None)
-            try:
-                Plugin._baseline = float(saved) if saved is not None else None
-            except (TypeError, ValueError):
-                pass
-        Plugin._hdr_baseline = None
-        if Plugin._same_session(settings.getSetting("hdr_baseline_session", None), started):
-            saved = settings.getSetting("hdr_baseline", None)
-            Plugin._hdr_baseline = saved if type(saved) is bool else None
-
-        wanted = Plugin._state.get("panel_mode")
-        stored_active = Plugin._state.get("active_mode")
-        loaded = Plugin._loaded_script_variant
-        if wanted in MODES and loaded == MODE_SCRIPT[wanted]:
-            active = wanted
-        elif stored_active in MODES and loaded == MODE_SCRIPT[stored_active]:
-            active = stored_active
-        elif loaded == MODE_PQ:
-            # The 1.0.x script is PQ and had no explicit mode setting.
-            active = MODE_PQ
-        elif loaded == MODE_G22:
-            active = MODE_G22
-        else:
-            active = stored_active if stored_active in MODES else None
-        if Plugin.native_display_active():
-            Plugin._state["active_mode"] = None
-        else:
-            Plugin._set_active_mode(active)
-
-    @staticmethod
-    def _activate_mode(mode) -> None:
-        """Apply a choice whose script is already loaded by this session."""
-        with Plugin._runtime_lock:
-            if Plugin.native_display_active():
-                return
-            previous = Plugin._state.get("active_mode")
-            if previous == mode:
-                return
-            Plugin._reset_hybrid_timing()
-            Plugin._hdr_argument_over()
-            if previous == MODE_HYBRID:
-                Plugin._hybrid_release(next_mode=mode)
-            if mode == MODE_HYBRID:
-                # This is a new ownership period. Capture what is there now and
-                # keep it across Decky reloads, not across separate entries.
-                Plugin._forget_hdr_baseline()
-                Plugin._hybrid_suspended_external = False
-            Plugin._set_active_mode(mode)
+    def _session_props() -> dict:
+        """Read the published EDID path, re-finding a session that moved."""
+        wanted = [ATOM_EDID_PATH]
+        if (time.monotonic() < Plugin._session_retry_after and _cached_props(wanted) is None
+                and _gamescope_start_time() is None):
+            return {}  # Desktop Mode: no xprop until the back-off runs out.
+        props = _read_props(wanted)
+        if not props:
+            # Re-probe a few times during startup, but do not launch a scan every
+            # pass forever while gamescope is down.
+            now = time.monotonic()
+            if now < Plugin._session_retry_after:
+                return {}
+            Plugin._session_retry_after = now + GATE_INTERVAL_S
+            if not _pick_display():
+                if _gamescope_start_time() is None:
+                    Plugin._session_retry_after = now + Plugin._session_retry_delay
+                    Plugin._session_retry_delay = min(Plugin._session_retry_delay * 2, ABSENT_PROBE_MAX_S)
+                return {}
+            # Retry live, but keep the watcher's snapshot: a running xprop -spy
+            # only reports later changes, so clearing it leaves a partial cache.
+            props = _read_props(wanted, fresh=True)
+            if not props:
+                return {}
+        Plugin._session_retry_delay = GATE_INTERVAL_S
+        Plugin._edid_path = (_as_path(props.get(ATOM_EDID_PATH))
+                             or Plugin._edid_path)
+        return props
 
     # -- exported to the frontend --
 
@@ -1858,280 +1092,7 @@ class Plugin:
             Plugin._require_settings()
         except CorruptSettings:
             pass
-        await _offload(Plugin._refresh_native_support)
-        return dict(Plugin._state)
-
-    async def run_setup(self, mode: str = MODE_PQ) -> dict:
-        """First-time setup: remember the chosen mode and install its script."""
-        return await Plugin._apply_mode(mode)
-
-    async def set_panel_mode(self, mode: str) -> dict:
-        """Change the mode after setup. Same path, so the two cannot diverge."""
-        return await Plugin._apply_mode(mode)
-
-    async def reset_settings(self) -> dict:
-        await _offload(Plugin._read_settings)
-        async with Plugin._mode_lock:
-            await _offload(Plugin._refresh_native_support, True)
-            if Plugin.native_display_active():
-                return dict(Plugin._state)
-            return await module_runtime.complete(_offload(Plugin._reset_settings_locked))
-
-    @staticmethod
-    def _reset_settings_locked() -> dict:
-        """Withdraw display ownership before discarding its recovery snapshots."""
-        with Plugin._runtime_lock, Plugin._edid_lock:
-            if Plugin.native_display_active():
-                return dict(Plugin._state)
-            Plugin._state["reset_error"] = ""
-            try:
-                Plugin._sync_loaded_script()
-                session = _gamescope_start_time()
-                with _settings_lock:
-                    settings.read()
-                    Plugin._require_settings()
-                    previous_session = settings.getSetting("reset_session", None)
-                    needs_restart = (Plugin._loaded_script_variant in (MODE_PQ, MODE_G22)
-                                     or (Plugin._same_session(previous_session, session)
-                                         if previous_session is not None else
-                                         Plugin._state.get("panel_mode") in MODES))
-                    reset_session = session if needs_restart else None
-                    settings.setSetting("reset_in_progress", True)
-                    settings.setSetting("reset_session", reset_session)
-                    settings.commit()
-                # The durable marker also suppresses all hardware passes after
-                # a Decky reload or an interrupted reset.
-                Plugin._state["reset_in_progress"] = True
-                Plugin._state["setup_done"] = False
-                if session is None:
-                    raise RuntimeError("Could not identify the Gaming Mode session. Retry reset in Gaming Mode.")
-                props = Plugin._session_props([ATOM_IS_EXTERNAL], fresh=True)
-                current = _gamescope_start_time()
-                if current is None or not Plugin._same_session(session, current):
-                    raise RuntimeError("Gaming Mode session changed during reset. Retry reset in Gaming Mode.")
-                external = _as_int(props.get(ATOM_IS_EXTERNAL))
-                if external not in (0, 1):
-                    raise RuntimeError("Could not verify the active display. Retry reset in Gaming Mode.")
-                if external == 0:
-                    if Plugin._baseline is not None:
-                        if not _write_nits(Plugin._baseline):
-                            raise RuntimeError("Could not restore the previous brightness setting.")
-                    elif not Plugin._release():
-                        raise RuntimeError("Could not release brightness control.")
-                # An external display owns its brightness and output mode.
-                Plugin._last_written = None
-                Plugin._state["active"] = False
-                if not _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0):
-                    raise RuntimeError("Could not release HDR support control.")
-                if external == 0:
-                    hdr = Plugin._hdr_baseline if Plugin._hdr_baseline is not None else False
-                    if not _write_atom_int(ATOM_HDR_ENABLED, int(hdr)):
-                        raise RuntimeError("Could not restore the previous HDR setting.")
-                    Plugin._state["hdr_now"] = bool(hdr)
-                if not Plugin._edid_restore():
-                    raise RuntimeError("Could not restore the original display EDID.")
-                note = _uninstall_script()
-                if note.startswith("could not"):
-                    raise RuntimeError(note)
-                # A disappeared/replaced connector does not need restoring,
-                # but its old recovery bytes must not survive a full reset.
-                try:
-                    os.unlink(EDID_BACKUP)
-                except FileNotFoundError:
-                    pass
-                with _settings_lock:
-                    settings.replace({**DEFAULT_SETTINGS, "reset_session": reset_session})
-                Plugin._baseline = None
-                Plugin._hdr_baseline = None
-                Plugin._edid_original = None
-                Plugin._edid_recheck_until = 0.0
-                Plugin._hybrid_suspended_external = False
-                Plugin._reset_hybrid_timing()
-                Plugin._hdr_argument_over()
-                Plugin._state.update(panel_mode=None, active_mode=None, setup_done=False,
-                    setup_note="", setup_error="", restart_pending=False, restart_error="",
-                    enabled=DEFAULT_SETTINGS["enabled"], edid_fix=DEFAULT_SETTINGS["edid_fix"],
-                    active=False, edid_patched=False, edid_game_nits=0.0,
-                    reason="waiting for display setup", hybrid_reason="",
-                    edid_reason="waiting for display setup", reset_in_progress=False,
-                    reset_restart_pending=reset_session is not None,
-                    reset_note=note)
-                decky.logger.info(f"{LOG} reset: {note}")
-            except Exception as error:
-                # Preserve the journal/baselines and keep the module passive.
-                # A retry can finish even if the script has already been removed.
-                with _settings_lock:
-                    settings.read()
-                    pending = settings.getSetting("reset_in_progress", False) is True
-                Plugin._state["reset_in_progress"] = pending
-                Plugin._state["reset_error"] = str(error)
-                if pending:
-                    Plugin._state["setup_done"] = False
-                diagnostic_event('display', 'reset_settings_locked_failed', level='warning', error=error, repeat=60)
-            return dict(Plugin._state)
-
-    @staticmethod
-    async def _apply_mode(mode: str, reinstall: bool = False) -> dict:
-        # Persistence migration may normalize old values, but a malformed RPC
-        # must never select PQ or install a script on the caller's behalf.
-        if type(mode) is not str or mode not in MODES:
-            raise ValueError("Unknown display mode. Choose gamma22, pq or hybrid.")
-        await _offload(Plugin._read_settings)
-        # RPC calls can overlap even though the frontend normally disables its
-        # buttons. BUNDLED_SCRIPT is process-global, so the whole transaction and
-        # its derived runtime state must be serialised, not only the file write.
-        async with Plugin._mode_lock:
-            operation = asyncio.create_task(Plugin._apply_mode_locked(mode, reinstall))
-            try:
-                return await asyncio.shield(operation)
-            except asyncio.CancelledError:
-                # run_in_executor cannot stop a file operation already in
-                # progress. Keep the lock until the transaction and rollback
-                # finish, then propagate cancellation to the RPC caller.
-                await operation
-                raise
-
-    @staticmethod
-    async def _apply_mode_locked(mode: str, reinstall: bool = False) -> dict:
-        await _offload(Plugin._refresh_native_support, True)
-        if Plugin.native_display_active():
-            return dict(Plugin._state)
-        if Plugin._state.get("reset_in_progress") or Plugin._state.get("reset_restart_pending"):
-            Plugin._state["setup_error"] = "Finish the display reset and restart Gaming Mode before choosing a new mode."
-            return dict(Plugin._state)
-        previous = Plugin._state["panel_mode"]
-
-        def _install_then_save():
-            with Plugin._runtime_lock:
-                if Plugin.native_display_active():
-                    return False, "Native gamescope display support is active."
-                _bind_script_dir()
-                if reinstall and os.path.lexists(INSTALLED_SCRIPT):
-                    return None, ""  # A script took its place since _script_lost_to_update looked.
-                backup = INSTALLED_SCRIPT + ".backup"
-                # lexists: a link there is unreadable by design and must not be lost.
-                installed_existed = os.path.lexists(INSTALLED_SCRIPT)
-                backup_existed = os.path.lexists(backup)
-                installed_before = _read_script_bytes(INSTALLED_SCRIPT)
-                backup_before = _read_bytes(backup)
-                if ((installed_existed and installed_before is None)
-                        or (backup_existed and backup_before is None)):
-                    return False, "could not read the existing display script safely"
-
-                def _rollback_files() -> bool:
-                    installed_ok = _restore_file_snapshot(
-                        INSTALLED_SCRIPT, installed_existed, installed_before)
-                    backup_ok = _restore_file_snapshot(
-                        backup, backup_existed, backup_before)
-                    _select_mode(previous)
-                    return installed_ok and backup_ok
-
-                _select_mode(mode)
-                try:
-                    ok, note = _install_script()
-                except Exception as e:
-                    rollback_ok = _rollback_files()
-                    diagnostic_event('display', 'script_install_failed', level='error', error=e,
-                                     stage='install', restored=rollback_ok)
-                    rollback = ("previous script restored" if rollback_ok else
-                                "script rollback failed")
-                    return False, f"display script installation failed: {e}; {rollback}"
-                if not ok:
-                    rollback_ok = _rollback_files()
-                    if not rollback_ok:
-                        note += "; script rollback failed"
-                    return False, note
-                try:
-                    with _settings_lock:
-                        settings.setSetting("panel_mode", mode)
-                        settings.commit()
-                except Exception as e:
-                    rollback_ok = _rollback_files()
-                    diagnostic_event('display', 'script_install_failed', level='error', error=e,
-                                     stage='settings', restored=rollback_ok)
-                    try:
-                        with _settings_lock:
-                            settings.setSetting("panel_mode", previous)
-                            settings.commit()
-                    except Exception:
-                        pass
-                    rollback = ("previous script restored" if rollback_ok else
-                                "script rollback failed")
-                    return False, f"could not save the display mode: {e}; {rollback}"
-                return True, note
-
-        Plugin._state["setup_error"] = ""
-        ok, note = await _offload(_install_then_save)
-        if ok is None:
-            diagnostic_event('display', 'script_reinstall_skipped', reason='script_present')
-            return dict(Plugin._state)
-        if not ok:
-            if Plugin.native_display_active():
-                return dict(Plugin._state)
-            Plugin._state["setup_error"] = note
-            Plugin._state["setup_note"] = note
-            diagnostic_event('display', 'setup_failed', level='error', reason='backend_reported_failure')
-            return dict(Plugin._state)
-
-        Plugin._state["panel_mode"] = mode
-        Plugin._state["setup_note"] = ""
-        Plugin._state["restart_error"] = ""
-        await _offload(Plugin._refresh_setup)
-
-        # A mode is live only when the running session has the variant it needs.
-        # Until then the old active mode keeps doing its job behind the restart
-        # screen instead of pretending the new script was loaded already.
-        if (Plugin._gamescope_started_at is not None
-                and Plugin._loaded_script_variant == MODE_SCRIPT[mode]):
-            await _offload(Plugin._activate_mode, mode)
-
-        decky.logger.info(
-            f"{LOG} selected mode {previous or 'unset'} -> {mode}, "
-            f"active {Plugin._state.get('active_mode') or 'unknown'}, "
-            f"script {os.path.basename(BUNDLED_SCRIPT)}")
-        diagnostic_event('display', 'mode_changed', previous=previous or 'unset', mode=mode,
-                         pending=Plugin._state.get('restart_pending') is True)
-
-        if Plugin._state.get("active_mode") == MODE_HYBRID:
-            await _offload(Plugin._hybrid_pass)
-        return dict(Plugin._state)
-
-    async def restart_session(self) -> dict:
-        diagnostic_event('display', 'session_restart_requested')
-        Plugin._state["restart_error"] = ""
-        ok, note = await _offload(_restart_session)
-        if ok:
-            diagnostic_event('display', 'session_restart_returned', outcome='requested')
-        else:
-            # The session going down would take this process with it, so if we
-            # are still here to report, it genuinely did not work.
-            Plugin._state["restart_error"] = note
-            diagnostic_event('display', 'session_restart_returned', level='error', outcome='failed')
-        return dict(Plugin._state)
-
-    async def set_enabled(self, enabled: bool) -> dict:
-        if type(enabled) is not bool:
-            raise ValueError("enabled must be a boolean")
-        await _offload(Plugin._refresh_native_support, True)
-        if Plugin.native_display_active():
-            return dict(Plugin._state)
-        def _do():
-            with Plugin._runtime_lock, _settings_lock:
-                if Plugin.native_display_active():
-                    return False
-                settings.read()
-                Plugin._require_settings()
-                settings.setSetting("enabled", bool(enabled))
-                settings.commit()
-                return True
-        if not await _offload(_do):
-            return dict(Plugin._state)
-        Plugin._state["enabled"] = bool(enabled)
-        if not enabled:
-            restored = await _offload(Plugin._release)
-            Plugin._state["reason"] = (
-                "turned off" if restored else
-                "turned off, but could not restore the previous gamescope value")
+        await _offload(Plugin._refresh_native)
         return dict(Plugin._state)
 
     async def set_edid_fix(self, enabled: bool) -> dict:
@@ -2151,714 +1112,7 @@ class Plugin:
             await _offload(Plugin._edid_pass)
         return dict(Plugin._state)
 
-    # -- brightness half --
-
-    @staticmethod
-    def _release() -> bool:
-        """Hand the atom back to whatever it was before we started forwarding."""
-        with Plugin._runtime_lock:
-            if Plugin.native_display_active():
-                return True
-            if not Plugin._state["active"] and Plugin._last_written is None:
-                return True
-            session = Plugin._ownership_session_current()
-            if session is not True:
-                return session is False
-            # A connector can change without restarting gamescope. Confirm the live
-            # atom directly; a watcher snapshot may predate docking or Steam's write.
-            props = Plugin._session_props([ATOM_IS_EXTERNAL, ATOM_SDR_NITS], fresh=True)
-            session = Plugin._ownership_session_current()
-            if session is not True:
-                return session is False
-            external = _as_int(props.get(ATOM_IS_EXTERNAL))
-            live = _as_float(props.get(ATOM_SDR_NITS))
-            if external not in (0, 1) or live is None or not math.isfinite(live):
-                return False
-            if (Plugin._last_written is not None
-                    and abs(live - Plugin._last_written) > 0.01):
-                Plugin._last_written = None
-                Plugin._state["active"] = False
-                return True
-            if external == 1 and Plugin._last_written is None:
-                Plugin._state["active"] = False
-                return True
-            target = (Plugin._baseline if Plugin._baseline is not None
-                      else FALLBACK_BASELINE_NITS)
-            if not _write_nits(target):
-                diagnostic_event('display', 'brightness_restore_failed', level='warning', repeat=60, pending=True)
-                return False
-            Plugin._last_written = None
-            Plugin._state["active"] = False
-            decky.logger.info(f"{LOG} released, restored {target:.2f} nits")
-            return True
-
-    @staticmethod
-    def _ownership_session_current() -> bool | None:
-        """Unknown sessions defer release; a new compositor owns fresh atoms."""
-        current = _gamescope_start_time()
-        if current is None or Plugin._gamescope_started_at is None:
-            return None
-        if Plugin._same_session(Plugin._gamescope_started_at, current):
-            return True
-        Plugin._last_written = None
-        Plugin._baseline = None
-        Plugin._hdr_baseline = None
-        Plugin._state["active"] = False
-        Plugin._hybrid_suspended_external = False
-        Plugin._reset_hybrid_timing()
-        return False
-
-    @staticmethod
-    def _remember_brightness_baseline(value: float) -> None:
-        try:
-            Plugin._store_settings({
-                "brightness_baseline": value,
-                "brightness_baseline_session": Plugin._gamescope_started_at,
-            }, required=True)
-        except Exception as error:
-            Plugin._state["active"] = False
-            Plugin._state["reason"] = str(error)
-            raise
-        Plugin._baseline = value
-        decky.logger.info(f"{LOG} baseline {value:.2f} nits")
-
-    @staticmethod
-    def _forward_nits(nits: float):
-        """Write only while the gate that authorised this value is still open."""
-        with Plugin._runtime_lock:
-            if Plugin.native_display_active():
-                Plugin._state["active"] = False
-                return None
-            if Plugin._ownership_session_current() is not True:
-                Plugin._state["active"] = False
-                return None
-            if Plugin._state.get("reset_in_progress") or (
-                    Plugin._state.get("panel_mode") is None and Plugin._last_written is None):
-                Plugin._state["active"] = False
-                return None
-            # A gate result can outlive a failed baseline commit. RAM receives
-            # the baseline only after that commit, so it is also the writer's
-            # admission check before any new brightness control is applied.
-            if Plugin._baseline is None:
-                Plugin._state["active"] = False
-                return None
-            if (not Plugin._state["active"]
-                    or Plugin._state.get("active_mode") != MODE_PQ
-                    or not Plugin._state.get("setup_done")
-                    or not Plugin._state.get("enabled")
-                    or not Plugin._state.get("panel_ok")):
-                # The loop may hold a stale gate result while a toggle or mode
-                # change is being processed. Hand back any prior value, but never
-                # let that stale result authorise a new write.
-                Plugin._release()
-                return None
-            # A backlight notification can arrive after docking or HDR-content
-            # switching but before the next gate tick. Revalidate that output
-            # before forwarding the built-in panel's brightness.
-            props = Plugin._session_props([ATOM_IS_EXTERNAL, ATOM_HDR_OUT, ATOM_HDR_APP], fresh=True)
-            if Plugin._ownership_session_current() is not True:
-                Plugin._state["active"] = False
-                return None
-            if (_as_int(props.get(ATOM_IS_EXTERNAL)) != 0
-                    or _as_int(props.get(ATOM_HDR_OUT)) != 1
-                    or _as_int(props.get(ATOM_HDR_APP)) != 0):
-                Plugin._release()
-                return None
-            ok = _write_nits(nits)
-            if ok:
-                Plugin._last_written = nits
-            return ok
-
-    @staticmethod
-    def _script_lost_to_update() -> dict | None:
-        """After our uninstall removed the script of a mode set up earlier, if nothing took its place:
-        the settings that close the reinstall once it succeeded; else None (also once out of attempts)."""
-        with Plugin._runtime_lock:
-            if not _bind_script_dir():
-                return None  # The Gaming Mode user is not known yet; the next start decides.
-            marker = settings.getSetting("script_reinstall", None)
-            loaded = settings.getSetting("script_reinstall_loaded", None)
-            attempts = settings.getSetting("script_reinstall_attempts", None)
-            attempts = 0 if attempts is None else attempts if type(attempts) is int and attempts >= 0 else REINSTALL_ATTEMPTS
-            # Before 2.3 no marker: a saved panel mode is the evidence, as every version saves it
-            # only after Setup installed its script (2.1.0 too; no setting tells 2.2.x apart).
-            lost = (marker in (True, None) and attempts < REINSTALL_ATTEMPTS
-                    and Plugin._state.get("panel_mode") in MODES
-                    and not Plugin._state.get("reset_in_progress")
-                    and not Plugin.native_display_active() and not os.path.lexists(INSTALLED_SCRIPT))
-            bundled = _read_script_bytes(BUNDLED_SCRIPT)
-            sha = hashlib.sha256(bundled).hexdigest() if bundled is not None else None
-            silent = (lost and isinstance(loaded, dict) and loaded.get("restart_pending") is False
-                      and Plugin._same_session(loaded.get("session"), Plugin._gamescope_started_at)
-                      and sha is not None and loaded.get("sha256") == sha)
-            if silent:
-                # This session loaded these very bytes before the update removed the file:
-                # putting them back needs no Gaming Mode restart.
-                Plugin._loaded_script_variant = _script_variant(bundled)
-            if lost:
-                # Counted before the attempt, so a start that dies in it counts too.
-                Plugin._store_settings({"script_reinstall_attempts": attempts + 1})
-                # Kept after a silent reinstall: a later plugin reload in this session finds the file
-                # newer than the session's start and must still know the session runs these bytes.
-                return {"script_reinstall": False, "script_reinstall_attempts": None, "script_reinstall_loaded": {
-                    "session": Plugin._gamescope_started_at, "sha256": sha} if silent else None}
-            if marker is not False:
-                Plugin._store_settings({"script_reinstall": False, "script_reinstall_attempts": None,
-                                        "script_reinstall_loaded": None})
-            return None
-
-    @staticmethod
-    def _refresh_setup() -> None:
-        """Re-check the display script; someone may have replaced it behind us."""
-        with Plugin._runtime_lock:
-            Plugin._refresh_native_support()
-            if Plugin.native_display_active():
-                Plugin._state["setup_done"] = False
-                Plugin._state["restart_pending"] = False
-                return
-            Plugin._sync_loaded_script()
-            if Plugin._state.get("reset_in_progress"):
-                Plugin._state["setup_done"] = False
-                Plugin._state["restart_pending"] = False
-                return
-            if Plugin._state["panel_mode"] is None:
-                # Nothing is installed on the user's behalf before they have said
-                # which trade-off they want.
-                Plugin._state["setup_done"] = False
-                Plugin._state["restart_pending"] = False
-                Plugin._state["setup_note"] = ""
-                reset_session = settings.getSetting("reset_session", None)
-                current = _gamescope_start_time()
-                Plugin._state["reset_restart_pending"] = (
-                    reset_session is not None and (current is None or Plugin._same_session(reset_session, current)))
-                if reset_session is not None and current is not None and not Plugin._same_session(reset_session, current):
-                    Plugin._store_settings({"reset_session": None})
-                Plugin._state["active_mode"] = None
-                return
-            installed, note = _script_status()
-            Plugin._state["setup_done"] = installed
-            pending = installed and _restart_needed(Plugin._loaded_script_variant)
-            Plugin._state["restart_pending"] = pending
-            if pending:
-                Plugin._state["setup_note"] = "installed, restart Game Mode to apply"
-            else:
-                Plugin._state["setup_note"] = note
-
-    @staticmethod
-    def _session_props(names, *, fresh=False) -> dict:
-        """Read atoms, re-find a session that moved, and learn the EDID path (all modes)."""
-        wanted = list(dict.fromkeys(list(names) + [ATOM_EDID_PATH]))
-        if (not fresh and time.monotonic() < Plugin._session_retry_after and _cached_props(wanted) is None
-                and _gamescope_start_time() is None):
-            Plugin._state["gamescope_reachable"] = False  # Desktop Mode: no xprop until the back-off runs out.
-            Plugin._session_note = "gamescope not reachable"
-            return {}
-        # Safety-critical writes bypass the watcher without destroying its
-        # complete snapshot. Incremental notifications still need that cache.
-        props = _read_props(wanted, fresh=True) if fresh else _read_props(wanted)
-
-        def complete(props):
-            return props and (ATOM_IS_EXTERNAL not in wanted or ATOM_IS_EXTERNAL in props)
-
-        if not complete(props):
-            Plugin._state["gamescope_reachable"] = False
-            # A non-empty reply is not enough: feedback and EDID_PATH are copied
-            # to every Xwayland, while the safety/control atoms live only on the
-            # gamescope root context. Re-probe a few times during startup, but do
-            # not launch a scan twice a second forever while gamescope is down.
-            now = time.monotonic()
-            if now < Plugin._session_retry_after:
-                Plugin._session_note = (
-                    "gamescope control root not ready" if props
-                    else "gamescope not reachable")
-                return {}
-            Plugin._session_retry_after = now + GATE_INTERVAL_S
-            if not _pick_display():
-                Plugin._session_note = "gamescope not reachable"
-                if _gamescope_start_time() is None:
-                    Plugin._session_retry_after = now + Plugin._session_retry_delay
-                    Plugin._session_retry_delay = min(Plugin._session_retry_delay * 2, ABSENT_PROBE_MAX_S)
-                return {}
-            # Retry live, but keep the watcher's snapshot: a running xprop -spy
-            # only reports later changes, so clearing it leaves a partial cache.
-            props = _read_props(wanted, fresh=True)
-            if not complete(props):
-                Plugin._session_note = "gamescope is up but its control root is not ready"
-                return {}
-        Plugin._session_note = ""
-        Plugin._session_retry_delay = GATE_INTERVAL_S
-        Plugin._state["gamescope_reachable"] = True
-        Plugin._edid_path = (_as_path(props.get(ATOM_EDID_PATH))
-                             or Plugin._edid_path)
-        return props
-
-    @staticmethod
-    def _refresh_gate() -> bool:
-        """Decide whether we should be forwarding right now. Costs one xprop."""
-        with Plugin._runtime_lock:
-            if Plugin._state.get("reset_in_progress"):
-                return False
-            if Plugin.native_display_active():
-                Plugin._state["active"] = False
-                return False
-            if not Plugin._state["setup_done"]:
-                # The panel shows only the setup button in this state, so quietly
-                # doing the work anyway would leave no way to turn it off.
-                Plugin._release()
-                Plugin._state["reason"] = "waiting for the display script"
-                return False
-
-            # Ahead of the mode gates on purpose: this is what teaches the EDID half
-            # where to look, and that half runs in all three modes.
-            names = [ATOM_HDR_OUT, ATOM_HDR_APP, ATOM_SDR_NITS, ATOM_IS_EXTERNAL,
-                     ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT]
-            props = Plugin._session_props(names)
-
-            mode = Plugin._state.get("active_mode")
-            if mode not in MODES:
-                Plugin._release()
-                Plugin._state["reason"] = "waiting for gamescope to load a display mode"
-                return False
-            if (mode != MODE_HYBRID
-                    and _as_int(props.get(ATOM_FORCE_HDR_SUPPORT))
-                    and not Plugin._set_force_hdr(0)):
-                Plugin._state["reason"] = "could not clear stale hybrid HDR support"
-                return False
-            reason = _gate_block_reason(mode, Plugin._state)
-            if reason:
-                Plugin._release()
-                Plugin._state["reason"] = reason
-                return False
-
-            if not props:
-                Plugin._state["reason"] = Plugin._session_note or "gamescope not reachable"
-                return False
-
-            atoms = {name: _as_int(props.get(name)) for name in names}
-
-            if atoms.get(ATOM_IS_EXTERNAL):
-                # The backlight we read belongs to the built-in panel; the atom
-                # applies to whatever gamescope is driving. Forwarding one to the
-                # other would set an external display's brightness from a slider
-                # that has nothing to do with it.
-                live = _as_float(atoms.get(ATOM_SDR_NITS))
-                if (Plugin._last_written is not None and live is not None
-                        and abs(live - Plugin._last_written) > 0.01):
-                    # Connector setup or another owner has already replaced our
-                    # internal-panel value. Restoring the internal baseline now
-                    # would itself overwrite the external display's choice.
-                    Plugin._last_written = None
-                    Plugin._state["active"] = False
-                    decky.logger.info(
-                        f"{LOG} external display replaced the brightness atom; "
-                        "leaving its value alone")
-                else:
-                    Plugin._release()
-                Plugin._state["reason"] = "external display, not ours to drive"
-                return False
-
-            # Persist the pre-existing value per gamescope session. A Decky reload
-            # recovers it instead of mistaking our last write for the baseline, while
-            # a fresh session captures Steam's current value.
-            if Plugin._baseline is None:
-                current = _as_float(atoms.get(ATOM_SDR_NITS))
-                if current and current > 0:
-                    Plugin._remember_brightness_baseline(current)
-
-            # gamescope drops our value on re-init (suspend, restart); rewrite it now
-            # rather than waiting for the slider to move.
-            live = _as_float(atoms.get(ATOM_SDR_NITS))
-            if (Plugin._last_written is not None and live is not None
-                    and abs(live - Plugin._last_written) > 0.01):
-                decky.logger.info(
-                    f"{LOG} atom reads {live:.2f} nits, we last wrote "
-                    f"{Plugin._last_written:.2f} - putting it back")
-                Plugin._last_written = None
-
-            # A killed hybrid can leave forced feedback behind. Clear it first or
-            # HDR_OUTPUT_FEEDBACK would say one even with a gamma 2.2 output.
-            if atoms.get(ATOM_FORCE_HDR_SUPPORT, 0):
-                Plugin._release()
-                if Plugin._set_force_hdr(0):
-                    Plugin._state["reason"] = "clearing stale hybrid HDR support"
-                else:
-                    Plugin._state["reason"] = "could not clear stale hybrid HDR support"
-                return False
-
-            # Output feedback, not our own request atom, closes the loop.
-            if not atoms.get(ATOM_HDR_OUT, 0):
-                Plugin._release()
-                if Plugin._standing_off():
-                    Plugin._state["reason"] = \
-                        "something else keeps taking the panel out of PQ"
-                elif Plugin._correct_hdr_mode(True):
-                    Plugin._state["reason"] = "putting the panel back into PQ"
-                else:
-                    Plugin._state["reason"] = "panel is not in PQ"
-                return False
-            Plugin._hdr_mode_settled()
-
-            if atoms.get(ATOM_HDR_APP, 0):
-                # Steam drives the gain atoms while HDR content is up. Adding to that
-                # would dim twice.
-                Plugin._release()
-                Plugin._state["reason"] = "HDR content on screen, Steam handles it"
-                return False
-
-            Plugin._state["reason"] = "forwarding slider to gamescope"
-            return True
-
-    # -- display mode --
-
-    @staticmethod
-    def _correct_hdr_mode(target: bool) -> bool:
-        """Move the panel into `target`, giving up if something keeps undoing it.
-
-        Shared by hybrid, which switches on content, and pq, which just holds the
-        panel where the user put it. Both write the same atom, and both would
-        strobe the screen if they argued with another writer forever.
-        """
-        if Plugin.native_display_active():
-            return False
-        now = time.monotonic()
-        if now < Plugin._hdr_backoff_until:
-            return False
-
-        props = Plugin._fresh_owned_props([ATOM_IS_EXTERNAL, ATOM_HDR_APP])
-        if props is None:
-            return False
-        content = _as_int(props.get(ATOM_HDR_APP))
-        if _as_int(props.get(ATOM_IS_EXTERNAL)) != 0 or content not in (0, 1):
-            return False
-        if Plugin._state.get("active_mode") == MODE_HYBRID and bool(content) != target:
-            return False
-
-        # A writer that undoes us a pass later lets the panel read as settled in
-        # between, so count repeated corrections to one target, not unsettled passes.
-        same = target == Plugin._hdr_fight_target and now - Plugin._hdr_fight_at < HDR_FIGHT_WINDOW_S
-        Plugin._hdr_fights = Plugin._hdr_fights + 1 if same else 1
-        Plugin._hdr_fight_target, Plugin._hdr_fight_at = target, now
-        if Plugin._hdr_fights > HDR_FIGHT_LIMIT:
-            Plugin._hdr_backoff_until = now + HDR_BACKOFF_S
-            Plugin._hdr_fights, Plugin._hdr_fight_target = 0, None
-            decky.logger.warning(
-                f"{LOG} the display mode keeps being changed back - standing "
-                f"off for {HDR_BACKOFF_S:.0f}s rather than blinking the panel")
-            return False
-
-        return _write_atom_int(ATOM_HDR_ENABLED, 1 if target else 0)
-
-    @staticmethod
-    def _hdr_mode_settled() -> None:
-        """The panel is where we want it: end a stand-off. Repeated corrections still count."""
-        Plugin._hdr_backoff_until = 0.0
-
-    @staticmethod
-    def _hdr_argument_over() -> None:
-        """A mode change, reset, new session or display hand-off starts afresh."""
-        Plugin._hdr_fights, Plugin._hdr_fight_target = 0, None
-        Plugin._hdr_backoff_until = 0.0
-
-    @staticmethod
-    def _standing_off() -> bool:
-        return time.monotonic() < Plugin._hdr_backoff_until
-
-    # -- hybrid half --
-
-    @staticmethod
-    def _reset_hybrid_timing() -> None:
-        """Forget transition timers that cannot cross an ownership boundary."""
-        Plugin._hybrid_pq_hold_until = 0.0
-        Plugin._hybrid_sdr_since = None
-
-    @staticmethod
-    def _set_force_hdr(value: int) -> bool:
-        """Write the forced-support flag; gamescope then rewrites its EDID, so recheck it."""
-        if not _write_atom_int(ATOM_FORCE_HDR_SUPPORT, value):
-            return False
-        Plugin._edid_recheck_until = time.monotonic() + GATE_INTERVAL_S
-        return True
-
-    @staticmethod
-    def _hybrid_handed_off() -> None:
-        Plugin._hybrid_suspended_external = False
-        Plugin._state["hybrid_reason"] = ""
-        Plugin._hdr_argument_over()
-
-    @staticmethod
-    def _fresh_owned_props(names):
-        """A fresh read that our ownership session brackets on both sides, else None."""
-        if Plugin._ownership_session_current() is not True:
-            return None
-        props = Plugin._session_props(names, fresh=True)
-        return props if Plugin._ownership_session_current() is True else None
-
-    @staticmethod
-    def _cancel_hybrid_sdr_candidate(log=False) -> None:
-        """A false HDR signal is continuous only while every pass confirms it."""
-        if Plugin._hybrid_sdr_since is not None and log:
-            decky.logger.info(
-                f"{LOG} hybrid: HDR returned, cancelled the gamma 2.2 switch")
-        Plugin._hybrid_sdr_since = None
-
-    @staticmethod
-    def _remember_hdr_baseline(value: bool) -> None:
-        try:
-            Plugin._store_settings({
-                "hdr_baseline": bool(value),
-                "hdr_baseline_session": Plugin._gamescope_started_at,
-            }, required=True)
-        except Exception as error:
-            Plugin._state["hybrid_reason"] = str(error)
-            raise
-        Plugin._hdr_baseline = bool(value)
-
-    @staticmethod
-    def _forget_hdr_baseline() -> None:
-        Plugin._hdr_baseline = None
-        Plugin._store_settings({"hdr_baseline": None, "hdr_baseline_session": None})
-
-    @staticmethod
-    def _hybrid_pass() -> None:
-        """Move the panel between gamma 2.2 and PQ from what the game asks for."""
-        with Plugin._runtime_lock:
-            if module_runtime.stop_requested("display"):
-                return
-            if Plugin.native_display_active():
-                return
-            if Plugin._ownership_session_current() is not True:
-                Plugin._state["hybrid_reason"] = "waiting to verify the current gamescope session"
-                return
-            if Plugin._state.get("reset_in_progress") or Plugin._state.get("active_mode") != MODE_HYBRID:
-                return
-            if not Plugin._state["setup_done"]:
-                Plugin._reset_hybrid_timing()
-                Plugin._state["hybrid_reason"] = "waiting for the display script"
-                return
-
-            names = [ATOM_HDR_APP, ATOM_HDR_ENABLED, ATOM_FORCE_HDR_SUPPORT,
-                     ATOM_IS_EXTERNAL, ATOM_HDR_OUT]
-            props = Plugin._session_props(names)
-            if not props:
-                # Time without feedback cannot count as continuously observed SDR.
-                # Keep the PQ hold deadline, but make the debounce start over once
-                # gamescope is reachable again.
-                Plugin._cancel_hybrid_sdr_candidate()
-                Plugin._state["hybrid_reason"] = \
-                    Plugin._session_note or "gamescope not reachable"
-                return
-
-            external = _as_int(props.get(ATOM_IS_EXTERNAL))
-            # Stable Hybrid ticks keep using the watcher. Baseline capture, support
-            # advertisement and a possible modeset require a live admission read.
-            if external != 1 and (
-                    Plugin._hdr_baseline is None or Plugin._hybrid_suspended_external
-                    or _as_int(props.get(ATOM_FORCE_HDR_SUPPORT)) != 1
-                    or _as_int(props.get(ATOM_HDR_ENABLED)) not in (0, 1)
-                    or _as_int(props.get(ATOM_HDR_APP)) not in (0, 1)
-                    or _as_int(props.get(ATOM_HDR_ENABLED)) != _as_int(props.get(ATOM_HDR_APP))):
-                props = Plugin._session_props(names, fresh=True)
-                if Plugin._ownership_session_current() is not True:
-                    Plugin._state["hybrid_reason"] = "waiting to verify the current gamescope session"
-                    return
-                external = _as_int(props.get(ATOM_IS_EXTERNAL))
-            if external not in (0, 1):
-                Plugin._cancel_hybrid_sdr_candidate()
-                Plugin._state["hybrid_reason"] = "could not verify the active display"
-                return
-
-            if external == 1:
-                Plugin._hybrid_suspend_external_locked(props)
-                return
-
-            returned_without_baseline = (
-                Plugin._hybrid_suspended_external
-                and Plugin._hdr_baseline is None)
-            if Plugin._hybrid_suspended_external:
-                Plugin._hybrid_suspended_external = False
-                Plugin._reset_hybrid_timing()
-                Plugin._hdr_argument_over()
-
-            forced = bool(_as_int(props.get(ATOM_FORCE_HDR_SUPPORT)))
-
-            # This atom is input, not feedback, and gamescope does not create it.
-            # Capture it before our first internal-panel write. An external display
-            # has a different baseline and must never supply this value. If Hybrid
-            # started while docked, use the internal panel's unforced output feedback
-            # on return rather than carrying the monitor's request atom across.
-            if Plugin._hdr_baseline is None:
-                found = _as_int(props.get(ATOM_HDR_ENABLED))
-                if returned_without_baseline:
-                    found = _as_int(props.get(ATOM_HDR_OUT)) or 0
-                elif found is None:
-                    found = 0 if forced else (_as_int(props.get(ATOM_HDR_OUT)) or 0)
-                Plugin._remember_hdr_baseline(bool(found))
-
-            # Re-asserted every pass: gamescope drops it on restart, and without it no
-            # game started in gamma 2.2 could ever ask for HDR.
-            if not _as_int(props.get(ATOM_FORCE_HDR_SUPPORT)):
-                if Plugin._set_force_hdr(1):
-                    decky.logger.info(f"{LOG} hybrid: HDR advertised to games")
-                else:
-                    Plugin._state["hybrid_reason"] = "could not advertise HDR to games"
-                    return
-
-            wants_hdr, is_hdr, enabled_unknown = _hybrid_reading(props)
-            Plugin._state["hdr_now"] = is_hdr
-
-            now = time.monotonic()
-            if wants_hdr:
-                Plugin._cancel_hybrid_sdr_candidate(log=True)
-                if not enabled_unknown and is_hdr:
-                    # Hybrid may be enabled while an HDR game is already on screen.
-                    # Give that existing PQ state the same settling protection as a
-                    # modeset initiated below, without extending it every pass.
-                    if Plugin._hybrid_pq_hold_until <= 0.0:
-                        Plugin._hybrid_pq_hold_until = \
-                            now + HYBRID_PQ_MIN_HOLD_S
-                    Plugin._hdr_mode_settled()
-                    Plugin._state["hybrid_reason"] = \
-                        "HDR content on screen, panel in PQ"
-                    return
-                target = True
-            elif not enabled_unknown and not is_hdr:
-                Plugin._reset_hybrid_timing()
-                Plugin._hdr_mode_settled()
-                Plugin._state["hybrid_reason"] = \
-                    "no HDR content, panel in gamma 2.2"
-                return
-            else:
-                # Going into PQ is urgent because HDR is already being presented.
-                # Coming out is deliberately asymmetric: transient SDR commits are
-                # common while games replace loading screens and swapchains, and a
-                # second physical modeset during the first one can strand a game on
-                # black. Require continuous SDR and honour the minimum PQ residency.
-                if Plugin._hybrid_sdr_since is None:
-                    Plugin._hybrid_sdr_since = now
-                    decky.logger.info(
-                        f"{LOG} hybrid: SDR observed, waiting before gamma 2.2")
-                ready_at = max(
-                    Plugin._hybrid_sdr_since + HYBRID_SDR_DEBOUNCE_S,
-                    Plugin._hybrid_pq_hold_until,
-                )
-                if now < ready_at:
-                    # Still in PQ, so not settled: keep counting undone switches.
-                    Plugin._state["hybrid_reason"] = (
-                        "no HDR content, waiting for a stable switch to gamma 2.2")
-                    return
-                target = False
-
-            if Plugin._correct_hdr_mode(target):
-                Plugin._state["hdr_now"] = target
-                if target:
-                    Plugin._hybrid_pq_hold_until = \
-                        now + HYBRID_PQ_MIN_HOLD_S
-                else:
-                    Plugin._reset_hybrid_timing()
-                Plugin._state["hybrid_reason"] = (
-                    "HDR content on screen, panel in PQ" if target
-                    else "no HDR content, panel in gamma 2.2")
-                decky.logger.info(
-                    f"{LOG} hybrid: panel -> {'PQ' if target else 'gamma 2.2'}")
-            elif Plugin._standing_off():
-                Plugin._state["hybrid_reason"] = (
-                    "something else keeps changing the display mode, standing off")
-            else:
-                Plugin._state["hybrid_reason"] = "could not switch the panel"
-
-    @staticmethod
-    def _hybrid_suspend_external_locked(props: dict) -> None:
-        """Hand HDR control to an external display once, then leave it alone."""
-        if not Plugin._hybrid_suspended_external:
-            Plugin._reset_hybrid_timing()
-            if not Plugin._set_force_hdr(0):
-                Plugin._state["hybrid_reason"] = \
-                    "could not hand HDR control to the external display"
-                return
-            Plugin._hybrid_suspended_external = True
-            output = _as_int(props.get(ATOM_HDR_OUT))
-            if output is not None:
-                Plugin._state["hdr_now"] = bool(output)
-            Plugin._hdr_argument_over()
-            decky.logger.info(f"{LOG} hybrid: suspended for external display")
-        Plugin._state["hybrid_reason"] = "external display, not ours to drive"
-
-    @staticmethod
-    def _hybrid_release(next_mode=None) -> bool:
-        """Stop forcing support and leave the output useful for what follows."""
-        with Plugin._runtime_lock:
-            if Plugin.native_display_active():
-                return True
-            session = Plugin._ownership_session_current()
-            if session is not True:
-                return session is False
-            Plugin._reset_hybrid_timing()
-            props = Plugin._session_props([ATOM_IS_EXTERNAL], fresh=True)
-            session = Plugin._ownership_session_current()
-            if session is not True:
-                return session is False
-            external = _as_int(props.get(ATOM_IS_EXTERNAL))
-
-            dropped = Plugin._set_force_hdr(0)
-
-            if external != 0:
-                # We can safely stop advertising synthetic HDR support, but without
-                # the marker we must not write the global output-mode atom. A known
-                # external display is equally hands-off: Steam or that monitor's own
-                # policy decides whether it should run HDR.
-                if external == 1 and dropped:
-                    Plugin._forget_hdr_baseline()
-                    Plugin._hybrid_handed_off()
-                    decky.logger.info(
-                        f"{LOG} hybrid: released control to the external display")
-                    return True
-                Plugin._state["hybrid_reason"] = (
-                    "could not clear HDR support for the external display"
-                    if external == 1 else
-                    "could not verify which display should receive HDR control")
-                diagnostic_event('display', 'hybrid_restore_failed', level='warning', repeat=60, stage='display_handoff', pending=True)
-                return False
-
-            if next_mode == MODE_PQ:
-                # Do not restore a false baseline only for the PQ gate to turn it on
-                # again two seconds later, producing two visible modesets.
-                target = True
-            elif next_mode == MODE_G22:
-                target = False
-            elif Plugin._hdr_baseline is not None:
-                target = Plugin._hdr_baseline
-            else:
-                # Nothing was captured or written in this ownership period. Clearing
-                # our support flag is sufficient and makes repeated unloads idempotent.
-                if dropped:
-                    Plugin._hybrid_handed_off()
-                    return True
-                Plugin._state["hybrid_reason"] = "could not hand HDR control back"
-                return False
-
-            restored = _write_atom_int(ATOM_HDR_ENABLED, 1 if target else 0)
-
-            if restored:
-                Plugin._state["hdr_now"] = target
-            if dropped and restored:
-                # Only forget the hand-back target after both writes succeeded. If
-                # Xwayland disappeared halfway through unload, a Decky reload in
-                # the same gamescope session still has enough information to retry.
-                Plugin._forget_hdr_baseline()
-                Plugin._hybrid_handed_off()
-                decky.logger.info(
-                    f"{LOG} hybrid: released, panel back in "
-                    f"{'PQ' if target else 'gamma 2.2'}")
-                return True
-            else:
-                # Worth saying out loud: the panel is now in whatever state the
-                # failed write left it, and nothing is left running to correct it.
-                diagnostic_event('display', 'hybrid_restore_failed', level='warning', repeat=60, stage='panel_handoff',
-                                 reason='support_flag' if not dropped else 'output_mode', pending=True)
-                Plugin._state["hybrid_reason"] = "could not hand HDR control back"
-                return False
-
-    # -- EDID half --
+    # -- EDID --
 
     @staticmethod
     def _edid_restore() -> bool:
@@ -2984,15 +1238,11 @@ class Plugin:
         with Plugin._edid_lock:
             if module_runtime.stop_requested("display"):
                 return
-            if Plugin._state.get("reset_in_progress") and not Plugin.native_display_active():
-                return
             if not Plugin._state["edid_fix"]:
                 Plugin._edid_restore()
                 return
 
-            # Native panel support and Lua setup never determine whether games need
-            # the independent EDID workaround, including after connector changes.
-            Plugin._session_props([])
+            Plugin._session_props()
 
             if settings.getSetting("edid_write_pending", None) is not None:
                 if not Plugin._edid_restore():
@@ -3063,7 +1313,7 @@ class Plugin:
             # Always, not just the first time: connector changes replace this file,
             # so the bytes we would restore must describe the display just parsed.
             Plugin._edid_original = data
-            if not _write_file_atomically(EDID_BACKUP, data):
+            if not _save_edid_backup(data):
                 Plugin._state["edid_reason"] = "could not save the original EDID"
                 diagnostic_transition('display', 'edid_recovery', 'backup_failed', level='warning', stage='backup', pending=True)
                 Plugin._edid_original = None
@@ -3097,221 +1347,54 @@ class Plugin:
 
     # -- loop --
 
-    @staticmethod
-    def _adopt_backlight(bl_dir: str) -> None:
-        Plugin._state["backlight"] = os.path.basename(bl_dir) if bl_dir else ""
-        maximum = _read_int(os.path.join(bl_dir, "max_brightness")) if bl_dir else None
-        Plugin._state["max_nits"] = round(_millinits_to_nits(maximum), 2) if maximum else 0.0
-
-    async def _loop(self, bl_dir: str):
-        bl_path = os.path.join(bl_dir, "brightness") if bl_dir else ""
-        notify = (await _offload(_open_notify, bl_dir)
-                  if bl_dir and not Plugin.native_display_active() else None)
-        if notify is not None:
-            decky.logger.info(f"{LOG} waiting on kernel change notifications")
-        elif not Plugin.native_display_active():
-            decky.logger.info(
-                f"{LOG} no notification support, polling every {POLL_FALLBACK_S}s")
-        gate_ok = False
-        gate_ts = 0.0
-        hybrid_ts = 0.0
-        hardware_retry_at = 0.0
-        try:
-            while True:
-                try:
-                    now = time.monotonic()
-                    if now - gate_ts >= GATE_INTERVAL_S:
-                        await _offload(Plugin._refresh_setup)
-                        native = Plugin.native_display_active()
-                        if native and notify is not None:
-                            os.close(notify)
-                            notify = None
-                        # DRM/backlight nodes can appear after Decky starts, or
-                        # move after a driver rebind. Retry discovery only while
-                        # hardware is missing; a healthy panel needs no scans.
-                        missing = not bl_dir or not os.path.exists(bl_path)
-                        if (not native and now >= hardware_retry_at
-                                and (missing or not Plugin._state["panel_ok"])):
-                            hardware_retry_at = now + HARDWARE_RETRY_S
-                            matched, desc = await _offload(_identify_panel)
-                            Plugin._state["panel_ok"] = matched
-                            Plugin._state["panel_desc"] = desc
-                            if missing:
-                                if notify is not None:
-                                    os.close(notify)
-                                    notify = None
-                                bl_dir = await _offload(_find_backlight)
-                                bl_path = os.path.join(bl_dir, "brightness") if bl_dir else ""
-                                notify = await _offload(_open_notify, bl_dir) if bl_dir else None
-                                Plugin._adopt_backlight(bl_dir)
-                                Plugin._last_written = None
-                        # Stamped first: a failing pass must not re-run the gate every tick.
-                        gate_ts = now
-                        gate_ok = await _offload(Plugin._refresh_gate)
-                        await _offload(Plugin._edid_pass)
-
-                    # Hybrid runs on its own, faster clock (see HYBRID_INTERVAL_S).
-                    if (Plugin._state.get("active_mode") == MODE_HYBRID
-                            and now - hybrid_ts >= HYBRID_INTERVAL_S):
-                        await _offload(Plugin._hybrid_pass)
-                        hybrid_ts = now
-
-                    # Changing the forced-support flag makes gamescope regenerate
-                    # its EDID file asynchronously. Re-apply for a short window so
-                    # a game cannot keep the 1499-nit fallback from that rewrite.
-                    if Plugin._edid_recheck_until:
-                        await _offload(Plugin._edid_pass)
-                        if time.monotonic() >= Plugin._edid_recheck_until:
-                            Plugin._edid_recheck_until = 0.0
-
-                    if gate_ok and not Plugin.native_display_active():
-                        # Cheap enough to do on the event loop; offloading it
-                        # would cost more in executor round trips than the read.
-                        raw = _read_int(bl_path)
-                        if raw is None:
-                            Plugin._state["active"] = False
-                            Plugin._state["reason"] = "backlight unreadable"
-                        else:
-                            # The backlight node is in millinits, exactly the unit
-                            # the atom wants. No curve of our own: Steam already
-                            # spaced the steps perceptually.
-                            nits = _millinits_to_nits(raw)
-                            Plugin._state["active"] = True
-                            Plugin._state["nits"] = round(nits, 2)
-                            if (Plugin._last_written is None
-                                    or abs(Plugin._last_written - nits) > 0.01):
-                                wrote = await _offload(Plugin._forward_nits, nits)
-                                if wrote is False:
-                                    Plugin._state["reason"] = \
-                                        "could not write to gamescope"
-
-                    # Sleep until either the backlight moves or the gate is due.
-                    remaining = GATE_INTERVAL_S - (time.monotonic() - gate_ts)
-                    if Plugin._state.get("active_mode") == MODE_HYBRID:
-                        remaining = min(
-                            remaining,
-                            HYBRID_INTERVAL_S - (time.monotonic() - hybrid_ts))
-                    if bl_dir and not Plugin.native_display_active():
-                        await _offload(_wait_for_change, notify, remaining)
-                    else:
-                        await asyncio.sleep(max(0.0, remaining))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:  # never let one bad pass kill the loop
-                    diagnostic_event('display', 'loop_failed', level='error', error=e, repeat=60)
-                    await asyncio.sleep(0.5)
-        finally:
-            if notify is not None:
-                # A cancelled wait's thread may still poll this fd: closing it under
-                # that thread fails it with EBADF or polls a reused descriptor.
-                module_runtime.background_task(module_runtime.drain('display')).add_done_callback(
-                    lambda _done, fd=notify: os.close(fd))
+    async def _loop(self):
+        while True:
+            try:
+                if not Plugin._cleanup_done:
+                    Plugin._cleanup_done = await _offload(Plugin._cleanup_old_display_fix)
+                await _offload(Plugin._edid_pass)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # never let one bad pass kill the loop
+                diagnostic_event('display', 'loop_failed', level='error', error=e, repeat=60)
+            await asyncio.sleep(GATE_INTERVAL_S)
 
     async def _main(self):
         decky.logger.info(f"{LOG} startup")
-        previous_settings_error = Plugin._state.get("settings_error", "")
         try:
             await _offload(Plugin._read_settings)
         except Exception as error:
-            message = f"Display settings are unavailable; the module was not started. {error}"
-            Plugin._state["settings_error"] = message
-            Plugin._state["setup_error"] = message
+            Plugin._state["settings_error"] = f"Display settings are unavailable; the module was not started. {error}"
             diagnostic_event('display', 'settings_unavailable', level='error', error=error)
             raise
-        if previous_settings_error and Plugin._state.get("setup_error") == previous_settings_error:
-            Plugin._state["setup_error"] = ""
         Plugin._state["settings_error"] = ""
-        Plugin._native_probe_after = 0.0
-        Plugin._state["reset_in_progress"] = settings.getSetting("reset_in_progress", False) is True
-        Plugin._state["reset_error"] = ""
-        for key in ("enabled", "edid_fix"):
-            value = settings.getSetting(key, DEFAULT_SETTINGS[key])
-            Plugin._state[key] = value if type(value) is bool else DEFAULT_SETTINGS[key]
+        value = settings.getSetting("edid_fix", DEFAULT_SETTINGS["edid_fix"])
+        Plugin._state["edid_fix"] = value if type(value) is bool else DEFAULT_SETTINGS["edid_fix"]
+        try:
+            await _offload(Plugin._drop_retired_settings)
+        except Exception as exc:
+            diagnostic_event('display', 'store_settings_failed', level='warning', error=exc, repeat=60)
 
-        stored = settings.getSetting("panel_mode", DEFAULT_SETTINGS["panel_mode"])
-        if stored in MODES:
-            Plugin._state["panel_mode"] = _select_mode(stored)
-            decky.logger.info(f"{LOG} panel mode {stored}")
-        else:
-            # No mode yet, so the panel shows the chooser and nothing is
-            # installed until the user has decided.
-            Plugin._state["panel_mode"] = None
-            decky.logger.info(f"{LOG} no panel mode chosen yet")
-
-        active = settings.getSetting("active_mode", DEFAULT_SETTINGS["active_mode"])
-        Plugin._state["active_mode"] = active if active in MODES else None
-
-        # Anything we wrote last time is still out there; the state that knew
-        # about it is not. Pick the session up first so the gate has somewhere
-        # to read from, and take back the EDID bytes we would have to restore.
+        # Take back the EDID bytes we would have to restore.
+        Plugin._edid_original = await _offload(_load_edid_backup)
+        if Plugin._edid_original:
+            decky.logger.info(f"{LOG} recovered the original EDID from a previous run")
         if not await _offload(_pick_display):
             decky.logger.info(f"{LOG} gamescope not up yet, the loop will retry")
-        saved = await _offload(_read_bytes, EDID_BACKUP)
-        if saved:
-            Plugin._edid_original = saved
-            decky.logger.info(
-                f"{LOG} recovered the original EDID from a previous run")
-
-        await _offload(Plugin._refresh_setup)
 
         def check_stop():
             """A stop that came during a slow step (see main.MODULE_START_LIMIT_S): apply nothing more."""
             if module_runtime.stop_requested("display"):
                 raise module_runtime.StartStopped("Display stopped while starting; nothing more was applied.")
         check_stop()
-        if Plugin._state["reset_in_progress"]:
-            await self.reset_settings()
-            check_stop()
-        reinstalled = await _offload(Plugin._script_lost_to_update)
-        if reinstalled is not None:
-            mode = Plugin._state["panel_mode"]
-            ok = not (await Plugin._apply_mode(mode, reinstall=True)).get("setup_error")
-            diagnostic_event('display', 'script_reinstalled', level='info' if ok else 'warning', mode=mode, success=ok)
-            if ok:  # A failure keeps the marker: the next start tries again.
-                await _offload(Plugin._store_settings, reinstalled)
-
-        # Before the slower startup work: a game that creates its surface before
-        # the forced-support flag is back loses HDR for its whole run.
-        check_stop()
-        if Plugin._state.get("active_mode") == MODE_HYBRID:
-            await _offload(Plugin._hybrid_pass)
-
-        matched, desc = await _offload(_identify_panel)
-        Plugin._state["panel_ok"] = matched
-        Plugin._state["panel_desc"] = desc
-
-        # The EDID half is not tied to the panel allowlist: the DXVK bug fires on
-        # any display carrying a DisplayID 2.0 block, and dropping a block DXVK
-        # never reads cannot cost anything.
-        await _offload(Plugin._session_props, [ATOM_IS_EXTERNAL])
+        Plugin._cleanup_done = await _offload(Plugin._cleanup_old_display_fix)
         check_stop()
         await _offload(Plugin._edid_pass)
-
-        bl_dir = (await _offload(_find_backlight)
-                  if not Plugin.native_display_active() else "")
-        Plugin._adopt_backlight(bl_dir)
-
-        if Plugin.native_display_active():
-            decky.logger.info(f"{LOG} native display support; maintaining the independent EDID fix")
-        elif not matched:
-            Plugin._state["reason"] = f"display not on the affected list: {desc}"
-            decky.logger.info(f"{LOG} brightness half idle - {desc}")
-        elif not bl_dir:
-            Plugin._state["reason"] = "no backlight device found"
-            decky.logger.warning(f"{LOG} brightness half idle - no backlight device")
-        else:
-            decky.logger.info(
-                f"{LOG} watching {Plugin._state['backlight']} "
-                f"(max {Plugin._state['max_nits']} nits) on {desc}"
-            )
-
         check_stop()
-        # The loop runs either way: the EDID half is not device specific, and the
-        # setup gate needs re-checking so the panel updates itself after Setup.
         Plugin._prop_task = asyncio.create_task(_watch_properties())
-        Plugin._task = asyncio.create_task(self._loop(bl_dir))
+        Plugin._task = asyncio.create_task(self._loop())
 
-    async def _unload(self, uninstalling=False):
+    async def _unload(self):
         # Stop both workers even when settings cannot be read. A failed unload
         # must not leave an active display loop behind a disabled module.
         tasks = {task for task in (Plugin._task, Plugin._prop_task) if task is not None}
@@ -3321,47 +1404,8 @@ class Plugin:
         Plugin._prop_task = None
         if tasks:
             await asyncio.wait(tasks, timeout=2.0)
-        # Module recovery and uninstall can call us before _main. Detect native
-        # ownership before any of the old release/default-atom paths can run.
         await _offload(Plugin._read_settings)
-        await _offload(Plugin._refresh_native_support, True)
-        # Put both things back before we go. The EDID would otherwise stay
-        # trimmed with nothing left to maintain it, and the atom would keep
-        # whatever level we last forwarded.
-        try:
-            await _offload(Plugin._release)
-        except Exception as exc:
-            diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='brightness', pending=True)
-        # Hybrid holds the panel in gamma 2.2 between HDR games. Leaving it there
-        # with nothing left to switch it back would cost the user their HDR.
-        # Uninstalling ends in gamma 2.2 (below), so do not detour through PQ.
-        if Plugin._state.get("active_mode") == MODE_HYBRID:
-            try:
-                await _offload(Plugin._hybrid_release, MODE_G22 if uninstalling else None)
-            except Exception as exc:
-                diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='hybrid', pending=True)
-        if uninstalling:
-            # Removing the script only affects the next gamescope process. Put
-            # the current internal session into gamma 2.2 now, so uninstalling
-            # cannot strand the user in PQ with a dead hardware slider.
-            try:
-                def release_legacy_atoms():
-                    with Plugin._runtime_lock:
-                        if Plugin.native_display_active():
-                            return
-                        props = Plugin._fresh_owned_props([ATOM_IS_EXTERNAL])
-                        if props is None:
-                            return
-                        _write_atom_int(ATOM_FORCE_HDR_SUPPORT, 0)
-                        # Only an HDR mode we chose can have left the panel in PQ;
-                        # otherwise Steam's own HDR setting is not ours to clear.
-                        chose_hdr = any(Plugin._state.get(key) in (MODE_PQ, MODE_HYBRID)
-                                        for key in ("panel_mode", "active_mode"))
-                        if chose_hdr and _as_int(props.get(ATOM_IS_EXTERNAL)) == 0:
-                            _write_atom_int(ATOM_HDR_ENABLED, 0)
-                await _offload(release_legacy_atoms)
-            except Exception as exc:
-                diagnostic_event('display', 'withdrawal_failed', level='warning', error=exc, stage='legacy_atoms', pending=True)
+        # The EDID would otherwise stay trimmed with nothing left to maintain it.
         try:
             await _offload(Plugin._edid_restore)
         except Exception as exc:
@@ -3369,28 +1413,4 @@ class Plugin:
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
-        await self._unload(uninstalling=True)
-        try:
-            def uninstall_legacy_script():
-                with Plugin._runtime_lock:
-                    if Plugin.native_display_active():
-                        return None
-                    _bind_script_dir()
-                    removed = _read_script_bytes(INSTALLED_SCRIPT)
-                    note = _uninstall_script()
-                    if note == "removed the display script":
-                        # Decky also uninstalls before every update; the next start puts it back,
-                        # without a restart if this session already runs the same script.
-                        Plugin._store_settings({"script_reinstall": True, "script_reinstall_attempts": None,
-                                                "script_reinstall_loaded": {
-                            "session": Plugin._gamescope_started_at,
-                            "sha256": hashlib.sha256(removed).hexdigest() if removed is not None else None,
-                            "restart_pending": Plugin._state.get("restart_pending") is True}})
-                    return note
-            note = await _offload(uninstall_legacy_script)
-            if note is None:
-                await self.cleanup_native_display()
-                return
-            diagnostic_event('display', 'legacy_cleanup_returned')
-        except Exception as e:
-            diagnostic_event('display', 'uninstall_failed', level='error', error=e, repeat=60)
+        await self._unload()

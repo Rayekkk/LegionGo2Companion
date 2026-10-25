@@ -15,7 +15,6 @@ import display_backend as display
 import fan_backend as fan
 import wifi_backend as wifi
 import test_display_edid as edid_fixture
-import test_display_lifecycle as lifecycle_fixture
 import test_wifi_manual_wpa as wpa_fixture
 
 
@@ -99,50 +98,6 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertEqual(case.edid.read_bytes(), b'foreign connector bytes')
         self.assertEqual(case.backup.read_bytes(), case.original)
 
-    def test_repeated_brightness_release_failure_is_coalesced(self):
-        self.fixture(lifecycle_fixture.NativeDisplayMigrationTests)
-        with patch.object(display, '_write_nits', return_value=False):
-            for _ in range(7): self.assertFalse(display.Plugin._release())
-        self.assertEqual(len(self.events('display', 'brightness_restore_failed')), 1)
-
-    def test_display_setup_keeps_private_failure_in_ui_and_logs_exception_metadata(self):
-        self.fixture(lifecycle_fixture.DisplayResetTests)
-        marker = 'unlabelled-private-setup-marker'
-        with patch.object(display, '_install_script', side_effect=PermissionError(errno.EACCES, marker)), \
-                patch.object(display, '_select_mode'), patch.object(display.decky, 'logger') as legacy:
-            result = asyncio.run(display.Plugin._apply_mode_locked('pq'))
-        self.assertIn(marker, result['setup_error'])
-        event = self.events('display', 'script_install_failed')[0]
-        self.assertEqual(event['error']['type'], 'PermissionError')
-        self.assertEqual(event['error']['errno'], errno.EACCES)
-        self.assertNotIn(marker, json.dumps(self.records))
-        self.assertNotIn(marker, repr(legacy.mock_calls))
-
-    def test_display_restart_logs_numeric_attempt_failures_without_subprocess_details(self):
-        case = self.fixture(lifecycle_fixture.DisplayResetTests)
-        marker = 'unlabelled-private-restart-marker'
-        for exception in (False, True):
-            with self.subTest(exception=exception):
-                self.records.clear(); diagnostics._seen.clear()
-                process = Mock(returncode=7, stderr=marker, stdout='')
-                with patch.object(display, '_display_owner', return_value=None), \
-                        patch.object(display, 'pwd', None), patch.object(display, '_system_env', return_value={}), \
-                        patch.object(display.os.path, 'exists', return_value=True), \
-                        patch.object(display.subprocess, 'run', return_value=process,
-                                     side_effect=PermissionError(errno.EACCES, marker) if exception else None), \
-                        patch.object(display.decky, 'logger') as legacy:
-                    result = asyncio.run(case.plugin.restart_session())
-                self.assertIn(marker, result['restart_error'])
-                attempts = self.events('display', 'session_restart_attempt_failed')
-                self.assertEqual(len(attempts), 2)
-                if exception:
-                    self.assertTrue(all(row['error']['errno'] == errno.EACCES for row in attempts))
-                else:
-                    self.assertTrue(all(row['context']['returncode'] == 7 for row in attempts))
-                self.assertEqual(self.events('display', 'session_restart_returned')[0]['context']['outcome'], 'failed')
-                self.assertNotIn(marker, json.dumps(self.records))
-                self.assertNotIn(marker, repr(legacy.mock_calls))
-
     def test_edid_rollback_with_failed_metadata_clear_reports_actual_pending_recovery(self):
         case = self.fixture(edid_fixture.DisplayWriteRecoveryTests)
         store = display.Plugin._store_settings
@@ -160,14 +115,6 @@ class PlatformDiagnosticTests(unittest.TestCase):
         self.assertTrue(event['context']['restored'])
         self.assertTrue(event['context']['pending'])
         self.assertNotIn('unlabelled-private-clear-marker', json.dumps(self.records))
-
-    def test_native_handoff_failure_has_one_deferred_event_and_one_recovery(self):
-        case = self.fixture(lifecycle_fixture.NativeDisplayMigrationTests)
-        with patch.object(display.Plugin, '_native_store', side_effect=OSError('Fixture native journal is full')):
-            for _ in range(4): case.refresh()
-        self.assertEqual([row['context']['status'] for row in self.events('display', 'native_cleanup')], ['deferred'])
-        case.refresh()
-        self.assertEqual([row['context']['status'] for row in self.events('display', 'native_cleanup')], ['deferred', 'ready'])
 
     def test_scan_failure_is_safe_once_recovery_is_visible_and_cancel_is_quiet(self):
         process = Mock(returncode=2)

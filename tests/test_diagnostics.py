@@ -472,19 +472,6 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
                          [('rpc_completed','info','refused'),('rpc_failed','warning','not_confirmed')])
         self.assertEqual(terminals[0]['context']['reason'],'unsupported_backend')
 
-    async def test_failed_session_restart_does_not_mark_later_display_calls_failed(self):
-        from unittest.mock import AsyncMock
-        state={'setup_done':True,'restart_error':'Gamescope restart failed'}
-        self.plugin._display=Mock(restart_session=AsyncMock(return_value=dict(state)),
-                                  get_state=AsyncMock(return_value=dict(state)),
-                                  set_edid_fix=AsyncMock(return_value=dict(state,edid_fix=True)))
-        await self.plugin.display_restart_session()
-        await self.plugin.display_get_state()
-        await self.plugin.display_set_edid_fix(True)
-        failed=[r['context']['operation'] for r in self.records
-                if r['event']=='rpc_failed' or r['context'].get('status')=='failed']
-        self.assertEqual(failed,['display_restart_session'])
-
     async def test_calls_refused_by_the_conflict_guard_are_not_reported_again(self):
         from unittest.mock import AsyncMock
         from desktop_bridge import DesktopBridge

@@ -484,7 +484,7 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         self.p._save(dict(defaults(),enabled=True,global_curve=curve,presets={'silent':curve}))
         fresh=fan.Plugin()
         with patch.object(fresh,'_start_client',new=AsyncMock()) as start:
-            self.assertEqual(await module_control.withdraw('fan',fresh),'')
+            await module_control.withdraw('fan',fresh)
             start.assert_not_awaited()
         self.assertEqual(fresh._state['global_curve'],curve)
         self.assertEqual(fresh._state['presets']['silent'],curve)

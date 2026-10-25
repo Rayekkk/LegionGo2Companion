@@ -113,7 +113,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_module_rpcs_are_gated_but_management_remains_available(self):
         for name in main.MODULE_NAMES:
             self.plugin._module_state[name] = {'enabled': False}
-        for method in ['get_settings', 'vibe_get_settings', 'display_get_state', 'display_reset_settings', 'wifi_get_status',
+        for method in ['get_settings', 'vibe_get_settings', 'display_get_state', 'display_set_edid_fix', 'wifi_get_status',
                        'rgb_get_status', 'remap_get_status', 'battery_get_status',
                        'battery_get_controller_levels', 'controller_get_status']:
             with self.subTest(method=method), self.assertRaisesRegex(RuntimeError, 'disabled'):
@@ -133,7 +133,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._rgb._uninstall.assert_awaited_once()
         fresh = self.make_plugin()
         self.assertEqual(fresh._module_state['controller'],
-                         {'enabled': False, 'note': 'restored', 'resume': resume})
+                         {'enabled': False, 'resume': resume})
 
     async def test_uninstall_keeps_the_band_policy_for_the_updated_plugin(self):
         # Decky runs _uninstall before every update; WiFi's own uninstall restores the network files.
@@ -765,88 +765,13 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
-    async def test_display_reenable_keeps_edid_module_running_with_native_support(self):
-        for state in ({'native_support_detected': True}, {'native_cleanup_pending': True}):
-            c = types.SimpleNamespace(set_panel_mode=AsyncMock(return_value={
-                **state, 'setup_done': False, 'native_cleanup_error': 'retrying'}))
-            await module_control.restore_intent('display', c, {'panel_mode': 'hybrid'})
-            c.set_panel_mode.assert_awaited_once_with('hybrid')
-
-    async def test_native_display_withdraw_only_restores_edid(self):
-        import display_backend
+    async def test_display_withdrawal_restores_the_edid_and_keeps_the_choice(self):
         restored = []
-        c = types.SimpleNamespace(
-            _unload=AsyncMock(), native_display_active=lambda: True,
-            cleanup_native_display=AsyncMock(return_value={'native_restart_pending': True}),
-            _edid_restore=lambda: restored.append('edid') or True)
-        with patch.object(display_backend, '_write_atom_int') as write, \
-             patch.object(display_backend, '_uninstall_script') as uninstall:
-            note = await module_control.withdraw('display', c)
+        c = types.SimpleNamespace(_unload=AsyncMock(), _edid_restore=lambda: restored.append('edid') or True)
+        await module_control.withdraw('display', c)
+        c._unload.assert_awaited_once_with()
         self.assertEqual(restored, ['edid'])
-        c._unload.assert_awaited_once_with(uninstalling=True)
-        write.assert_not_called()
-        uninstall.assert_not_called()
-        self.assertIn('Restart', note)
-
-    async def test_native_cleanup_failure_keeps_module_withdrawal_pending(self):
-        c = types.SimpleNamespace(
-            _unload=AsyncMock(), native_display_active=lambda: True,
-            cleanup_native_display=AsyncMock(return_value={
-                'native_cleanup_pending': True, 'native_cleanup_error': 'disk full'}))
-        with self.assertRaisesRegex(RuntimeError, 'disk full'):
-            await module_control.withdraw('display', c)
-
-    async def test_pending_display_withdrawal_probes_native_before_first_unload(self):
-        import display_backend
-        detected = False
-        events = []
-
-        async def probe():
-            nonlocal detected
-            events.append('probe')
-            detected = True
-            return {'native_support_detected': True}
-
-        async def unload(uninstalling=False):
-            self.assertTrue(detected, 'Legacy unload must not run before native discovery')
-            events.append('unload')
-
-        c = types.SimpleNamespace(
-            cleanup_native_display=probe, _unload=unload,
-            native_display_active=lambda: detected, _edid_restore=lambda: True)
-        with patch.object(display_backend, '_write_atom_int') as write, \
-             patch.object(display_backend, '_uninstall_script') as uninstall:
-            await module_control.withdraw('display', c)
-        self.assertEqual(events[0:2], ['probe', 'unload'])
-        write.assert_not_called()
-        uninstall.assert_not_called()
-
-    async def test_native_detected_during_unload_fences_final_legacy_writes(self):
-        import display_backend
-        detected = False
-
-        async def unload(uninstalling=False):
-            nonlocal detected
-            if uninstalling:
-                detected = True
-
-        c = types.SimpleNamespace(
-            cleanup_native_display=AsyncMock(return_value={}), _unload=unload,
-            native_display_active=lambda: detected, _edid_restore=lambda: True)
-        with patch.object(display_backend, '_write_atom_int') as write, \
-             patch.object(display_backend, '_uninstall_script') as uninstall:
-            await module_control.withdraw('display', c)
-        self.assertTrue(detected)
-        write.assert_not_called()
-        uninstall.assert_not_called()
-
-    async def test_display_reenable_reinstalls_saved_mode_and_checks_result(self):
-        c = types.SimpleNamespace(set_panel_mode=AsyncMock(return_value={'setup_done': True}))
-        await module_control.restore_intent('display', c, {'panel_mode': 'hybrid'})
-        c.set_panel_mode.assert_awaited_once_with('hybrid')
-        c.set_panel_mode.return_value = {'setup_done': False, 'setup_error': 'disk full'}
-        with self.assertRaisesRegex(RuntimeError, 'disk full'):
-            await module_control.restore_intent('display', c, {'panel_mode': 'hybrid'})
+        self.assertEqual(module_control.capture_intent('display'), {}, 'the HDR fix switch stays in its settings')
 
     async def test_capture_rgb_intent_excludes_old_hardware_baselines(self):
         import rgb_backend
@@ -862,8 +787,7 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
         c.set_power_led.assert_awaited_once_with(False)
 
     async def test_display_failed_restoration_is_not_reported_as_disabled(self):
-        c = types.SimpleNamespace(_unload=AsyncMock(), cleanup_native_display=AsyncMock(return_value={}),
-                                  _release=lambda: False, _edid_restore=lambda: True)
+        c = types.SimpleNamespace(_unload=AsyncMock(), _edid_restore=lambda: False)
         with self.assertRaisesRegex(RuntimeError, 'restoration'):
             await module_control.withdraw('display', c)
 
@@ -909,7 +833,7 @@ class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
             store = AtomicSettingsManager('display_settings', raw)
             store.replace(dict(display.DEFAULT_SETTINGS))
             stack.enter_context(patch.object(display, 'settings', store))
-            state = dict(display.Plugin._state, settings_error='', setup_error='')
+            state = dict(display.Plugin._state, settings_error='')
             stack.enter_context(patch.object(display.Plugin, '_state', state))
             stack.enter_context(patch.object(display.Plugin, '_task', None))
             stack.enter_context(patch.object(display.Plugin, '_prop_task', None))
@@ -925,14 +849,10 @@ class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
                     await loader.display_get_state()
                 self.assertIsNone(loader._display._task)
                 self.assertIsNone(loader._display._prop_task)
-            for name, value in (('_refresh_native_support', None), ('_refresh_setup', None),
-                                ('_release', True), ('_edid_restore', True), ('_edid_pass', None)):
+            for name, value in (('_cleanup_old_display_fix', True), ('_edid_restore', True), ('_edid_pass', None)):
                 stack.enter_context(patch.object(display.Plugin, name, return_value=value))
-            stack.enter_context(patch.object(display.Plugin, '_session_props', return_value={}))
             stack.enter_context(patch.object(display, '_pick_display', return_value=False))
-            stack.enter_context(patch.object(display, '_read_bytes', return_value=None))
-            stack.enter_context(patch.object(display, '_identify_panel', return_value=(False, 'fixture')))
-            stack.enter_context(patch.object(display, '_find_backlight', return_value=''))
+            stack.enter_context(patch.object(display, '_load_edid_backup', return_value=None))
             stack.enter_context(patch.object(display, '_watch_properties', new=AsyncMock()))
             stack.enter_context(patch.object(loader._display, '_loop', new=AsyncMock()))
             stack.enter_context(patch.object(main, 'restore_intent', new=AsyncMock()))
@@ -941,7 +861,6 @@ class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result['display']['ready'])
                 self.assertEqual(result['display']['error'], '')
                 self.assertEqual(state['settings_error'], '')
-                self.assertEqual(state['setup_error'], '')
                 self.assertIsNotNone(loader._display._task)
                 self.assertIsNotNone(loader._display._prop_task)
                 self.assertEqual((await loader.display_get_state())['settings_error'], '')
@@ -1197,33 +1116,6 @@ class ModuleEventLoopTests(unittest.IsolatedAsyncioTestCase):
     make_plugin = ModuleGateTests.make_plugin
     asyncTearDown = ModuleGateTests.asyncTearDown
 
-    def held_io(self, observations, result=None):
-        loop = asyncio.get_running_loop()
-        def run():
-            heartbeat = threading.Event()
-            loop.call_soon_threadsafe(heartbeat.set)
-            observations.append(heartbeat.wait(2))
-            return result
-        return run
-
-    async def test_slow_session_status_probe_keeps_event_loop_responsive(self):
-        self.plugin._module_state['display'] = {'enabled': False, 'session': 100.0}
-        observed = []
-        with patch.object(display, '_gamescope_start_time', side_effect=self.held_io(observed, 200.0)):
-            for operation in (self.plugin.get_version, self.plugin._publish_modules):
-                await operation()
-        self.assertEqual(observed, [True, True], 'Status probes must allow an event-loop heartbeat while I/O waits.')
-
-    async def test_display_withdrawal_session_probe_keeps_event_loop_responsive(self):
-        observed = []
-        with patch.object(display, '_gamescope_start_time', side_effect=self.held_io(observed, 200.0)), \
-                patch.object(main, 'withdraw', new=AsyncMock(return_value='Restart Game Mode')):
-            result = await self.plugin.modules_set_enabled('display', False)
-        self.assertTrue(observed)
-        self.assertTrue(all(observed), 'Recording the withdrawn session must also allow a heartbeat.')
-        self.assertEqual(self.plugin._module_state['display']['session'], 200.0)
-        self.assertFalse(result['display']['enabled'])
-
     async def test_cancelled_module_change_finishes_commit_before_withdrawal(self):
         entered, release = threading.Event(), threading.Event()
         original_commit = self.plugin._module_store.commit
@@ -1250,66 +1142,6 @@ class ModuleEventLoopTests(unittest.IsolatedAsyncioTestCase):
         saved = self.make_plugin()._module_state['battery']
         self.assertFalse(saved['enabled'])
         self.assertFalse(saved.get('pending'))
-
-
-class DisplayWithdrawalTests(unittest.IsolatedAsyncioTestCase):
-    def component(self, probe, session):
-        return types.SimpleNamespace(
-            cleanup_native_display=AsyncMock(return_value={}), _unload=AsyncMock(),
-            native_display_active=lambda: False, _release=lambda: True,
-            _edid_restore=lambda: True, _session_props=probe,
-            _ownership_session_current=session)
-
-    async def test_withdrawal_ignores_stale_internal_output_snapshot(self):
-        reads = []
-        def probe(names, *, fresh=False):
-            reads.append(fresh)
-            return {display.ATOM_IS_EXTERNAL: '1' if fresh else '0'}
-        c = self.component(probe, lambda: True)
-        with patch.object(display, '_write_atom_int', return_value=True) as write, \
-                patch.object(display, '_uninstall_script', return_value='removed'):
-            await module_control.withdraw('display', c)
-        self.assertEqual(reads, [True])
-        write.assert_called_once_with(display.ATOM_FORCE_HDR_SUPPORT, 0)
-
-    async def test_new_session_during_probe_prevents_atom_writes(self):
-        c = self.component(Mock(return_value={display.ATOM_IS_EXTERNAL: '0'}),
-                           Mock(side_effect=[True, False]))
-        with patch.object(display, '_write_atom_int', return_value=True) as write, \
-                patch.object(display, '_uninstall_script', return_value='removed') as uninstall:
-            await module_control.withdraw('display', c)
-        write.assert_not_called()
-        uninstall.assert_called_once()
-
-    async def test_unknown_output_keeps_cleanup_pending(self):
-        for props in ({}, {display.ATOM_IS_EXTERNAL: 'invalid'}):
-            c = self.component(Mock(return_value=props), lambda: True)
-            with self.subTest(props=props), \
-                    patch.object(display, '_write_atom_int', return_value=True) as write, \
-                    patch.object(display, '_uninstall_script') as uninstall:
-                with self.assertRaisesRegex(RuntimeError, 'verify'):
-                    await module_control.withdraw('display', c)
-            write.assert_not_called()
-            uninstall.assert_not_called()
-
-    async def test_unbound_recovery_removes_script_without_changing_session_atoms(self):
-        # Pending cleanup runs before _main and may have no bound compositor.
-        c = self.component(Mock(), lambda: None)
-        with patch.object(display, '_write_atom_int', return_value=True) as write, \
-                patch.object(display, '_uninstall_script', return_value='removed') as uninstall:
-            note = await module_control.withdraw('display', c)
-        write.assert_not_called()
-        c._session_props.assert_not_called()
-        uninstall.assert_called_once()
-        self.assertIn('Restart', note)
-
-    async def test_confirmed_internal_session_releases_both_atoms(self):
-        c = self.component(Mock(return_value={display.ATOM_IS_EXTERNAL: '0'}), lambda: True)
-        with patch.object(display, '_write_atom_int', return_value=True) as write, \
-                patch.object(display, '_uninstall_script', return_value='removed'):
-            await module_control.withdraw('display', c)
-        self.assertEqual([call.args for call in write.call_args_list], [
-            (display.ATOM_FORCE_HDR_SUPPORT, 0), (display.ATOM_HDR_ENABLED, 0)])
 
 
 class UnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):

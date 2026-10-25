@@ -124,9 +124,7 @@ def _logged_rpc(function, name):
                 raise
             if isinstance(result, dict) and result.get('success') is False and result.get('error') in _REFUSALS:
                 refused(result['error'])
-            # restart_error stays in the shared display state; only the restart call itself owns it.
-            elif isinstance(result, dict) and (result.get('success') is False
-                                               or (name == 'display_restart_session' and bool(result.get('restart_error')))):
+            elif isinstance(result, dict) and result.get('success') is False:
                 code = result.get('returncode')
                 failed(reason='backend_reported_failure', returncode=code if type(code) is int else None)
             elif quiet:
@@ -472,7 +470,7 @@ class Plugin:
                        'error': (self._module_state.get(name, {}).get('error', '')
                                  or (self._module_health.get(name, {}).get('error', '')
                                      if self._module_enabled(name) else '')),
-                       'note': self._module_state.get(name, {}).get('note', '')}
+                       'note': ''}
                 for name in MODULE_NAMES}
         for name, entry in result.items():
             if self._still_starting(name):
@@ -481,11 +479,6 @@ class Plugin:
             if entry['enabled'] and module_runtime.is_paused(name):
                 entry.update(ready=False, maintenance=True,
                     note='Controller operations are paused for firmware maintenance.')
-        display = self._module_state.get('display', {})
-        if display.get('session') is not None:
-            current = display_backend._gamescope_start_time()
-            if current is not None and not display_backend.Plugin._same_session(display['session'], current):
-                result['display']['note'] = ''
         return result
 
     def _still_starting(self, name):
@@ -523,10 +516,6 @@ class Plugin:
             await decky.emit('companion_guard', await asyncio.to_thread(self._guard_status))
         except Exception as exc:
             diagnostics.event('plugin', 'module_status_notification_failed', level='warning', error=exc, repeat=60)
-
-    async def modules_restart_session(self):
-        result = await self._display.restart_session()
-        return {'success': not bool(result.get('restart_error')), 'error': result.get('restart_error', '')}
 
     async def modules_set_enabled(self, name, enabled):
         if name not in MODULE_NAMES or type(enabled) is not bool:
@@ -790,10 +779,8 @@ class Plugin:
                 diagnostics.event(name, 'module_recovery_persist_failed', level='error', error=save_error)
 
     async def _withdraw_module(self, name, resume):
-        note = await withdraw(name, getattr(self, '_' + name))
-        self._module_state[name] = {'enabled': False, 'note': note, 'resume': resume}
-        if name == 'display':
-            self._module_state[name]['session'] = await asyncio.to_thread(display_backend._gamescope_start_time)
+        await withdraw(name, getattr(self, '_' + name))
+        self._module_state[name] = {'enabled': False, 'resume': resume}
         await module_runtime.complete(asyncio.to_thread(self._save_modules))
 
     async def _migration(self):
@@ -1017,7 +1004,6 @@ class Plugin:
                 raise ValueError('Invalid Desktop RPC contract')
             bridge = DesktopBridge(self, methods, self._desktop_context, {
                 'set_panel_active': self._desktop_panel_active,
-                'display_restart_session': self._desktop_display_restart,
             }, read_logs=self._desktop_get_logs)
             await bridge.start()
             self._desktop = bridge
@@ -1041,12 +1027,6 @@ class Plugin:
 
     async def _desktop_panel_active(self, active):
         return await self._panel_active('_desktop_panel_deadline', active)
-
-    async def _desktop_display_restart(self):
-        if await asyncio.to_thread(display_backend._gamescope_start_time) is None:
-            state = await self.display_get_state()
-            return dict(state, restart_error='Switch to Gaming Mode to apply OLED session changes. Desktop session was not restarted.')
-        return await self.display_restart_session()
 
     async def _unload(self):
         diagnostics.event('plugin', 'shutdown_started', source='backend')
@@ -1425,25 +1405,10 @@ class Plugin:
     async def vibe_test_vibration(self, duration_ms=500):
         return await self._vibration.test_vibration(duration_ms)
 
-    # OLED display / brightness / EDID ------------------------------------------
+    # Display (HDR brightness fix for games) -------------------------------------
 
     async def display_get_state(self):
         return await self._display.get_state()
-
-    async def display_run_setup(self, mode="pq"):
-        return await self._display.run_setup(mode)
-
-    async def display_set_panel_mode(self, mode):
-        return await self._display.set_panel_mode(mode)
-
-    async def display_reset_settings(self):
-        return await self._display.reset_settings()
-
-    async def display_restart_session(self):
-        return await self._display.restart_session()
-
-    async def display_set_enabled(self, enabled):
-        return await self._display.set_enabled(enabled)
 
     async def display_set_edid_fix(self, enabled):
         return await self._display.set_edid_fix(enabled)

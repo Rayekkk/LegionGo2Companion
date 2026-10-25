@@ -27,7 +27,6 @@ import main
 import safe_settings
 import tdp_backend as tdp
 from safe_settings import AtomicSettingsManager
-import test_display_hybrid
 import test_tdp_core
 import test_vibration_backend
 
@@ -477,19 +476,6 @@ class BatteryEventTests(Events, unittest.IsolatedAsyncioTestCase):
         self.assertEqual({key: row['context'][key] for key in ('restored', 'reason', 'pending')},
                          {'restored': False, 'reason': 'operation_unconfirmed', 'pending': True})
         self.assertNotIn('error', row)  # the RPC's returned error text is the panel's, not this event's
-
-
-class DisplayEventTests(Events, test_display_hybrid.DisplayFixture):
-    def test_mode_change_records_both_modes_and_the_pending_restart(self):
-        self.start('pq')
-        asyncio.run(display_plugin().set_panel_mode('gamma22'))
-        row, = self.events('display', 'mode_changed')
-        self.assertEqual({key: row['context'][key] for key in ('previous', 'mode', 'pending')},
-                         {'previous': 'pq', 'mode': 'gamma22', 'pending': True})
-
-
-def display_plugin():
-    return test_display_hybrid.display.Plugin()
 
 
 class DiagnosticsFormatTests(Events, unittest.TestCase):
