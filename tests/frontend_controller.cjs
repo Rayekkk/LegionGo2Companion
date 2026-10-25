@@ -110,6 +110,29 @@ run(async () => {
   assert.equal(overlay.count('controller_set_gyro_source'), 1, 'native dropdown selection must save while QAM is hidden');
   overlay.respond('controller_set_gyro_source', { ...status, controlled: true, gyro_source: 'right', applied_source: 'right' });
   await settle(); overlay.unmount();
+  // Controller sleep: only where both pads have the timer, and nothing is written until the user picks a time.
+  const sleepRow = h => find(h.render(), node => node.type === 'DropdownItem' && node.props.label === 'Turn off after');
+  const noTimer = harness(); noTimer.render();
+  noTimer.respond('controller_get_status', { ...status, sleep: { available: false, minutes: null, error: '' } }); await settle();
+  assert.equal(sleepRow(noTimer), undefined, 'no timer on these pads: no section');
+  assert.doesNotMatch(text(noTimer.render()), /Controller sleep/);
+  noTimer.unmount();
+  const sleep = harness(); sleep.render();
+  sleep.respond('controller_get_status', { ...status, sleep: { available: true, minutes: null, error: '' } }); await settle();
+  assert.match(text(sleep.render()), /Controller sleep/);
+  assert.equal(sleepRow(sleep).props.selectedOption, 'default', 'a stale driver value is never shown as the choice');
+  assert.equal(sleepRow(sleep).props.description, 'Turns the detached controllers off after this long without use.');
+  assert.equal(sleepRow(sleep).props.rgOptions.map(option => option.label).join(','),
+    'Controller default,Never,5 min,10 min,15 min,30 min,45 min,60 min');
+  sleepRow(sleep).props.onChange({ data: 'default' }); await settle();
+  assert.equal(sleep.count('controller_set_sleep_time'), 0, 'picking the default again writes nothing');
+  sleepRow(sleep).props.onChange({ data: 30 }); await settle();
+  assert.equal(sleep.count('controller_set_sleep_time'), 1);
+  assert.equal(JSON.stringify(sleep.calls.find(call => call.name === 'controller_set_sleep_time').args), '[30]');
+  sleep.respond('controller_set_sleep_time', { ...status, sleep: { available: true, minutes: 30, error: '' } }); await settle();
+  assert.equal(sleepRow(sleep).props.selectedOption, 30);
+  assert.equal(sleepRow(sleep).props.rgOptions[0].label, 'Never', 'after a choice the default is gone');
+  sleep.unmount();
   // The rules both UIs share (src/controller.tsx and the Desktop ModulePage.qml import the same module).
   const G = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/controller.mjs')).href);
   assert.match(G.sourceNote({ gyro_source: 'left', applied_source: 'left', controlled: false }), /Not confirmed yet…$/,

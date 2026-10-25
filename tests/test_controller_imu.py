@@ -267,6 +267,57 @@ class ImuTests(unittest.TestCase):
                 imu.desired_for_source(source, valid, valid)
         self.assertEqual(self.writes, [])
 
+    # The pads' auto_sleep_time, through the same checked device discovery and writer.
+    def timer(self, side, value=None):
+        path = self.device / f"{side}_handle" / "auto_sleep_time"
+        if value is not None:
+            self.put(path, str(value))
+        return path
+
+    def test_offered_only_when_both_pads_have_the_timer(self):
+        self.assertFalse(imu.sleep_supported(), "the older firmware has no timer")
+        self.timer("left", 0)
+        self.assertFalse(imu.sleep_supported(), "one pad alone is not enough")
+        self.timer("right", 0)
+        self.assertTrue(imu.sleep_supported())
+        self.put(self.dmi / "product_name", "83L3")  # Go S
+        self.assertFalse(imu.sleep_supported())
+
+    def test_only_a_differing_pad_is_written_and_a_read_confirms_it(self):
+        self.timer("left", 10)
+        self.timer("right", 0)
+        with patch.object(imu, "_write_payload", wraps=imu._write_payload) as writer:
+            self.assertTrue(imu.apply_sleep({"left": 10, "right": 10}))
+        self.assertEqual([call.args[0].parent.name for call in writer.call_args_list], ["right_handle"])
+        self.assertEqual(writer.call_args.args[2], b"10\n")
+        self.assertEqual(imu.read_sleep(), {"left": 10, "right": 10})
+        with patch.object(imu, "_write_payload") as writer:
+            self.assertTrue(imu.apply_sleep({"left": 10, "right": 10}))
+        writer.assert_not_called()
+
+    def test_false_driver_success_is_not_confirmed_and_retries_are_bounded(self):
+        # The driver returns success after its 50 ms timeout while the pad kept its value.
+        self.timer("left", 0)
+        self.timer("right", 0)
+        with patch.object(imu, "_write_payload") as writer, patch.object(imu.time, "sleep") as pause:
+            self.assertFalse(imu.apply_sleep({"left": 15, "right": 15}))
+        self.assertEqual(writer.call_count, 2, "one write per pad, never a burst")
+        self.assertLessEqual(pause.call_count, 6)
+
+    def test_invalid_values_never_write(self):
+        self.timer("left", 0)
+        self.timer("right", 0)
+        with patch.object(imu, "_write_payload") as writer:
+            for values in ({"left": 256, "right": 0}, {"left": -1, "right": 0}, {"left": True, "right": 0},
+                           {"left": "5", "right": 5}, {"left": 5}, None):
+                with self.subTest(values=values), self.assertRaises(imu.ImuError):
+                    imu.apply_sleep(values)
+            self.put(self.timer("right"), "garbage")
+            with self.assertRaises(imu.ImuError):
+                imu.apply_sleep({"left": 5, "right": 5})
+        self.assertEqual([call.args[0].parent.name for call in writer.call_args_list], ["left_handle"],
+                         "an unreadable pad is never written")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@
   "controller_get_status",
   "controller_release_control",
   "controller_set_gyro_source",
+  "controller_set_sleep_time",
   "controller_start_diagnostics",
   "controller_stop_diagnostics",
   "delete_game_profile",

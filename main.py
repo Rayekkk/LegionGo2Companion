@@ -1537,6 +1537,9 @@ class Plugin:
     async def controller_release_control(self):
         return await self._controller.release_control()
 
+    async def controller_set_sleep_time(self, minutes):
+        return await self._controller.set_sleep_time(minutes)
+
     async def controller_start_diagnostics(self):
         return await self._controller.start_diagnostics()
 

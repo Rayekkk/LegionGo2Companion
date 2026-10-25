@@ -475,6 +475,9 @@ RowLayout {
                 text("Steam controller",()=>gyro().virtual?.path || "—",{visible:()=>controllerDetails}),
                 text("Gyro reporting",()=>Gyro.reportingText(gyro()),{visible:()=>controllerDetails}),
                 action("Restore previous controller settings","controller_release_control",null,{bar:true,visible:()=>!!gyro().recovery_pending || !!gyro().conflict})
+            ]},{title:Gyro.SLEEP_TITLE,column:0,visible:()=>Gyro.sleepShown(gyro()),fields:[
+                choices(Gyro.SLEEP_LABEL,()=>Gyro.sleepValue(gyro()),v=>{ if(Gyro.sleepChange(gyro(),v))change("controller_set_sleep_time",[v]); },()=>Gyro.sleepOptions(gyro()),
+                    {note:()=>Gyro.sleepNote(gyro())})
             ]},{title:"Controller firmware",owner:"firmware",column:0,fields:[
                 notice("",firmwareMessage),
                 text("Status",()=>firmwarePhase()),

@@ -63,10 +63,18 @@ CHECK_SECONDS = 60.0
 RECOVERY_RETRY_SECONDS = 5.0
 BATTERY_SAMPLE_TIMEOUT_SECONDS = 0.25
 BATTERY_CACHE_SECONDS = 15.0
+# Minutes, the choices Legion Space offers for the detached controllers; 0 turns the timer off.
+SLEEP_MINUTES = (0, 5, 10, 15, 30, 45, 60)
+# A confirmed sleep time is checked again this often; a failing check backs off to it from 5 s.
+SLEEP_CHECK_SECONDS = 300.0
 
 
 class ControllerError(RuntimeError):
     pass
+
+
+class SleepPending(ControllerError):
+    """The sleep time is saved, but the pads have not confirmed it yet; the module keeps retrying."""
 
 
 def _text(path: Path) -> str | None:
@@ -310,14 +318,26 @@ def _state() -> dict:
             "ownership": copy.deepcopy(ownership)}
 
 
-def _save(state: dict) -> None:
-    previous = copy.deepcopy(settings.getSetting("state", {}))
+def _save(state: dict | None, key: str = "state") -> None:
+    previous = copy.deepcopy(settings.getSetting(key, {}))
     try:
-        settings.setSetting("state", state)
+        settings.setSetting(key, state)
         settings.commit()
     except Exception:
-        settings.setSetting("state", previous)
+        settings.setSetting(key, previous)
         raise
+
+
+def _sleep_state() -> dict | None:
+    """The user's sleep time and the pads' values read before Companion first wrote; None until the user picks one."""
+    raw = settings.getSetting("sleep", None)
+    if not isinstance(raw, dict) or type(raw.get("minutes")) is not int or raw["minutes"] not in SLEEP_MINUTES:
+        return None
+    baseline = raw.get("baseline")
+    if not (isinstance(baseline, dict) and set(baseline) == {"left", "right"}
+            and all(type(value) is int and 0 <= value <= 255 for value in baseline.values())):
+        baseline = None
+    return {"minutes": raw["minutes"], "baseline": baseline}
 
 
 def _imu_status() -> dict:
@@ -356,6 +376,9 @@ class Plugin:
         self._status_cache: tuple[float, dict] | None = None
         self._battery_cache: tuple[float, dict] | None = None
         self._battery_lock = threading.Lock()
+        self._sleep_error = ""
+        self._sleep_retry = RECOVERY_RETRY_SECONDS
+        self._sleep_due = 0.0  # monotonic time of the next sleep-time check
 
     @staticmethod
     def _battery_result(sample: dict | None = None, reason: str = "") -> dict:
@@ -467,7 +490,8 @@ class Plugin:
                           "applied_source": applied, "controlled": controlled, "conflict": self._conflict,
                           "error": self._error, "physical": physical, "virtual": virtual,
                           "imu": imu,
-                          "recovery_pending": bool(state["ownership"] and state["ownership"].get("pending"))}
+                          "recovery_pending": bool(state["ownership"] and state["ownership"].get("pending")),
+                          "sleep": self._sleep_status()}
                 self._status_cache = (now, copy.deepcopy(result))
             with self._capture_lock:
                 result["diagnostics_active"] = bool(self._capture and self._capture["active"])
@@ -682,6 +706,93 @@ class Plugin:
     async def release_control(self) -> dict:
         return await self.set_gyro_source("system")
 
+    def _sleep_status(self) -> dict:
+        saved = _sleep_state()
+        # The pads' own value is not shown: the driver can report a stale cached one.
+        return {"available": controller_imu.sleep_supported(),
+                "minutes": saved["minutes"] if saved else None, "error": self._sleep_error}
+
+    def _apply_sleep(self) -> bool:
+        """Write the chosen sleep time to a pad that reports another one; nothing until the user picks one."""
+        with self._operation:
+            saved = _sleep_state()
+            if saved is None:
+                ok, error = True, ""
+            else:
+                try:
+                    ok = controller_imu.apply_sleep({"left": saved["minutes"], "right": saved["minutes"]})
+                    error = "" if ok else "The controllers have not confirmed the sleep time yet. Companion tries again when they respond."
+                except Exception as exc:
+                    ok, error = False, str(exc)
+                transition("controller", "sleep_time", ok, level="info" if ok else "warning",
+                           outcome="confirmed" if ok else "deferred", initial=False)
+            if error != self._sleep_error:
+                self._status_cache = None
+            self._sleep_error = error
+            return ok
+
+    def _set_sleep(self, minutes: int) -> None:
+        with self._operation:
+            if self._closed:
+                raise ControllerError("Controller support is stopped.")
+            if not controller_imu.sleep_supported():
+                raise ControllerError("These controllers do not offer a sleep timer.")
+            saved = _sleep_state()
+            if saved:
+                baseline = saved["baseline"]
+            else:
+                # Read once, before Companion's first write: turning the module off gives it back.
+                try:
+                    baseline = controller_imu.read_sleep()
+                except Exception:
+                    baseline = None
+            _save({"minutes": minutes, "baseline": baseline}, "sleep")
+            self._status_cache = None
+            if not self._apply_sleep():
+                self._sleep_retry = RECOVERY_RETRY_SECONDS
+                self._sleep_due = time.monotonic() + RECOVERY_RETRY_SECONDS
+                raise SleepPending(self._sleep_error)
+
+    async def set_sleep_time(self, minutes) -> dict:
+        if type(minutes) is not int or minutes not in SLEEP_MINUTES:
+            raise ValueError("Unsupported controller sleep time.")
+        await _offload(self._set_sleep, minutes)
+        return await _offload(self._status, True)
+
+    def _release_sleep(self) -> None:
+        """Turning the module off: the pads get back the sleep time read before Companion's first write."""
+        with self._operation:
+            saved = _sleep_state()
+            if saved is None:
+                return
+            if saved["baseline"] is not None and not controller_imu.apply_sleep(saved["baseline"]):
+                raise ControllerError("The controllers did not confirm their previous sleep time. Wake them and retry.")
+            _save(None, "sleep")
+            self._sleep_error = ""
+            self._status_cache = None
+
+    @module_runtime.controller_operation('controller')
+    async def _sleep_pass(self) -> bool:
+        return await _offload(self._apply_sleep)
+
+    async def _sleep_check(self, now: float, resumed: bool) -> None:
+        """Only a pad that differs is written; a failing check backs off from 5 s to 5 min, so a sleeping pad is not flooded."""
+        if resumed:
+            self._sleep_retry = RECOVERY_RETRY_SECONDS
+        try:
+            ok = await self._sleep_pass()
+        except module_runtime.ControllerPaused:
+            self._sleep_due = now + RECOVERY_RETRY_SECONDS
+            return
+        except Exception:
+            ok = False  # e.g. maintenance began: the gyro watch must keep running
+        if ok:
+            self._sleep_retry = RECOVERY_RETRY_SECONDS
+            self._sleep_due = now + SLEEP_CHECK_SECONDS
+        else:
+            self._sleep_due = now + self._sleep_retry
+            self._sleep_retry = min(SLEEP_CHECK_SECONDS, self._sleep_retry * 2)
+
     def _snapshot(self, token: str | None = None, *, renew: bool = False) -> dict:
         with self._capture_lock:
             capture = self._capture
@@ -847,11 +958,14 @@ class Plugin:
         # Healthy devices and externally changed ownership stay at one minute.
         retry_delay = RECOVERY_RETRY_SECONDS
         next_check = now + (retry_delay if self._error and not self._conflict else CHECK_SECONDS)
+        self._sleep_due = now  # startup, an update or re-enabling: one check on the first tick
         while not self._closed:
             await asyncio.sleep(5)
             if module_runtime.is_paused('controller'):
                 continue
             now, resumed = time.monotonic(), resume()
+            if resumed or now >= self._sleep_due:
+                await self._sleep_check(now, resumed)
             service_exited = self._service_watch.consume_exit()
             if service_exited:
                 # Only advance the schedule. _select still verifies the actual
@@ -921,4 +1035,5 @@ class Plugin:
     async def _uninstall(self) -> None:
         # Decky also uninstalls before every update. Unload already restored the
         # controller and keeps the choice with its ownership, which _main reapplies.
+        # The pads keep their sleep time: only turning the module off gives the old one back.
         await self._unload()

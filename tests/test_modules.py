@@ -878,7 +878,7 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(draining.done()); finish.set(); await draining
 
     async def test_controller_withdraws_after_close_without_restarting_monitor(self):
-        c = types.SimpleNamespace(_unload=AsyncMock(), _release=lambda **kw: None)
+        c = types.SimpleNamespace(_unload=AsyncMock(), _release=lambda **kw: None, _release_sleep=lambda: None)
         await module_control.withdraw('controller', c)
         c._unload.assert_awaited_once()
 

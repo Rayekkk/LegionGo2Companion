@@ -18,7 +18,7 @@ def capture_intent(name):
         return {'enabled': b._load_state()['enabled']}
     if name == 'controller':
         import controller_backend as b
-        return {'source': b._state()['gyro_source']}
+        return {'source': b._state()['gyro_source'], 'sleep': (b._sleep_state() or {}).get('minutes')}
     if name == 'wifi':
         import wifi_backend as b
         s = b._load_settings()
@@ -39,8 +39,15 @@ async def restore_intent(name, component, intent):
         check(await component.set_enabled(intent['enabled']))
     elif name == 'remap' and intent.get('enabled') is True:
         check(await component.set_enabled(True))
-    elif name == 'controller' and intent.get('source') in ('left', 'right', 'combined'):
-        await component.set_gyro_source(intent['source'])
+    elif name == 'controller':
+        import controller_backend as backend
+        if intent.get('source') in ('left', 'right', 'combined'):
+            await component.set_gyro_source(intent['source'])
+        if type(intent.get('sleep')) is int and intent['sleep'] in backend.SLEEP_MINUTES:
+            try:
+                await component.set_sleep_time(intent['sleep'])
+            except backend.SleepPending:
+                pass  # saved: the module retries once the pads respond
     elif name == 'wifi':
         import wifi_backend as backend
         policy = intent.get('band_policy')
@@ -89,6 +96,7 @@ async def withdraw(name, component):
         check(await component.set_enabled(False))
     elif name == 'controller':
         await asyncio.to_thread(component._release, persist=True)
+        await asyncio.to_thread(component._release_sleep)
     elif name == 'battery':
         check(await component.release_control())
     elif name == 'wifi':

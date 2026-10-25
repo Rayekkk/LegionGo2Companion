@@ -6,7 +6,8 @@ import { ButtonItem, DropdownItem, DropdownOption, PanelSection, PanelSectionRow
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { FirmwarePanel } from "./firmware";
 import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder } from "./shared";
-import { reportingText, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
+import { reportingText, SLEEP_DEFAULT, SLEEP_LABEL, SLEEP_TITLE, sleepChange, sleepNote, sleepOptions, sleepShown, sleepText,
+  sleepValue, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
   vectorText } from "../desktop/native/controller.mjs";
 
 type GyroSource = "system" | "combined" | "left" | "right";
@@ -25,6 +26,7 @@ export interface ControllerStatus {
   virtual: { path: string; pid: string } | null;
   recovery_pending?: boolean;
   imu?: { available: boolean; actual: { left: boolean; right: boolean } | null; reason?: string };
+  sleep?: { available: boolean; minutes: number | null; error: string };
 }
 
 interface Stream<T> {
@@ -61,6 +63,7 @@ const getDiagnostics = callable<[string], ControllerDiagnostics>("controller_get
 const stopDiagnostics = callable<[string], ControllerDiagnostics>("controller_stop_diagnostics");
 const setGyroSource = callable<[GyroSource], ControllerStatus>("controller_set_gyro_source");
 const releaseControl = callable<[], ControllerStatus>("controller_release_control");
+const setSleepTime = callable<[number], ControllerStatus>("controller_set_sleep_time");
 
 const sourceOptions: DropdownOption[] = Object.entries(sourceLabels).map(([data, label]) => ({ data, label }));
 
@@ -231,7 +234,8 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
     }
   }, [beginPolling]);
 
-  const apply = useCallback(async (operation: () => Promise<ControllerStatus>, message: string) => {
+  const apply = useCallback(async (operation: () => Promise<ControllerStatus>, message: string,
+    problem = (next: ControllerStatus) => next.error || (next.conflict ? next.reason || "Another controller configuration is active." : "")) => {
     // A native dropdown invokes its selection while QAM can still be hidden.
     // Visibility gates polling, not the user's explicit selection callback.
     if (!mounted.current || saving.current || startInFlight.current || stopInFlight.current || token.current) return;
@@ -248,11 +252,12 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
         const next = await operation();
         if (!mounted.current || generation.current !== activeGeneration) return;
         setStatus(next);
-        if (next.error || next.conflict) fail(next.error || next.reason || "Another controller configuration is active.");
+        const text = problem(next);
+        if (text) fail(text);
         else notify(message);
       } catch (failure) {
         if (mounted.current && generation.current === activeGeneration) {
-          fail(errorText(failure, "") || "The gyro source change could not be confirmed.");
+          fail(errorText(failure, "") || "The change could not be confirmed.");
         }
       } finally {
         mutations.done();
@@ -324,6 +329,23 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
         ["Steam controller", status.virtual ? status.virtual.path : "—"],
       ])}
     </PanelSection>
+    {sleepShown(status) && <PanelSection title={SLEEP_TITLE}>
+      <PanelSectionRow>
+        <DropdownItem
+          label={SLEEP_LABEL}
+          description={busy ? "Applying…" : sleepNote(status)}
+          strDefaultLabel={SLEEP_DEFAULT}
+          selectedOption={sleepValue(status)}
+          rgOptions={sleepOptions(status).map(({ id, label }) => ({ data: id, label }))}
+          disabled={blocked}
+          onChange={(option) => {
+            const minutes = option.data;
+            if (!sleepChange(status, minutes)) return;
+            void apply(() => setSleepTime(minutes), `Controller sleep: ${sleepText(minutes)}.`, (next) => next.sleep?.error || "");
+          }}
+        />
+      </PanelSectionRow>
+    </PanelSection>}
     {firmware && <FirmwarePanel visible={visible} />}
   </>;
 };

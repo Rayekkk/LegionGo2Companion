@@ -261,7 +261,7 @@ TestCase {
         const hidden=["Fan Control","Vibration","Button mapping","Gyro & touchpad","Display"],kept=["TDP","Lighting","Battery","Wi-Fi"];
         fake.data=Object.assign({},fake.data,{get_version:all,rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true},power_led:{supported:true,current:true}}});
         panel.page="controller";
-        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,firmware");
+        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,controller,firmware");
         for(const name of hidden.concat(kept))verify(field("modules",name).visible(),name);
         compare(field("modules","Lighting").note(),"Stick lights and power button light.");
         verify(field("rgb","Power button light").visible());
@@ -312,6 +312,29 @@ TestCase {
         verify(!panel.fieldEnabled("controller",field("controller","Gyro source")),"Gyro routing still needs InputPlumber");
         fake.data=Object.assign({},fake.data,{controller_get_status:{available:false,physical:null,virtual:null}});
         verify(!panel.fieldEnabled("controller",field("controller","Controller test")),"No physical controller: no test");
+    }
+    // Shown only where both pads have the timer; nothing is claimed or written until the user picks a time.
+    function test_controllerSleepWaitsForTheUsersChoice() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{controller:{enabled:true,ready:true}}},
+            controller_get_status:{available:true,physical:{path:"/dev/hidraw1"},sleep:{available:false,minutes:null,error:""}}});
+        panel.page="controller";
+        const sleepCard=panel.cards.find(card=>card.title==="Controller sleep");verify(sleepCard!==undefined);
+        verify(!sleepCard.visible(),"No timer on these pads: no section");
+        fake.data=Object.assign({},fake.data,{controller_get_status:{available:true,sleep:{available:true,minutes:null,error:""}}});
+        verify(sleepCard.visible());
+        const entry=field("controller","Turn off after");
+        compare(entry.get(),"default");
+        compare(entry.choices().map(item=>item.label).join(","),"Controller default,Never,5 min,10 min,15 min,30 min,45 min,60 min");
+        compare(entry.note(),"Turns the detached controllers off after this long without use.");
+        entry.set("default");
+        compare(fake.calls.length,0,"Picking the default again writes nothing");
+        entry.set(10);
+        compare(fake.calls.length,1);compare(fake.calls[0].method,"controller_set_sleep_time");compare(fake.calls[0].args.join(","),"10");
+        fake.data=Object.assign({},fake.data,{controller_get_status:{available:true,sleep:{available:true,minutes:10,error:""}}});
+        compare(entry.get(),10);
+        verify(!entry.choices().some(item=>item.id==="default"),"After a choice the default is gone");
+        entry.set(10);
+        compare(fake.calls.length,1,"The saved time is not written again");
     }
     function test_discardConfirmedAfterTheGameChangedDoesNotTouchTheNewGame() {
         fake.data=Object.assign({},fake.data,{get_game_profile:gameProfile()});
@@ -433,7 +456,7 @@ TestCase {
             vibe_is_ready:{ready:true},vibe_get_settings:{settings:{},app_id:"0",profile_id:"0"},
             rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true}},remap_get_status:{supported:true}});
         panel.page="controller";
-        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,firmware","Firmware stays last");
+        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,controller,firmware","Firmware stays last");
         const firmware=panel.cards.find(c=>c.owner==="firmware");
         verify(firmware!==undefined);
         panel.page="rgb";compare(panel.cards.map(card=>card.owner).join(","),"rgb");panel.page="controller";

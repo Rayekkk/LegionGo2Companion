@@ -701,5 +701,135 @@ class CaptureTests(unittest.TestCase):
         close.assert_called_once_with(7)
 
 
+
+class SleepTests(unittest.TestCase):
+    """Controller sleep: written only after the user picks a time, then kept without flooding the pads."""
+
+    def setUp(self):
+        self.store = MemorySettings()
+        self.backend = module.Plugin()
+        self.pads = {"left": 0, "right": 0}
+        self.responding = True
+        self.supported = True
+        self.writes = []
+        for item in (patch.object(module, "settings", self.store),
+                     patch.object(module.controller_imu, "sleep_supported", side_effect=lambda: self.supported),
+                     patch.object(module.controller_imu, "read_sleep", side_effect=lambda: dict(self.pads)),
+                     patch.object(module.controller_imu, "apply_sleep", side_effect=self.apply)):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def apply(self, values):
+        # Like hid-lenovo-go: a pad that already reports the value is not written;
+        # a sleeping pad accepts the write without changing.
+        for side, value in values.items():
+            if self.pads[side] != value:
+                self.writes.append((side, value))
+                if self.responding:
+                    self.pads[side] = value
+        return self.pads == values
+
+    def test_nothing_is_written_or_saved_before_the_user_picks_a_time(self):
+        self.assertTrue(self.backend._apply_sleep())
+        asyncio.run(self.backend._sleep_check(0.0, True))
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.store.commits, 0)
+        self.assertEqual(self.backend._sleep_status(), {"available": True, "minutes": None, "error": ""})
+
+    def test_a_choice_writes_both_pads_and_keeps_the_values_read_before(self):
+        result = asyncio.run(self._set(10))
+        self.assertEqual(self.pads, {"left": 10, "right": 10})
+        self.assertEqual(result["sleep"], {"available": True, "minutes": 10, "error": ""})
+        self.assertEqual(self.store.committed["sleep"], {"minutes": 10, "baseline": {"left": 0, "right": 0}})
+        asyncio.run(self._set(30))
+        self.assertEqual(self.store.committed["sleep"]["baseline"], {"left": 0, "right": 0},
+                         "a later choice never takes Companion's own value as the baseline")
+
+    def test_only_listed_minutes_are_accepted(self):
+        for value in (7, -1, 256, "10", 10.0, True, False, None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                asyncio.run(self.backend.set_sleep_time(value))
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.store.commits, 0)
+
+    def test_pads_without_the_timer_are_neither_shown_nor_written(self):
+        self.supported = False
+        self.assertFalse(self.backend._sleep_status()["available"])
+        with self.assertRaises(module.ControllerError):
+            asyncio.run(self.backend.set_sleep_time(10))
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.store.commits, 0)
+
+    def test_an_unconfirmed_write_keeps_the_choice_and_says_so(self):
+        self.responding = False
+        with self.assertRaises(module.SleepPending):
+            asyncio.run(self.backend.set_sleep_time(15))
+        self.assertEqual(self.store.committed["sleep"]["minutes"], 15)
+        self.assertTrue(self.backend._sleep_status()["error"])
+        self.responding = True
+        self.assertTrue(self.backend._apply_sleep())
+        self.assertEqual(self.backend._sleep_status()["error"], "")
+
+    def test_reapplied_only_to_a_pad_that_differs(self):
+        asyncio.run(self._set(10))
+        self.writes.clear()
+        self.assertTrue(self.backend._apply_sleep())
+        self.assertEqual(self.writes, [], "a pad already at the chosen time is left alone")
+        self.pads["right"] = 0  # the pad came back with another value
+        self.assertTrue(self.backend._apply_sleep())
+        self.assertEqual(self.writes, [("right", 10)])
+
+    def test_a_sleeping_pad_is_retried_with_backoff_not_flooded(self):
+        asyncio.run(self._set(10))
+        self.pads["left"] = 0
+        self.responding = False
+        self.writes.clear()
+        clock = [0.0]
+
+        async def sleep(seconds):
+            clock[0] += seconds
+            if clock[0] > 1200:
+                raise asyncio.CancelledError
+
+        async def watch():
+            with self.assertRaises(asyncio.CancelledError):
+                await self.backend._watch()
+
+        with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])),                 patch.object(module.asyncio, "sleep", side_effect=sleep),                 patch.object(module.module_runtime, "suspend_offset", return_value=0.0),                 patch.object(self.backend, "_watch_check"):
+            asyncio.run(watch())
+        # 5, 10, 20, 40, 80, 160, then every 300 s: 9 attempts in 20 minutes, not 240.
+        self.assertLessEqual(len(self.writes), 9)
+        self.assertGreaterEqual(len(self.writes), 6)
+        self.assertEqual(set(self.writes), {("left", 10)}, "only the pad that differs is written")
+
+    def test_update_keeps_the_pads_value_and_turning_the_module_off_restores_it(self):
+        asyncio.run(self._set(10))
+        asyncio.run(self.backend._uninstall())  # Decky runs this before every update
+        self.assertEqual(self.pads, {"left": 10, "right": 10})
+        self.assertEqual(module._sleep_state()["minutes"], 10)
+        self.responding = False
+        with self.assertRaises(module.ControllerError):
+            self.backend._release_sleep()
+        self.assertEqual(module._sleep_state()["minutes"], 10, "an unconfirmed restore stays pending")
+        self.responding = True
+        self.backend._release_sleep()
+        self.assertEqual(self.pads, {"left": 0, "right": 0})
+        self.assertIsNone(module._sleep_state())
+
+    def test_reenabling_the_module_keeps_a_choice_the_pads_have_not_confirmed(self):
+        import module_control
+        asyncio.run(self._set(30))
+        intent = module_control.capture_intent("controller")
+        self.assertEqual(intent["sleep"], 30)
+        self.backend._release_sleep()
+        self.responding = False
+        asyncio.run(module_control.restore_intent("controller", self.backend, intent))
+        self.assertEqual(module._sleep_state()["minutes"], 30)
+
+    async def _set(self, minutes):
+        with patch.object(module, "_hid_inventory", return_value=(None, None)):
+            return await self.backend.set_sleep_time(minutes)
+
+
 if __name__ == "__main__":
     unittest.main()

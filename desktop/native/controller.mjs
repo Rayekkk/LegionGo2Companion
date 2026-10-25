@@ -25,5 +25,22 @@ export function streamText(stream) {
     : `${stream.reports} reports · ${finite(stream.rate_hz) ? `${stream.rate_hz.toFixed(1)} Hz` : "rate unknown"}`;
   return stream?.error ? `${stream.error} ${rate}` : rate;
 }
+export const SLEEP_TITLE = "Controller sleep";
+export const SLEEP_LABEL = "Turn off after";
+export const SLEEP_NOTE = "Turns the detached controllers off after this long without use.";
+export const SLEEP_DEFAULT = "Controller default";
+const SLEEP_MINUTES = [0, 5, 10, 15, 30, 45, 60];
+export const sleepText = minutes => minutes === 0 ? "Never" : `${minutes} min`;
+/** Shown only where both pads have the timer (the Go S and older Go controller firmware do not). */
+export const sleepShown = status => status?.sleep?.available === true;
+/** The saved choice, or "default" until the user picks one: the driver can report a stale value, so none is claimed. */
+export const sleepValue = status => typeof status?.sleep?.minutes === "number" ? status.sleep.minutes : "default";
+export const sleepOptions = status => [
+  ...(sleepValue(status) === "default" ? [{ id: "default", label: SLEEP_DEFAULT }] : []),
+  ...SLEEP_MINUTES.map(id => ({ id, label: sleepText(id) })),
+];
+/** A real choice that differs from the saved one; picking "Controller default" again writes nothing. */
+export const sleepChange = (status, value) => typeof value === "number" && SLEEP_MINUTES.includes(value) && value !== sleepValue(status);
+export const sleepNote = status => status?.sleep?.error ? `${SLEEP_NOTE} ${status.sleep.error}` : SLEEP_NOTE;
 const reporting = value => value === true ? "On" : value === false ? "Off" : "Unknown";
 export const reportingText = status => `left ${reporting(status?.imu?.actual?.left)} · right ${reporting(status?.imu?.actual?.right)}`;

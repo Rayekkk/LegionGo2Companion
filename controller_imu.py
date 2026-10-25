@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Rayekkk
-"""Checked Legion Go controller IMU bypass access for the controller's common transaction.
+"""Checked Legion Go controller sysfs access: the IMU bypass and the pads' sleep timer.
 
 This module has no settings, worker, or startup writes. The caller must prepare
 its durable journal (including baseline/expected/desired) before apply(), then
@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +71,8 @@ def _values(device: Path) -> dict[str, bool]:
     return {side: _read_bool(device, side) for side in SIDES}
 
 
-def _discover() -> Path:
+def _device() -> Path:
+    """The one hid-lenovo-go configuration interface of this console's controllers."""
     console = module_runtime.legion_device(SYS_ROOT / "class/dmi/id")[0]
     if console not in ("go1", "go2"):
         raise ImuError("IMU control is available only on the Lenovo Legion Go and Legion Go 2.")
@@ -92,7 +94,11 @@ def _discover() -> Path:
     if len(matches) != 1:
         raise ImuError("A compatible Legion Go controller IMU was not found." if not matches else
                        "More than one Legion Go controller IMU was found; none was selected.")
-    device = matches[0]
+    return matches[0]
+
+
+def _discover() -> Path:
+    device = _device()
     for side in SIDES:
         attribute = _attribute(device, side)
         options = _read(attribute.with_name("imu_bypass_enabled_index"), device).split()
@@ -112,20 +118,79 @@ def _checked_values(value: Any) -> dict[str, bool]:
     return dict(value)
 
 
-def _write(device: Path, side: str, enabled: bool) -> None:
-    if type(enabled) is not bool:
-        raise ImuError("IMU bypass state must be a boolean.")
-    path = _regular(_attribute(device, side), device)
+def _write_payload(attribute: Path, device: Path, payload: bytes) -> None:
+    path = _regular(attribute, device)
     fd = os.open(path, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
                  | getattr(os, "O_NOFOLLOW", 0))
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ImuError("The IMU attribute changed during access.")
-        payload = b"true\n" if enabled else b"false\n"
+            raise ImuError("The controller attribute changed during access.")
         if os.write(fd, payload) != len(payload):
-            raise ImuError("The kernel accepted only part of the IMU setting.")
+            raise ImuError("The kernel accepted only part of the controller setting.")
     finally:
         os.close(fd)
+
+
+def _write(device: Path, side: str, enabled: bool) -> None:
+    if type(enabled) is not bool:
+        raise ImuError("IMU bypass state must be a boolean.")
+    _write_payload(_attribute(device, side), device, b"true\n" if enabled else b"false\n")
+
+
+def _sleep_attribute(device: Path, side: str) -> Path:
+    if side not in SIDES:
+        raise ImuError("Unsupported controller side.")
+    return device / f"{side}_handle" / "auto_sleep_time"
+
+
+def _read_sleep(device: Path, side: str) -> int:
+    value = _read(_sleep_attribute(device, side), device)
+    if not re.fullmatch(r"[0-9]{1,3}", value) or int(value) > 255:
+        raise ImuError(f"The {side} controller returned an invalid sleep time.")
+    return int(value)
+
+
+def sleep_supported() -> bool:
+    """Both pads offer the sleep timer (hid-lenovo-go on the 2025 controller firmware). Sends nothing to the pads."""
+    with _lock:
+        try:
+            device = _device()
+            for side in SIDES:
+                _regular(_sleep_attribute(device, side), device)
+            return True
+        except Exception:
+            return False
+
+
+def read_sleep() -> dict[str, int]:
+    with _lock:
+        device = _device()
+        return {side: _read_sleep(device, side) for side in SIDES}
+
+
+def apply_sleep(values: dict) -> bool:
+    """Write each pad whose sleep time differs, then confirm by reading; True once both report theirs.
+
+    The driver reports success even when a pad did not answer within 50 ms, and a read can
+    return its cached value, so only a read showing the new value counts.
+    """
+    if (not isinstance(values, dict) or set(values) != set(SIDES)
+            or any(type(values[side]) is not int or not 0 <= values[side] <= 255 for side in SIDES)):
+        raise ImuError("Sleep times must be whole numbers from 0 to 255 for both controllers.")
+    with _lock:
+        device = _device()
+        confirmed = True
+        for side in SIDES:
+            if _read_sleep(device, side) == values[side]:
+                continue
+            _write_payload(_sleep_attribute(device, side), device, f"{values[side]}\n".encode("ascii"))
+            for _attempt in range(3):
+                if _read_sleep(device, side) == values[side]:
+                    break
+                time.sleep(0.05)
+            else:
+                confirmed = False
+        return confirmed
 
 
 def read_status() -> dict[str, Any]:
