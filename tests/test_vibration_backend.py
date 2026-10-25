@@ -68,7 +68,7 @@ class FakeDevice(unittest.IsolatedAsyncioTestCase):
         for name, value in {
             'settings': self.store, '_device_path': str(self.device), '_attr_cache': {},
             '_capabilities_cache': {}, '_last_applied_values': None,
-            '_active_app_id': '', '_active_app_ts': None,
+            '_active_app_id': '', '_active_app_ts': None, '_drift_interval': vibe._DRIFT_INTERVAL_S,
         }.items():
             self.stack.enter_context(patch.object(vibe, name, value))
         self.stack.enter_context(patch.object(vibe, 'time', types.SimpleNamespace(
@@ -642,6 +642,42 @@ class VibrationReadbackTests(unittest.TestCase):
         opened.return_value.read.side_effect = FileNotFoundError('controller disconnected')
         with patch('builtins.open', opened):
             self.assertFalse(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
+
+
+class VibrationSleepingPadTests(FakeDevice):
+    """A pad that does not take writes (asleep, no uevent) is not flooded: each write may be felt."""
+
+    def setUp(self):
+        super().setUp()
+        self.stack.enter_context(patch.object(vibe, '_READBACK_DELAY_S', 0))
+        self.ignored.add('right_handle/rumble_mode')
+
+    async def test_wake_retries_rewrite_only_the_attributes_that_failed(self):
+        async def sleep(seconds):
+            self.clock += seconds
+        with patch.object(vibe, '_REAPPLY_WAIT_S', 1.0), patch.object(vibe, '_REAPPLY_STEP_S', 0.5),                 patch.object(vibe, 'asyncio', types.SimpleNamespace(sleep=sleep)):
+            self.assertFalse((await self.plugin.reapply())['success'])
+        self.assertEqual(len(self.writes), 7, 'three passes: the first writes all five, the others one')
+        self.assertEqual(self.writes[5:], ['right_handle/rumble_mode'] * 2)
+        self.assertEqual(self.hardware(), {**DEFAULTS, 'right_handle/rumble_mode': 'racing'})
+
+    async def test_a_failing_check_backs_off_and_a_hotplug_resets_it(self):
+        ticks = []
+
+        def resumed():
+            ticks.append(None)
+            self.clock += vibe._DRIFT_INTERVAL_S
+            if len(ticks) > 10:
+                raise asyncio.CancelledError
+            return False
+        with patch.object(vibe, '_RESUME_CHECK_S', 0), patch.object(vibe, '_resume_detected', side_effect=resumed):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.plugin._drift_loop()
+        self.assertEqual(self.writes.count('right_handle/rumble_mode'), 3, 'checks after 30, 60 and 120 s, not ten')
+        self.assertEqual(vibe._drift_interval, 8 * vibe._DRIFT_INTERVAL_S)
+        with patch.object(vibe, '_emit_device_status', new=AsyncMock()):
+            await vibe._handle_device_added(str(self.device), 'change')
+        self.assertEqual(vibe._drift_interval, vibe._DRIFT_INTERVAL_S)
 
 
 class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):

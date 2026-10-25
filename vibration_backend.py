@@ -101,6 +101,9 @@ _monitor_task: asyncio.Task | None = None
 _drift_task: asyncio.Task | None = None
 _resume_detected = module_runtime.ResumeWatch()
 _DRIFT_INTERVAL_S = 30.0
+# A failing check backs off to this: every write to a sleeping pad may be felt.
+_DRIFT_MAX_INTERVAL_S = 300.0
+_drift_interval = _DRIFT_INTERVAL_S  # reset by success and by a hotplug
 _RESUME_CHECK_S = 5.0
 
 # App id the frontend last reported as running. Drives profile resolution
@@ -878,7 +881,7 @@ async def _monitor_hotplug() -> None:
 
 @module_runtime.controller_operation('vibration')
 async def _handle_device_added(sys_path: str, action: str) -> None:
-    global _device_path, _discovery_method
+    global _device_path, _discovery_method, _drift_interval
     if module_runtime.is_paused('vibration'):
         return
     attribute = os.path.join(sys_path, _SIGNATURE_ATTR)
@@ -926,6 +929,7 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
         return
     transition("vibration", "profile_apply", ok, source=action, initial=False,
                level="info" if ok else "warning", outcome="confirmed" if ok else "deferred")
+    _drift_interval = _DRIFT_INTERVAL_S
     await _emit_device_status()
 
 
@@ -946,6 +950,7 @@ class Plugin:
     _setup_error: str | None = None
 
     async def _drift_loop(self):
+        global _drift_interval
         last_check = time.monotonic()
         periodic = not _is_go_s()  # nothing to compare on the Go S: it cannot be read back
         while True:
@@ -956,11 +961,12 @@ class Plugin:
                 if _resume_detected():
                     decky.logger.info(
                         "[lego-vibe] backend detected resume from suspend")
-                    await self.reapply()
+                    if (await self.reapply())["success"]:
+                        _drift_interval = _DRIFT_INTERVAL_S
                     last_check = time.monotonic()
                     continue
                 now = time.monotonic()
-                if not periodic or now - last_check < _DRIFT_INTERVAL_S:
+                if not periodic or now - last_check < _drift_interval:
                     continue
 
                 def _verify() -> bool:
@@ -971,6 +977,7 @@ class Plugin:
                 ok = await _offload(_verify)
                 transition("vibration", "profile_apply", ok, stage="periodic", initial=False,
                            level="info" if ok else "warning", outcome="confirmed" if ok else "deferred")
+                _drift_interval = _DRIFT_INTERVAL_S if ok else min(_DRIFT_MAX_INTERVAL_S, _drift_interval * 2)
                 last_check = now
             except asyncio.CancelledError:
                 raise
@@ -1153,14 +1160,20 @@ class Plugin:
     async def reapply(self) -> dict:
         """Force every attribute back after resume, when the controller returns at firmware defaults.
 
-        Retried: the resume notification arrives seconds before USB re-enumerates.
+        Retried: the resume notification arrives seconds before USB re-enumerates. Only the
+        first pass is forced; later ones rewrite only what is not confirmed, since each write
+        to a pad that is still asleep may be felt as a buzz.
         """
         deadline = time.monotonic() + _REAPPLY_WAIT_S
+        first = True
 
         def _do() -> dict:
-            _forget_device()
+            nonlocal first
+            if first or _is_go_s():  # the Go S waits out its setup window again on every pass, as before
+                _forget_device()
             values = _active_values()
-            return {"success": _apply_settings(values, force=True), "settings": values}
+            force, first = first, False
+            return {"success": _apply_settings(values, force=force), "settings": values}
 
         while True:
             result = await _offload(_do)
