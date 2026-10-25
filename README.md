@@ -34,7 +34,7 @@ same controls are also available as a native [Desktop app](#desktop-app).
 | [Gyro & touchpad](#gyro--touchpad) | Choose which controller's gyro Steam uses, test the gyro and touchpad, and set when the detached controllers turn off |
 | [Controller firmware](#controller-firmware) | Update the controllers and their receiver with Lenovo's firmware (experimental) |
 | [Battery](#battery) | Limit charging to about 80% and see the console and both controller batteries |
-| [Display](#display) | Fix the HDR brightness games read; on older SteamOS also choose the screen mode |
+| [Display](#display) | Fix the HDR brightness games read |
 | [Wi-Fi](#wi-fi) | Prefer or require the faster 5/6 GHz bands |
 
 ## Requirements
@@ -42,11 +42,11 @@ same controls are also available as a native [Desktop app](#desktop-app).
 | Requirement | Details |
 |---|---|
 | Device | Lenovo Legion Go 2 (best supported: **8ASP2 / 83N0**); Legion Go and Legion Go S in [early beta](#compatibility) |
-| System | SteamOS **Stable** (tested on 3.8.16 and 3.8.28) with [Decky Loader](https://decky.xyz) |
+| System | SteamOS **Stable** with [Decky Loader](https://decky.xyz); Display needs SteamOS **3.9 or newer** |
 | Desktop app (optional) | Nothing extra: it uses the Qt 6.9+ that comes with SteamOS 3.8 and newer |
 
-Compatibility was also checked on SteamOS 3.9.3 Beta. Each page explains when a control
-is unavailable on your console.
+SteamOS 3.9 supports the Legion Go 2 screen natively; on older SteamOS, Display only offers
+its HDR brightness fix. Each page explains when a control is unavailable on your console.
 
 ### Compatibility
 
@@ -95,8 +95,8 @@ the module.
 
 Not supported yet on the Legion Go and Legion Go S: Fan Control, which needs EC data that has only
 been verified on the Legion Go 2, and controller firmware updates; on the Legion Go S also vibration
-modes, touchpad strength and the test buzz. Not needed there: Display's modes
-are for the Legion Go 2 OLED panel (the other consoles use SteamOS's own display profiles); SteamOS
+modes, touchpad strength and the test buzz. Not needed there: Display (the other consoles use
+SteamOS's own display profiles); SteamOS
 handles the Legion Go's back buttons and the Legion Go S gyro natively; the Legion Go S needs no
 button mapping, and its firmware already allows more than 50 W. The
 power-button light uses the same firmware field as on the Legion Go 2, at the place each console's
@@ -158,7 +158,7 @@ logged and does not pause Companion; failure to inspect the plugin directory its
 blocks controls.
 
 Companion keeps its own settings when it is installed again or updated. After installation,
-check **Manage Modules** and **Display**, where setup or a Gaming Mode restart may be requested.
+check **Manage Modules**.
 
 </details>
 
@@ -167,13 +167,11 @@ check **Manage Modules** and **Display**, where setup or a Gaming Mode restart m
 1. Open **About → Check for updates**.
 2. Choose **Download &lt;version&gt;** and wait until the page shows the file in your Downloads folder.
 3. Install that ZIP through **Decky Settings → Developer → Install Plugin from ZIP**.
-4. If Display asks for it, restart Gaming Mode.
 
 Downloading does not install the update. Decky removes the old version first, so Companion
 hands the hardware back for a moment; the new version applies your settings again when it
-starts. Display reinstalls its script and asks for a Gaming Mode restart only when the script
-changed or a restart was already due (always after an update from 2.1.0 or 2.2.x), and an open Desktop
-app restarts in the new version. The update from 2.2.x or older still loses the gyro source,
+starts, and an open Desktop app restarts in the new version. An update from 2.3.0 or older
+removes Companion's old display script by itself (see [Display](#display)). The update from 2.2.x or older still loses the gyro source,
 battery protection, lighting control and Wi-Fi band policy once; set them again afterwards.
 
 <details>
@@ -232,11 +230,11 @@ while lighting control stays active to keep them off after wake.
 | Vibration | Restores the vibration settings found before Companion first changed them, otherwise the driver defaults; on the Legion Go S the values Companion set stay, as they cannot be read |
 | Lighting, Button mapping, Gyro & touchpad, Battery | Restores the previous state for controls Companion still manages |
 | Wi-Fi | Restores the configuration Companion changed; Wi-Fi may briefly reconnect |
-| Display | Withdraws display adjustments and its script; Gaming Mode may need a restart |
+| Display | Restores the original EDID copy, so games read the panel's own values again |
 
 If cleanup cannot finish, the module stays blocked and offers **Retry &lt;module&gt; cleanup**.
 A module that could not start offers **Retry &lt;module&gt; start**. Unfinished cleanup is
-retried on startup. **Restart Gaming Mode** asks first: it ends the current gaming session.
+retried on startup.
 
 </details>
 
@@ -536,39 +534,22 @@ you choose. Detached controllers are labelled, with their last reported level wh
 ### Display
 
 **Fix HDR brightness in games** corrects the brightness information (EDID) that games read, so
-HDR games use the panel's real values. Restart a game that was already running.
+HDR games use the panel's real values instead of a 1499-nit placeholder. Restart a game that was
+already running. It changes gamescope's copy of the EDID, never the panel firmware.
 
-<a href="docs/screenshots/oled-display.png"><img src="docs/screenshots/oled-display.png" alt="Display mode, HDR brightness slider and HDR info for games" width="360"></a>
-
-**On SteamOS 3.9 and newer**, SteamOS supports this screen itself: the page says
-**SteamOS supports this screen** and only the HDR fix stays. **On older SteamOS**, choose a
-screen mode at first setup (it asks before installing), or later with **Change display mode**:
-
-| Mode | What it does | What you may notice |
-|---|---|---|
-| Hybrid (recommended) | Gamma 2.2 for normal content, PQ for HDR | The screen briefly blanks when it switches |
-| PQ | Keeps the panel in HDR mode | Dark scenes can look slightly grey |
-| Gamma 2.2 | Keeps direct brightness control | HDR highlights are less bright |
-
-> [!IMPORTANT]
-> **Restart Gaming Mode** asks first, then closes Steam and running games. Save your games first.
+SteamOS 3.9 and newer drives the Legion Go 2 screen itself (PQ/gamma, HDR switching and the
+brightness slider). On older SteamOS the page asks you to update; the HDR fix still works there.
 
 <details>
 <summary><b>Display details</b></summary>
 
-When SteamOS ships its own Legion Go 2 display profile, Companion retires its older fix,
-removes its own display script and hides PQ, Gamma 2.2, Hybrid and brightness forwarding.
-Cleanup retries automatically; use **Restart Gaming Mode** when asked to finish the handover.
-
-**Brightness slider in HDR** forwards Steam's brightness slider while the panel is in PQ and
-Steam does not already handle HDR brightness; its description says when it is not needed.
-Hybrid and PQ can switch immediately; changing to or from Gamma 2.2 can need a restart.
-
-The HDR fix changes gamescope's copy of the EDID, never the panel firmware, and works
-independently of the screen mode. On systems using the older fix, **Reset display fix** (after
-a confirmation) removes Companion's brightness, HDR and EDID changes and its script, restores a
-previous third-party script from backup if present, and returns to first setup. An unfinished
-reset stays paused and offers **Retry display reset**.
+Companion 2.3.0 and older offered their own display modes (PQ, Gamma 2.2, Hybrid), Setup and
+brightness forwarding for SteamOS 3.8. They are gone. Each start removes the display script
+those versions installed (`~/.config/gamescope/scripts/lenovo.legiongo2.oled.lua`, only when it
+is exactly Companion's), so SteamOS's own profile is used. A script of your own that Setup kept
+as `lenovo.legiongo2.oled.lua.backup` is put back on SteamOS 3.8 and left alone on 3.9, where it
+would override SteamOS. A Gaming Mode that was already running keeps the old script until it
+restarts.
 
 </details>
 
@@ -679,10 +660,9 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | Returning fan to automatic… | Let it finish. Keep custom control off if recovery cannot be confirmed. |
 | Fan Control reports a watchdog connection failure | This is communication between local processes; the fan still returns to automatic. Include the reason and, before rebooting, the output of `sudo cat /run/legiongo2companion-fan/last-fault.json` (if it exists) in a report. |
 | Fan RPM or APU shows a dash | The reading is unavailable or stale. Another program reading the EC can prevent a safe read. A dash does not mean the fan stopped. |
-| Display controls are locked | Read the SteamOS-support or cleanup message and use the requested restart. |
 | Recovery required, settings damaged or cleanup incomplete | Keep the saved settings and backups; follow the page's reason and retry button. Deleting them can remove what is needed to restore your previous state. |
 | A plugin conflict persists | Renamed copies of the old plugins still count; keep backups outside Decky's plugin folder. If the plugin folder cannot be read, restore access to it. |
-| The plugin folder was deleted by hand and the display or Wi-Fi still acts as if Companion were set | Install Companion again and uninstall it in Decky Settings; uninstalling restores what it changed. By hand: delete `~/.config/gamescope/scripts/lenovo.legiongo2.oled.lua` (rename a `lenovo.legiongo2.oled.lua.backup` next to it back to that name, if present), remove the `BandModifier2_4GHz` line from `[Rank]` in `/etc/iwd/main.conf` (iwd backend only), then restart the console. |
+| The plugin folder was deleted by hand and the display or Wi-Fi still acts as if Companion were set | Install Companion again and uninstall it in Decky Settings; uninstalling restores what it changed. By hand: remove the `BandModifier2_4GHz` line from `[Rank]` in `/etc/iwd/main.conf` (iwd backend only), then restart the console. |
 
 </details>
 
@@ -734,14 +714,15 @@ settings and verifies the interface it uses.
 | Controller gyro | Lenovo IMU bypass controls and InputPlumber D-Bus event filters |
 | Passive diagnostics | Read-only copies of native and virtual controller HID reports during an explicit test |
 | Battery protection | The kernel battery `charge_types` attribute |
-| OLED | Gamescope display script, X properties and gamescope's published EDID copy |
+| Display | X properties and gamescope's published EDID copy |
 | Wi-Fi | NetworkManager with the active iwd or WPA supplicant backend |
 
-Display corrections change gamescope's EDID copy, not the panel firmware. Native-display
-handover detects the system profile at
-`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`. Detection checks
-file presence, not Lua contents or SteamOS channel. The first handover requests a Gaming Mode
-restart. See the [technical review](docs/NATIVE_DISPLAY_SUPPORT.md).
+The HDR fix drops the DisplayID 2.0 block from gamescope's published EDID copy: DXVK's
+libdisplay-info rejects the whole EDID because of it, and DXVK never reads that block. The
+original bytes are kept root-only in `/var/lib/legiongo2companion/` and put back when the fix is
+turned off or Companion is uninstalled. The SteamOS 3.9 notice comes from the presence of
+`/usr/share/gamescope/scripts/00-gamescope/displays/lenovo.legiongo2.oled.lua`; its contents are
+not read.
 
 Settings use atomic replacement and backup/recovery handling. Failed changes retain restoration
 information; controls pause if settings cannot be recovered. Restoration only changes state
@@ -762,7 +743,7 @@ Page refreshes pause while Quick Access is hidden. Diagnostic readers close outs
 controller battery sampling is a short read with a 15-second cache. RGB animations run in
 firmware, and slider edits are grouped while a control is moving. Vibration discards superseded
 queued values for the same field and profile while keeping the final accepted edit. Actual
-overhead depends on enabled modules, display mode and the system build.
+overhead depends on enabled modules and the system build.
 
 Conflict detection checks plugin folders and manifests, including renamed copies. It blocks
 requests and stops workers when a conflict appears; a restart is required after removal. WiFi

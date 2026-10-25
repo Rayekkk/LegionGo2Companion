@@ -98,8 +98,8 @@ is read from the EC) and `plugin.startup_complete` (comma-separated `ready` and
 `failed` modules). Applied TDP limits are `tdp.limits_applied` with `spl`,
 `sppt`, `fppt` in watts, `source` (`wmi` or `ryzenadj`) and `reason` (`game`,
 `global`, `ac`, `drift`, `startup`, `rollback`; empty for an RPC, whose
-`operation` names it). A saved OLED mode is `display.mode_changed` with
-`previous`, `mode` and `pending` (a Gaming Mode restart is still needed).
+`operation` names it). Removing the display script of 2.3.0 and older is
+`display.old_script_cleanup` with its `outcome`.
 
 Examples of useful boundaries include:
 
@@ -146,8 +146,7 @@ attribute or poll: a healthy start is `startup`, `runtime` and `startup_complete
 and monitored states declared with `transition(..., initial=False)` (RPC health,
 settings backups, managed profiles, RGB/vibration reconcile, TDP loops, native
 display detection) stay silent until they first fail, then record the failure
-and the recovery. A cancelled backlight wait no longer closes its descriptor
-under the waiting thread, so stopping the display module logs no `EBADF`.
+and the recovery.
 
 New structured events use selected scalar fields. They do not record RPC
 arguments, whole settings or profiles, game names/history, session capabilities,

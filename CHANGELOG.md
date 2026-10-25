@@ -6,6 +6,16 @@ Unreleased.
 
 - **Controller sleep** (Gyro & touchpad): choose when the detached controllers turn themselves off after going unused: Never, 5, 10, 15, 30, 45 or 60 minutes, for both controllers, the same choices as Legion Space. Until you pick one, Companion changes nothing and shows **Controller default**. Your choice is set again after a wake or a reconnect, only on a controller that reports another value, and survives updates; turning the module off leaves the controllers at their current time. On the Legion Go 2 and on the Legion Go with the 2025 controller firmware (beta).
 
+### Changed
+
+- **Display needs SteamOS 3.9 or newer.** SteamOS 3.9 supports the Legion Go 2 screen natively, so the Display page now holds only **Fix HDR brightness in games**, which stays: without it, games on SteamOS 3.9 still read a 1499-nit HDR peak instead of the panel's real values. On older SteamOS the page asks you to update SteamOS; the HDR fix works there too.
+- **After the update, Companion removes its old display script by itself** (only the exact script it installed). If Setup had kept your own script as a `.backup`, it is put back on SteamOS 3.8 and left alone on 3.9, where it would override SteamOS. A Gaming Mode that is already running keeps the old script until it restarts.
+- The original EDID copy that the HDR fix restores is now kept root-only in `/var/lib/legiongo2companion/` instead of Decky's settings folder; the old copy moves there by itself.
+
+### Removed
+
+- **Display modes (PQ, Gamma 2.2, Hybrid), Setup, Reset display fix, Brightness slider in HDR and the Restart Gaming Mode buttons**, in the panel, the Desktop app and Manage Modules: SteamOS 3.9 does all of this natively. Turning Display off no longer asks for a Gaming Mode restart.
+
 ### Fixed
 
 - **Vibration:** while a controller sleeps or stops answering, Companion no longer keeps resending your vibration settings to it, which could make it buzz now and then. After a wake it retries only the settings that did not take, and its periodic check slows down from every 30 seconds to every 5 minutes until the controller answers or is reconnected.

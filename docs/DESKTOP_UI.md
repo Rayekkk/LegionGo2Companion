@@ -77,8 +77,6 @@ All nine modules retain their existing module gates, locks and restoration.
 Desktop reads the authoritative running game from the backend instead of
 submitting Steam foreground-app hints. Per-game/AC writes use existing context
 checks; an old draft cannot be silently applied to a newly foregrounded game.
-OLED session changes target Gaming Mode/Gamescope. Desktop never restarts KDE;
-without Gamescope those controls explain that Gaming Mode is required.
 
 ## Installation and local transport
 
