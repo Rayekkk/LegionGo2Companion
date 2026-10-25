@@ -162,12 +162,6 @@ def sleep_supported() -> bool:
             return False
 
 
-def read_sleep() -> dict[str, int]:
-    with _lock:
-        device = _device()
-        return {side: _read_sleep(device, side) for side in SIDES}
-
-
 def apply_sleep(values: dict) -> bool:
     """Write each pad whose sleep time differs, then confirm by reading; True once both report theirs.
 

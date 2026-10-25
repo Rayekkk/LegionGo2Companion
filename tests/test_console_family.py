@@ -7,7 +7,7 @@ import types
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import support  # Install isolated Decky stubs before backend imports.
 import battery_backend
@@ -197,7 +197,7 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
             setattr(self.plugin, "_" + name, types.SimpleNamespace(
                 _main=AsyncMock(), _migration=AsyncMock(), _unload=AsyncMock(), _uninstall=AsyncMock(),
                 get_state=AsyncMock(return_value={"success": True}), set_enabled=AsyncMock(),
-                applicable=lambda name=name: name not in ("fan", "display")))
+                controller_event=Mock(), applicable=lambda name=name: name not in ("fan", "display")))
         self.plugin._start_desktop = AsyncMock()
 
     async def test_it_never_runs_and_is_reported_as_not_applicable(self):
@@ -247,6 +247,7 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         driver["bound"] = True  # hid-lenovo-go bound to a Go's controller after Decky started
         await self.plugin._controller_hotplug()
         self.plugin._vibration._main.assert_awaited_once()
+        self.plugin._controller.controller_event.assert_called_once()  # a reconnected pad gets its sleep time checked
         status = self.plugin._module_status()
         self.assertEqual((status["vibration"]["applicable"], status["vibration"]["ready"]), (True, True))
         self.assertIs(status["battery"]["applicable"], True)

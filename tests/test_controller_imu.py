@@ -290,7 +290,7 @@ class ImuTests(unittest.TestCase):
             self.assertTrue(imu.apply_sleep({"left": 10, "right": 10}))
         self.assertEqual([call.args[0].parent.name for call in writer.call_args_list], ["right_handle"])
         self.assertEqual(writer.call_args.args[2], b"10\n")
-        self.assertEqual(imu.read_sleep(), {"left": 10, "right": 10})
+        self.assertEqual([imu._read_sleep(self.device, side) for side in imu.SIDES], [10, 10])
         with patch.object(imu, "_write_payload") as writer:
             self.assertTrue(imu.apply_sleep({"left": 10, "right": 10}))
         writer.assert_not_called()

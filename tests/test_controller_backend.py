@@ -712,16 +712,17 @@ class SleepTests(unittest.TestCase):
         self.responding = True
         self.supported = True
         self.writes = []
+        self.reads = 0
         for item in (patch.object(module, "settings", self.store),
                      patch.object(module.controller_imu, "sleep_supported", side_effect=lambda: self.supported),
-                     patch.object(module.controller_imu, "read_sleep", side_effect=lambda: dict(self.pads)),
                      patch.object(module.controller_imu, "apply_sleep", side_effect=self.apply)):
             item.start()
             self.addCleanup(item.stop)
 
     def apply(self, values):
-        # Like hid-lenovo-go: a pad that already reports the value is not written;
-        # a sleeping pad accepts the write without changing.
+        # Like hid-lenovo-go: every call reads the pads (a request to each), a pad that already
+        # reports the value is not written, and a sleeping pad accepts the write without changing.
+        self.reads += 1
         for side, value in values.items():
             if self.pads[side] != value:
                 self.writes.append((side, value))
@@ -736,14 +737,11 @@ class SleepTests(unittest.TestCase):
         self.assertEqual(self.store.commits, 0)
         self.assertEqual(self.backend._sleep_status(), {"available": True, "minutes": None, "error": ""})
 
-    def test_a_choice_writes_both_pads_and_keeps_the_values_read_before(self):
+    def test_a_choice_writes_both_pads_and_is_saved(self):
         result = asyncio.run(self._set(10))
         self.assertEqual(self.pads, {"left": 10, "right": 10})
         self.assertEqual(result["sleep"], {"available": True, "minutes": 10, "error": ""})
-        self.assertEqual(self.store.committed["sleep"], {"minutes": 10, "baseline": {"left": 0, "right": 0}})
-        asyncio.run(self._set(30))
-        self.assertEqual(self.store.committed["sleep"]["baseline"], {"left": 0, "right": 0},
-                         "a later choice never takes Companion's own value as the baseline")
+        self.assertEqual(self.store.committed["sleep_minutes"], 10)
 
     def test_only_listed_minutes_are_accepted(self):
         for value in (7, -1, 256, "10", 10.0, True, False, None):
@@ -764,7 +762,7 @@ class SleepTests(unittest.TestCase):
         self.responding = False
         with self.assertRaises(module.SleepPending):
             asyncio.run(self.backend.set_sleep_time(15))
-        self.assertEqual(self.store.committed["sleep"]["minutes"], 15)
+        self.assertEqual(self.store.committed["sleep_minutes"], 15)
         self.assertTrue(self.backend._sleep_status()["error"])
         self.responding = True
         self.assertTrue(self.backend._apply_sleep())
@@ -779,42 +777,70 @@ class SleepTests(unittest.TestCase):
         self.assertTrue(self.backend._apply_sleep())
         self.assertEqual(self.writes, [("right", 10)])
 
-    def test_a_sleeping_pad_is_retried_with_backoff_not_flooded(self):
-        asyncio.run(self._set(10))
-        self.pads["left"] = 0
-        self.responding = False
-        self.writes.clear()
-        clock = [0.0]
+    def watch(self, until, events=None, resume_at=None):
+        """Run the real watch loop on a fake clock; events maps a time to a callback."""
+        clock, events = [0.0], dict(events or {})
 
         async def sleep(seconds):
             clock[0] += seconds
-            if clock[0] > 1200:
+            for at in [at for at in events if at <= clock[0]]:
+                events.pop(at)()
+            if clock[0] > until:
                 raise asyncio.CancelledError
 
         async def watch():
             with self.assertRaises(asyncio.CancelledError):
                 await self.backend._watch()
 
-        with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])),                 patch.object(module.asyncio, "sleep", side_effect=sleep),                 patch.object(module.module_runtime, "suspend_offset", return_value=0.0),                 patch.object(self.backend, "_watch_check"):
+        offset = lambda: 2.0 if resume_at is not None and clock[0] >= resume_at else 0.0
+        with patch.object(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch.object(module.asyncio, "sleep", side_effect=sleep), \
+                patch.object(module.module_runtime, "suspend_offset", side_effect=offset), \
+                patch.object(self.backend, "_watch_check"):
             asyncio.run(watch())
+
+    def test_a_confirmed_time_is_not_read_again_until_a_wake_or_a_controller_event(self):
+        # Each read is a request to the pad and could keep it from ever falling asleep.
+        asyncio.run(self._set(10))
+        self.reads = 0
+        self.writes.clear()
+        self.watch(3600)
+        self.assertEqual(self.reads, 1, "one check at start, then no periodic reads")
+
+        def reconnected():
+            self.pads["right"] = 0
+            self.backend.controller_event()  # main.py: the controllers' udev events settled
+        self.reads = 0
+        self.watch(1800, events={600: reconnected}, resume_at=1200)
+        self.assertEqual(self.reads, 3, "start, the controller event and the wake")
+        self.assertEqual(self.writes, [("right", 10)], "only the reconnected pad that differs is written")
+
+    def test_a_sleeping_pad_is_retried_with_backoff_not_flooded(self):
+        asyncio.run(self._set(10))
+        self.pads["left"] = 0
+        self.responding = False
+        self.writes.clear()
+        self.watch(1200)
         # 5, 10, 20, 40, 80, 160, then every 300 s: 9 attempts in 20 minutes, not 240.
         self.assertLessEqual(len(self.writes), 9)
         self.assertGreaterEqual(len(self.writes), 6)
         self.assertEqual(set(self.writes), {("left", 10)}, "only the pad that differs is written")
-
-    def test_update_keeps_the_pads_value_and_turning_the_module_off_restores_it(self):
-        asyncio.run(self._set(10))
-        asyncio.run(self.backend._uninstall())  # Decky runs this before every update
-        self.assertEqual(self.pads, {"left": 10, "right": 10})
-        self.assertEqual(module._sleep_state()["minutes"], 10)
-        self.responding = False
-        with self.assertRaises(module.ControllerError):
-            self.backend._release_sleep()
-        self.assertEqual(module._sleep_state()["minutes"], 10, "an unconfirmed restore stays pending")
         self.responding = True
+        self.reads = 0
+        self.watch(3600)
+        self.assertEqual(self.reads, 1, "after the pad confirms, the retries stop")
+
+    def test_update_and_turning_the_module_off_leave_the_pads_time_alone(self):
+        asyncio.run(self._set(10))
+        self.writes.clear()
+        self.reads = 0
+        asyncio.run(self.backend._uninstall())  # Decky runs this before every update
+        self.assertEqual(module._sleep_minutes(), 10)
+        # A value read back to restore could be the driver's stale cache, so nothing is written.
         self.backend._release_sleep()
-        self.assertEqual(self.pads, {"left": 0, "right": 0})
-        self.assertIsNone(module._sleep_state())
+        self.assertEqual((self.reads, self.writes), (0, []))
+        self.assertEqual(self.pads, {"left": 10, "right": 10})
+        self.assertIsNone(module._sleep_minutes(), "Companion stops managing the time")
 
     def test_reenabling_the_module_keeps_a_choice_the_pads_have_not_confirmed(self):
         import module_control
@@ -824,7 +850,7 @@ class SleepTests(unittest.TestCase):
         self.backend._release_sleep()
         self.responding = False
         asyncio.run(module_control.restore_intent("controller", self.backend, intent))
-        self.assertEqual(module._sleep_state()["minutes"], 30)
+        self.assertEqual(module._sleep_minutes(), 30)
 
     async def _set(self, minutes):
         with patch.object(module, "_hid_inventory", return_value=(None, None)):

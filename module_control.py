@@ -18,7 +18,7 @@ def capture_intent(name):
         return {'enabled': b._load_state()['enabled']}
     if name == 'controller':
         import controller_backend as b
-        return {'source': b._state()['gyro_source'], 'sleep': (b._sleep_state() or {}).get('minutes')}
+        return {'source': b._state()['gyro_source'], 'sleep': b._sleep_minutes()}
     if name == 'wifi':
         import wifi_backend as b
         s = b._load_settings()

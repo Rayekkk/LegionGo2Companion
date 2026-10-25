@@ -467,6 +467,7 @@ before they turn themselves off: **Never**, 5, 10, 15, 30, 45 or 60 minutes, the
 (the choices Legion Space offers). Until you pick one, Companion changes nothing and shows
 **Controller default**. After a wake or a reconnect it sets the time again only on a controller
 that reports another one. The section appears only when both controllers have the timer.
+Turning the module off leaves the controllers at their current time.
 
 <details>
 <summary><b>Gyro and test details</b></summary>
