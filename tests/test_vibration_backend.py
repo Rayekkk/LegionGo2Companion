@@ -113,6 +113,25 @@ class VibrationBaselineTests(FakeDevice):
         self.assertTrue(vibe._restore_baseline())
         self.assertEqual(self.hardware(), DRIVER)
 
+    def test_release_writes_only_what_differs_and_never_a_mode_it_cannot_read(self):
+        # Every update and uninstall releases; the pads buzz whenever their rumble mode is set, even unchanged.
+        vibe._migrate()
+        self.assertTrue(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
+        modes = ('left_handle/rumble_mode', 'right_handle/rumble_mode')
+        for name in modes:
+            (self.device / name).write_text(DRIVER[name], encoding='ascii')
+        self.writes.clear()
+        self.assertTrue(vibe._restore_baseline())
+        self.assertEqual(self.hardware(), DRIVER)
+        self.assertEqual(self.writes, ['rumble_intensity', 'touchpad/vibration_intensity', 'touchpad/vibration_enabled'])
+        self.assertTrue(vibe._apply_settings(dict(vibe.DEFAULT_PROFILE)))
+        self.writes.clear()
+        real_read, flips = vibe._read_attr, iter(range(10 ** 6))
+        unsettled = lambda path: real_read(path) + str(next(flips)) if 'rumble_mode' in path else real_read(path)
+        with patch.object(vibe, '_read_attr', side_effect=unsettled):
+            self.assertFalse(vibe._restore_baseline(), 'an unread mode is not confirmed')
+        self.assertFalse(set(modes) & set(self.writes))
+
     def test_existing_install_and_invalid_baseline_fall_back_to_the_default_profile(self):
         for baseline in (None, {**DRIVER, 'rumble_intensity': 'loud'}):
             with self.subTest(baseline=baseline):

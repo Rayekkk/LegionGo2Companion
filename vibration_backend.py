@@ -344,7 +344,10 @@ def _capture_baseline(sys_path: str) -> None:
 
 
 def _restore_baseline() -> bool:
-    """Release: the captured driver values, else DEFAULT_PROFILE."""
+    """Release: the captured driver values, else DEFAULT_PROFILE.
+
+    Written like the checks (verify): only what two equal reads show differs, so an update or
+    uninstall does not make the pads buzz; a value that cannot be read is left unconfirmed."""
     global _last_applied_values
     with _settings_lock:
         _read_valid_settings()
@@ -352,16 +355,20 @@ def _restore_baseline() -> bool:
         if device is not None:
             _capture_baseline(device)  # a pending baseline must not fall through to DEFAULT_PROFILE
         baseline = settings.getSetting(SETTINGS_KEY_BASELINE, None)
-    if isinstance(baseline, dict) and set(baseline) == set(_PROFILE_ATTRS):
-        with _apply_lock:
-            p = _get_device_path()
-            caps = _capabilities(p) if p is not None else {}
-            allowed = dict(zip(_PROFILE_ATTRS, (caps.get("intensity"), caps.get("mode"), caps.get("mode"),
-                                                caps.get("tp_intensity"), ["true", "false"])))
-            if p is not None and all(baseline[a] in (allowed[a] or ()) for a in allowed):
-                _last_applied_values = None
-                return all([_write_attr(p, attr, baseline[attr], True) for attr in _PROFILE_ATTRS])
-    return _apply_settings(dict(DEFAULT_PROFILE), None, True)
+    if _is_go_s():
+        return _apply_settings(dict(DEFAULT_PROFILE), None, True)
+    with _apply_lock:
+        _last_applied_values = None
+        p = _get_device_path()
+        if p is None:
+            return False
+        caps = _capabilities(p)
+        allowed = dict(zip(_PROFILE_ATTRS, (caps["intensity"], caps["mode"], caps["mode"],
+                                            caps["tp_intensity"], ["true", "false"])))
+        if not (isinstance(baseline, dict) and set(baseline) == set(_PROFILE_ATTRS)
+                and all(baseline[a] in allowed[a] for a in allowed)):
+            baseline = _profile_targets(caps, DEFAULT_PROFILE)
+        return all([_write_attr(p, attr, baseline[attr], verify=True) for attr in _PROFILE_ATTRS])
 
 
 def _settings_locked(fn, *args):
