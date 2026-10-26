@@ -128,7 +128,7 @@ ELF with only the session **path** in its arguments, never the capability.
 
 The loopback RPC bridge listens on `127.0.0.1` at an ephemeral port. An explicit
 method contract derived from Decky panels (`desktop/native/rpc-methods.json`,
-78 methods, generated and checked by `scripts/desktop-contract.mjs`), a private
+77 methods, generated and checked by `scripts/desktop-contract.mjs`), a private
 rotating capability in the 0600 session file,
 exact Origin/Host, argument binding and bounded request admission protect it.
 There is no static web server, GET mutation, CORS endpoint or LAN listener.
