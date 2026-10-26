@@ -77,6 +77,7 @@ class FakeDevice(unittest.IsolatedAsyncioTestCase):
             vibe, 'scan_proc_for_appid', side_effect=lambda: self.running))
         self.stack.enter_context(patch.object(vibe, '_discover', return_value=(str(self.device), 'fixture')))
         self.stack.enter_context(patch('builtins.open', side_effect=opened))
+        self.stack.enter_context(patch.object(vibe.module_runtime, 'CONTROLLER_READ_GAP_S', 0))
         self.plugin = vibe.Plugin()
 
     async def asyncTearDown(self):
@@ -620,22 +621,34 @@ class VibrationForegroundTests(FakeDevice):
 
 class VibrationReadbackTests(unittest.TestCase):
     def setUp(self):
-        self.cache = patch.object(vibe, '_attr_cache', {})
-        self.cache.start()
-        self.addCleanup(self.cache.stop)
+        for name, value in (('_attr_cache', {}),):
+            patcher = patch.object(vibe, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(vibe.module_runtime, 'CONTROLLER_READ_GAP_S', 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def test_delayed_readback_is_bounded_and_can_confirm(self):
+    def write(self, reads, cached=None):
         opened = mock_open()
-        opened.return_value.read.side_effect = ['low\n', 'high\n']
-        with patch('builtins.open', opened), patch.object(vibe.time, 'sleep'):
-            self.assertTrue(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
-        self.assertEqual(opened.return_value.read.call_count, 2)
+        opened.return_value.read.side_effect = [value + '\n' for value in reads]
+        vibe._attr_cache.clear()
+        if cached:
+            vibe._attr_cache[('/mock', 'rumble_intensity')] = cached
+        with patch('builtins.open', opened):
+            ok = vibe._write_attr('/mock', 'rumble_intensity', 'high')
+        writes = [c for c in opened.call_args_list if len(c.args) > 1 and 'w' in c.args[1]]
+        return ok, len(writes), opened.return_value.read.call_count
 
-    def test_ignored_write_is_reported_as_failure_after_bounded_readback(self):
-        opened = mock_open(read_data='low\n')
-        with patch('builtins.open', opened), patch.object(vibe.time, 'sleep'):
-            self.assertFalse(vibe._write_attr('/mock', 'rumble_intensity', 'high', True))
-        self.assertEqual(opened.return_value.read.call_count, vibe._READBACK_ATTEMPTS)
+    def test_a_write_is_confirmed_only_by_two_equal_reads(self):
+        # hid-lenovo-go can return the previous command's reply first (#7: false "did not confirm").
+        self.assertEqual(self.write(['low', 'high', 'high']), (True, 1, 3))
+        self.assertEqual(self.write(['high', 'low', 'low']), (False, 1, 3), "one matching read is not enough")
+        self.assertEqual(self.write(['low', 'medium', 'low', 'medium']), (False, 1, 4), "bounded")
+
+    def test_a_stale_differing_read_does_not_cost_a_write(self):
+        self.assertEqual(self.write(['low', 'high', 'high'], cached='high'), (True, 0, 3))
+        self.assertEqual(self.write(['high'], cached='high'), (True, 0, 1))
 
     def test_device_disappearing_during_readback_is_not_success(self):
         opened = mock_open()
@@ -649,7 +662,6 @@ class VibrationSleepingPadTests(FakeDevice):
 
     def setUp(self):
         super().setUp()
-        self.stack.enter_context(patch.object(vibe, '_READBACK_DELAY_S', 0))
         self.ignored.add('right_handle/rumble_mode')
 
     async def test_wake_retries_rewrite_only_the_attributes_that_failed(self):

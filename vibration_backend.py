@@ -110,8 +110,6 @@ _RESUME_CHECK_S = 5.0
 # for hotplug and resume re-applies, which have no frontend round trip.
 _active_app_id: str = DEFAULT_APP
 _active_app_ts: float | None = None
-_READBACK_ATTEMPTS = 3
-_READBACK_DELAY_S = 0.05
 
 # Serialises sysfs writes between RPC calls, hotplug and resume.
 _apply_lock = threading.Lock()
@@ -279,28 +277,29 @@ def _invalidate_cache(sys_path: str | None = None) -> None:
             del _attr_cache[key]
 
 
+def _read_attr(path: str) -> str:
+    with open(path, encoding="ascii") as source:
+        return source.read().strip()
+
+
 def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False) -> bool:
     key = (sys_path, rel_path)
+    path = os.path.join(sys_path, rel_path)
+    read = lambda: _read_attr(path)
     if not force and _attr_cache.get(key) == value:
         try:
-            with open(os.path.join(sys_path, rel_path), encoding="ascii") as handle:
-                if handle.read().strip() == value:
-                    return True
+            # A differing read may be the previous command's reply: it must settle before it costs a write.
+            if read() == value or module_runtime.settled_read(read) == value:
+                return True
         except (OSError, UnicodeError):
             # Fall through to the normal write path.  The device may have been
             # rebound under the same sysfs path since the cache was populated.
             pass
-    path = os.path.join(sys_path, rel_path)
     try:
         with open(path, 'w') as f:
             f.write(value + '\n')
-        for attempt in range(_READBACK_ATTEMPTS):
-            with open(path, encoding="ascii") as source:
-                if source.read().strip() == value:
-                    break
-            if attempt + 1 == _READBACK_ATTEMPTS:
-                raise OSError("The controller did not confirm the requested value")
-            time.sleep(_READBACK_DELAY_S)
+        if module_runtime.settled_read(read) != value:
+            raise OSError("The controller did not confirm the requested value")
         _attr_cache[key] = value
         return True
     except (OSError, UnicodeError) as exc:
