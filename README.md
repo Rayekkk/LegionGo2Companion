@@ -463,8 +463,9 @@ still needs gyro or touchpad assignments in its Steam Input layout.
 **Controller sleep → Turn off after** sets how long the detached controllers wait without use
 before they turn themselves off: **Never**, 5, 10, 15, 30, 45 or 60 minutes, the same for both
 (the choices Legion Space offers). Until you pick one, Companion changes nothing and shows
-**Controller default**. After a wake or a reconnect it sets the time again only on a controller
-that reports another one. The section appears only when both controllers have the timer.
+**Controller default**. Every two minutes, and after a wake or a reconnect, it sets the time
+again only on a controller that reports another one, so a controller that was asleep when you
+chose gets it after it wakes. The section appears only when both controllers have the timer.
 Turning the module off leaves the controllers at their current time.
 
 <details>

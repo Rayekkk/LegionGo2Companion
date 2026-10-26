@@ -4,7 +4,7 @@ Unreleased.
 
 ### Added
 
-- **Controller sleep** (Gyro & touchpad): choose when the detached controllers turn themselves off after going unused: Never, 5, 10, 15, 30, 45 or 60 minutes, for both controllers, the same choices as Legion Space. Until you pick one, Companion changes nothing and shows **Controller default**. Your choice is set again after a wake or a reconnect, only on a controller that reports another value, and survives updates; turning the module off leaves the controllers at their current time. On the Legion Go 2 and on the Legion Go with the 2025 controller firmware (beta).
+- **Controller sleep** (Gyro & touchpad): choose when the detached controllers turn themselves off after going unused: Never, 5, 10, 15, 30, 45 or 60 minutes, for both controllers, the same choices as Legion Space. Until you pick one, Companion changes nothing and shows **Controller default**. Companion checks your choice every two minutes and after a wake or a reconnect and sets it again only on a controller that reports another value, so a controller that was asleep when you chose gets it once it wakes. The choice survives updates; turning the module off leaves the controllers at their current time. On the Legion Go 2 and on the Legion Go with the 2025 controller firmware (beta).
 
 ### Changed
 

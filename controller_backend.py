@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
-import math
 import os
 import re
 import secrets
@@ -66,10 +65,10 @@ BATTERY_SAMPLE_TIMEOUT_SECONDS = 0.25
 BATTERY_CACHE_SECONDS = 15.0
 # Minutes, the choices Legion Space offers for the detached controllers; 0 turns the timer off.
 SLEEP_MINUTES = (0, 5, 10, 15, 30, 45, 60)
-# A failing sleep-time write is retried after 5 s, doubling up to this. A confirmed one is not read
-# again until start, a wake or a controller event: every read is a request to the pad, which could
-# keep it awake.
-SLEEP_RETRY_MAX_SECONDS = 300.0
+# The sleep time is checked this often, besides start, a wake and a controller event: a pad that wakes
+# sends no event, and a write to a sleeping pad is lost although the driver reports success. A failing
+# check is retried after 5 s, doubling up to this. Reads this rare do not keep a pad awake (measured).
+SLEEP_CHECK_SECONDS = 120.0
 
 
 class ControllerError(RuntimeError):
@@ -765,8 +764,8 @@ class Plugin:
         return await _offload(self._apply_sleep)
 
     async def _sleep_check(self, now: float, resumed: bool) -> None:
-        """Only a pad that differs is written. A failing check backs off from 5 s to 5 min, so a sleeping pad is
-        not flooded; a confirmed one waits for the next start, wake or controller event."""
+        """Only a pad that differs is written, at most once per check. A failing check backs off from 5 s to
+        SLEEP_CHECK_SECONDS, so a sleeping pad is not flooded; a confirmed one is checked again after that."""
         if resumed:
             self._sleep_retry = RECOVERY_RETRY_SECONDS
         try:
@@ -778,10 +777,10 @@ class Plugin:
             ok = False  # e.g. maintenance began: the gyro watch must keep running
         if ok:
             self._sleep_retry = RECOVERY_RETRY_SECONDS
-            self._sleep_due = math.inf
+            self._sleep_due = now + SLEEP_CHECK_SECONDS
         else:
             self._sleep_due = now + self._sleep_retry
-            self._sleep_retry = min(SLEEP_RETRY_MAX_SECONDS, self._sleep_retry * 2)
+            self._sleep_retry = min(SLEEP_CHECK_SECONDS, self._sleep_retry * 2)
 
     def _snapshot(self, token: str | None = None, *, renew: bool = False) -> dict:
         with self._capture_lock:

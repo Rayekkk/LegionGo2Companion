@@ -13,7 +13,6 @@ import os
 import re
 import stat
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -163,10 +162,10 @@ def sleep_supported() -> bool:
 
 
 def apply_sleep(values: dict) -> bool:
-    """Write each pad whose sleep time differs, then confirm by reading; True once both report theirs.
+    """Write each pad whose sleep time differs, at most once, then confirm; True once both report theirs.
 
-    The driver reports success even when a pad did not answer within 50 ms, and a read can
-    return its cached value, so only a read showing the new value counts.
+    The driver reports success even when a pad did not answer: a sleeping pad loses the write and
+    reads 0. A read can also return the previous command's reply, so only two equal reads count.
     """
     if (not isinstance(values, dict) or set(values) != set(SIDES)
             or any(type(values[side]) is not int or not 0 <= values[side] <= 255 for side in SIDES)):
@@ -175,15 +174,11 @@ def apply_sleep(values: dict) -> bool:
         device = _device()
         confirmed = True
         for side in SIDES:
-            if _read_sleep(device, side) == values[side]:
+            read = lambda side=side: _read_sleep(device, side)
+            if module_runtime.settled_read(read) == values[side]:
                 continue
             _write_payload(_sleep_attribute(device, side), device, f"{values[side]}\n".encode("ascii"))
-            for _attempt in range(3):
-                if _read_sleep(device, side) == values[side]:
-                    break
-                time.sleep(0.05)
-            else:
-                confirmed = False
+            confirmed = module_runtime.settled_read(read) == values[side] and confirmed
         return confirmed
 
 

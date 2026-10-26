@@ -799,21 +799,34 @@ class SleepTests(unittest.TestCase):
                 patch.object(self.backend, "_watch_check"):
             asyncio.run(watch())
 
-    def test_a_confirmed_time_is_not_read_again_until_a_wake_or_a_controller_event(self):
-        # Each read is a request to the pad and could keep it from ever falling asleep.
+    def test_a_confirmed_time_is_checked_every_two_minutes_and_on_events(self):
         asyncio.run(self._set(10))
         self.reads = 0
         self.writes.clear()
         self.watch(3600)
-        self.assertEqual(self.reads, 1, "one check at start, then no periodic reads")
+        self.assertEqual(self.reads, 30, "at start, then once per SLEEP_CHECK_SECONDS")
+        self.assertEqual(self.writes, [])
 
         def reconnected():
             self.pads["right"] = 0
             self.backend.controller_event()  # main.py: the controllers' udev events settled
         self.reads = 0
-        self.watch(1800, events={600: reconnected}, resume_at=1200)
-        self.assertEqual(self.reads, 3, "start, the controller event and the wake")
+        self.watch(130, events={60: reconnected})
+        self.assertEqual(self.reads, 2, "start and the controller event, before the periodic check")
         self.assertEqual(self.writes, [("right", 10)], "only the reconnected pad that differs is written")
+
+    def test_a_write_lost_to_a_sleeping_pad_returns_after_it_wakes(self):
+        # A waking pad sends no event, and the write it missed reported success.
+        asyncio.run(self._set(10))
+        self.pads["left"] = 0
+        self.responding = False
+        self.writes.clear()
+        written = []
+
+        def woke():
+            self.responding = True
+        self.watch(760, events={625: woke, 755: lambda: written.append(dict(self.pads))})
+        self.assertEqual(written, [{"left": 10, "right": 10}], "within SLEEP_CHECK_SECONDS of the wake")
 
     def test_a_sleeping_pad_is_retried_with_backoff_not_flooded(self):
         asyncio.run(self._set(10))
@@ -821,14 +834,14 @@ class SleepTests(unittest.TestCase):
         self.responding = False
         self.writes.clear()
         self.watch(1200)
-        # 5, 10, 20, 40, 80, 160, then every 300 s: 9 attempts in 20 minutes, not 240.
-        self.assertLessEqual(len(self.writes), 9)
-        self.assertGreaterEqual(len(self.writes), 6)
+        # 5, 10, 20, 40, 80, then every 120 s: 14 attempts in 20 minutes, not 240.
+        self.assertLessEqual(len(self.writes), 14)
+        self.assertGreaterEqual(len(self.writes), 10)
         self.assertEqual(set(self.writes), {("left", 10)}, "only the pad that differs is written")
         self.responding = True
-        self.reads = 0
+        self.writes.clear()
         self.watch(3600)
-        self.assertEqual(self.reads, 1, "after the pad confirms, the retries stop")
+        self.assertEqual(self.writes, [("left", 10)], "after the pad confirms, it is only read")
 
     def test_update_and_turning_the_module_off_leave_the_pads_time_alone(self):
         asyncio.run(self._set(10))

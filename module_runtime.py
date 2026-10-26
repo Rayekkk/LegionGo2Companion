@@ -226,6 +226,24 @@ def read_sysfs_text(path, limit=512, *, error=OSError, subject=None):
     return raw.decode("ascii", errors="strict").strip()
 
 
+CONTROLLER_READ_GAP_S = 0.15
+
+
+def settled_read(read, reads=4):
+    """The value two reads in a row agree on, or None after `reads` reads.
+
+    Every hid-lenovo-go attribute read sends a command to the pad, and the driver can hand back
+    the previous command's reply (one completion for all), so a single read can be stale."""
+    last = read()
+    for _ in range(reads - 1):
+        time.sleep(CONTROLLER_READ_GAP_S)
+        value = read()
+        if value == last:
+            return value
+        last = value
+    return None
+
+
 # Machine type (DMI product_name) -> console: go1 Legion Go, gos Legion Go S, go2 Legion Go 2.
 LEGION_GO_MODELS = {"83E1": "go1", "83L3": "gos", "83N6": "gos", "83N0": "go2", "83N1": "go2"}
 # Left out on purpose (owner's decision), so product_version does not place them either.

@@ -299,10 +299,22 @@ class ImuTests(unittest.TestCase):
         # The driver returns success after its 50 ms timeout while the pad kept its value.
         self.timer("left", 0)
         self.timer("right", 0)
-        with patch.object(imu, "_write_payload") as writer, patch.object(imu.time, "sleep") as pause:
+        with patch.object(imu, "_write_payload") as writer, patch.object(imu.module_runtime.time, "sleep") as pause:
             self.assertFalse(imu.apply_sleep({"left": 15, "right": 15}))
         self.assertEqual(writer.call_count, 2, "one write per pad, never a burst")
         self.assertLessEqual(pause.call_count, 6)
+
+    def test_only_two_equal_reads_count(self):
+        # hid-lenovo-go can return the previous command's reply: here the other pad's 10 before the real 0.
+        self.timer("left", 0)
+        self.timer("right", 10)
+        reads = {"left": iter([10, 0, 0, 0, 10, 10]), "right": iter([10, 10])}
+        with patch.object(imu, "_read_sleep", side_effect=lambda _device, side: next(reads[side])), \
+                patch.object(imu, "_write_payload") as writer, patch.object(imu.module_runtime.time, "sleep") as pause:
+            self.assertTrue(imu.apply_sleep({"left": 10, "right": 10}))
+        self.assertEqual([call.args[0].parent.name for call in writer.call_args_list], ["left_handle"],
+                         "a stale matching read does not skip the write; a stale 0 after it does not fail it")
+        pause.assert_called_with(imu.module_runtime.CONTROLLER_READ_GAP_S)
 
     def test_invalid_values_never_write(self):
         self.timer("left", 0)
