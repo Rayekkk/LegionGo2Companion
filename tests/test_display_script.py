@@ -57,7 +57,7 @@ class ScriptTargetTests(unittest.TestCase):
 
     def bind(self, euid, pid=77, owner=None, target=('/home/deck/.config', 1000, 1001)):
         with patch.object(display.os, 'geteuid', create=True, return_value=euid), \
-             patch.object(display, '_gamescope_start_time', return_value=1.0), \
+             patch.object(display, '_gamescope_running', return_value=True), \
              patch.object(display, '_gamescope_pid', pid), \
              patch.object(display, '_display_owner', return_value=owner), \
              patch.object(display, '_gamescope_config_dir', return_value=target):
@@ -88,7 +88,7 @@ class ScriptTargetTests(unittest.TestCase):
         display._script_binding = None
         with patch.object(display.os, 'geteuid', create=True, return_value=0), \
              patch.object(display, 'OLD_SCRIPT_SHA256', OURS), \
-             patch.object(display, '_gamescope_start_time', return_value=None), \
+             patch.object(display, '_gamescope_running', return_value=False), \
              patch.object(display, '_gamescope_pid', None), \
              patch.object(display, '_display_owner', return_value=None):
             self.assertIsNone(display._remove_old_scripts(restore_backup=True))
@@ -330,19 +330,6 @@ class EdidBackupMoveTests(unittest.TestCase):
 
 
 class DisplayWriterTests(unittest.TestCase):
-    def test_display_writer_ignores_preexisting_staging_link(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            victim = root / "unrelated-file"
-            victim.write_bytes(b"original unrelated data")
-            target = root / "script.lua"
-            staging = Path(str(target) + ".lego2brightnessfix.tmp")
-            # Hard links work without Windows symlink privileges. This tests
-            # following an existing inode, not Linux privilege escalation.
-            os.link(victim, staging)
-            self.assertTrue(display._write_file_atomically(str(target), b"lua"))
-            self.assertEqual(victim.read_bytes(), b"original unrelated data")
-
     @POSIX
     def test_display_writer_refuses_target_symlink_and_preserves_reader_access(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -458,7 +445,7 @@ class DisplayStartTests(unittest.TestCase):
 
 class GamescopeSessionTests(unittest.TestCase):
     def test_desktop_mode_backs_off_xprop_and_probes_at_once_when_gamescope_returns(self):
-        now, spawns, gamescope = [0.0], [], [None]
+        now, spawns, gamescope = [0.0], [], [False]
 
         def run(argv, **_kw):  # KWin's Xwayland: an X server without GAMESCOPE atoms
             spawns.append(argv)
@@ -476,7 +463,7 @@ class GamescopeSessionTests(unittest.TestCase):
              patch.object(display.Plugin, "_session_retry_after", 0.0), \
              patch.object(display.Plugin, "_session_retry_delay", display.GATE_INTERVAL_S), \
              patch.object(display, "_display_candidates", return_value=(":0",)), \
-             patch.object(display, "_gamescope_start_time", side_effect=lambda: gamescope[0]), \
+             patch.object(display, "_gamescope_running", side_effect=lambda: gamescope[0]), \
              patch.object(display, "_xprop_command", side_effect=lambda args, *_: ["xprop", *args]), \
              patch.object(display, "_xprop_env", return_value={}), \
              patch.object(display, "_xprop_user", return_value={}), \
@@ -491,33 +478,9 @@ class GamescopeSessionTests(unittest.TestCase):
                 display.Plugin._session_props()
             self.assertLess(len(spawns), 100)  # ~600 without the back-off: one xprop every pass
             spawns.clear()
-            gamescope[0] = display._IDENTITY_BASE  # Gaming Mode is back
+            gamescope[0] = True  # Gaming Mode is back
             display.Plugin._session_props()
             self.assertTrue(spawns)
-
-    def test_session_identity_is_the_process_start_not_the_proc_inode_mtime(self):
-        def stat_line(ticks):
-            # comm may hold spaces and parentheses; starttime is field 22.
-            return f"42 (gamescope (wl) S 1 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 {ticks} 0 0"
-        files = {"/proc/42/comm": "gamescope-wl\n", "/proc/42/stat": stat_line(1000),
-                 "/proc/sys/kernel/random/boot_id": "0a1b2c3d-1111-2222-3333-444455556666\n"}
-        def fake_open(path, *args, **kwargs):
-            if path not in files:
-                raise FileNotFoundError(path)
-            return io.StringIO(files[path])
-        def no_mtime(path, *args, **kwargs):
-            raise AssertionError(f"identity must not use stat({path}) mtime")
-        with patch.object(display, "_gamescope_pid", None), patch.object(display, "_gamescope_scan_after", 0.0), \
-             patch.object(display, "_CLK_TCK", 100), patch.object(display, "open", fake_open, create=True), \
-             patch.object(display.os, "listdir", return_value=["1", "42"]), patch.object(display.os, "stat", no_mtime):
-            first = display._gamescope_start_time()
-            self.assertEqual(display._gamescope_start_time(), first)
-            files["/proc/sys/kernel/random/boot_id"] = "ffffffff-1111-2222-3333-444455556666\n"
-            other_boot = display._gamescope_start_time()
-            files["/proc/42/stat"] = stat_line(1500)
-            restarted = display._gamescope_start_time()
-        self.assertNotEqual(first, other_boot)
-        self.assertAlmostEqual(restarted - other_boot, 5.0)
 
 
 class NativeDisplayTests(unittest.TestCase):

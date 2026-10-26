@@ -345,7 +345,7 @@ async def _watch_properties() -> None:
         process = None
         display = None
         try:
-            if time.monotonic() < probe_after and await _offload(_gamescope_start_time) is None:
+            if time.monotonic() < probe_after and not await _offload(_gamescope_running):
                 await asyncio.sleep(GATE_INTERVAL_S)
                 continue
             if not await _offload(_pick_display):
@@ -569,65 +569,40 @@ def _load_edid_backup():
 
 _gamescope_pid = None
 _gamescope_scan_after = 0.0
-_CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
 
-# Session identities start above any epoch time (2.1 saved epoch stamps).
-_IDENTITY_BASE = 1e11
-
-
-def _boot_offset():
-    """A per-boot constant, so process start ticks differ between boots."""
-    try:
-        with open("/proc/sys/kernel/random/boot_id") as handle:
-            return _IDENTITY_BASE + int(handle.read().strip().replace("-", "")[:6], 16) * 1000.0
-    except (OSError, ValueError):
-        return _IDENTITY_BASE
-
-
-def _gamescope_start_time():
-    """Identify the live session, scanning /proc only after losing its PID."""
+def _gamescope_running() -> bool:
+    """Whether gamescope-wl runs (its PID in _gamescope_pid), scanning /proc only after losing it."""
     global _gamescope_pid, _gamescope_scan_after
-    def started(pid):
+    def is_gamescope(pid):
         with open(f"/proc/{pid}/comm") as handle:
-            if handle.read().strip() != "gamescope-wl":
-                return None
-        # starttime (field 22) is fixed at fork; the /proc/<pid> inode mtime is
-        # only the moment something first looked and can change with the dcache.
-        with open(f"/proc/{pid}/stat") as handle:
-            try:
-                ticks = int(handle.read().rpartition(")")[2].split()[19])
-            except (ValueError, IndexError):
-                return None
-        return _boot_offset() + ticks / _CLK_TCK
+            return handle.read().strip() == "gamescope-wl"
     if _gamescope_pid is not None:
         try:
-            value = started(_gamescope_pid)
-            if value is not None:
-                return value
+            if is_gamescope(_gamescope_pid):
+                return True
         except OSError:
             pass
         _gamescope_pid = None
         _gamescope_scan_after = 0.0
     now = time.monotonic()
     if now < _gamescope_scan_after:
-        return None
+        return False
     _gamescope_scan_after = now + 2.0
     try:
         entries = os.listdir("/proc")
     except OSError:
-        return None
+        return False
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
-            value = started(entry)
-            if value is not None:
+            if is_gamescope(entry):
                 _gamescope_pid = entry
-                return value
+                return True
         except OSError:
             continue
-    return None
+    return False
 
 
 # -- old display script cleanup --
@@ -656,7 +631,7 @@ def _bind_script_dir() -> bool:
     global SCRIPT_DIR, INSTALLED_SCRIPT, SCRIPT_USER, _script_binding
     if not _is_root():
         return True
-    _gamescope_start_time()
+    _gamescope_running()
     pid = _gamescope_pid
     try:
         if pid is not None:
@@ -1070,7 +1045,7 @@ class Plugin:
         """Read the published EDID path, re-finding a session that moved."""
         wanted = [ATOM_EDID_PATH]
         if (time.monotonic() < Plugin._session_retry_after and _cached_props(wanted) is None
-                and _gamescope_start_time() is None):
+                and not _gamescope_running()):
             return {}  # Desktop Mode: no xprop until the back-off runs out.
         props = _read_props(wanted)
         if not props:
@@ -1081,7 +1056,7 @@ class Plugin:
                 return {}
             Plugin._session_retry_after = now + GATE_INTERVAL_S
             if not _pick_display():
-                if _gamescope_start_time() is None:
+                if not _gamescope_running():
                     Plugin._session_retry_after = now + Plugin._session_retry_delay
                     Plugin._session_retry_delay = min(Plugin._session_retry_delay * 2, ABSENT_PROBE_MAX_S)
                 return {}

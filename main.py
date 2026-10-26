@@ -985,8 +985,7 @@ class Plugin:
         # Read-only context. Never set frontend app hints from an application that
         # cannot observe Steam's authoritative foreground app.
         app_id = '' if self._guard_blocked or self._guard_error else await asyncio.to_thread(tdp_backend._get_running_appid)
-        session = await asyncio.to_thread(display_backend._gamescope_start_time)
-        return {'app_id': app_id, 'gamescope': session is not None}
+        return {'app_id': app_id, 'gamescope': await asyncio.to_thread(display_backend._gamescope_running)}
 
     async def _start_desktop(self):
         async with self._desktop_lock:

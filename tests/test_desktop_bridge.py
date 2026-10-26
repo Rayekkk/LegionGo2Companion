@@ -177,7 +177,7 @@ class DesktopBridgeTests(unittest.IsolatedAsyncioTestCase):
         for method in expected:
             self.assertTrue(inspect.iscoroutinefunction(getattr(main.Plugin, method, None)), method)
         # Same exclusions as scripts/desktop-contract.mjs (Steam app hints, RPCs the app never calls).
-        expected -= {'set_active_app', 'vibe_set_active_app', 'is_ready', 'modules_restart_session'}
+        expected -= {'set_active_app', 'vibe_set_active_app', 'is_ready'}
         expected |= {'list_game_profiles'}  # read-only, shown only by the native app
         self.assertTrue(inspect.iscoroutinefunction(main.Plugin.list_game_profiles))
         contract = root / 'desktop/native/rpc-methods.json'

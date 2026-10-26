@@ -6,8 +6,8 @@ stub `decky` and its own save path run in a temp dir (TDP, Fan, Remap and Wi-Fi 
 Vibration RPCs), then the resulting JSON was copied here.
 
 Not covered, because the code that reads them is unchanged since 2.1.0: battery, RGB and controller (their
-state validators are identical), display (startup reads enabled / edid_fix / panel_mode / active_mode the
-same way; 2.1-era reset and session records are covered in test_display_lifecycle) and module_settings
+state validators are identical), display (2.4.0 keeps only edid_fix and its recovery records; test_display_script covers dropping the
+rest) and module_settings
 (main reads `modules` the same way, with the same module names).
 """
 import copy
