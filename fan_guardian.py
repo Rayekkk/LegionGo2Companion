@@ -78,10 +78,13 @@ def confirm_override_change(ec, sample, expected):
     first = sample['override']
     time.sleep(0.05)
     current = read_ec_status(ec, sample)
+    # In the reason, so session_ended, control_fault and last-fault.json carry it past a reboot.
+    detail = f'(read {first} then {current["override"]}, expected {expected}, power mode {current["power_mode"]})'
     if first == current['override'] == 0:
-        raise Retry('Firmware took the fan back.')
+        raise Retry(f'Firmware took the fan back {detail}.')
     if current['override'] != expected:
-        raise RuntimeError('Fan override changed outside its owner.')
+        raise RuntimeError(f'Fan override changed outside its owner {detail}.')
+    diagnostic_event('fan', 'override_misread', level='warning', reason=detail)
     check_ec_temperature(sample)
     return current
 

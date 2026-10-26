@@ -471,15 +471,18 @@ class FanProcessTests(unittest.TestCase):
             fcntl.flock(f,fcntl.LOCK_EX);f.seek(addr);f.write(data)
 
     def test_firmware_taking_the_fan_back_is_a_retry_and_a_fresh_session_rearms(self):
-        self.configure();self.poke(0xC6C8,b'\0\0')
+        self.configure();self.poke(0xC683,b'\3');self.poke(0xC6C8,b'\0\0')
         st=self.wait_release();self.assertEqual(st['outcome'],'retry',st);self.assertIn('Firmware took the fan back',st['reason'])
-        self.assertEqual(json.loads((self.root/'last-fault.json').read_text())['outcome'],'retry')
+        record=json.loads((self.root/'last-fault.json').read_text())
+        self.assertEqual(record['outcome'],'retry')
+        self.assertIn('(read 0 then 0, expected 1800, power mode 3)',record['reason'],'the cause survives in the fault record')
         self.assertEqual(self.start()['kind'],'ready')
         st=self.configure();self.assertTrue(st['active']);self.assertEqual(st['override'],1800)
 
     def test_foreign_override_write_is_a_fault_and_released(self):
         self.configure();self.poke(0xC6C8,(2400).to_bytes(2,'little'))
-        st=self.wait_release();self.assertEqual(st['outcome'],'fault',st);self.assertIn('outside its owner',st['reason'])
+        st=self.wait_release();self.assertEqual(st['outcome'],'fault',st)
+        self.assertIn('outside its owner (read 2400 then 2400, expected 1800, power mode 0)',st['reason'])
 
     def test_100_hardmax_without_handover_or_heating_hardware(self):
         from fan_policy import DEFAULT_CURVE,MIN_RPM,LAST_MIN_RPM
