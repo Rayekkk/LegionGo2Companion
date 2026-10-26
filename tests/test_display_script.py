@@ -355,8 +355,22 @@ class DisplayStartTests(unittest.TestCase):
         self.manager = AtomicSettingsManager('display_settings', str(self.root))
         self.stack.enter_context(patch.object(display, 'settings', self.manager))
         for name, value in {'_state': dict(display.Plugin._state), '_task': None, '_prop_task': None,
-                            '_edid_original': None, '_cleanup_done': False}.items():
+                            '_edid_original': None, '_cleanup_done': False,
+                            '_cleanup_retry_after': 0.0, '_cleanup_retry_delay': display.GATE_INTERVAL_S}.items():
             self.stack.enter_context(patch.object(display.Plugin, name, value))
+
+    def test_a_cleanup_that_keeps_failing_is_retried_ever_more_rarely(self):
+        # Each attempt runs a helper process; a symlinked ~/.config/gamescope makes every one fail.
+        clock = [100.0]
+        remove = Mock(side_effect=OSError('refused a symlinked directory'))
+        with patch.object(display, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])),                 patch.object(display.Plugin, '_refresh_native', return_value='supported'),                 patch.object(display, '_remove_old_scripts', remove):
+            for _ in range(1800):  # an hour of 2 s loop passes
+                self.assertFalse(display.Plugin._cleanup_old_display_fix())
+                clock[0] += display.GATE_INTERVAL_S
+            self.assertLess(remove.call_count, 25)  # 1800 without the back-off
+            remove.side_effect, remove.return_value = None, 'removed the old display script'
+            clock[0] += display.CLEANUP_RETRY_MAX_S
+            self.assertTrue(display.Plugin._cleanup_old_display_fix())
 
     def test_a_2_3_0_settings_file_keeps_only_the_edid_fix_and_its_recovery(self):
         pending = {'schema': 1, 'path': '/tmp/edid', 'device': 1, 'inode': 2,

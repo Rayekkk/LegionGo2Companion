@@ -69,6 +69,7 @@ WATCHER_RECOVERY_S = 30.0  # Longer than a Gamescope restart.
 # Desktop Mode has no gamescope atoms: while no gamescope-wl runs, X probes back
 # off (doubling) to this; a returning gamescope-wl is probed at once.
 ABSENT_PROBE_MAX_S = 32.0
+CLEANUP_RETRY_MAX_S = 300.0  # a failure that lasts (e.g. a symlinked ~/.config/gamescope) is retried this rarely
 
 # Companion 1.0-2.3.0 installed one of these under SCRIPT_NAME in gamescope's
 # user script dir (2.1.0 and earlier also, unseen, under /root). SHA-256 of the
@@ -981,6 +982,8 @@ class Plugin:
     _task = None
     _prop_task = None
     _cleanup_done = False         # the old display script was dealt with this start
+    _cleanup_retry_after = 0.0
+    _cleanup_retry_delay = GATE_INTERVAL_S  # grows while removing it keeps failing
     _session_retry_after = 0.0
     _session_retry_delay = GATE_INTERVAL_S  # grows only while gamescope-wl is gone
     # Re-entrant on purpose: methods that take it also call each other while holding it.
@@ -1040,6 +1043,8 @@ class Plugin:
     @staticmethod
     def _cleanup_old_display_fix() -> bool:
         """Remove the display script of 2.3.0 and earlier; True once done for this start."""
+        if time.monotonic() < Plugin._cleanup_retry_after:
+            return False
         status = Plugin._refresh_native()
         if status not in ("supported", "absent"):
             return False  # Whether to restore the user's .backup depends on the profile: ask again.
@@ -1047,6 +1052,9 @@ class Plugin:
             outcome = _remove_old_scripts(restore_backup=status == "absent")
         except Exception as exc:
             diagnostic_event('display', 'old_script_cleanup_failed', level='warning', error=exc, repeat=60)
+            # Each attempt starts a helper process as gamescope's user.
+            Plugin._cleanup_retry_after = time.monotonic() + Plugin._cleanup_retry_delay
+            Plugin._cleanup_retry_delay = min(Plugin._cleanup_retry_delay * 2, CLEANUP_RETRY_MAX_S)
             return False
         if outcome is None:
             return False  # gamescope's user is not known yet
@@ -1387,6 +1395,7 @@ class Plugin:
             if module_runtime.stop_requested("display"):
                 raise module_runtime.StartStopped("Display stopped while starting; nothing more was applied.")
         check_stop()
+        Plugin._cleanup_retry_after, Plugin._cleanup_retry_delay = 0.0, GATE_INTERVAL_S
         Plugin._cleanup_done = await _offload(Plugin._cleanup_old_display_fix)
         check_stop()
         await _offload(Plugin._edid_pass)
