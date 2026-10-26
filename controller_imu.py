@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import re
 import stat
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,8 @@ import module_runtime
 SYS_ROOT = Path("/sys")
 HID_DEVICES = Path("/sys/bus/hid/devices")
 SIDES = ("left", "right")
-_lock = threading.RLock()
+# Every read and write here is a command to the pads, as are RGB's and Vibration's.
+_lock = module_runtime.controller_config_lock
 
 
 class ImuError(RuntimeError):
@@ -172,14 +172,15 @@ def apply_sleep(values: dict) -> bool:
         raise ImuError("Sleep times must be whole numbers from 0 to 255 for both controllers.")
     with _lock:
         device = _device()
-        confirmed = True
-        for side in SIDES:
-            read = lambda side=side: _read_sleep(device, side)
+    confirmed = True
+    for side in SIDES:
+        read = lambda side=side: _read_sleep(device, side)
+        with _lock:  # one pad at a time: the other modules reach the pads in between
             if module_runtime.settled_read(read) == values[side]:
                 continue
             _write_payload(_sleep_attribute(device, side), device, f"{values[side]}\n".encode("ascii"))
             confirmed = module_runtime.settled_read(read) == values[side] and confirmed
-        return confirmed
+    return confirmed
 
 
 def read_status() -> dict[str, Any]:

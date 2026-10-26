@@ -46,9 +46,12 @@ class _FirmwareLock:
 # Mutex [ECMT]"). Hold only around one firmware-backed sysfs write, innermost,
 # from worker threads only: never take another lock or block on I/O beyond it.
 firmware_lock = _FirmwareLock()
-# The controller MCU answers one configuration command at a time and the Go S driver
-# matches no reply to its request. RGB's sysfs transactions (each access is a command)
-# and Vibration's raw Go S frames hold this lock so their commands never interleave.
+# The controller MCU answers one configuration command at a time, and neither driver
+# matches a reply to its request (hid-lenovo-go can hand back the previous command's).
+# Every hid-lenovo-go attribute access is a command, as is each raw Go S frame: RGB,
+# Vibration and the controller's IMU and sleep timer hold this lock per short sequence
+# (an attribute's reads, write and confirmation) so their commands never interleave.
+# Innermost but for firmware_lock: never wait here for another module's lock.
 controller_config_lock = threading.RLock()
 CONTROLLER_MODULES = frozenset({'controller', 'remap', 'rgb', 'vibration'})
 _controller_paused = False

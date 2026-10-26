@@ -733,6 +733,17 @@ class VibrationQuietPassTests(FakeDevice):
         self.assertEqual(self.writes, [])
 
 
+    async def test_another_module_s_command_never_lands_between_an_attribute_s_reads_and_write(self):
+        # RGB and the sleep timer send commands to the same pads, and the driver can hand a read their reply.
+        self.set_pads({**DEFAULTS, 'rumble_intensity': 'low'})
+        with module_runtime.controller_config_lock:  # another module's command in flight
+            check = asyncio.ensure_future(asyncio.to_thread(vibe._apply_settings, vibe._active_values(), verify=True))
+            await asyncio.sleep(0.3)
+            self.assertFalse(check.done())
+            self.assertEqual(self.writes, [])
+        self.assertTrue(await check)
+        self.assertEqual(self.writes, ['rumble_intensity'])
+
 class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_retry_clears_transient_startup_error(self):
         plugin = vibe.Plugin()

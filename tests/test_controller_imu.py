@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -315,6 +316,21 @@ class ImuTests(unittest.TestCase):
         self.assertEqual([call.args[0].parent.name for call in writer.call_args_list], ["left_handle"],
                          "a stale matching read does not skip the write; a stale 0 after it does not fail it")
         pause.assert_called_with(imu.module_runtime.CONTROLLER_READ_GAP_S)
+
+    def test_a_pad_s_reads_and_write_never_interleave_with_another_module(self):
+        # RGB and Vibration send commands to the same pads, and the driver can hand a read their reply.
+        self.timer("left", 0)
+        self.timer("right", 0)
+        result = []
+        with patch.object(imu.module_runtime, "CONTROLLER_READ_GAP_S", 0):
+            with imu.module_runtime.controller_config_lock:  # another module's command in flight
+                worker = threading.Thread(target=lambda: result.append(imu.apply_sleep({"left": 10, "right": 10})))
+                worker.start()
+                worker.join(0.3)
+                self.assertTrue(worker.is_alive())
+                self.assertEqual(self.timer("left").read_text(encoding="ascii").strip(), "0")
+            worker.join(5)
+        self.assertEqual(result, [True])
 
     def test_invalid_values_never_write(self):
         self.timer("left", 0)

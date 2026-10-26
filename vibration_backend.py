@@ -285,40 +285,42 @@ def _read_attr(path: str) -> str:
 def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False, verify: bool = False) -> bool:
     """verify (start, hotplug, wake, the periodic check): write only a value that two equal reads show
     differs, never one that cannot be read. The pads buzz whenever their rumble mode is set, even unchanged."""
-    key = (sys_path, rel_path)
-    path = os.path.join(sys_path, rel_path)
-    read = lambda: _read_attr(path)
-    if verify:
+    # Each read is a command to the pads too: RGB and the sleep timer must not send theirs in between.
+    with module_runtime.controller_config_lock:
+        key = (sys_path, rel_path)
+        path = os.path.join(sys_path, rel_path)
+        read = lambda: _read_attr(path)
+        if verify:
+            try:
+                current = module_runtime.settled_read(read)
+            except (OSError, UnicodeError):
+                current = None
+            if current == value:
+                _attr_cache[key] = value
+                return True
+            if current is None:
+                return False  # the next pass reads again
+        elif not force and _attr_cache.get(key) == value:
+            try:
+                # A differing read may be the previous command's reply: it must settle before it costs a write.
+                if read() == value or module_runtime.settled_read(read) == value:
+                    return True
+            except (OSError, UnicodeError):
+                # Fall through to the normal write path.  The device may have been
+                # rebound under the same sysfs path since the cache was populated.
+                pass
         try:
-            current = module_runtime.settled_read(read)
-        except (OSError, UnicodeError):
-            current = None
-        if current == value:
+            with open(path, 'w') as f:
+                f.write(value + '\n')
+            if module_runtime.settled_read(read) != value:
+                raise OSError("The controller did not confirm the requested value")
             _attr_cache[key] = value
             return True
-        if current is None:
-            return False  # the next pass reads again
-    elif not force and _attr_cache.get(key) == value:
-        try:
-            # A differing read may be the previous command's reply: it must settle before it costs a write.
-            if read() == value or module_runtime.settled_read(read) == value:
-                return True
-        except (OSError, UnicodeError):
-            # Fall through to the normal write path.  The device may have been
-            # rebound under the same sysfs path since the cache was populated.
-            pass
-    try:
-        with open(path, 'w') as f:
-            f.write(value + '\n')
-        if module_runtime.settled_read(read) != value:
-            raise OSError("The controller did not confirm the requested value")
-        _attr_cache[key] = value
-        return True
-    except (OSError, UnicodeError) as exc:
-        _attr_cache.pop(key, None)
-        event("vibration", "attribute_write", level="error", error=exc,
-              attribute=rel_path, outcome="failed", repeat=60)
-        return False
+        except (OSError, UnicodeError) as exc:
+            _attr_cache.pop(key, None)
+            event("vibration", "attribute_write", level="error", error=exc,
+                  attribute=rel_path, outcome="failed", repeat=60)
+            return False
 
 
 def _capture_baseline(sys_path: str) -> None:
@@ -328,9 +330,10 @@ def _capture_baseline(sys_path: str) -> None:
             return
         values = {}
         try:
-            for attr in _PROFILE_ATTRS:
-                with open(os.path.join(sys_path, attr), encoding="ascii") as handle:
-                    values[attr] = handle.read(64).strip()
+            with module_runtime.controller_config_lock:  # each read is a command to the pads
+                for attr in _PROFILE_ATTRS:
+                    with open(os.path.join(sys_path, attr), encoding="ascii") as handle:
+                        values[attr] = handle.read(64).strip()
         except (OSError, UnicodeError):
             values = {}  # unknown; never retried after our own write
         settings.setSetting(SETTINGS_KEY_BASELINE, values)

@@ -122,7 +122,7 @@ settings = SettingsManager(
 )
 
 _settings_lock = threading.RLock()
-_apply_lock = module_runtime.controller_config_lock  # shared with Vibration's Go S frames
+_apply_lock = module_runtime.controller_config_lock  # shared with Vibration and the sleep timer
 _drift_task: asyncio.Task | None = None
 _resume_detected = module_runtime.ResumeWatch()
 _last_error = ""
