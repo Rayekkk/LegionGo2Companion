@@ -24,6 +24,7 @@ Unreleased.
 - **Controller firmware:** Check, Download and Install now need both controllers attached and say so: "Attach both controllers to check or install firmware updates." Install still refuses a controller below 30% battery.
 - **Battery:** when the firmware turns on fast charging and battery protection at the same time, the charging mode cannot be read. The page now says so instead of showing "Invalid argument" and offers **Reset charging mode to Standard**; your saved protection choice is applied again afterwards.
 - **Stick lights:** your lighting is set again once when Companion starts and once more shortly after a wake, so it no longer stays wrong when the controller wakes with stale values. The lights now also work while one controller is detached (they failed with "The joystick-ring interface does not belong to the expected controller."), and they are set again after a controller is attached or detached.
+- **Fan Control** no longer turns itself off for good when the fan briefly returns to firmware control on its own (seen once while a controller was reattached): Companion takes the fan back after its usual safety checks, up to 3 times in 10 minutes. It still turns Fan Control off when anything else writes the fan speed, and a single misread of the fan setting no longer counts as such a write.
 
 # 2.3.0
 
