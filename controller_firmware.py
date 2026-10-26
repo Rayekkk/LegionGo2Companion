@@ -382,18 +382,32 @@ def console_power():
     return ac, percent
 
 
+PADS_DETACHED = 'Attach both controllers to check or install firmware updates.'
+
+
+def pads_attached(read):
+    """Every firmware step needs both pads attached (owner decision), from a fresh input report.
+
+    The receiver re-enumerates as 61ED while one pad is detached, so this runs before any device lookup."""
+    levels = read() if read else None
+    if not isinstance(levels, dict) or any(levels.get('connection_' + side) != 'attached' for side in ('left', 'right')):
+        raise FirmwareError(PADS_DETACHED)
+    return levels
+
+
 def pad_power(read, components, partial=False):
     """fwupd writes each pad over the receiver link: a detached or low pad could drop mid-write.
 
     partial: an earlier component of this install is already written."""
-    pads = [c for c in ('left', 'right') if c in components]
-    levels = read() if pads and read else None
-    for side in pads:
-        level = levels.get(side) if isinstance(levels, dict) else None
-        if levels is None or levels.get('connection_' + side) != 'attached' or type(level) is not int or level < 30:
-            raise FirmwareError(f'{RELEASES[side].label}: attach it to the console and charge it to at least 30%. '
-                                + ('Components updated before it keep their new firmware; check again to finish.'
-                                   if partial else 'Nothing was installed.'))
+    suffix = 'Components already updated keep their new firmware; check again to finish.' if partial else 'Nothing was installed.'
+    try:
+        levels = pads_attached(read)
+    except FirmwareError as exc:
+        raise FirmwareError(f'{exc} {suffix}') from None
+    for side in ('left', 'right'):
+        level = levels.get(side)
+        if side in components and (type(level) is not int or level < 30):
+            raise FirmwareError(f'{RELEASES[side].label}: attach it to the console and charge it to at least 30%. ' + suffix)
 
 
 def build_container(images):
@@ -503,7 +517,7 @@ class FirmwarePreparation:
         self._thread = None
         self._reader = reader or read_installed_versions
         self._model = model  # The console's name in Lenovo's feed.
-        self._pads = pads  # Returns controller attach/battery levels; None refuses every pad install.
+        self._pads = pads  # Returns controller attach/battery levels; None refuses every step.
         self._sleep = sleep
         self._phase, self._component, self._error = 'idle', '', ''
         self._check = None   # id, at, checked_at, installed, offers, newer
@@ -557,6 +571,7 @@ class FirmwarePreparation:
         with self._lock:
             if self._busy():
                 return self._status()  # Both frontends observe the step already running.
+            pads_attached(self._pads)
             self._check, self._images, self._token = None, None, ''
             self._start('checking', self._run_check)
             event('firmware', 'check_started')
@@ -566,7 +581,9 @@ class FirmwarePreparation:
         with self._lock:
             if self._busy():
                 return self._status()
-            self._start('downloading', self._run_download, self._fresh_check('available'))
+            check = self._fresh_check('available')
+            pads_attached(self._pads)
+            self._start('downloading', self._run_download, check)
             return self._status()
 
     def admit_install(self, token):
@@ -687,6 +704,7 @@ class FirmwarePreparation:
                     if component not in check['newer']:
                         continue
                     label = RELEASES[component].label
+                    pad_power(self._pads, (component,), partial=installed != check['installed'])
                     if self._reader() != installed:
                         raise FirmwareError('Controller versions changed before installation. Check again.')
                     devices = fwupd_devices()
@@ -694,7 +712,6 @@ class FirmwarePreparation:
                         raise FirmwareError('fwupd and the controller driver report different versions. Check again.')
                     if updater_running():
                         raise FirmwareError('Another firmware update is running. Try again when it finishes.')
-                    pad_power(self._pads, (component,), partial=installed != check['installed'])
                     self._step('installing', component)
                     event('firmware', 'install_started', scope=component, version=images[component].release.version)
                     returncode, seconds, tail = install_blob(container, devices[component]['id'],

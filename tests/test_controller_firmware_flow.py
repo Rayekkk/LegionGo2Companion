@@ -292,26 +292,47 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(status['phase'], 'failed')
 
     @patch.object(fw, 'INSTALL_ENABLED', True)
-    def test_pad_install_needs_the_pad_attached_and_charged(self):
+    def test_install_needs_both_pads_attached_and_the_updated_pad_charged(self):
         found, _ = devices()
-        for pads in ({'left': 100, 'connection_left': 'detached'}, {'left': 29, 'connection_left': 'attached'},
-                     {'left': None, 'connection_left': 'attached'}, None):
+        attached = {'left': 100, 'right': 100, 'connection_left': 'attached', 'connection_right': 'attached'}
+        for pads, error in ((dict(attached, connection_right='detached'), 'Attach both controllers'),  # right is not updated
+                            (dict(attached, connection_left='connecting'), 'Attach both controllers'),
+                            (None, 'Attach both controllers'),
+                            (dict(attached, left=29), 'Left controller: attach'), (dict(attached, left=None), 'Left controller: attach')):
             state = self.downloaded()
             token = state.service.status()['token']
             state.pads = pads
-            with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
+            with self.subTest(pads=pads), patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
                     patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
-                    patch.object(fw, 'install_blob') as install, self.assertRaisesRegex(fw.FirmwareError, 'Left controller: attach'):
+                    patch.object(fw, 'install_blob') as install, self.assertRaisesRegex(fw.FirmwareError, error):
                 state.service.install(token, Mock())
             install.assert_not_called()
             self.assertEqual(state.service.status()['phase'], 'downloaded')  # The verified download stays for a retry.
+
+    def test_check_and_download_need_both_pads_attached(self):
+        detached = {'left': 100, 'right': 100, 'connection_left': 'attached', 'connection_right': 'detached'}
+        state = Service()
+        state.pads = detached
+        with patch.object(catalog, 'check_catalog') as check, \
+                self.assertRaisesRegex(fw.FirmwareError, '^Attach both controllers to check or install firmware updates.$'):
+            state.service.check()
+        check.assert_not_called()
+        self.assertEqual(state.service.status()['phase'], 'idle')
+        state.pads = dict(detached, connection_right='attached')
+        with patch.object(catalog, 'check_catalog', return_value=feed()):
+            state.run('check')
+        state.pads = detached
+        with patch.object(fw, 'download_image') as download, self.assertRaisesRegex(fw.FirmwareError, 'Attach both'):
+            state.service.download()
+        download.assert_not_called()
+        self.assertEqual(state.service.status()['phase'], 'available')  # Download again once both are attached.
 
     @patch.object(fw, 'INSTALL_ENABLED', True)
     def test_pad_detached_after_admission_is_refused_before_its_write(self):
         found, _ = devices()
         state = self.downloaded()
         token = state.service.status()['token']
-        reads = iter([state.pads, {'left': 100, 'connection_left': 'detached'}])
+        reads = iter([state.pads, dict(state.pads, connection_left='detached')])
         state.service._pads = lambda: next(reads)
         with patch.object(fw.Path, 'is_file', return_value=True), patch.object(fw, 'console_power'), \
                 patch.object(fw, 'fwupd_devices', return_value=found), patch.object(fw, 'updater_running', return_value=False), \
@@ -319,7 +340,7 @@ class FlowTests(unittest.TestCase):
             _, status = state.run('install', token, Mock())
         install.assert_not_called()
         self.assertEqual(status['phase'], 'failed')
-        self.assertIn('attach it to the console', status['error'])
+        self.assertEqual(status['error'], 'Attach both controllers to check or install firmware updates. Nothing was installed.')
 
     @patch.object(fw, 'INSTALL_ENABLED', True)
     def test_pad_detached_after_the_first_pad_says_what_was_installed(self):
@@ -343,7 +364,7 @@ class FlowTests(unittest.TestCase):
             _, status = state.run('install', token, Mock())
         install.assert_called_once()  # Left only; the detached right pad is never written.
         self.assertEqual(status['phase'], 'failed')
-        self.assertIn('Right controller: attach it', status['error'])
+        self.assertIn('Attach both controllers', status['error'])
         self.assertIn('keep their new firmware', status['error'])
         self.assertNotIn('Nothing was installed', status['error'])
 
@@ -387,14 +408,16 @@ class FlowTests(unittest.TestCase):
                 fw.candidate_release('left', dict(candidate, **change))
 
     def test_pads_need_thirty_percent(self):
-        read = lambda level: lambda: {'left': level, 'connection_left': 'attached'}
+        read = lambda level: lambda: {'left': level, 'right': 5, 'connection_left': 'attached', 'connection_right': 'attached'}
         fw.pad_power(read(30), ('left',))
         with self.assertRaisesRegex(fw.FirmwareError, 'at least 30%'):
             fw.pad_power(read(29), ('left',))
 
-    def test_receiver_only_install_does_not_read_the_pads(self):
-        fw.pad_power(None, ('receiver',))
-        fw.pad_power(Mock(side_effect=AssertionError('read')), ('receiver',))
+    def test_receiver_only_install_needs_both_pads_attached(self):
+        fw.pad_power(lambda: {'connection_left': 'attached', 'connection_right': 'attached'}, ('receiver',))
+        for read in (None, lambda: {'connection_left': 'attached', 'connection_right': 'detached'}):
+            with self.assertRaisesRegex(fw.FirmwareError, 'Attach both'):
+                fw.pad_power(read, ('receiver',))
 
     def test_check_refuses_while_another_updater_runs(self):
         state = Service()

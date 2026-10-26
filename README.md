@@ -492,9 +492,10 @@ firmware and installs every newer part in one go.
 
 > [!IMPORTANT]
 > Connect the charger (on battery, Install needs at least 30% charge), keep both controllers
-> attached and do not put the console to sleep. Install refuses a controller that is detached
-> or below 30% battery. It can take up to about five minutes and the
-> controllers may disconnect briefly. This is the only Companion feature that could damage the
+> attached and do not put the console to sleep. Check, Download and Install need both
+> controllers attached, and Install refuses a controller below 30% battery. It can take up to
+> about five minutes and the controllers may disconnect briefly. This is the only Companion
+> feature that could damage the
 > hardware, and it has been tested only by reinstalling the firmware already installed, so the
 > panel and the Desktop app show a red risk notice above the buttons until the next real update
 > has been verified.
