@@ -454,7 +454,7 @@ elsewhere.
 Choose the **Gyro source**: **Left controller**, **Right controller**, **Both controllers** or
 **System default**. The gyros are in the removable handles; Both averages them.
 
-<a href="docs/screenshots/gyro-touchpad.png"><img src="docs/screenshots/gyro-touchpad.png" alt="Controller motion source and gyro reporting status" width="360"></a>
+<a href="docs/screenshots/gyro-touchpad.png"><img src="docs/screenshots/gyro-touchpad.png" alt="Gyro source, controller test and Controller sleep setting" width="360"></a>
 
 **Start controller test** shows live gyro and touchpad readings for 30 seconds, from the
 controllers and as Steam receives them, so you can see whether input reaches Steam. A game
@@ -538,6 +538,8 @@ you choose. Detached controllers are labelled, with their last reported level wh
 **Fix HDR brightness in games** corrects the brightness information (EDID) that games read, so
 HDR games use the panel's real values instead of a 1499-nit placeholder. Restart a game that was
 already running. It changes gamescope's copy of the EDID, never the panel firmware.
+
+<a href="docs/screenshots/display.png"><img src="docs/screenshots/display.png" alt="Display page with the Fix HDR brightness in games switch" width="360"></a>
 
 SteamOS 3.9 and newer drives the Legion Go 2 screen itself (PQ/gamma, HDR switching and the
 brightness slider). On older SteamOS the page asks you to update; the HDR fix still works there.
