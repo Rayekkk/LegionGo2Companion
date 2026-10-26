@@ -115,6 +115,10 @@ run(async()=>{
   h.respond('firmware_check',new Error('Lost result'),true);await settle();
   assert.equal(h.button().props.disabled,true,'lost write result requires fresh status, no replay');
   assert.equal(h.count('firmware_check'),1);h.unmount();
+  h=harness();h.render();h.respond('firmware_get_status',status);await settle();h.button().props.onClick();await settle();
+  h.respond('firmware_check',new Error('Attach both controllers'),true);await settle();
+  h.fire();h.respond('firmware_get_status',status);await settle();
+  assert.ok(h.text().includes('Attach both controllers'),'a refused step stays visible after the next status poll');h.unmount();
   // The texts both UIs share (src/firmware.tsx and the Desktop ModulePage.qml import the same module).
   const F = await import(require('node:url').pathToFileURL(require('node:path').join(__dirname, '../desktop/native/firmware.mjs')).href);
   const shown = harness(); shown.render();

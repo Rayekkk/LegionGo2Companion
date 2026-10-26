@@ -14,6 +14,8 @@ QtObject {
     property string error: ""
     property bool connected: false
     property var readErrors: ({})
+    // A refused firmware step (e.g. a pad is detached) stays on screen until the next step; polling must not clear it.
+    property string firmwareStepError: ""
     property var host: null
     property int generation: 0
     property string diagnosticToken: ""
@@ -180,6 +182,7 @@ QtObject {
                 && (result?.active===false || String(problem).indexOf("no longer available")>=0)) backend.diagnosticToken="";
             if (problem) {
                 if(method.startsWith("firmware_")) {
+                    if(request.mutation)backend.firmwareStepError=problem;
                     const times=Object.assign({},backend.received);delete times.firmware_get_status;backend.received=times;
                     const errors=Object.assign({},backend.readErrors);errors.firmware_get_status=problem;backend.readErrors=errors;
                 }
@@ -194,6 +197,7 @@ QtObject {
                 if (method.startsWith("fan_")) key = "fan_get_state";
                 else if (method.startsWith("firmware_")) key = "firmware_get_status";
                 if(method.startsWith("firmware_")) {
+                    if(request.mutation)backend.firmwareStepError="";
                     const errors=Object.assign({},backend.readErrors);errors.firmware_get_status="";backend.readErrors=errors;
                 }
                 else if (method === "battery_set_enabled" || method === "battery_release_control" || method === "battery_reset_charging_mode") {

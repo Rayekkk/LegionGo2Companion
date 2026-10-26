@@ -23,6 +23,8 @@ const actionLabel = (value: FirmwareStatus) => (has(busyPhases, value.phase) ? b
 export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = ({ visible, allowUpdates = true }) => {
   const [state, setState] = useState<FirmwareStatus | null>(null);
   const [error, setError] = useState("");
+  // A refused step stays visible until the next click; the status poll clears only `error`.
+  const [stepError, setStepError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [fresh, setFresh] = useState(false);
   const mounted = useRef(false);
@@ -88,7 +90,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
         !current(statusRef.current) || !mounted.current || !shown.current) return;
     mutating.current = true; revision.current++;
     invalidate();
-    setSubmitting(true); setError("");
+    setSubmitting(true); setError(""); setStepError("");
     try {
       const pending = currentRead.current;
       if (pending) {
@@ -102,7 +104,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
       const sampledAt = performance.now();
       const result = await run(); if (mounted.current && shown.current) adopt(result, sampledAt);
     }
-    catch (failure) { if (mounted.current) { console.warn("[legiongo2companion] firmware.step_failed"); invalidate(); setError(errorText(failure, "The firmware step failed. Wait for a fresh status before retrying.")); } }
+    catch (failure) { if (mounted.current) { console.warn("[legiongo2companion] firmware.step_failed"); invalidate(); setStepError(errorText(failure, "The firmware step failed. Wait for a fresh status before retrying.")); } }
     finally { mutating.current = false; if (mounted.current) setSubmitting(false); }
   };
   // The confirmation takes focus from the Quick Access menu, so the panel is usually hidden and
@@ -117,7 +119,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
     }
     mutating.current = true; revision.current++;
     invalidate();
-    setSubmitting(true); setError("");
+    setSubmitting(true); setError(""); setStepError("");
     try {
       const sampledAt = performance.now();
       const result = await installUpdate(token); if (mounted.current) adopt(result, sampledAt);
@@ -125,7 +127,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
       const text = errorText(failure, "The firmware update did not start. Check for updates again.");
       console.warn("[legiongo2companion] firmware.step_failed");
       toaster.toast({ title: "Controller firmware", body: text });
-      if (mounted.current) { invalidate(); setError(text); }
+      if (mounted.current) { invalidate(); setStepError(text); }
     } finally { mutating.current = false; if (mounted.current) setSubmitting(false); }
   };
   const confirmInstall = () => {
@@ -158,6 +160,6 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
     {fresh && installBlocked && infoRow("Install unavailable", state?.install_reason || "")}
     <PanelSectionRow><ButtonItem layout="below" disabled={!allowUpdates || !fresh || !state || submitting || has(busyPhases, phase)}
       onClick={act}>{state ? actionLabel(state) : "Check for updates"}</ButtonItem></PanelSectionRow>
-    {error && infoRow("Firmware status", error)}
+    {(stepError || error) && infoRow("Firmware status", stepError || error)}
   </PanelSection>;
 };

@@ -55,7 +55,7 @@ RowLayout {
             [value?.message,value?.error,value?.token,value?.install_reason].every(v=>v===undefined || typeof v==="string") &&
             ["idle","checking","up_to_date","available","downloading","downloaded","installing","verifying","installed","failed"].includes(value?.phase);
     }
-    function firmwareMessage() { return firmwareFresh() ? s("firmware_get_status").error || s("firmware_get_status").message || "" : backend.readErrors?.firmware_get_status || "Wait for a fresh firmware status before updating."; }
+    function firmwareMessage() { return backend.firmwareStepError || (firmwareFresh() ? s("firmware_get_status").error || s("firmware_get_status").message || "" : backend.readErrors?.firmware_get_status || "Wait for a fresh firmware status before updating."); }
     function firmwarePhase() { return firmwareFresh() ? Firmware.PHASE_LABELS[s("firmware_get_status").phase] : "Status unavailable"; }
     // RPC lists arrive as Qt sequences, which Array.isArray() does not accept.
     function items(value) { return !!value && typeof value==="object" && typeof value.length==="number"?Array.from(value):[]; }
