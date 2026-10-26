@@ -557,7 +557,9 @@ def _load_edid_backup():
         data = old
         decky.logger.info(f"{LOG} moved the original EDID out of the settings folder")
     try:
-        os.unlink(OLD_EDID_BACKUP)
+        # Through a settings folder symlinked to ours, the old path is the private copy itself.
+        if not os.path.samestat(os.lstat(OLD_EDID_BACKUP), os.stat(EDID_BACKUP)):
+            os.unlink(OLD_EDID_BACKUP)
     except OSError:
         pass
     return data

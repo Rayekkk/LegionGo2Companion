@@ -304,6 +304,15 @@ class EdidBackupMoveTests(unittest.TestCase):
         self.assertIsNone(display._load_edid_backup())
         self.assertFalse(display._save_edid_backup(self.original))
 
+    @POSIX
+    def test_a_settings_folder_linked_to_the_private_one_never_removes_the_private_copy(self):
+        self.private.mkdir(mode=0o700)
+        self.new.write_bytes(self.original)
+        self.old.parent.rmdir()
+        self.old.parent.symlink_to(self.private)  # the user owns the settings folder and can do this
+        self.assertEqual(display._load_edid_backup(), self.original)
+        self.assertEqual(self.new.read_bytes(), self.original)
+
     def test_an_interrupted_2_3_0_write_is_still_restored_from_the_moved_copy(self):
         import test_display_edid
         case = test_display_edid.DisplayWriteRecoveryTests()
