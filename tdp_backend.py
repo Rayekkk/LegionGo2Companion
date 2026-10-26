@@ -1137,6 +1137,10 @@ def _record_applied(source: str, triplet_mw: tuple) -> None:
     _invalidate_limits_cache()
 
 
+# The firmware's own SMU write lands within 0.5 s of a ppt_* write (measured); twice that.
+EXTRAS_FIRMWARE_SETTLE_S = 1.0
+
+
 def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int, *, extras: bool = False) -> dict:
     """The firmware path inside the range it accepts; verified ryzenadj only
     beyond it (the Extras range, when `extras`) or, on a Go 2, when the firmware interface is absent."""
@@ -1159,9 +1163,20 @@ def _apply_limits(spl_mw: int, sppt_mw: int, fppt_mw: int, *, extras: bool = Fal
         elif caps:
             # Above the firmware range (Extras): first the firmware's custom mode with the
             # nearest limits it accepts, so its own mode cannot override ours, then the SMU.
-            source, result = "ryzenadj", (
-                _apply_wmi(*(min(v, caps[k]["max"]) for k, v in triple_w))
-                if _ryzenadj_available else _fail("verified ryzenadj is unavailable"))
+            # Measured on a Go 2: a ppt_* write puts the firmware's limits into the SMU within
+            # ~0.5 s, over a ryzenadj write made meanwhile. So a write that changes nothing is
+            # skipped, and a real one is given time to land before ryzenadj.
+            wmi_w = tuple(min(v, caps[k]["max"]) for k, v in triple_w)
+            path = _profile_path()
+            source = "ryzenadj"
+            if not _ryzenadj_available:
+                result = _fail("verified ryzenadj is unavailable")
+            elif path and _read_profile(path) == "custom" and _ppt_matches(*wmi_w):
+                result = _ok()
+            else:
+                result = _apply_wmi(*wmi_w)
+                if result["success"]:
+                    time.sleep(EXTRAS_FIRMWARE_SETTLE_S)
             if result["success"]:
                 result = _apply_ryzenadj(spl_mw, sppt_mw, fppt_mw)
         elif _legion_go_2():

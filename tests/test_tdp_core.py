@@ -120,6 +120,7 @@ class TdpCoreTests(unittest.TestCase):
             'PLATFORM_PROFILE_GLOB': str(self.root / 'platform-profile/*/profile'),
             'RAPL_GLOB': str(self.root / 'powercap/intel-rapl-*'),  # ':' is not valid on Windows
             'CPU_SYS_ROOT': str(self.cpu), 'BIN_DIR': str(self.bin.parent), 'BIN_PATH': str(self.bin),
+            'EXTRAS_FIRMWARE_SETTLE_S': 0,
         }.items():
             self.stack.enter_context(patch.object(tdp, name, value))
         for name, value in PRISTINE_STATE.items():  # every test starts from a fresh import's state
@@ -383,6 +384,32 @@ class TdpCoreTests(unittest.TestCase):
         self.assertTrue(tdp._apply_limits(60000, 70000, 80000)['success'])
         self.assertEqual(self.ppts(), (35, 37, 45))
         self.assertEqual(self.applies(), [])
+
+    def test_extras_survive_the_firmware_pushing_its_own_limits_after_a_ppt_write(self):
+        # Measured on a Go 2: a ppt_* write puts the firmware's limits into the SMU a moment
+        # later, over a ryzenadj write made meanwhile (live 35/37/45 instead of 35/50/50).
+        self.helper_ready()
+        writes, pending, real_write = [], [], tdp._write_ppt
+
+        def write_ppt(*args, **kwargs):
+            real_write(*args, **kwargs)
+            writes.append(args)
+            pending.append(args)
+
+        def firmware_lands(*_):
+            if pending:
+                pending.clear()
+                self.smu.clear()  # the SMU now reads the firmware's ppt_* values
+
+        with patch.object(tdp, '_write_ppt', side_effect=write_ppt), \
+                patch.object(tdp.time, 'sleep', side_effect=firmware_lands):
+            for _ in range(2):  # from another firmware mode, then the drift re-apply in custom
+                self.assertTrue(tdp._apply_limits(35000, 50000, 50000, extras=True)['success'])
+                firmware_lands()
+                live = tdp._ryzenadj_info(lock_timeout=1.0)
+                self.assertEqual((live['spl_limit'], live['sppt_limit'], live['fppt_limit']),
+                                 (35, 50, 50))
+        self.assertEqual(writes, [(35, 37, 45)])  # unchanged firmware limits are not rewritten
 
     def test_extras_never_run_ryzenadj_when_custom_mode_is_not_confirmed(self):
         self.helper_ready()
