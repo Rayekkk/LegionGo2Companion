@@ -178,6 +178,10 @@ class RgbBackendTests(unittest.TestCase):
                         patch.object(rgb_backend, "_write_attr") as writes,
                     ):
                         self.assertEqual(rgb_backend._rgb_capability(), (real, ""))
+                        detached = real.replace("61EB", "61ED")  # the receiver with one pad detached
+                        with patch.object(rgb_backend.os.path, "realpath", side_effect=lambda path:
+                                          "/sys/bus/hid/drivers/hid-lenovo-go" if path.replace("\\", "/").endswith("/driver") else detached):
+                            self.assertEqual(rgb_backend._rgb_capability(), (detached, ""))
                         with patch.object(rgb_backend.os.path, "realpath", return_value=real.replace("61EB", "6182")):
                             self.assertIsNone(rgb_backend._rgb_capability()[0], "foreign HID id")
                         with patch.object(rgb_backend.os.path, "realpath", side_effect=lambda path:
@@ -375,6 +379,11 @@ class RgbBackendTests(unittest.TestCase):
                                  if control else [])
 
     def test_a_wake_window_ends_with_one_forced_ring_pass(self):
+        for trigger in ("wake", "controller_event"):  # main.py: the controllers re-enumerated
+            with self.subTest(trigger=trigger):
+                self._wake_window(trigger)
+
+    def _wake_window(self, trigger):
         now, calls = [0.0], []
         plugin = rgb_backend.Plugin()
 
@@ -394,7 +403,10 @@ class RgbBackendTests(unittest.TestCase):
             patch.object(plugin, "get_status", return_value={}),
         ):
             async def wake():
-                await plugin.reapply()
+                if trigger == "wake":
+                    await plugin.reapply()
+                else:
+                    plugin.controller_event()
                 await plugin._drift_loop()
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(wake())

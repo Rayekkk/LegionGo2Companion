@@ -248,6 +248,7 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._controller_hotplug()
         self.plugin._vibration._main.assert_awaited_once()
         self.plugin._controller.controller_event.assert_called_once()  # a reconnected pad gets its sleep time checked
+        self.plugin._rgb.controller_event.assert_called_once()  # and the rings their lighting
         status = self.plugin._module_status()
         self.assertEqual((status["vibration"]["applicable"], status["vibration"]["ready"]), (True, True))
         self.assertIs(status["battery"]["applicable"], True)

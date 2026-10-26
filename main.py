@@ -952,6 +952,7 @@ class Plugin:
         """A controller came or its driver bound: a module that did not apply at load may now (a Go
         whose hid-lenovo-go bound after Decky started). It starts as at startup; none is ever stopped here."""
         self._controller.controller_event()  # a reconnected pad may have another sleep time
+        self._rgb.controller_event()  # and the rings a new HID device (61EB <-> 61ED)
         if not self._applicable or all(self._applicable.values()):
             return
         applicable, device = await asyncio.to_thread(self._detect_device)

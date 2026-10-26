@@ -30,7 +30,9 @@ from safe_settings import SettingsManager
 
 
 RGB_LED_PATH = "/sys/class/leds/go:rgb:joystick_rings"
-RGB_HID_ID = "17EF:61EB"
+# The receiver is 61EB with both pads attached or both detached and 61ED with one detached; 61EC/61EE
+# are a Go 1 on the 2025 controller firmware.
+RGB_HID_IDS = ("17EF:61EB", "17EF:61EC", "17EF:61ED", "17EF:61EE")
 RGB_DRIVER = "hid-lenovo-go"
 RGB_PROFILE = 3
 RGB_EFFECTS = ("monocolor", "breathe", "chroma", "rainbow")
@@ -44,8 +46,7 @@ RGB_SUPPORTED_MODELS = frozenset({
     ("Legion Go 8ASP2", "83N0"),
     ("Legion Go 8AHP2", "83N1"),
 })
-# The same multicolor LED ABI on the other consoles (kernel hid-lenovo-go / hid-lenovo-go-s).
-GO1_RGB_HID_IDS = ("17EF:61EB", "17EF:61EC", "17EF:61ED", "17EF:61EE")  # 2025 controller firmware
+# The same multicolor LED ABI on the Go S (kernel hid-lenovo-go-s).
 GO_S_RGB_LED_PATH = "/sys/class/leds/go_s:rgb:joystick_rings"
 GO_S_RGB_HID_IDS = ("1A86:E310", "1A86:E311")
 GO_S_RGB_DRIVER = "hid-lenovo-go-s"
@@ -162,10 +163,10 @@ def _rgb_interface() -> tuple[str, tuple[str, ...], str] | None:
     """(LED class path, accepted HID ids, driver) of this console's joystick rings, or None."""
     identity = _read_identity()
     if (identity["product_family"], identity["product_name"]) in RGB_SUPPORTED_MODELS:
-        return RGB_LED_PATH, (RGB_HID_ID,), RGB_DRIVER
+        return RGB_LED_PATH, RGB_HID_IDS, RGB_DRIVER
     console = module_runtime.legion_device()[0]
     if console == "go1":
-        return RGB_LED_PATH, GO1_RGB_HID_IDS, RGB_DRIVER
+        return RGB_LED_PATH, RGB_HID_IDS, RGB_DRIVER
     if console == "gos":
         return GO_S_RGB_LED_PATH, GO_S_RGB_HID_IDS, GO_S_RGB_DRIVER
     return None  # Also a Go 2 whose DMI family and machine type disagree.
@@ -1283,10 +1284,15 @@ class Plugin:
 
         return await self._locked_change(_restore)
 
+    def controller_event(self) -> None:
+        """A wake, or the controllers re-enumerated (a pad attached or detached): check the rings on every
+        tick for a while, then rewrite a controlled ring once, as it can read back stale values."""
+        self._settle_until = time.monotonic() + STARTUP_SETTLE_S
+        self._settle_force = True  # once more as the window ends
+
     @module_runtime.controller_operation('rgb')
     async def reapply(self) -> dict[str, Any]:
-        self._settle_until = time.monotonic() + STARTUP_SETTLE_S
-        self._settle_force = True  # and once more as the window ends
+        self.controller_event()
         deadline = time.monotonic() + REAPPLY_WAIT_S
         while True:
             state = await _offload(_load_state)
