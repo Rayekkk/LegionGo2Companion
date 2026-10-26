@@ -162,7 +162,7 @@ def sleep_supported() -> bool:
 
 
 def apply_sleep(values: dict) -> bool:
-    """Write each pad whose sleep time differs, at most once, then confirm; True once both report theirs.
+    """Write each pad whose sleep time two equal reads show differs, at most once, then confirm; True once both report theirs.
 
     The driver reports success even when a pad did not answer: a sleeping pad loses the write and
     reads 0. A read can also return the previous command's reply, so only two equal reads count.
@@ -176,7 +176,11 @@ def apply_sleep(values: dict) -> bool:
     for side in SIDES:
         read = lambda side=side: _read_sleep(device, side)
         with _lock:  # one pad at a time: the other modules reach the pads in between
-            if module_runtime.settled_read(read) == values[side]:
+            current = module_runtime.settled_read(read)
+            if current == values[side]:
+                continue
+            if current is None:  # never written on a guess: the next check reads again
+                confirmed = False
                 continue
             _write_payload(_sleep_attribute(device, side), device, f"{values[side]}\n".encode("ascii"))
             confirmed = module_runtime.settled_read(read) == values[side] and confirmed

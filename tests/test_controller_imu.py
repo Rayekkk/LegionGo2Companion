@@ -332,6 +332,14 @@ class ImuTests(unittest.TestCase):
             worker.join(5)
         self.assertEqual(result, [True])
 
+    def test_reads_that_do_not_agree_are_never_answered_with_a_write(self):
+        self.timer("left", 10)
+        self.timer("right", 10)
+        flips = iter(range(10 ** 6))
+        with patch.object(imu, "_read_sleep", side_effect=lambda _device, side: next(flips) % 256 if side == "left" else 10),                 patch.object(imu, "_write_payload") as writer, patch.object(imu.module_runtime.time, "sleep"):
+            self.assertFalse(imu.apply_sleep({"left": 10, "right": 10}))
+        writer.assert_not_called()
+
     def test_invalid_values_never_write(self):
         self.timer("left", 0)
         self.timer("right", 0)
