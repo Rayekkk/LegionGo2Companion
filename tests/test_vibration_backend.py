@@ -692,6 +692,47 @@ class VibrationSleepingPadTests(FakeDevice):
         self.assertEqual(vibe._drift_interval, vibe._DRIFT_INTERVAL_S)
 
 
+class VibrationQuietPassTests(FakeDevice):
+    """The pads buzz whenever their rumble mode is set, even to the same value: start, hotplug and wake
+    write only what two equal reads show differs."""
+
+    def set_pads(self, values):
+        for name, value in values.items():
+            (self.device / name).write_text(value, encoding='ascii')
+
+    async def passes(self):
+        async def sleep(seconds):
+            self.clock += seconds
+        with patch.object(vibe, '_monitor_hotplug', new=Mock(return_value=asyncio.sleep(0))), \
+                patch.object(vibe.Plugin, '_drift_loop', new=Mock(return_value=asyncio.sleep(0))), \
+                patch.object(vibe, '_emit_device_status', new=AsyncMock()), \
+                patch.object(vibe, '_REAPPLY_WAIT_S', 1.0), patch.object(vibe, '_REAPPLY_STEP_S', 0.5), \
+                patch.object(vibe, 'asyncio', types.SimpleNamespace(sleep=sleep)):
+            await self.plugin._main()
+            await vibe._handle_device_added(str(self.device), 'add')
+            await self.plugin.reapply()
+
+    async def test_pads_that_already_have_the_profile_are_not_written(self):
+        self.set_pads(DEFAULTS)
+        await self.passes()
+        self.assertEqual(self.writes, [])
+
+    async def test_only_the_differing_attributes_are_written(self):
+        self.set_pads({**DEFAULTS, 'rumble_intensity': 'low', 'touchpad/vibration_enabled': 'false'})
+        await self.passes()
+        self.assertEqual(self.writes, ['rumble_intensity', 'touchpad/vibration_enabled'], 'never the rumble mode')
+        self.assertEqual(self.hardware(), DEFAULTS)
+
+    async def test_reads_that_do_not_agree_are_never_answered_with_a_write(self):
+        self.set_pads(DEFAULTS)
+        real_read, flips = vibe._read_attr, iter(range(10 ** 6))
+        unsettled = lambda path: real_read(path) + str(next(flips)) if 'rumble_mode' in path else real_read(path)
+        with patch.object(vibe, '_read_attr', side_effect=unsettled):
+            await self.passes()
+            self.assertFalse(vibe._apply_settings(vibe._active_values(), verify=True))  # the periodic check
+        self.assertEqual(self.writes, [])
+
+
 class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_retry_clears_transient_startup_error(self):
         plugin = vibe.Plugin()

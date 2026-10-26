@@ -303,7 +303,7 @@ class VibrationRpcTests(unittest.TestCase):
         self.assertEqual(self.profile()['mode'], before)  # both UIs show what the controller has
         self.assertEqual(self.hardware(), FIRMWARE_DEFAULTS)
 
-    def test_reapply_forces_the_saved_profile_back_after_the_controller_reset(self):
+    def test_reapply_sets_the_saved_profile_back_after_the_controller_reset(self):
         self.store.replace({'schema_version': 2, 'baseline': {}, 'game_profiles': {'0': {
             'overwrite': False, 'settings': {'level': 3, 'mode': 1, 'touchpadIntensity': 0, 'touchpadEnabled': False}}}})
         self.assertTrue(run(self.plugin.reapply())['success'])
@@ -316,9 +316,9 @@ class VibrationRpcTests(unittest.TestCase):
         self.assertTrue(result['success'], result)
         self.assertEqual(self.hardware(), saved)
         self.assertEqual(result['settings']['level'], 3)
-        # The driver's read-back can be stale after a reset, so nothing may be skipped as "already set".
+        # Every setting is read back twice before it is skipped as "already set" (a stale reply cannot pass).
         self.assertEqual(len(write.call_args_list), 5)
-        self.assertTrue(all(call.args[3] is True for call in write.call_args_list))
+        self.assertTrue(all(call.args[4] is True for call in write.call_args_list))
 
     def test_reapply_reports_failure_when_the_controller_never_returns(self):
         with patch.object(vibe, '_discover', return_value=(None, None)), \

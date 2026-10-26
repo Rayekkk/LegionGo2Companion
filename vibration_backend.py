@@ -282,11 +282,23 @@ def _read_attr(path: str) -> str:
         return source.read().strip()
 
 
-def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False) -> bool:
+def _write_attr(sys_path: str, rel_path: str, value: str, force: bool = False, verify: bool = False) -> bool:
+    """verify (start, hotplug, wake, the periodic check): write only a value that two equal reads show
+    differs, never one that cannot be read. The pads buzz whenever their rumble mode is set, even unchanged."""
     key = (sys_path, rel_path)
     path = os.path.join(sys_path, rel_path)
     read = lambda: _read_attr(path)
-    if not force and _attr_cache.get(key) == value:
+    if verify:
+        try:
+            current = module_runtime.settled_read(read)
+        except (OSError, UnicodeError):
+            current = None
+        if current == value:
+            _attr_cache[key] = value
+            return True
+        if current is None:
+            return False  # the next pass reads again
+    elif not force and _attr_cache.get(key) == value:
         try:
             # A differing read may be the previous command's reply: it must settle before it costs a write.
             if read() == value or module_runtime.settled_read(read) == value:
@@ -356,10 +368,11 @@ _offload = functools.partial(module_runtime.offload, 'vibration', _settings_lock
 
 
 def _apply_settings(values: dict, sys_path: str | None = None,
-                    force: bool = False, new: tuple = ()) -> bool:
+                    force: bool = False, new: tuple = (), verify: bool = False) -> bool:
     """Write a full profile to the hardware. Every attribute is attempted.
 
-    new: on the Go S, settings the owner is changing now, sent besides those changed before."""
+    new: on the Go S, settings the owner is changing now, sent besides those changed before.
+    verify: see _write_attr; for the passes the owner did not ask for."""
     global _last_applied_values
     if _is_go_s():
         return _apply_go_s(values, new)
@@ -379,13 +392,13 @@ def _apply_settings(values: dict, sys_path: str | None = None,
         mode = _enum_at(caps["mode"], values[PKEY_MODE])
         results = [
             _write_attr(p, 'rumble_intensity',
-                        _enum_at(caps["intensity"], values[PKEY_LEVEL]), force),
-            _write_attr(p, 'left_handle/rumble_mode',  mode, force),
-            _write_attr(p, 'right_handle/rumble_mode', mode, force),
+                        _enum_at(caps["intensity"], values[PKEY_LEVEL]), force, verify),
+            _write_attr(p, 'left_handle/rumble_mode',  mode, force, verify),
+            _write_attr(p, 'right_handle/rumble_mode', mode, force, verify),
             _write_attr(p, 'touchpad/vibration_intensity',
-                        _enum_at(caps["tp_intensity"], values[PKEY_TP_INT]), force),
+                        _enum_at(caps["tp_intensity"], values[PKEY_TP_INT]), force, verify),
             _write_attr(p, 'touchpad/vibration_enabled',
-                        "true" if values[PKEY_TP_EN] else "false", force),
+                        "true" if values[PKEY_TP_EN] else "false", force, verify),
         ]
         success = all(results)
         _last_applied_values = copy.deepcopy(values) if success else None
@@ -905,7 +918,7 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
             return
 
     # A 'change' on the device we already own is not skipped: it still means
-    # the firmware may have reset, so we fall through and force a re-apply.
+    # the firmware may have reset, so we fall through and re-check every attribute.
     try:
         module_runtime.require_available('vibration')
     except module_runtime.ControllerPaused:
@@ -918,7 +931,7 @@ async def _handle_device_added(sys_path: str, action: str) -> None:
     def _apply() -> bool:
         _invalidate_cache(sys_path)
         _capabilities_cache.pop(sys_path, None)
-        return _apply_settings(_active_values(), sys_path=sys_path, force=True)
+        return _apply_settings(_active_values(), sys_path=sys_path, verify=True)
 
     try:
         ok = await _offload(_apply)
@@ -969,9 +982,8 @@ class Plugin:
                     continue
 
                 def _verify() -> bool:
-                    # _write_attr reads hardware before accepting a cache hit, so
-                    # this is a read-only pass unless something actually drifted.
-                    return _apply_settings(_active_values())
+                    # A read-only pass unless something actually drifted.
+                    return _apply_settings(_active_values(), verify=True)
 
                 ok = await _offload(_verify)
                 transition("vibration", "profile_apply", ok, stage="periodic", initial=False,
@@ -1005,7 +1017,7 @@ class Plugin:
             def _start() -> bool:
                 _resume_detected.mark()
                 values = _active_values()
-                return _apply_settings(values, force=True)
+                return _apply_settings(values, verify=True)
             confirmed = await _offload(_start)
             transition("vibration", "profile_apply", bool(confirmed), initial=False,
                        level="info" if confirmed else "warning", stage="startup",
@@ -1157,11 +1169,10 @@ class Plugin:
 
     @module_runtime.controller_operation('vibration')
     async def reapply(self) -> dict:
-        """Force every attribute back after resume, when the controller returns at firmware defaults.
+        """Set every differing attribute back after resume: the controller may return at firmware defaults.
 
-        Retried: the resume notification arrives seconds before USB re-enumerates. Only the
-        first pass is forced; later ones rewrite only what is not confirmed, since each write
-        to a pad that is still asleep may be felt as a buzz.
+        Retried: the resume notification arrives seconds before USB re-enumerates. Each pass
+        writes only what two equal reads show differs, since each write may be felt as a buzz.
         """
         deadline = time.monotonic() + _REAPPLY_WAIT_S
         first = True
@@ -1171,8 +1182,8 @@ class Plugin:
             if first or _is_go_s():  # the Go S waits out its setup window again on every pass, as before
                 _forget_device()
             values = _active_values()
-            force, first = first, False
-            return {"success": _apply_settings(values, force=force), "settings": values}
+            first = False
+            return {"success": _apply_settings(values, verify=True), "settings": values}
 
         while True:
             result = await _offload(_do)
