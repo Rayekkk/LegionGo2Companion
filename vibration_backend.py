@@ -113,6 +113,9 @@ _active_app_ts: float | None = None
 
 # Serialises sysfs writes between RPC calls, hotplug and resume.
 _apply_lock = threading.Lock()
+# Set by _unload: a check still running in a worker stops before its next attribute. Each can take
+# a second or more, and Decky SIGKILLs a stop still waiting after 5 s, skipping _uninstall().
+_stopping = threading.Event()
 
 # Guards against stacking effects, e.g. the test button being tapped twice.
 # Two concurrent FF effects on one device combine into something that
@@ -370,12 +373,21 @@ def _settings_locked(fn, *args):
 _offload = functools.partial(module_runtime.offload, 'vibration', _settings_locked)
 
 
+def _profile_targets(caps: dict, values: dict) -> dict:
+    """The driver value of each attribute in _PROFILE_ATTRS for a profile."""
+    mode = _enum_at(caps["mode"], values[PKEY_MODE])
+    return {'rumble_intensity': _enum_at(caps["intensity"], values[PKEY_LEVEL]),
+            'left_handle/rumble_mode': mode, 'right_handle/rumble_mode': mode,
+            'touchpad/vibration_intensity': _enum_at(caps["tp_intensity"], values[PKEY_TP_INT]),
+            'touchpad/vibration_enabled': "true" if values[PKEY_TP_EN] else "false"}
+
+
 def _apply_settings(values: dict, sys_path: str | None = None,
                     force: bool = False, new: tuple = (), verify: bool = False) -> bool:
     """Write a full profile to the hardware. Every attribute is attempted.
 
     new: on the Go S, settings the owner is changing now, sent besides those changed before.
-    verify: see _write_attr; for the passes the owner did not ask for."""
+    verify: see _write_attr; for the passes the owner did not ask for, which a stop cuts short."""
     global _last_applied_values
     if _is_go_s():
         return _apply_go_s(values, new)
@@ -391,18 +403,12 @@ def _apply_settings(values: dict, sys_path: str | None = None,
         if p is None:
             _last_applied_values = None
             return False
-        caps = _capabilities(p)
-        mode = _enum_at(caps["mode"], values[PKEY_MODE])
-        results = [
-            _write_attr(p, 'rumble_intensity',
-                        _enum_at(caps["intensity"], values[PKEY_LEVEL]), force, verify),
-            _write_attr(p, 'left_handle/rumble_mode',  mode, force, verify),
-            _write_attr(p, 'right_handle/rumble_mode', mode, force, verify),
-            _write_attr(p, 'touchpad/vibration_intensity',
-                        _enum_at(caps["tp_intensity"], values[PKEY_TP_INT]), force, verify),
-            _write_attr(p, 'touchpad/vibration_enabled',
-                        "true" if values[PKEY_TP_EN] else "false", force, verify),
-        ]
+        results = []
+        for attr, value in _profile_targets(_capabilities(p), values).items():
+            if verify and (_stopping.is_set() or module_runtime.stop_requested('vibration')):
+                results.append(False)  # unconfirmed; the next start checks again
+                break
+            results.append(_write_attr(p, attr, value, force, verify))
         success = all(results)
         _last_applied_values = copy.deepcopy(values) if success else None
         return success
@@ -1015,6 +1021,7 @@ class Plugin:
 
     async def _main(self):
         Plugin._setup_error = getattr(self, '_migration_error', None)
+        _stopping.clear()
         global _monitor_task, _drift_task
         try:
             def _start() -> bool:
@@ -1035,6 +1042,7 @@ class Plugin:
             raise
 
     async def _unload(self):
+        _stopping.set()
         global _active_app_ts
         _active_app_ts = None
         global _monitor_task, _drift_task

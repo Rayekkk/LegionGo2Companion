@@ -69,6 +69,7 @@ class FakeDevice(unittest.IsolatedAsyncioTestCase):
             'settings': self.store, '_device_path': str(self.device), '_attr_cache': {},
             '_capabilities_cache': {}, '_last_applied_values': None,
             '_active_app_id': '', '_active_app_ts': None, '_drift_interval': vibe._DRIFT_INTERVAL_S,
+            '_stopping': threading.Event(),
         }.items():
             self.stack.enter_context(patch.object(vibe, name, value))
         self.stack.enter_context(patch.object(vibe, 'time', types.SimpleNamespace(
@@ -743,6 +744,23 @@ class VibrationQuietPassTests(FakeDevice):
             self.assertEqual(self.writes, [])
         self.assertTrue(await check)
         self.assertEqual(self.writes, ['rumble_intensity'])
+
+    async def test_a_stop_ends_a_check_before_its_next_attribute(self):
+        # Each attribute can take a second or more; Decky SIGKILLs a stop after 5 s, skipping _uninstall.
+        self.set_pads({**DEFAULTS, 'rumble_intensity': 'low', 'touchpad/vibration_enabled': 'false'})
+        reading, answer = threading.Event(), threading.Event()
+        real_read = vibe._read_attr
+        def slow_pad(path):
+            reading.set()
+            answer.wait(5)
+            return real_read(path)
+        with patch.object(vibe, '_read_attr', side_effect=slow_pad):
+            check = asyncio.ensure_future(asyncio.to_thread(vibe._apply_settings, vibe._active_values(), verify=True))
+            await asyncio.to_thread(reading.wait, 5)
+            await self.plugin._unload()
+            answer.set()
+            self.assertFalse(await check)
+        self.assertEqual(self.writes, ['rumble_intensity'], 'the attribute in progress finishes, no other starts')
 
 class VibrationStartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_retry_clears_transient_startup_error(self):
