@@ -69,6 +69,16 @@ def read_ec_status(ec, sample):
     return dict(sample)
 
 
+def confirm_override_change(ec, sample, expected):
+    """Re-read a changed override once, writing nothing: one disturbed port read is not an owner change."""
+    time.sleep(0.05)
+    current = read_ec_status(ec, sample)
+    if current['override'] != expected:
+        raise RuntimeError('Fan override changed outside its owner.')
+    check_ec_temperature(sample)
+    return current
+
+
 def check_ec_temperature(sample):
     # C307 has no proven identity equivalent to Tctl or GPU edge. A valid
     # independent channel may lag or differ; equality is not a freshness test.
@@ -621,7 +631,7 @@ def serve(ipc):
                         check_ec_temperature(ec_sample)
                         expected = encode_target(state['target']) if state['active'] else 0
                         if current['override'] != expected:
-                            raise RuntimeError('Fan override changed outside its owner.')
+                            current = confirm_override_change(ec, ec_sample, expected)
                         if target != state['target']:
                             ec.set_target(target, stopped)
                             state['target'] = target; state['writes'] += 1; state['target_changed_at'] = now

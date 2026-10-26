@@ -75,6 +75,9 @@ def model_worker(root, ipc_fd):
             if self.m[0]==0x2E: return self.m[1]
             if self.m[1]==0x12 and self.m[2]*256+self.m[3]==0xC307:
                 return model_sample['temperature']
+            if self.m[1]==0x12 and self.m[2]*256+self.m[3]==0xC6C8 and (root/'misread-once').exists():
+                try:(root/'misread-once').unlink();return self.m[0xC6C8]^0x55  # One disturbed port read.
+                except FileNotFoundError:pass
             return {0x10:self.m[3],0x11:self.m[2]}.get(self.m[1],self.m[self.m[2]*256+self.m[3]])
         def write(self,port,value):
             if (root/'hang-io').exists() and os.getpid()==int((root/'worker-pid').read_text()):
@@ -453,6 +456,13 @@ class FanProcessTests(unittest.TestCase):
         self.assertEqual(record['sample']['ec_temperature'],255)
         self.assertEqual(record['sample']['cpu_temperature'],45)
         self.assertIn('sensor_started_at',record['sample'])
+
+    def test_one_disturbed_override_read_is_read_again_and_keeps_control(self):
+        self.configure();(self.root/'misread-once').touch()
+        self.assertTrue(self.until(lambda:not (self.root/'misread-once').exists(),2))
+        for _ in range(3):state=self.receive_kind('telemetry',1.5)  # The last one follows the second read.
+        self.assertTrue(state['active']);self.assertEqual(state['override'],1800)
+        self.assertIsNone(self.p.poll());self.assertFalse((self.root/'last-fault.json').exists())
 
     def test_100_hardmax_without_handover_or_heating_hardware(self):
         from fan_policy import DEFAULT_CURVE,MIN_RPM,LAST_MIN_RPM
