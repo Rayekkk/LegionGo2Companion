@@ -18,9 +18,11 @@ Unreleased.
 
 ### Fixed
 
-- **Vibration:** while a controller sleeps or stops answering, Companion no longer keeps resending your vibration settings to it, which could make it buzz now and then. After a wake it retries only the settings that did not take, and its periodic check slows down from every 30 seconds to every 5 minutes until the controller answers or is reconnected.
+- **Vibration:** while a controller sleeps or stops answering, Companion no longer keeps resending your vibration settings to it, which could make it buzz now and then. After a wake it retries only the settings that did not take, and its periodic check slows down from every 30 seconds to every 5 minutes until the controller answers or is reconnected. The controllers also no longer buzz when Companion starts or when a controller is attached or detached, unless their vibration mode really has to change: Companion reads each setting first and writes only one that differs, never one it cannot read reliably.
+- **Vibration and Controller sleep:** a setting is confirmed only when the controller reports it twice in a row, so a delayed reply from the controller no longer counts as a failed write (many "did not confirm" log entries) or as a confirmed one.
+- **Controller firmware:** Check, Download and Install now need both controllers attached and say so: "Attach both controllers to check or install firmware updates." Install still refuses a controller below 30% battery.
 - **Battery:** when the firmware turns on fast charging and battery protection at the same time, the charging mode cannot be read. The page now says so instead of showing "Invalid argument" and offers **Reset charging mode to Standard**; your saved protection choice is applied again afterwards.
-- **Stick lights:** your lighting is set again once when Companion starts and once more shortly after a wake, so it no longer stays wrong when the controller wakes with stale values.
+- **Stick lights:** your lighting is set again once when Companion starts and once more shortly after a wake, so it no longer stays wrong when the controller wakes with stale values. The lights now also work while one controller is detached (they failed with "The joystick-ring interface does not belong to the expected controller."), and they are set again after a controller is attached or detached.
 
 # 2.3.0
 
