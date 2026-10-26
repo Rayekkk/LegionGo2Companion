@@ -464,6 +464,23 @@ class FanProcessTests(unittest.TestCase):
         self.assertTrue(state['active']);self.assertEqual(state['override'],1800)
         self.assertIsNone(self.p.poll());self.assertFalse((self.root/'last-fault.json').exists())
 
+    def poke(self,addr,data):
+        """Another EC writer (firmware or a foreign tool), under the same lock as real transactions."""
+        import fcntl
+        with (self.root/'ports-model').open('r+b') as f:
+            fcntl.flock(f,fcntl.LOCK_EX);f.seek(addr);f.write(data)
+
+    def test_firmware_taking_the_fan_back_is_a_retry_and_a_fresh_session_rearms(self):
+        self.configure();self.poke(0xC6C8,b'\0\0')
+        st=self.wait_release();self.assertEqual(st['outcome'],'retry',st);self.assertIn('Firmware took the fan back',st['reason'])
+        self.assertEqual(json.loads((self.root/'last-fault.json').read_text())['outcome'],'retry')
+        self.assertEqual(self.start()['kind'],'ready')
+        st=self.configure();self.assertTrue(st['active']);self.assertEqual(st['override'],1800)
+
+    def test_foreign_override_write_is_a_fault_and_released(self):
+        self.configure();self.poke(0xC6C8,(2400).to_bytes(2,'little'))
+        st=self.wait_release();self.assertEqual(st['outcome'],'fault',st);self.assertIn('outside its owner',st['reason'])
+
     def test_100_hardmax_without_handover_or_heating_hardware(self):
         from fan_policy import DEFAULT_CURVE,MIN_RPM,LAST_MIN_RPM
         self.put('ec-temperature','45')

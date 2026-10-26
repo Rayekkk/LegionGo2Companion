@@ -70,9 +70,16 @@ def read_ec_status(ec, sample):
 
 
 def confirm_override_change(ec, sample, expected):
-    """Re-read a changed override once, writing nothing: one disturbed port read is not an owner change."""
+    """Re-read a changed override once, writing nothing: one disturbed port read is not an owner change.
+
+    Zero twice: the firmware took the fan back on its own (automatic is safe), so a fresh
+    session may re-arm within the retry budget. Any other confirmed value is a foreign writer.
+    """
+    first = sample['override']
     time.sleep(0.05)
     current = read_ec_status(ec, sample)
+    if first == current['override'] == 0:
+        raise Retry('Firmware took the fan back.')
     if current['override'] != expected:
         raise RuntimeError('Fan override changed outside its owner.')
     check_ec_temperature(sample)
