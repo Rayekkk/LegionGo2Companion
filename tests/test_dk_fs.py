@@ -62,6 +62,31 @@ class WriteTest(unittest.TestCase):
             dk_fs.write_atomic(self.path, source)
         self.assertEqual(len(read(self.path)), 3 * dk_fs.CHUNK + 5)
 
+    def test_a_function_writes_into_the_open_temp_file_and_cancels_by_raising(self):
+        dk_fs.write_atomic(self.path, b"old")
+        seen = []
+
+        def build(f):
+            seen.append(sorted(n for n in self.files() if n.endswith(".tmp")))
+            f.write(b"new ")
+            f.write(b"table")
+        self.assertTrue(dk_fs.write_atomic(self.path, build, 0o644))
+        self.assertEqual(read(self.path), b"new table")
+        self.assertEqual(len(seen[0]), 1, "it runs once the temp file exists, beside the target")
+
+        def cancelled(f):
+            f.write(b"half")
+            raise InterruptedError("cancelled")
+        with self.assertRaises(InterruptedError):
+            dk_fs.write_atomic(self.path, cancelled)
+        self.assertEqual(read(self.path), b"new table", "a cancelled build replaces nothing")
+        self.assertEqual(self.files(), ["settings.json"], "and leaves no temp file")
+        called = []
+        with mock.patch.object(dk_fs.os, "open", side_effect=PermissionError(13, "Permission denied")), \
+                self.assertRaises(PermissionError):
+            dk_fs.write_atomic(self.path, called.append)
+        self.assertEqual(called, [], "a folder that cannot be written fails before the build")
+
     def test_a_failed_write_keeps_the_old_file_and_removes_its_temp_file(self):
         dk_fs.write_atomic(self.path, b"old")
         with mock.patch.object(dk_fs.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
@@ -409,6 +434,17 @@ class JsonStoreTest(unittest.TestCase):
         os.rmdir(self.path)
         self.damage()
         self.assertNotIn(self.dir, dk_fs.load_json(self.path).detail)
+
+    def test_shown_gives_an_os_error_without_its_path(self):
+        with self.assertRaises(OSError) as caught:
+            dk_fs.read_bytes(os.path.join(self.dir, "missing", "settings.json"))
+        self.assertIn(self.dir, caught.exception.filename, "the system's own text names the path")
+        self.assertEqual(dk_fs.shown(caught.exception), caught.exception.strerror)
+        self.assertEqual(dk_fs.shown(PermissionError(13, "Permission denied", self.path)), "Permission denied")
+        self.assertEqual(dk_fs.shown(OSError(self.path)), "OSError", "no description: the type, never the text")
+        self.assertEqual(dk_fs.shown(dk_fs.UnsafePath("settings.json is a symbolic link")),
+                         "settings.json is a symbolic link", "dk_fs's own text names no folder")
+        self.assertEqual(dk_fs.shown(ValueError("too large")), "too large")
 
     def test_content_validate_refuses_starts_a_recovery(self):
         dk_fs.write_json(self.path, {"v": 1}, validate=dk_fs.require_object)

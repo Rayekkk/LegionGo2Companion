@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 const ts = require(path.join(root, 'node_modules/typescript'));
 // These src/ modules always run for real, even where tests stub other pages; so does every desktop/native/*.mjs.
-const REAL_MODULES = new Set(['./shared', './result', './tdp_api', './tdp_watcher', './tdp_cpu', './tdp_state', './tdp_sections', './vibration_api', './overview']);
+const REAL_MODULES = new Set(['./shared', './ui', './about', './curve', './result', './tdp_api', './tdp_watcher', './tdp_cpu', './tdp_state', './tdp_sections', './vibration_api', './overview']);
 
 // Fake timers leave no native event-loop handle, so a pending top-level promise
 // would let Node exit successfully; require explicit completion instead.
@@ -100,7 +100,9 @@ function mount(file, options = {}) {
     removeEventListener: (name, fn) => { if (!fn || listeners[name] === fn) delete listeners[name]; }, ...options.api,
     callable: name => (...args) => Promise.resolve(answers(name)(...args)).then(d2) };
   const ui = new Proxy({ ...options.ui }, { get: (target, key) => key in target ? target[key] : key });
-  const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }), Fragment: 'Fragment' };
+  // ui.tsx's ActionButton has no hooks: drawn in place, it is the ButtonItem the pages used to inline.
+  const element = (type, props) => typeof type === 'function' && type.name === 'ActionButton' ? type(props) : { type, props };
+  const jsx = { jsx: element, jsxs: element, Fragment: 'Fragment' };
   const timer = (kind, fn, delay) => { const id = ++nextTimer; timers.set(id, { kind, fn, delay }); return id; };
   class FakeDate extends Date { static now() { return clock.now; } }
   const context = vm.createContext({ console, window: {}, Error, __PLUGIN_VERSION__: require(path.join(root, 'package.json')).version,

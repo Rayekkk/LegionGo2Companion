@@ -6,7 +6,8 @@
 A mismatch is not caught by TypeScript or by the panel tests (they answer with stand-ins): Decky would answer the
 call with a TypeError at runtime. Every `callable<[args], R>("name")` in src/ (also through a local wrapper such as
 `const rpc = <A, R>(name: string) => ... callable<A, R>(name)`, a `type X = [...]` alias and `...X` spreads) is
-checked against the public coroutine methods of main.Plugin, whose signatures dk_rpc.boundary keeps.
+checked against the public coroutine methods of main.Plugin, whose signatures dk_rpc.boundary keeps. The name may
+stand on its own line, with a trailing comma or before a wrapper's further arguments (Prettier's layout).
 
 Sources: DeckyVibranceHDR tests/rpc-contract.test.mjs (name and argument count), DeckyKit overview (callable names).
 Guarantees: an unknown name fails; an argument list whose shortest or longest form the method cannot take fails
@@ -116,7 +117,7 @@ def frontend_calls(src):
             if m.group(1) not in wrappers:
                 continue
             end = _close(text, m.end() - 1)
-            name = re.match(r"\s*\(\s*([\"'])([A-Za-z_][\w]*)\1\s*\)", text[end:]) if end > 0 else None
+            name = re.match(r"\s*\(\s*([\"'])([A-Za-z_][\w]*)\1\s*[,)]", text[end:]) if end > 0 else None
             if not name:
                 continue  # the wrapper's own body, or a computed name
             types = _split(text[m.end():end - 1])
@@ -204,7 +205,9 @@ class ContractCheckTest(unittest.TestCase):
             'const d = callable<[key: string, value?: number], R>("set_value");\n'
             'const e = callable<[string, ...Two], R>("any_args");\n'
             'const rpc = <A extends unknown[], R>(name: string) => { const call = callable<A, R>(name); };\n'
-            'const f = rpc<[string, number], R>("set_value");\n'), [])
+            'const f = rpc<[string, number], R>("set_value");\n'
+            'const g = callable<\n  [key: string],\n  R\n>(\n  "set_value",\n);\n'
+            'const h = rpc<[], R>("get_state", { slow: true });\n'), [])
 
     def test_unknown_names_and_wrong_counts_fail(self):
         found = self.check('const a = callable<[], R>("missing");\n'
@@ -213,9 +216,11 @@ class ContractCheckTest(unittest.TestCase):
                            'const d = callable<[number], R>("_main");\n'
                            'const e = callable<[number], R>("helper");\n'
                            'const rpc = <A, R>(name: string) => callable<A, R>(name);\n'
-                           'const f = rpc<[], R>("get_states");\n')
-        self.assertEqual(len(found), 6, found)
-        self.assertTrue(any("missing" in p for p in found) and any("get_states" in p for p in found))
+                           'const f = rpc<[], R>("get_states");\n'
+                           'const g = callable<[], R>(\n  "unknown_rpc",\n);\n')
+        self.assertEqual(len(found), 7, found)
+        self.assertTrue(any("missing" in p for p in found) and any("get_states" in p for p in found)
+                        and any("unknown_rpc" in p for p in found))
 
     def test_an_unreadable_argument_list_fails(self):
         self.assertEqual(len(self.check('const a = callable<Unknown, R>("get_state");\n')), 1)

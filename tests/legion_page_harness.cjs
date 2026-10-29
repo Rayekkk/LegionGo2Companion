@@ -39,7 +39,7 @@ function harness(file, component, initiallyVisible = true) {
     unmount: h.unmount, remount: () => h.remount(),
   };
 }
-function findSection(node, title, action = 'onClick') {
+function findSection(node, title, action = 'onOpen') {
   if (!node || typeof node !== 'object') return;
   if (node.props?.title === title && node.props?.[action]) return node;
   for (const child of Array.isArray(node) ? node : [node.props?.children]) {

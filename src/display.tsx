@@ -5,7 +5,8 @@
 import { useQuickAccessVisible } from "@decky/api";
 import { PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { detailsRows, infoRow, statusPlaceholder, rpc } from "./shared";
+import { rpc } from "./shared";
+import { detailsRows, infoRow, statusPlaceholder } from "./ui";
 import { EDID_FIX_LABEL, EDID_FIX_NOTE, edidStatus, steamosNotice } from "../desktop/native/display.mjs";
 
 interface State {

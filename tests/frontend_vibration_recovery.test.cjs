@@ -117,8 +117,8 @@ run(async () => {
     const h=mount({vibe_get_settings:()=>{if(failed)throw Error('temporary settings failure');return settings('0',3);},
       [pendingName]:()=>delayed.promise});
     let tree=await ready(h);
-    assert.ok(button(tree,'Retry settings'),'An initial rejection is visible even while another read is pending.');
-    failed=false;button(tree,'Retry settings').props.onClick();h.render();await settle();
+    assert.ok(button(tree,'Try again'),'An initial rejection is visible even while another read is pending.');
+    failed=false;button(tree,'Try again').props.onClick();h.render();await settle();
     assert.equal(count(h,'vibe_get_settings'),1,'Retry waits for the previous initial snapshot to settle.');
     assert.equal(count(h,pendingName),1,'A retry cannot duplicate an unfinished hardware read.');
     h.responses[pendingName]=base[pendingName];delayed.resolve(base[pendingName]);await settle();tree=h.render();
@@ -274,14 +274,14 @@ run(async () => {
       return failed === 'vibe_get_settings' ? settings('0', 0) : base[failed];
     } };
     const h = mount(replies); tree = await ready(h);
-    assert.ok(find(tree, 'Could not load settings')); assert.ok(button(tree, 'Retry settings'));
+    assert.ok(find(tree, 'Vibration settings unavailable')); assert.ok(button(tree, 'Try again'));
     assert.equal(find(tree, 'Vibration strength'), undefined, 'An unread profile never exposes editable defaults');
     assert.ok(JSON.stringify(tree).includes(`${failed} disconnected`));
     h.hide(); h.show(); await settle(); assert.equal(count(h, failed), 1, 'Reopening does not start a duplicate failed read');
-    reject = false; const retry = button(tree, 'Retry settings').props.onClick; retry(); retry();
+    reject = false; const retry = button(tree, 'Try again').props.onClick; retry(); retry();
     h.render(); await settle(); tree = h.render();
     assert.equal(count(h, failed), 2, 'Repeated retry activation creates one new batch');
-    assert.equal(find(tree, 'Vibration strength').props.value, 0); assert.equal(button(tree, 'Retry settings'), undefined); h.unmount();
+    assert.equal(find(tree, 'Vibration strength').props.value, 0); assert.equal(button(tree, 'Try again'), undefined); h.unmount();
   }
 
   // Slow initialization and heartbeat snapshots cannot roll back a newer game or draft.
@@ -349,9 +349,9 @@ run(async () => {
   tree = await ready(unknownSwitch);
   unknownSwitch.responses.vibe_get_settings = () => { throw Error('resync offline'); };
   await find(tree, 'Per-game profile').props.onChange(true); await settle(); tree = unknownSwitch.render();
-  assert.equal(find(tree, 'Vibration strength'), undefined); assert.ok(button(tree, 'Retry settings'));
+  assert.equal(find(tree, 'Vibration strength'), undefined); assert.ok(button(tree, 'Try again'));
   unknownSwitch.responses.vibe_get_settings = settings('111', 2, true);
-  button(tree, 'Retry settings').props.onClick(); unknownSwitch.render(); await settle(); tree = unknownSwitch.render();
+  button(tree, 'Try again').props.onClick(); unknownSwitch.render(); await settle(); tree = unknownSwitch.render();
   assert.equal(find(tree, 'Per-game profile').props.checked, true); unknownSwitch.unmount();
   // Presentation must retain native stepped controls and real driver details
   // without issuing hardware mutations when a diagnostic disclosure is opened.
@@ -400,9 +400,9 @@ run(async () => {
   }
   // A refusal without a state (the module guard) reads as a failed call: its text, and the panel re-reads the profile.
   {
-    const h = mount({ vibe_set_intensity: refused('Vibration is turned off in Manage Modules.') });
+    const h = mount({ vibe_set_intensity: refused('Vibration is turned off in Manage modules.') });
     find(await ready(h), 'Vibration strength').props.onChange(3); h.flush(); await settle();
-    assert.deepEqual(h.toasts.map(t => t.body), ['Could not apply setting: Vibration is turned off in Manage Modules.']);
+    assert.deepEqual(h.toasts.map(t => t.body), ['Could not apply setting: Vibration is turned off in Manage modules.']);
     assert.equal(count(h, 'vibe_get_settings'), 2, 'The refused edit re-reads the saved profile.');
     assert.equal(find(h.render(), 'Vibration strength').props.value, 2); h.unmount();
   }

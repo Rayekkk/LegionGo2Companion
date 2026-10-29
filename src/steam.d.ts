@@ -5,7 +5,12 @@
 // FSR4Injector/DeckyReshade (Apps, GameSessions, store_category), LegionGo2Companion/Ayaneo3Companion (resume from
 // suspend through SleepManager, unsubscribe as an object or a function). Guarantees: every member a plugin calls is
 // declared with its arguments; nothing is `any`. Members are optional where Steam builds lack them, so callers must
-// check. Add a member here (in DeckyKit) when a plugin needs one; never redeclare these globals in a plugin.
+// check. Also the build constant __PLUGIN_VERSION__ (rollup.config.js puts plugin.json's version in its place;
+// source: FSR4Injector src/panel.tsx). Add a member here (in DeckyKit) when a plugin needs one; never redeclare these
+// globals in a plugin (an older module-level `declare const __PLUGIN_VERSION__` still compiles: it shadows this one).
+
+/** plugin.json's version, put in place by the build (rollup.config.js). */
+declare const __PLUGIN_VERSION__: string;
 
 interface SteamAppOverview {
   appid: number;

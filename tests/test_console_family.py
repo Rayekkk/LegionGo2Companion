@@ -182,7 +182,7 @@ class ApplicabilityTests(unittest.TestCase):
 
 
 class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
-    """A module that does not apply never starts, stops, restores or answers; Manage Modules cannot turn it on."""
+    """A module that does not apply never starts, stops, restores or answers; Manage modules cannot turn it on."""
 
     async def asyncSetUp(self):
         stack = self.stack = ExitStack()

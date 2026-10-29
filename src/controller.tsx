@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { toaster } from "@decky/api";
 import { ButtonItem, DropdownItem, DropdownOption, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { FirmwarePanel } from "./firmware";
-import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
+import { errorText, mutationQueue, rpc } from "./shared";
+import { detailsRows, infoRow, notify as toast, statusPlaceholder } from "./ui";
 import { reportingText, SLEEP_DEFAULT, SLEEP_LABEL, SLEEP_TITLE, sleepChange, sleepNote, sleepOptions, sleepShown, sleepText,
   sleepValue, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
   vectorText } from "../desktop/native/controller.mjs";
@@ -77,7 +77,7 @@ export const controllerSummary = (status?: ControllerStatus) => {
 };
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
-const notify = (body: string) => toaster.toast({ title: "Gyro & touchpad", body });
+const notify = (body: string) => toast("Gyro & touchpad", body);
 
 /** firmware: controller firmware updates apply to this console (get_version.device.firmware). */
 export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ visible, firmware = true }) => {
@@ -269,7 +269,7 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
   }, []);
 
   if (!status) return <>
-    {statusPlaceholder({ title: "Controller", label: "Status unavailable", error, onRetry: () => void refresh(), retryLabel: "Check Again" })}
+    {statusPlaceholder({ title: "Controller", label: "Status unavailable", error, onRetry: () => void refresh()})}
     {firmware && <FirmwarePanel visible={visible} />}
   </>;
 

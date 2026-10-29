@@ -102,22 +102,22 @@ run(async () => {
   await testOverview('an initial failure has a retry hint and recovers without leaving stale metadata', async h => {
     await failPower(h);
     assert.equal(section(h).description, 'Status unavailable');
-    assert.match(section(h).statusNote, /Retrying while this menu is open/);
-    assert.equal(section(h, 'Vibration').statusNote, undefined);
+    assert.match(section(h).note, /Retrying while this menu is open/);
+    assert.equal(section(h, 'Vibration').note, undefined);
     h.advance(10000); h.fire(); answerOverview(h); await settle();
-    assertPowerSummary(h); assert.equal(section(h).statusNote, undefined);
+    assertPowerSummary(h); assert.equal(section(h).note, undefined);
   });
   await testOverview('only repeated failures mark confirmed data older and the existing tick updates its age', async h => {
     answerOverview(h); await settle();
     h.advance(10000); h.fire(); await failPower(h);
-    assertPowerSummary(h); assert.equal(section(h).statusNote, undefined, 'one transient failure is quiet');
+    assertPowerSummary(h); assert.equal(section(h).note, undefined, 'one transient failure is quiet');
     h.advance(10000); h.fire(); await failPower(h);
-    assertPowerSummary(h); assert.match(section(h).statusNote, /Older data.*Last read 20s ago/);
-    assert.equal(section(h, 'Vibration').statusNote, undefined, 'failure metadata stays with its own RPC');
+    assertPowerSummary(h); assert.match(section(h).note, /Older data.*Last read 20s ago/);
+    assert.equal(section(h, 'Vibration').note, undefined, 'failure metadata stays with its own RPC');
     h.advance(10000); h.fire(); answerOverview(h, ['get_settings']); await settle();
-    assert.match(section(h).statusNote, /Last read 30s ago/);
+    assert.match(section(h).note, /Last read 30s ago/);
     h.respond('get_settings', overviewValues.get_settings); await settle();
-    assert.equal(section(h).statusNote, undefined, 'a confirmed refresh clears the warning');
+    assert.equal(section(h).note, undefined, 'a confirmed refresh clears the warning');
     assert.equal([...h.timers.values()].filter(timer => timer.delay === 1000).length, 1, 'only live fan telemetry has a fast timer');
     assert.ok([...h.timers.values()].every(timer => timer.delay === 1000 || timer.delay >= 10000));
   });
@@ -140,7 +140,7 @@ run(async () => {
     h.panelVisible(false);assert.equal([...h.timers.values()].filter(t=>t.delay===1000).length,0,'hidden root removes live fan timer');
     h.fire();await settle();assert.equal(h.calls.length,count,'no new read behind the other QAM tab');
     h.panelVisible(true);await settle();assert.equal(h.calls.filter(c=>c.name==='fan_get_state'&&!c.settled).length,1,'actual root visibility restarts one fresh request');
-    findSection(h.render(),'Fan Control').props.onClick();h.render();
+    findSection(h.render(),'Fan Control').props.onOpen();h.render();
     h.panelVisible(false);
     assert.ok(findSection(h.render(),'Fan Control','onBack'),
       'The current page, not a previously captured tree, remains mounted while polling pauses');
@@ -149,12 +149,12 @@ run(async () => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
     answerOverview(h, ['get_settings']); await settle();
     h.advance(20000); h.fire(); answerOverview(h, ['get_settings']); await settle();
-    assert.doesNotMatch(section(h).statusNote || '', /Older data|delayed/);
+    assert.doesNotMatch(section(h).note || '', /Older data|delayed/);
     h.advance(10000); h.fire(); answerOverview(h, ['get_settings']); await settle();
-    assertPowerSummary(h); assert.match(section(h).statusNote, /Older data.*Last read 40s ago.*Update delayed/);
+    assertPowerSummary(h); assert.match(section(h).note, /Older data.*Last read 40s ago.*Update delayed/);
     assert.equal(h.calls.filter(call => call.name === 'get_settings').length, 2);
     h.respond('get_settings', overviewValues.get_settings); await settle();
-    assert.equal(section(h).statusNote, undefined);
+    assert.equal(section(h).note, undefined);
   });
   await testOverview('a hung initial read becomes unavailable only after thirty visible seconds', async h => {
     answerOverview(h, ['get_settings']); await settle();
@@ -162,8 +162,8 @@ run(async () => {
     assert.notEqual(section(h).description, 'Status unavailable');
     h.advance(10000); h.fire(); answerOverview(h, ['get_settings']); await settle();
     assert.equal(section(h).description, 'Status unavailable');
-    assert.match(section(h).statusNote, /Still waiting/);
-    assert.equal(section(h, 'Vibration').statusNote, undefined);
+    assert.match(section(h).note, /Still waiting/);
+    assert.equal(section(h, 'Vibration').note, undefined);
     assert.equal(h.calls.filter(call => call.name === 'get_settings').length, 1);
   });
   await testOverview('hidden time never turns a pending read into a failure', async h => {
@@ -174,20 +174,20 @@ run(async () => {
     h.advance(3600000); queuedTicks.forEach(tick => tick());
     assert.equal(h.calls.length, before, 'hidden age checks never start work');
     h.visible(true);
-    assert.match(section(h).statusNote, /^Updating….*Last read 1h ago/);
-    assert.doesNotMatch(section(h).statusNote, /Older data|delayed/);
+    assert.match(section(h).note, /^Updating….*Last read 1h ago/);
+    assert.doesNotMatch(section(h).note, /Older data|delayed/);
     h.advance(20000); h.fire(); answerOverview(h, ['get_settings']); await settle();
-    assert.match(section(h).statusNote, /Older data.*Update delayed/, 'only accumulated visible waiting counts');
+    assert.match(section(h).note, /Older data.*Update delayed/, 'only accumulated visible waiting counts');
     h.respond('get_settings', overviewValues.get_settings); await settle();
-    assert.equal(section(h).statusNote, undefined);
+    assert.equal(section(h).note, undefined);
   });
   await testOverview('hidden rejections do not count toward a visible failure streak', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
     h.visible(false); await failPower(h); h.advance(3600000); h.visible(true);
     await failPower(h);
-    assert.equal(section(h).statusNote, undefined, 'the first visible error still tolerates a transient failure');
+    assert.equal(section(h).note, undefined, 'the first visible error still tolerates a transient failure');
     h.advance(10000); h.fire(); await failPower(h);
-    assert.match(section(h).statusNote, /Older data/);
+    assert.match(section(h).note, /Older data/);
   });
   await testOverview('fresh backend warnings replace old healthy data and survive later transport failures', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
@@ -203,13 +203,13 @@ run(async () => {
       h.advance(10000); h.fire(); h.reject('battery_get_status'); answerOverview(h); await settle();
     }
     assert.equal(section(h, 'Battery').description, 'Battery firmware unavailable');
-    assert.match(section(h, 'Battery').statusNote, /Older data/);
+    assert.match(section(h, 'Battery').note, /Older data/);
   });
   await testOverview('driver warnings are not masked by missing vibration settings', async h => {
     h.respond('vibe_get_driver_status', { found: false }); h.reject('vibe_get_settings');
     answerOverview(h); await settle();
     assert.equal(section(h, 'Vibration').description, 'Controller driver not detected');
-    assert.match(section(h, 'Vibration').statusNote, /Retrying/);
+    assert.match(section(h, 'Vibration').note, /Retrying/);
   });
   await testOverview('display settings_error replaces its earlier healthy summary', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
@@ -232,23 +232,23 @@ run(async () => {
   }
   await testOverview('stale rejected page reads cannot seed the returned overview metadata', async h => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
-    findSection(h.render(), 'TDP').props.onClick(); h.render();
+    findSection(h.render(), 'TDP').props.onOpen(); h.render();
     h.reject('get_settings'); await settle();
     findSection(h.render(), 'TDP', 'onBack').props.onBack(); h.render();
     await failPower(h);
-    assertPowerSummary(h); assert.equal(section(h).statusNote, undefined, 'only the post-page error counts');
+    assertPowerSummary(h); assert.equal(section(h).note, undefined, 'only the post-page error counts');
   });
   for (const gate of [{ enabled: false }, { enabled: true, pending: true }]) {
     await testOverview(`module gate ${JSON.stringify(gate)} clears freshness and ignores rejected prior reads`, async h => {
       answerOverview(h); await settle(); h.advance(10000); h.fire(); await failPower(h);
       h.advance(10000); h.fire(); await failPower(h);
-      assert.match(section(h).statusNote, /Older data/);
+      assert.match(section(h).note, /Older data/);
       h.fire();
       const gated = { ...structuredClone(modules), tdp: gate };
       h.callbacks.companion_guard({ ...overviewValues.get_version, modules: gated }); h.render({ modules: gated });
       h.reject('get_settings'); await settle();
       h.callbacks.companion_guard(overviewValues.get_version); h.render({ modules });
-      assert.equal(section(h).statusNote, undefined);
+      assert.equal(section(h).note, undefined);
       assert.notEqual(section(h).description, 'Custom · 23 W');
       answerOverview(h); await settle(); assertPowerSummary(h);
     });
@@ -259,7 +259,7 @@ run(async () => {
     const plugin = h.initialize(); h.dispose = () => { h.unmount(); plugin.onDismount(); };
     h.respond('get_version', overviewValues.get_version); await settle(); h.remount();
     oldRead.settled = true; oldRead.reject(new Error('old plugin disconnected')); await settle();
-    assert.equal(section(h).statusNote, undefined);
+    assert.equal(section(h).note, undefined);
     assert.notEqual(section(h).description, 'Status unavailable');
     answerOverview(h); await settle(); assertPowerSummary(h);
   });
@@ -312,7 +312,7 @@ run(async () => {
     });
   }
   await testOverview('entering a module invalidates old overview values without blocking fresh reads on return', async h => {
-    findSection(h.render(), 'TDP').props.onClick(); h.render();
+    findSection(h.render(), 'TDP').props.onOpen(); h.render();
     h.respond('get_settings', overviewValues.get_settings); await settle();
     findSection(h.render(), 'TDP', 'onBack').props.onBack();
     const returned = h.render();

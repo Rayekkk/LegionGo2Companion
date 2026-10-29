@@ -18,7 +18,9 @@ Guarantees:
   on Windows (a caller's own creationflags are kept, not a duplicate-argument TypeError). Everything else is subprocess.run's (Ayaneo3Companion relies on it): a non-zero exit is returned,
   check=True raises CalledProcessError, a given env is used as it is, input/cwd/user/group reach the child.
 - run_helper(): `python -I` helper with a wall-clock deadline and a cancel flag; on either the child is killed and
-  reaped, so no thread of Decky's executor waits on it (DNS lookups, slow scripts). It answers (returncode, stdout,
+  reaped, so no thread of Decky's executor waits on it (DNS lookups, slow scripts). The stop is reported at most
+  REAP_SECONDS after it: a killed child the system has not let go of by then (a loaded machine) is reaped by a
+  background thread, never a TimeoutExpired in place of the stop or the result. It answers (returncode, stdout,
   stderr), the streams as bytes when piped. On POSIX it starts through posix_spawn (close_fds=False: Python's own
   descriptors are not inheritable), never a full fork of Decky's process, which is slow when that process is
   emulated.
@@ -50,6 +52,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 PYTHON = sys.executable if os.name == "nt" else "/usr/bin/python3"  # Decky's frozen Python cannot run scripts
@@ -58,6 +61,7 @@ _BLOCKED = {"LD_LIBRARY_PATH", "LD_LIBRARY_PATH_ORIG", "LD_PRELOAD", "LD_AUDIT"}
 PR_SET_PDEATHSIG = 1  # <linux/prctl.h>
 HOST_ROOT = "/proc/self/root"  # the host's own /, past an emulator's (FEX's) view of it
 _ELF_MACHINE = slice(18, 20)  # e_machine in an ELF header (little-endian)
+REAP_SECONDS = 3  # run_helper's wait for a killed child; with the 0.2 s poll well inside Decky's 5 s unload
 
 
 @functools.cache
@@ -157,7 +161,10 @@ def run_helper(args, seconds, cancelled=None, *, stopped=None, stdin=subprocess.
     finally:
         if worker.poll() is None:
             worker.kill()
-        worker.communicate(timeout=3)
+        try:
+            worker.communicate(timeout=REAP_SECONDS)
+        except subprocess.TimeoutExpired:  # killed, not yet let go of (a loaded machine): reap it later, answer now
+            threading.Thread(target=worker.communicate, name="dk_process reap", daemon=True).start()
 
 
 def spawn_argv(argv, env):

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
-import { toaster, useQuickAccessVisible } from "@decky/api";
+import { useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, GamepadButton,
-  DropdownItem, Dropdown, DialogHeader, DialogBody, DialogLabel,
-  DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
+  DropdownItem, Dropdown, DialogBody, DialogLabel, DialogFooter, DialogButton, showModal, Spinner } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import { errorText, infoRow, rpc } from "./shared";
+import { CurveAxes, CurveDialog, CurveGraph as Graph, curveLayout, type CurveLayout, type CurveSize, type Point } from "./curve";
+import { errorText, rpc } from "./shared";
+import { colors, infoRow, notify as toast } from "./ui";
 import { curveName as title, editPoint, fanStatus, nudgeSpeed, pointText, saveLabel, speedText } from "../desktop/native/fan.mjs";
 import { FAN_BETA_TEXT } from "../desktop/native/modules.mjs";
 
@@ -70,104 +71,76 @@ const fanReadingLabel = (state?: FanState, now = Date.now()) => {
 export { editPoint, fanStatus };
 const fanMode = (state?: FanState) => fanStatus(state).headline;
 export const fanSummary = (state?: FanState) => `${fanReadingLabel(state)} · ${fanMode(state)}`;
-const notify = (body: string) => toaster.toast({ title: "Fan Control", body });
+const notify = (body: string) => toast("Fan Control", body);
 
-export const graphLayout = (fullscreen: boolean, width=800, height=308) => {
-  if(!fullscreen)return {width:400,height:248,left:76,span:292,bottom:202,rise:170,font:12,scale:1};
-  const viewWidth=Math.max(800,Math.round(width/height*308)),scale=viewWidth/width;
-  return {width:viewWidth,height:308,left:Math.round(viewWidth*.14),span:Math.round(viewWidth*.8),bottom:244,rise:200,font:Math.max(18,14*scale),scale};
-};
+/** Legion's geometry on curve.tsx: wide left margins hold "4800 RPM", the bottom one the degrees and the point line. */
+const FAN_SIZE: CurveSize = { qam: { width: 400, height: 248, font: 12 }, full: { height: 308, minWidth: 800, font: 18 },
+  margins: { left: 6.4, right: 2.6, top: 2.6, bottom: 3.8 } };
+export const graphLayout = (fullscreen: boolean, width = 800, height = 308) => curveLayout(fullscreen, { width, height }, FAN_SIZE);
+const FAN_LEGEND = { [GamepadButton.BUMPER_LEFT]: "Previous point", [GamepadButton.BUMPER_RIGHT]: "Next point" };
 export const CurveGraph: FC<{curve: Curve; selected: number; status: FanState; disabled: boolean; rpmStep: number;
   fullscreen?: boolean;
   select: (point: number) => void; edit: (axis: 0|1, value: number, point?: number) => void}> = ({curve, selected, status, disabled, rpmStep, select, edit, fullscreen=false}) => {
-  const [steering, setSteering] = useState(false);
-  const drag = useRef<{point: number; pointer: number} | null>(null);
-  const svg = useRef<SVGSVGElement | null>(null);
-  const [frame,setFrame]=useState({width:800,height:308});
-  useEffect(()=>{
-    const element=svg.current;if(!fullscreen || !element)return;
-    const update=()=>{const r=element.getBoundingClientRect();if(r.width>0 && r.height>0)setFrame(previous=>Math.abs(previous.width-r.width)<.5 && Math.abs(previous.height-r.height)<.5 ? previous : {width:r.width,height:r.height});};
-    const Observer=element.ownerDocument.defaultView?.ResizeObserver;const observer=Observer ? new Observer(update) : null;
-    observer?.observe(element);update();return()=>observer?.disconnect();
-  },[fullscreen]);
-  const layout=graphLayout(fullscreen,frame.width,frame.height);
-  const {left,span,bottom,rise,font}=layout;
-  const x = (t: number) => left+t*span/100, y = (r: number) => bottom-r/status.limits.max_rpm*rise;
-  const consume = (event: Event) => {event.preventDefault();event.stopPropagation();};
-  const enter = (event: Event) => {if(disabled)return;consume(event);setSteering(true);};
-  const leave = (event: Event) => {consume(event);setSteering(false);};
-  const handleBumper = (event: GamepadEvent) => {
-    const button = event.detail.button;
+  const max = status.limits.max_rpm;
+  /** A gamepad button while editing: LB/RB pick a point, left/right move it 1°C, up/down change its speed by one step. */
+  const press = (button: number) => {
     if (button === GamepadButton.BUMPER_LEFT || button === GamepadButton.BUMPER_RIGHT) {
-      event.preventDefault();event.stopPropagation(); select((selected+(button === GamepadButton.BUMPER_LEFT ? 7 : 1))%8); return;
+      select((selected+(button === GamepadButton.BUMPER_LEFT ? 7 : 1))%8); return true;
     }
-  };
-  const handleDirection = (event: GamepadEvent) => {
-    const button = event.detail.button;
-    if (!steering || disabled) return;
-    if ([GamepadButton.DIR_LEFT,GamepadButton.DIR_RIGHT,GamepadButton.DIR_UP,GamepadButton.DIR_DOWN].includes(button)) {
-      event.preventDefault();event.stopPropagation();
-      if (button === GamepadButton.DIR_LEFT || button === GamepadButton.DIR_RIGHT) edit(0, curve[selected][0]+(button === GamepadButton.DIR_LEFT ? -1 : 1));
-      else edit(1, nudgeSpeed(curve[selected][1], button === GamepadButton.DIR_UP ? rpmStep : -rpmStep, status.limits.min_rpm));
+    if (button === GamepadButton.DIR_LEFT || button === GamepadButton.DIR_RIGHT) { edit(0, curve[selected][0]+(button === GamepadButton.DIR_LEFT ? -1 : 1)); return true; }
+    if (button === GamepadButton.DIR_UP || button === GamepadButton.DIR_DOWN) {
+      edit(1, nudgeSpeed(curve[selected][1], button === GamepadButton.DIR_UP ? rpmStep : -rpmStep, status.limits.min_rpm)); return true;
     }
+    return false;
   };
-  const move = (event: React.PointerEvent<SVGSVGElement>) => {
-    if (disabled || !drag.current || drag.current.pointer !== event.pointerId || !svg.current) return;
-    const matrix = svg.current.getScreenCTM(); if (!matrix) return;
-    const local = svg.current.createSVGPoint();local.x=event.clientX;local.y=event.clientY;
-    const point = local.matrixTransform(matrix.inverse());
-    edit(0,(point.x-left)*100/span,drag.current.point);edit(1, Math.round((bottom-point.y)/rise*status.limits.max_rpm/rpmStep)*rpmStep,drag.current.point);
+  const span = (L: CurveLayout) => L.width-L.left-L.right, rise = (L: CurveLayout) => L.bottom-L.top;
+  // A dragged point goes where the finger is, on both axes.
+  const drag = (point: number, at: Point, _from: Point, L: CurveLayout) => {
+    edit(0,(at.x-L.left)*100/span(L),point);edit(1, Math.round((L.bottom-at.y)/rise(L)*max/rpmStep)*rpmStep,point);
   };
   const fresh = !fanReadingLabel(status).includes("—");
-  return <Focusable data-fan-editor="true" data-fan-editing={steering ? "true" : "false"} tabIndex={0}
-    focusClassName="lg2-fan-graph-focused" onActivate={enter} onOKButton={enter}
-    onCancelButton={steering ? leave : undefined} onButtonDown={steering ? handleBumper : undefined}
-    onGamepadDirection={steering ? handleDirection : undefined} onGamepadBlur={() => setSteering(false)}
-    onOKActionDescription={steering ? undefined : "Edit curve"} onCancelActionDescription={steering ? "Finish editing" : undefined}
-    actionDescriptionMap={steering ? {[GamepadButton.BUMPER_LEFT]:"Previous point",[GamepadButton.BUMPER_RIGHT]:"Next point"} : {}}
-    style={{border:steering ? "2px solid #66c0f4" : "2px solid #52606d", borderRadius:8,width:"100%",boxSizing:"border-box",...(fullscreen ? {height:"100%"} : {})}}>
-    <style>{`.lg2-fan-graph-focused{outline:2px solid #fff;outline-offset:2px}`}</style>
-    <div data-fan-controller-hint="true" style={{padding:"6px 10px",fontSize:fullscreen ? 16 : 12,color:steering ? "#66c0f4" : "#dcdedf"}}>
-      {steering ? "Editing · LB/RB point · ←/→ 1°C · ↑/↓ speed · B finish" : "Focus graph and press A to edit with controller"}
-    </div>
-    <svg ref={svg} data-fan-graph="true" data-fan-graph-layout={fullscreen ? "dialog" : "qam"} role="img" aria-label="Eight-point fan curve. Drag points or press A and use D-pad. LB/RB selects a point. Point eight stays at 100°C and cannot go below the minimum running speed."
-      viewBox={`0 0 ${layout.width} ${layout.height}`} style={{width:"100%",display:"block",touchAction:"none",...(fullscreen ? {height:"calc(100% - 36px)"} : {})}}
-      onPointerMove={move} onPointerUp={event => {drag.current=null;event.currentTarget.releasePointerCapture?.(event.pointerId);}}
-      onPointerCancel={() => {drag.current=null;}} onLostPointerCapture={() => {drag.current=null;}}>
-      <rect x={left} y={y(status.limits.min_rpm)} width={span} height={bottom-y(status.limits.min_rpm)} fill="currentColor" opacity=".05" />
-      {[0,status.limits.min_rpm,status.limits.max_rpm].map(r => <g key={r}>
-        <path d={`M${left} ${y(r)}H${left+span}`} stroke="currentColor" opacity=".2" />
-        <text x={left-7} y={y(r)+4} textAnchor="end" fill="currentColor" fontSize={font}>{speedLabel(r,status)}</text>
-      </g>)}
-      {[0,20,40,60,80,100].map(t => <text key={t} x={x(t)} y={bottom+22} textAnchor="middle" fill="currentColor" fontSize={font}>{t}°</text>)}
-      <path d={`M${left} ${bottom-rise}V${bottom}H${left+span}`} stroke="currentColor" fill="none" opacity=".6" />
-      <polyline points={curve.map(([t,r])=>`${x(t)},${y(r)}`).join(" ")} stroke="#66c0f4" strokeWidth={fullscreen ? 2.5*layout.scale : 2.5} fill="none" />
-      {curve.map(([t,r],i)=><g key={i} onPointerDown={event=>{
-        event.preventDefault();select(i);if(!disabled){drag.current={point:i,pointer:event.pointerId};svg.current?.setPointerCapture(event.pointerId);}
-      }}><circle data-fan-point={i+1} cx={x(t)} cy={y(r)} r={fullscreen ? 22*layout.scale : 16} fill="transparent" />
-        <circle cx={x(t)} cy={y(r)} r={fullscreen ? (i===selected ? 8 : 5)*layout.scale : i===selected ? 7 : 4} fill={i===selected ? "#fff" : "#66c0f4"} stroke="#66c0f4" strokeWidth={fullscreen ? 2*layout.scale : 2} /></g>)}
-      {fresh && <g data-fan-live-marker="true" style={{pointerEvents:"none"}}><circle cx={x(Math.min(100,Math.max(0,status.readings!.apu_temperature!)))}
-        cy={y(Math.min(status.limits.max_rpm,Math.max(0,status.readings!.rpm!)))} r="6" fill="#f5c96b" stroke="#111" strokeWidth="2" />
-        <text x={left} y={fullscreen ? 24 : 18} fill="#f5c96b" fontSize={font}>{`Live tach · ${fanReadingLabel(status)}`}</text></g>}
-      <text x={left} y={fullscreen ? 299 : 240} fill="currentColor" fontSize={font}>{pointText(selected,curve.length,curve[selected][0],speedLabel(curve[selected][1],status))}</text>
-    </svg>
-  </Focusable>;
+  // A tap starts editing as A does (Companion always worked so; DeckyEQ's graph starts only with A).
+  return <Graph<number> fullscreen={fullscreen} disabled={disabled} size={FAN_SIZE} legend={FAN_LEGEND} press={press} drag={drag} tapToEdit
+    label="Eight-point fan curve. Drag points or press A and use D-pad. LB/RB selects a point. Point eight stays at 100°C and cannot go below the minimum running speed."
+    hint={steering => steering ? "Editing · LB/RB point · ←/→ 1°C · ↑/↓ speed · B done" : "Focus graph and press A to edit with controller"}>
+    {({layout: L, grab}) => {
+      const {left,font}=L;
+      const x = (t: number) => left+t*span(L)/100, y = (r: number) => L.bottom-r/max*rise(L);
+      return <>
+        <rect x={left} y={y(status.limits.min_rpm)} width={span(L)} height={L.bottom-y(status.limits.min_rpm)} fill="currentColor" opacity=".05" />
+        <CurveAxes layout={L} x={x} y={y} columns={[]}
+          rows={[0,status.limits.min_rpm,max].map(r => ({value: r, label: speedLabel(r,status)}))} />
+        {[0,20,40,60,80,100].map(t => <text key={t} x={x(t)} y={L.bottom+font*1.8} textAnchor="middle" fill="currentColor" fontSize={font}>{t}°</text>)}
+        <path d={`M${left} ${L.top}V${L.bottom}H${L.width-L.right}`} stroke="currentColor" fill="none" opacity=".6" />
+        <polyline points={curve.map(([t,r])=>`${x(t)},${y(r)}`).join(" ")} stroke={colors.accent} strokeWidth={2.5*L.scale} fill="none" />
+        {curve.map(([t,r],i)=><g key={i} onPointerDown={event=>{select(i);grab(event,i);}}>
+          <circle data-fan-point={i+1} cx={x(t)} cy={y(r)} r={fullscreen ? 22*L.scale : 16} fill="transparent" />
+          <circle cx={x(t)} cy={y(r)} r={(i===selected ? (fullscreen ? 8 : 7) : (fullscreen ? 5 : 4))*L.scale} fill={i===selected ? colors.curve.selected : colors.accent}
+            stroke={colors.accent} strokeWidth={2*L.scale} /></g>)}
+        {fresh && <g data-fan-live-marker="true" style={{pointerEvents:"none"}}><circle cx={x(Math.min(100,Math.max(0,status.readings!.apu_temperature!)))}
+          cy={y(Math.min(max,Math.max(0,status.readings!.rpm!)))} r={6*L.scale} fill={colors.curve.live} stroke={colors.surface} strokeWidth={2*L.scale} />
+          <text x={left} y={font*1.5} fill={colors.curve.live} fontSize={font}>{`Live tach · ${fanReadingLabel(status)}`}</text></g>}
+        <text x={left} y={L.height-font*0.6} fill="currentColor" fontSize={font}>{pointText(selected,curve.length,curve[selected][0],speedLabel(curve[selected][1],status))}</text>
+      </>;
+    }}
+  </Graph>;
 };
 
 type EditorDraft = {curve: Curve; dirty: boolean; revision: number};
 type EditorSnapshot = {scope: string; selected: number; drafts: Record<string, EditorDraft>; rpmStep: number};
+// The dialog's body is the page's full-screen layout, with its own reads while the QAM page waits behind it.
 const FullEditor: FC<{initial: EditorSnapshot; onResult: (result: EditorSnapshot) => void; onClosed: () => void; closeModal?: () => void}> =
-  ({initial,onResult,onClosed,closeModal}) => <ModalRoot className="lg2-fan-dialog" modalClassName="lg2-fan-dialog-layer" bAllowFullSize onCancel={closeModal} closeModal={closeModal}>
-    <style>{`.lg2-fan-dialog{width:min(1120px,94vw)!important;max-width:94vw!important;height:100%!important;max-height:900px!important;min-height:0!important;display:flex!important;flex-direction:column!important;flex:1 1 auto!important;overflow:hidden!important;box-sizing:border-box!important;padding:20px!important}.lg2-fan-dialog-layer{padding:16px!important;overflow:hidden!important;align-items:center!important;justify-content:center!important}.lg2-fan-dialog button{min-height:40px}.lg2-fan-dialog *{box-sizing:border-box}`}</style>
+  ({initial,onResult,onClosed,closeModal}) => <CurveDialog title="Fan curve editor" closeModal={closeModal}>
     <div style={{height:"100%",flex:1,width:"100%",minHeight:0,display:"flex",flexDirection:"column",gap:12}} data-fan-fullscreen="true">
-      <DialogHeader style={{margin:0,flexShrink:0}}>Fan curve editor</DialogHeader>
       <FanPage fullscreen initialEditor={initial} onEditorChange={onResult} onClose={() => {closeModal?.();onClosed();}} />
     </div>
-  </ModalRoot>;
+  </CurveDialog>;
 
 export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; fullscreen?: boolean;
-  initialEditor?: EditorSnapshot; onEditorChange?: (snapshot: EditorSnapshot) => void; onClose?: () => void}> =
-  ({viewVisible=true,isViewVisible=() => true,fullscreen=false,initialEditor,onEditorChange,onClose} = {}) => {
+  initialEditor?: EditorSnapshot; onEditorChange?: (snapshot: EditorSnapshot) => void; onClose?: () => void;
+  /** Leaving the QAM page asks first while any curve has unsaved changes (index.tsx). */
+  guardLeave?: (check: (() => string | null) | null) => void}> =
+  ({viewVisible=true,isViewVisible=() => true,fullscreen=false,initialEditor,onEditorChange,onClose,guardLeave} = {}) => {
   const qamVisible = useQuickAccessVisible();
   const [modalOpen, setModalOpen] = useState(false);
   const pageRoot = useRef<HTMLDivElement | null>(null);
@@ -217,6 +190,11 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     }
   };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; modal.current?.Close();modal.current=null; }; }, []);
+  useEffect(() => {
+    guardLeave?.(() => dirtyRef.current || Object.values(drafts.current).some(entry => entry.dirty)
+      ? "Your unsaved curve changes are lost. The saved curves stay." : null);
+    return () => guardLeave?.(null);
+  }, []);
   useEffect(() => {
     if (!draft) return;
     drafts.current[scope]={curve:clone(draft),dirty,revision:baseRevision.current};
@@ -269,7 +247,8 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
   };
   const failure = (control: string) => failed?.control === control ? failed.text : undefined;
   if (!status || !draft) return <div ref={pageRoot}>{fullscreen ? <DialogBody>{readError || "Reading fan…"}</DialogBody>
-    : <PanelSection>{infoRow("Fan Control", readError || "Reading fan…")}</PanelSection>}</div>;
+    // The page reads again every second by itself: a failed first read shows why, without a button.
+    : <PanelSection>{readError ? infoRow("Fan Control unavailable", readError) : <PanelSectionRow><Spinner /></PanelSectionRow>}</PanelSection>}</div>;
   const limits = status.limits;
   const edit = (axis: 0 | 1, value: number, point=selected) => {
     if (busyRef.current || point===7 && axis===0) return;
@@ -352,11 +331,11 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
         <div><DialogLabel>Speed unit</DialogLabel><Dropdown menuLabel="Speed unit" selectedOption={unit} rgOptions={[{data:"rpm",label:"RPM"},{data:"percent",label:"Percent"}]} disabled={busy} onChange={option=>switchUnit(option.data==="percent")} /></div>
         <div><DialogLabel>Speed edit step</DialogLabel><Dropdown menuLabel="Speed edit step" selectedOption={displayedStep} rgOptions={stepOptions} disabled={busy} onChange={option=>setRpmStep(unit==="percent" ? Math.round(option.data*limits.max_rpm/100) : option.data)} /></div>
       </Focusable>
-      {assignmentMode && <div data-fan-assignment-note="true" style={{color:"#66c0f4",fontSize:13}}>{ASSIGNMENT_NOTE}</div>}
+      {assignmentMode && <div data-fan-assignment-note="true" style={{color:colors.accent,fontSize:13}}>{ASSIGNMENT_NOTE}</div>}
       <div data-fan-dialog-graph="true" style={{minHeight:260,flex:"1 0 260px",maxHeight:480}}>{graph}</div>
       {failed && <div role="status">{failed.text}</div>}
       {scope!=="global" && status.settings.presets[scope] && <DialogButton disabled={busy || dirty} onClick={useGlobal}>Use global curve for {title(scope)}</DialogButton>}
-      <div style={{fontSize:13,color:"#afb7c0"}}>8 points · the 100°C point can't go below {speedLabel(limits.last_min_rpm,status)}{dirty ? " · Unsaved changes" : ""}</div>
+      <div style={{fontSize:13,color:colors.muted}}>8 points · the 100°C point can't go below {speedLabel(limits.last_min_rpm,status)}{dirty ? " · Unsaved changes" : ""}</div>
     </DialogBody>
     <DialogFooter style={{display:"flex",gap:12,margin:0,padding:0,flexShrink:0}}>
       <Focusable flow-children="row" data-fan-footer="true" style={{display:"flex",gap:12,width:"100%"}}>
@@ -370,10 +349,10 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     <PanelSection>
       <div data-fan-summary="true" style={{textAlign:"center",padding:"4px 0 12px"}}>
         <div style={{fontSize:20,fontWeight:600}}>{fanReadingLabel(status,now)}</div>
-        <div style={{fontSize:13,color:"#afb7c0",marginTop:4}}>{fanState.headline}</div>
+        <div style={{fontSize:13,color:colors.muted,marginTop:4}}>{fanState.headline}</div>
       </div>
       {status.beta && infoRow("Beta", FAN_BETA_TEXT)}
-      <PanelSectionRow><ToggleField label="Enable Fan Control" checked={status.settings.enabled}
+      <PanelSectionRow><ToggleField label="Enable fan control" checked={status.settings.enabled}
         disabled={busy || !status.settings.enabled && (!status.supported || !!status.ownership?.blocked || dirty || !!status.needs_curve_review)}
         description={enableDescription}
         onChange={toggle} /></PanelSectionRow>

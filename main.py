@@ -340,11 +340,11 @@ def _guard_component_calls(cls):
                     if module and not self._applies(module):
                         raise RuntimeError('This module does not apply to this console.')
                     if module and not self._module_enabled(module):
-                        raise RuntimeError('This module is disabled. Enable it in Manage Modules.')
+                        raise RuntimeError('This module is disabled. Enable it in Manage modules.')
                     if module and self._still_starting(module):
                         raise RuntimeError('This module is still starting. Try again in a moment.')
                     if module and self._module_health.get(module, {}).get('ready') is False:
-                        raise RuntimeError('This module could not start. Retry it in Manage Modules.')
+                        raise RuntimeError('This module could not start. Retry it in Manage modules.')
                     if name in _BACKGROUND_RPCS:
                         # Register download work before releasing the admission
                         # gate, but never hold hardware controls behind networking.
@@ -723,7 +723,10 @@ class Plugin:
         return "Companion is paused. Restart Decky or the console to resume safely."
 
     def _guard_status(self):
+        account = _session_account()
         return {"version": _plugin_version(),
+                # The panel shows saved files (update ZIP, device report) inside it as ~/…
+                "home": account.pw_dir if account else "",
                 "modules": self._module_status(),
                 "device": dict(self._device),
                 "standalone_plugins": list(self._guard_conflicts),

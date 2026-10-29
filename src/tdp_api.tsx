@@ -3,9 +3,10 @@
 // https://github.com/Rayekkk/LeGoTDP
 // TDP page: backend calls, their types, unit helpers and toasts.
 
-import { callable, toaster } from "@decky/api";
+import { callable } from "@decky/api";
 import { settle, type Result } from "./result";
 import { errorText, rpc } from "./shared";
+import { notify } from "./ui";
 import {
   fromAbsolute, resolvedPreset, simpleTuning, type Caps, type CapsInfo, type CpuPowerControls, type PresetTable,
   type RunningLimits, type TdpInfo,
@@ -79,13 +80,7 @@ export const setEpp            = cpuCall(callable<[string, string, boolean, stri
 
 // ── Toasts ─────────────────────────────────────────────────────────────────────
 
-export const notify = (title: string, body: string) => {
-  try {
-    toaster.toast({ title, body, duration: 4000 });
-  } catch {
-    console.error("[legiongo2companion] tdp.notification_failed");
-  }
-};
+export { notify };
 
 export const notifyFailure = (title: string, err: unknown) => {
   const body = errorText(err ?? "Unknown error");

@@ -26,16 +26,16 @@ run(async () => {
     h.render(); h.reject(read); await settle();
     let view = h.render();
     assert.match(JSON.stringify(view), /status unavailable/, `${component} shows the first read failure`);
-    const retry = findButton(view, 'Retry status');
+    const retry = findButton(view, 'Try again');
     assert.ok(retry, `${component} allows an explicit retry`);
     retry.props.onClick(); retry.props.onClick(); await settle();
     assert.equal(h.calls.filter(c => c.name === read).length, 2, 'retry remains bounded');
     h.reject(read); await settle();
-    assert.ok(findButton(h.render(), 'Retry status'), 'repeated errors remain actionable');
+    assert.ok(findButton(h.render(), 'Try again'), 'repeated errors remain actionable');
     h.visible(false); const before = h.calls.length; h.fire();
     assert.equal(h.calls.length, before, 'failed hidden pages do not poll');
     h.visible(true); h.respond(read, value); await settle();
-    assert.equal(findButton(h.render(), 'Retry status'), undefined, 'successful recovery clears initial error');
+    assert.equal(findButton(h.render(), 'Try again'), undefined, 'successful recovery clears initial error');
     h.unmount();
   }
   for (const spec of [

@@ -24,18 +24,29 @@ logging.getLogger("test_dk_update").addHandler(logging.NullHandler())  # assertL
 REPO, FOLDER, NAME = "Owner/DkPlugin", "DkPlugin", "Dk Plugin"
 
 
+def stamped(entry):
+    """entry as a ZipInfo with a fixed time, so two plugin_zip() calls give the same bytes (a name would get the
+    current DOS time, which ticks every 2 s: a different SHA-256 on a loaded machine)."""
+    if isinstance(entry, zipfile.ZipInfo):
+        return entry
+    info = zipfile.ZipInfo(entry, (2026, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = (0o40775 << 16) | 0x10 if entry.endswith("/") else 0o600 << 16  # what writestr gives a name
+    return info
+
+
 def plugin_zip(version="1.2.0", *, folder=FOLDER, name=NAME, extra=(), drop=(), package=None, manifest=None):
     """A release ZIP: (bytes). extra: (ZipInfo or name, data) entries added; drop: required files left out."""
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(f"{folder}/", b"")
+        z.writestr(stamped(f"{folder}/"), b"")
         files = {"main.py": b"print()", "dist/index.js": b"x", "plugin.json": json.dumps({"name": name, "version": version, **(manifest or {})}),
                  "package.json": json.dumps({"name": package or "dkplugin", "version": version})}
         for rel, data in files.items():
             if rel not in drop:
-                z.writestr(f"{folder}/{rel}", data)
+                z.writestr(stamped(f"{folder}/{rel}"), data)
         for entry, data in extra:
-            z.writestr(entry, data)
+            z.writestr(stamped(entry), data)
     return out.getvalue()
 
 

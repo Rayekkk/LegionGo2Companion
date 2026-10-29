@@ -129,6 +129,54 @@ class RpcTest(unittest.TestCase):
                          "each change of failure once; after a success the same failure is news again")
         self.assertIsNotNone(logs.records[0].exc_info, "an unexpected error keeps its traceback")
 
+    def test_a_returned_fail_is_logged_as_a_refusal_once_until_it_succeeds(self):
+        rpc = dk_rpc.boundary(LOG, log_fails=True)
+        answers = [dk_rpc.fail("Busy.", {"a": 1}), dk_rpc.fail("Busy."), dk_rpc.ok(), dk_rpc.fail("Busy.")]
+
+        class Plugin:
+            @rpc
+            async def set(self):
+                return answers.pop(0)
+
+        async def calls():
+            return [await Plugin().set() for _ in range(len(answers))]
+
+        with self.assertLogs(LOG, "WARNING") as logs:
+            results = asyncio.run(calls())
+        self.assertEqual(results[0], {"ok": False, "error": "Busy.", "state": {"a": 1}}, "the answer as it was")
+        self.assertEqual([(r.levelname, r.getMessage()) for r in logs.records], [("WARNING", "set refused: Busy.")] * 2)
+        self.assertIsNone(logs.records[0].exc_info)
+
+        @dk_rpc.boundary(LOG)
+        async def quiet(self):
+            return dk_rpc.fail("Busy.")
+        with self.assertNoLogs(LOG):  # by default the plugin logs its own refusals, as before
+            self.assertFalse(asyncio.run(quiet(None))["ok"])
+
+    def test_a_shown_refusal_carries_the_state_as_it_is(self):
+        current = {"level": 3}
+
+        async def read_async(plugin):
+            return {**current, "plugin": type(plugin).__name__}
+
+        def broken(plugin):
+            raise KeyError("state")
+
+        for reader, expected in ((lambda plugin: dict(current), {"level": 3}),
+                                 (read_async, {"level": 3, "plugin": "Plugin"}), (broken, None)):
+            rpc = dk_rpc.boundary(LOG, shown=(RuntimeError,), state=reader)
+
+            class Plugin:
+                @rpc
+                async def set(self, kind):
+                    raise RuntimeError("Out of range.") if kind == "refusal" else KeyError("k")
+
+            with self.subTest(expected=expected), self.assertLogs(LOG, "WARNING") as logs:
+                self.assertEqual(asyncio.run(Plugin().set("refusal")), dk_rpc.fail("Out of range.", expected))
+                self.assertNotIn("state", asyncio.run(Plugin().set("bug")), "only refusals carry it, not bugs")
+            if expected is None:
+                self.assertIn("could not be read", logs.output[1], "a failing state is logged, not raised")
+
     def test_the_method_keeps_its_name_and_signature(self):
         rpc = dk_rpc.boundary(LOG)
 

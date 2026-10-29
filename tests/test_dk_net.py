@@ -274,8 +274,9 @@ class ProcessTest(unittest.TestCase):
 
     def test_a_fetch_process_that_cannot_start_is_a_net_error(self):
         with mock.patch.object(dk_process, "PYTHON", os.path.join(tempfile.gettempdir(), "no-such-python")):
-            with self.assertRaisesRegex(dk_net.NetError, "could not start"):
+            with self.assertRaisesRegex(dk_net.NetError, "could not start") as caught:
                 dk_net.get("https://example.test/x", 100, hosts=None)
+        self.assertNotIn(tempfile.gettempdir(), str(caught.exception), "an OSError's path holds the user's name")
 
     def test_bounds_and_hosts_are_required_up_front(self):
         with self.assertRaises(TypeError):

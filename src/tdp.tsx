@@ -2,33 +2,26 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/LeGoTDP
 
-import { ButtonItem, PanelSection, PanelSectionRow, Spinner } from "@decky/ui";
-import { FC } from "react";
-import { infoRow } from "./shared";
+import { FC, useEffect } from "react";
+import { statusPlaceholder } from "./ui";
 import { AppWatcher } from "./tdp_watcher";
 import { CpuPowerControlsSection } from "./tdp_cpu";
 import { useTdpState } from "./tdp_state";
 import { customLimitsSection, moreSection, noticeSection, powerSection } from "./tdp_sections";
 
-export const TdpPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
+export const TdpPage: FC<{ visible?: boolean; guardLeave?: (check: (() => string | null) | null) => void }> =
+  ({ visible: tabShown = true, guardLeave }) => {
   const s = useTdpState(tabShown);
-  const { ready, setupErr, initializing, initialize, enabled, preset, profilePending, profileError, game, perGame,
+  // Leaving the page with Custom limits not applied asks first (index.tsx).
+  useEffect(() => {
+    guardLeave?.(() => s.dirtyRef.current ? "Your Custom limit changes haven't been applied and are lost. The applied limits stay." : null);
+    return () => guardLeave?.(null);
+  }, []);
+  const { ready, setupErr, initialize, enabled, preset, profilePending, profileError, game, perGame,
     acSeparate, editingAc, acOnline, onCpuBusyChange, setCpuNote } = s;
 
-  if (!ready && setupErr) return (
-    <PanelSection title="TDP status unavailable">
-      {infoRow("Error", setupErr)}
-      <PanelSectionRow><ButtonItem disabled={initializing} onClick={() => void initialize()}>
-        Retry status
-      </ButtonItem></PanelSectionRow>
-    </PanelSection>
-  );
-
-  if (!ready) return (
-    <PanelSection title="Initializing...">
-      <PanelSectionRow><Spinner /></PanelSectionRow>
-    </PanelSection>
-  );
+  // The error shows as soon as one read fails, also while others still run; initialize() ignores a click meanwhile.
+  if (!ready) return statusPlaceholder({ label: "TDP status unavailable", error: setupErr, onRetry: () => void initialize() });
 
   return (
     <>

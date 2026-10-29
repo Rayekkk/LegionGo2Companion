@@ -4,9 +4,10 @@
 // https://github.com/Rayekkk/LeGo-Vibe-Control
 // Vibration page: backend calls, their types, toasts and the foreground game watcher.
 
-import { callable, toaster } from "@decky/api";
+import { callable } from "@decky/api";
 import { useCallback, useEffect, useRef } from "react";
 import { errorText, rpc, runningApp, watchRunningApp, type RunningApp } from "./shared";
+import { notify as toast } from "./ui";
 import { settle, type Result } from "./result";
 import { failureText } from "../desktop/native/vibration.mjs";
 
@@ -87,13 +88,7 @@ export const testVibration = rpc<[number], void>("vibe_test_vibration");
 // ── Toasts ────────────────────────────────────────────────────────────────────
 
 // Toasts carry the module name; a failure's body says what failed and why.
-export const notify = (body: string) => {
-  try {
-    toaster.toast({ title: "Vibration", body, duration: 4000 });
-  } catch {
-    console.error("[legiongo2companion] vibration.notification_failed");
-  }
-};
+export const notify = (body: string) => toast("Vibration", body);
 
 export const notifyFailure = (what: string, err: unknown) => {
   console.error("[legiongo2companion] vibration.operation_failed");

@@ -19,7 +19,7 @@ function mount(options = {}) {
       get_game_profile: id => id === '222' ? profile(22, true) : options.firstProfile ?? profile(11),
       ...options.responses } });
   h.exports.AppWatcher.start();
-  return { calls: h.calls, timers: h.timers, toasts, modals, responses: h.responses, render: () => h.render(), get writes() { return h.writes; },
+  return { calls: h.calls, timers: h.timers, toasts, modals, responses: h.responses, render: () => h.render(), renderWith: props => h.render(props), get writes() { return h.writes; },
     defer: h.defer, pending: h.pending,
     resolve(call, value) { h.settle(call, value); },
     reject(call, message = 'old game request failed') { h.settle(call, new Error(message), true); },
@@ -91,22 +91,22 @@ run(async () => {
   });
   await test('first readiness failure is actionable and double retry is coalesced', async () => {
     const h = mount(); h.defer('is_ready'); h.render(); h.reject(h.pending('is_ready'), 'Decky offline'); await settle();
-    const view = h.render(); assert.match(field(view, 'Error').props.description, /Decky offline/);
-    const retry = button(view, 'Retry status'); assert.ok(retry);
+    const view = h.render(); assert.match(field(view, 'TDP status unavailable').props.description.props.children, /Decky offline/);
+    const retry = button(view, 'Try again'); assert.ok(retry);
     h.defer('is_ready'); retry.props.onClick(); retry.props.onClick(); await settle();
     assert.equal(count(h, 'is_ready'), 2);
     h.resolve(h.pending('is_ready'), { ready: true }); await settle();
-    assert.ok(field(h.render(), 'Enable TDP control')); assert.equal(button(h.render(), 'Retry status'), undefined);
+    assert.ok(field(h.render(), 'Enable TDP control')); assert.equal(button(h.render(), 'Try again'), undefined);
     h.unmount();
   });
   await test('failed initial settings are shown before sibling reads finish', async () => {
     const h = mount(); h.defer('get_settings'); h.defer('get_power_source'); h.render(); await settle();
     h.reject(h.pending('get_settings'), 'settings unreadable'); await settle();
-    assert.match(field(h.render(), 'Error').props.description, /settings unreadable/);
-    button(h.render(), 'Retry status').props.onClick(); await settle();
+    assert.match(field(h.render(), 'TDP status unavailable').props.description.props.children, /settings unreadable/);
+    button(h.render(), 'Try again').props.onClick(); await settle();
     assert.equal(count(h, 'get_power_source'), 1, 'a still-running sibling read is not duplicated');
     h.resolve(h.pending('get_power_source'), { ac: false }); await settle();
-    button(h.render(), 'Retry status').props.onClick(); await settle(); assert.ok(field(h.render(), 'Enable TDP control')); h.unmount();
+    button(h.render(), 'Try again').props.onClick(); await settle(); assert.ok(field(h.render(), 'Enable TDP control')); h.unmount();
   });
   await test('automatic initialization retry is bounded and stops when hidden or unmounted', async () => {
     const h = mount({ responses: { is_ready: () => { throw Error('offline'); } } }); await ready(h);
@@ -420,6 +420,13 @@ run(async () => {
     assert.equal(h.modals.length, 1, 'a preset needs no confirmation');
     assert.deepEqual(Array.from(h.calls.filter(c => c.name === 'apply_tdp').at(-1).args), [16000, 25000, 30000, '', 'balanced', '111']);
     assert.equal(custom(), undefined); h.unmount();
+  });
+  await test('leaving the page asks first only while Custom limits are not applied', async () => {
+    const h = mount(); let check; h.renderWith({ guardLeave: fn => { check = fn; } }); await ready(h);
+    assert.equal(check(), null, 'nothing unsaved: leaving asks nothing');
+    field(h.render(), 'Sustained power · 15 W').props.onChange(18);
+    assert.match(check(), /Custom limit changes haven't been applied and are lost/);
+    h.unmount(); assert.equal(check, null, 'an unmounted page leaves no check behind');
   });
   await test('preset buttons apply on click; the selected one is marked and disabled; Custom applies nothing', async () => {
     const h = mount(); await ready(h);

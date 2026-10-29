@@ -227,6 +227,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(response["version"], json.loads((ROOT / "plugin.json").read_text())["version"])
         self.assertIsInstance(response["standalone_plugins"], list)
 
+    def test_get_version_names_the_console_users_home_for_the_panel_paths(self):
+        account = types.SimpleNamespace(pw_dir="/home/deck", pw_uid=1000)
+        with patch.object(main, "_session_account", return_value=account):
+            self.assertEqual(asyncio.run(support.LegacyPlugin().get_version())["home"], "/home/deck")
+        with patch.object(main, "_session_account", return_value=None):
+            self.assertEqual(asyncio.run(support.LegacyPlugin().get_version())["home"], "")
+
 
 class RootForwardingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):

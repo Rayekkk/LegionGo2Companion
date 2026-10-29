@@ -8,12 +8,12 @@ import {
   PanelSection,
   PanelSectionRow,
   SliderField,
-  Spinner,
   ToggleField,
 } from "@decky/ui";
 import { addEventListener, removeEventListener, useQuickAccessVisible } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
-import { detailsRows, errorText, infoRow, mutationQueue } from "./shared";
+import { errorText, mutationQueue } from "./shared";
+import { detailsRows, infoRow, statusPlaceholder } from "./ui";
 import { betaText, driverNotice, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 import {
   AppWatcher, checkResult, DEFAULT_APP, getCapabilities, getDriverStatus, getSettings, isReady, notify, notifyFailure,
@@ -380,25 +380,8 @@ const LGoVibeControl = ({ strengthOnly = false }: { strengthOnly?: boolean }) =>
     setLoadAttempt(attempt => attempt + 1);
   };
 
-  if (loadError) return <PanelSection title="Vibration settings unavailable">
-    {infoRow("Could not load settings", loadError)}
-    <PanelSectionRow><ButtonItem layout="below" onClick={retryLoad}>Retry settings</ButtonItem></PanelSectionRow>
-  </PanelSection>;
-
-  if (setupErr) return <PanelSection title="Vibration unavailable">
-    {infoRow("Could not start vibration control", setupErr)}
-    <PanelSectionRow><ButtonItem layout="below" onClick={retryLoad}>Retry settings</ButtonItem></PanelSectionRow>
-  </PanelSection>;
-
-  if (loading) {
-    return (
-      <PanelSection title="Initializing...">
-        <PanelSectionRow>
-          <Spinner />
-        </PanelSectionRow>
-      </PanelSection>
-    );
-  }
+  if (loadError || setupErr || loading) return statusPlaceholder({
+    label: loadError ? "Vibration settings unavailable" : "Vibration unavailable", error: loadError || setupErr, onRetry: retryLoad });
 
   const driverFound = driver?.found ?? false;
   const missingDriver = driverNotice(driver);

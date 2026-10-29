@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-# Shared from DeckyKit (shared/backend/dk_net.py): change it there, then `kit sync`. Needs dk_process.py.
+# Shared from DeckyKit (shared/backend/dk_net.py): change it there, then `kit sync`. Needs dk_process.py and dk_fs.py.
 
 """HTTPS downloads a plugin can trust: verified, bounded in size and time, pinned by hash when it matters.
 
@@ -34,10 +34,11 @@ Guarantees:
 - With `sha256` given, other content is refused (Mismatch) and nothing is kept.
 - download() spools the body to an anonymous temp file in dest's folder (SteamOS's /tmp is RAM), checks size
   and hash, then publishes it with dk_fs.write_atomic (no symlinks as root, fsync of file and folder, owner and mode
-  kept); on any failure dest is untouched. Needs dk_fs.py. spool() hands the same checked body over as an open
+  kept); on any failure dest is untouched. spool() hands the same checked body over as an open
   anonymous file in a folder of the caller's choice (content to decode or unpack, never kept as it is); nothing
   is left on disk once it is closed or after a failure.
-- Error messages (NetError and subclasses) say what went wrong without the URL; the caller says what it fetched.
+- Error messages (NetError and subclasses) say what went wrong without the URL, and an OSError of the plugin's side
+  (a full disk, a fetch process that cannot start) without its path (dk_fs.shown); the caller says what it fetched.
 
 Deliberately not here: retries (the user presses again), GitHub release parsing and per-request redirect
 policies such as Legion's metadata/archive (the shared updater passes `hosts` and `redirects`), proxies, cookies,
@@ -252,7 +253,8 @@ def _run(url, body, limit, headers, hosts, deadline, cancel, redirects, byte_ran
         except InterruptedError as e:
             raise NetError("cancelled") from e
         except (OSError, ValueError) as e:
-            raise NetError(f"the download process could not start ({e})") from e
+            import dk_fs
+            raise NetError(f"the download process could not start ({dk_fs.shown(e)})") from e
         status.seek(0)
         try:
             result = json.loads(status.read(16384))
@@ -275,7 +277,8 @@ def _run(url, body, limit, headers, hosts, deadline, cancel, redirects, byte_ran
 
 def _disk(e):
     """A local file error as a NetError, without the path (it may hold the user's name)."""
-    return NetError(f"the file could not be saved ({e.strerror or type(e).__name__})")
+    import dk_fs
+    return NetError(f"the file could not be saved ({dk_fs.shown(e)})")
 
 
 def get(url, limit, sha256=None, *, hosts, redirects=True, headers=None, deadline=DEADLINE, cancel=None,

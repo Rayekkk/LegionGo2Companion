@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
-import { toaster } from "@decky/api";
-import { ButtonItem, ConfirmModal, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
+import { ButtonItem, Field, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import { errorText, infoRow, rpc } from "./shared";
+import { errorText, rpc } from "./shared";
+import { colors, confirmAction, infoRow, notify as toast } from "./ui";
 import { BUSY_LABELS as busyPhases, installConfirm, PHASE_LABELS as phaseLabel, RISK_NOTICE } from "../desktop/native/firmware.mjs";
 
 type FirmwareComponent = { id: string; label: string; installed: string; available: string; newer: boolean; downloaded: boolean };
@@ -114,7 +114,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
     if (!allowUpdates || mutating.current) return;
     const latest = statusRef.current;
     if (latest && (latest.phase !== "downloaded" || latest.token !== token)) {
-      toaster.toast({ title: "Controller firmware", body: "The download changed. Check for updates again." });
+      toast("Controller firmware", "The download changed. Check for updates again.");
       return;
     }
     mutating.current = true; revision.current++;
@@ -126,7 +126,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
     } catch (failure) {
       const text = errorText(failure, "The firmware update did not start. Check for updates again.");
       console.warn("[legiongo2companion] firmware.step_failed");
-      toaster.toast({ title: "Controller firmware", body: text });
+      toast("Controller firmware", text);
       if (mounted.current) { invalidate(); setStepError(text); }
     } finally { mutating.current = false; if (mounted.current) setSubmitting(false); }
   };
@@ -134,9 +134,7 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
     const seen = statusRef.current;
     if (!seen || seen.phase !== "downloaded" || !seen.install_enabled || !freshRef.current) return;
     const ask = installConfirm(seen);
-    showModal(<ConfirmModal strTitle={ask.title} strOKButtonText={ask.ok}
-      strDescription={<div style={{ whiteSpace: "pre-line" }}>{ask.text}</div>}
-      onOK={() => void install(seen.token)} />);
+    confirmAction(ask.title, <div style={{ whiteSpace: "pre-line" }}>{ask.text}</div>, ask.ok, () => void install(seen.token));
   };
   const act = () => {
     const phase = statusRef.current?.phase || "";
@@ -150,8 +148,8 @@ export const FirmwarePanel: FC<{ visible: boolean; allowUpdates?: boolean }> = (
   const rows = (state?.components || []).filter(c => c && (c.installed || c.available));
   return <PanelSection title="Controller firmware">
     <PanelSectionRow><div style={{ background: "rgba(236, 99, 112, 0.12)", border: "1px solid rgba(236, 99, 112, 0.45)", borderRadius: 10, padding: "4px 12px" }}>
-      <Field focusable label={<span style={{ color: "#ff9ca6", fontWeight: 600 }}>{RISK_NOTICE.title}</span>}
-        description={<span style={{ color: "#ff9ca6" }}>{RISK_NOTICE.text}</span>} />
+      <Field focusable label={<span style={{ color: colors.error, fontWeight: 600 }}>{RISK_NOTICE.title}</span>}
+        description={<span style={{ color: colors.error }}>{RISK_NOTICE.text}</span>} />
     </div></PanelSectionRow>
     {infoRow(fresh ? phaseLabel[phase] : state ? "Status unavailable" : "Controller firmware",
       fresh ? state?.error || state?.message || "" : "Wait for a fresh firmware status before updating.")}

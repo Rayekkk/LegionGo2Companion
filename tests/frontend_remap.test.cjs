@@ -44,7 +44,7 @@ run(async () => {
     assert.equal(find(h.render(), 'Desktop button').props.selectedOption, 'f1', 'the refusal status replaces the choice');
     assert.equal(reads(), 1, 'a refusal with its status needs no re-read');
     find(h.render(), 'Desktop button').props.onChange({ data: 'f3' }); await settle();
-    h.respond('remap_set_action', { ok: false, error: 'This module is disabled. Enable it in Manage Modules.' }); await settle();
+    h.respond('remap_set_action', { ok: false, error: 'This module is disabled. Enable it in Manage modules.' }); await settle();
     assert.match(find(h.render(), 'Desktop button').props.description, /could not be confirmed/);
     assert.equal(reads(), 2, 'a refusal without status re-reads it');
     h.respond('remap_get_status', remap); await settle();

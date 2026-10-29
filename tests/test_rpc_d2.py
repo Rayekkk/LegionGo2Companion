@@ -44,7 +44,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         plugin = self.plugin()
         plugin._module_state['rgb'] = {'enabled': False}
         self.assertEqual(await plugin.rgb_get_status(),
-                         {'ok': False, 'error': 'This module is disabled. Enable it in Manage Modules.'})
+                         {'ok': False, 'error': 'This module is disabled. Enable it in Manage modules.'})
         plugin._rgb.set_color = AsyncMock(side_effect=ValueError('Hue must be 0-360.'))
         plugin._module_state['rgb'] = {'enabled': True}
         self.assertEqual(await plugin.rgb_set_color(400, 50), {'ok': False, 'error': 'Hue must be 0-360.'})

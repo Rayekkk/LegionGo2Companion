@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -138,7 +139,29 @@ class ProcessTest(unittest.TestCase):
                 real(*a, **k)) or started[-1]):
             with self.assertRaises(InterruptedError):
                 dk_process.run_helper(["-c", "print('done')"], 30, lambda: next(flips, True))
+        deadline = time.monotonic() + 30  # a loaded machine may leave the reap to run_helper's background thread
+        while started[0].returncode is None and time.monotonic() < deadline:
+            time.sleep(0.05)
         self.assertIsNotNone(started[0].returncode, "reaped, no zombie")
+
+    def test_a_killed_helper_slow_to_go_does_not_hide_the_stop(self):
+        reaped = threading.Event()
+
+        def communicate(timeout=None):
+            if timeout is None:  # the background reap
+                reaped.set()
+                return b"", None
+            raise subprocess.TimeoutExpired("helper", timeout)
+        with mock.patch.object(dk_process.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
+            popen.return_value.communicate.side_effect = communicate
+            with self.assertRaises(TimeoutError):
+                dk_process.run_helper(["-c", "pass"], 0.3)
+            with self.assertRaises(InterruptedError):
+                dk_process.run_helper(["-c", "pass"], 30, iter([False, True]).__next__)
+        self.assertEqual(popen.return_value.kill.call_count, 2)
+        self.assertTrue(reaped.wait(5), "reaped in the background, not left a zombie")
+        self.assertLessEqual(dk_process.REAP_SECONDS, 3, "Decky kills a plugin whose unload takes over 5 s")
 
     def test_a_cancelled_helper_never_starts(self):
         with mock.patch.object(dk_process.subprocess, "Popen") as popen, self.assertRaises(InterruptedError):

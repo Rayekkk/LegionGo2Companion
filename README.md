@@ -158,7 +158,7 @@ logged and does not pause Companion; failure to inspect the plugin directory its
 blocks controls.
 
 Companion keeps its own settings when it is installed again or updated. After installation,
-check **Manage Modules**.
+check **Manage modules**.
 
 </details>
 
@@ -196,14 +196,14 @@ folders after uninstalling for a full cleanup.
 
 ## Quick start
 
-Open Companion in Decky. **Hardware Controls** shows a short status for each module. Select
-a row to open its page and use **‹ All Controls** to go back.
+Open Companion in Decky. **Hardware controls** shows a short status for each module. Select
+a row to open its page and use **‹ All Controls** or B to go back.
 
-<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware Controls menu with module status summaries" width="360"></a>
+<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Hardware controls menu with module status summaries" width="360"></a>
 
-1. Open **Manage Modules** and keep the modules you want to use.
+1. Open **Manage modules** and keep the modules you want to use.
 2. For game-specific power or vibration, start the game first. On **TDP** choose **This game** under **Settings for &lt;game&gt;**; on **Vibration** turn on **Per-game profile**.
-3. For custom cooling, open **Fan Control**, check the curve, save any edits, then turn on **Enable Fan Control**.
+3. For custom cooling, open **Fan Control**, check the curve, save any edits, then turn on **Enable fan control**.
 4. Results appear as short notifications. If something fails, the reason stays under that control; **Show details** at the end of each page has the technical facts.
 
 Your settings stay saved across reboots and come back after sleep. Fan Control resumes your
@@ -220,12 +220,12 @@ The screenshots in this guide are full 1920 × 1066 PNGs: click one to open it.
 
 ## Using the modules
 
-### Manage Modules
+### Manage modules
 
 Turn a module off to stop its work, give its hardware back to the system and hide its page.
 Its settings are kept for when you turn it on again.
 
-<a href="docs/screenshots/manage-modules.png"><img src="docs/screenshots/manage-modules.png" alt="Manage Modules switches in the Steam overlay" width="360"></a>
+<a href="docs/screenshots/manage-modules.png"><img src="docs/screenshots/manage-modules.png" alt="Manage modules switches in the Steam overlay" width="360"></a>
 
 <details>
 <summary><b>What each module restores when turned off</b></summary>
@@ -307,7 +307,7 @@ charger; Maximum and Custom are unchanged. Off, the presets use the charger valu
 
 Turning **Allow up to 50 W** off lowers saved boosts above the standard limits. If the helper is
 unavailable, the normal range and your profiles stay available; use **Retry helper download**
-when offered. If status or a profile could not load, use **Retry status** or **Retry profile**.
+when offered. If status or a profile could not load, use **Try again** or **Retry profile**.
 
 </details>
 
@@ -318,7 +318,7 @@ Fan Control starts with the **Balanced** curve and stays off until you turn it o
 <a href="docs/screenshots/fan-control.png"><img src="docs/screenshots/fan-control.png" alt="Fan Control readings, enable switch and fan curve" width="360"></a>
 
 1. Check the curve, adjust it if you like and press **Save global curve**.
-2. Turn on **Enable Fan Control**. Turn it off at any time to return to the fan's automatic mode.
+2. Turn on **Enable fan control**. Turn it off at any time to return to the fan's automatic mode.
 
 The graph has **8 points from 0 to 100°C**. Drag a point, or focus the graph and use the controller:
 
@@ -328,7 +328,7 @@ The graph has **8 points from 0 to 100°C**. Drag a point, or focus the graph an
 | LB / RB | Select the previous / next point |
 | D-pad left / right | Change the temperature by 1°C |
 | D-pad up / down | Change the speed by the selected step |
-| B | Finish editing |
+| B | Done (finish editing) |
 
 **Starting curve** offers **Silent**, **Balanced** and **Aggressive** as starting points to edit.
 **Full screen curve editor** gives you more room.
@@ -406,7 +406,7 @@ settings; they apply whenever the game starts.
 
 - **Reset to defaults** resets the selected global or game profile.
 - **Show details** shows the controller driver and its endpoints.
-- **Retry settings** reloads the settings after a load failure.
+- **Try again** reloads the settings after a load failure.
 
 The available modes come from the controller driver. Saved vibration settings are reapplied
 after controller reconnection and wake.
@@ -646,13 +646,13 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | What you see | What to do |
 |---|---|
 | All modules paused | Uninstall LeGoTDP, LeGo Vibe Control and LeGo2 Brightness Fix, then restart Decky or the console. |
-| A module is missing | Check **Manage Modules**: a disabled module is hidden; a failed start or cleanup has a retry button there. |
+| A module is missing | Check **Manage modules**: a disabled module is hidden; a failed start or cleanup has a retry button there. |
 | A control is unavailable | Read the reason on the page; some controls need system drivers or a specific model. |
 | Fan Control is not available | Check your model in [Requirements](#requirements). |
 | Another app controls the fan | Stop the other fan tool and let it return the fan to automatic. |
 | Fan Control turned off after an error | Read the reason, let recovery finish, check your curve, then turn it on again. |
 | Turned off: the BIOS/EC version changed how the fan is controlled | The check after a firmware update failed. Turn Fan Control on again to repeat it; if it keeps failing, report it with your BIOS and EC versions. |
-| My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable Fan Control**. |
+| My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable fan control**. |
 | A curve point will not move further | Temperatures stay in order and speeds cannot drop between points; the last point stays at 100°C and at least 2000 RPM. |
 | The gyro test works but the game does not react | Check that game's Steam Input layout. |
 | The controllers stopped working, often after sleep | Companion restarts SteamOS's InputPlumber by itself when it has lost the controllers (at most once per 10 minutes, and three times until Decky or the console restarts); if they still do not respond, restart the console. |
@@ -742,7 +742,7 @@ Settings use atomic replacement and backup/recovery handling. Failed changes ret
 information; controls pause if settings cannot be recovered. Restoration only changes state
 still owned by Companion, preserving conflicting external changes. TDP/CPU and Vibration capture
 the system's own values before their first change and restore them on withdrawal; installs from
-before 2.2 without captured values fall back to the defaults listed under Manage Modules.
+before 2.2 without captured values fall back to the defaults listed under Manage modules.
 Interrupted cleanup is also retried during uninstall when Companion is not paused by a plugin
 conflict.
 

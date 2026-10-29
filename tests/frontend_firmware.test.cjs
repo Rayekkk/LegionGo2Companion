@@ -46,6 +46,8 @@ run(async()=>{
   h.button().props.onClick();await settle();
   assert.equal(h.count('firmware_install'),0,'Install only opens a confirmation');
   assert.equal(h.modals.length,1);const modal=h.modals[0];
+  assert.deepEqual([modal.props.strTitle,modal.props.strOKButtonText,modal.props.strCancelButtonText,modal.props.bDestructiveWarning],
+    ['Install controller firmware?','Install','Cancel',false],'the shared confirmation: a question, its verb and Cancel');
   assert.ok(JSON.stringify(h.nodes(modal.props.strDescription)).includes('Left controller: 260310A → 260401A'));
   assert.ok(JSON.stringify(h.nodes(modal.props.strDescription)).includes('AC power'));
   modal.props.onOK();modal.props.onOK();await settle();

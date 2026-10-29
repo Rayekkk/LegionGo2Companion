@@ -278,7 +278,7 @@ run(async () => {
     [{ ok: false, error: 'Permission denied', state: { error: 'unexpected', message: 'Permission denied' } }, 'Permission denied'],
     [{ ok: false, error: 'This feature is turned off in Modules.' }, 'Wi-Fi status is unavailable. Retrying while this page is open.']]) {
     const h = harness('wifi.tsx', 'WifiPage'); h.render(); h.respond('wifi_get_status', answer); await settle();
-    assert.equal(find(h.render(), 'Wi-Fi status unavailable').props.description, text);
+    assert.equal(find(h.render(), 'Wi-Fi status unavailable').props.description.props.children, text);
     h.unmount();
   }
   const guarded = harness('wifi.tsx', 'WifiPage'); guarded.render(); guarded.respond('wifi_get_status', wifi); await settle();

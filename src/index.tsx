@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { addEventListener, removeEventListener, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
+import { addEventListener, callable, removeEventListener, definePlugin, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
-  Field,
   PanelSection,
   PanelSectionRow,
+  Spinner,
   staticClasses,
   ToggleField,
 } from "@decky/ui";
@@ -20,9 +20,12 @@ import { RgbPage, rgbSummary } from "./rgb";
 import { RemapPage, remapSummary } from "./remap";
 import { BatteryPage, batterySummary } from "./battery";
 import { ControllerPage, controllerSummary } from "./controller";
-import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
+import { DeviceReportSection } from "./report";
+import { AboutPage, UpdateController, type UpdateCheck, type UpdateDownload } from "./about";
 import { FirmwarePanel } from "./firmware";
-import { errorText, infoRow, rpc } from "./shared";
+import { errorText, rpc } from "./shared";
+import type { Result } from "./result";
+import { confirmAction, infoRow, notify as toast, PageHeader, PageShell, SectionLink } from "./ui";
 import { configureOverviewModules, currentOverview, displaySummary, EMPTY_MODULES, guardOverview, invalidateOverviewReads,
   moduleEnabled, type ModuleKey, type ModuleStates, type Overview, overviewDescription, overviewNote, pauseOverview,
   PLUGIN_VERSION, pollOverview, resetOverview, tdpSummary, vibrationSummary, watchOverview } from "./overview";
@@ -46,8 +49,15 @@ interface GuardStatus {
   restart_required?: boolean;
   guard_error?: string;
   message?: string;
+  /** The console user's home folder: saved files show as ~/… */
+  home?: string;
 }
 const getVersion = rpc<[], GuardStatus>("get_version");
+// One updater per plugin load: a check or download keeps running while the QAM is closed or the page changes.
+type Fields<T> = Omit<T, "ok" | "error">;
+const checkUpdates = callable<[], Result<Fields<UpdateCheck>>>("updates_check");
+const downloadUpdate = callable<[string], Result<Fields<UpdateDownload>>>("updates_download");
+let updates: UpdateController | null = null;
 let guardStatus: GuardStatus | null = null;
 const guardListeners = new Set<(status: GuardStatus) => void>();
 let tdpWatcherEnabled = false;
@@ -102,22 +112,8 @@ const refreshGuard = async () => {
   } finally { if (guardRead === request) guardRead = null; }
 };
 
-const PageShell: FC<{ children: ReactNode; rootRef?: {current: HTMLDivElement | null} }> = ({ children, rootRef }) => (
-  <div ref={rootRef} data-companion-page style={{ width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden", boxSizing: "border-box" }}>
-    {children}
-  </div>
-);
-
-const Chevron: FC = () => (
-  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"
-    style={{ display: "block", width: "1em", height: "1em", flexShrink: 0 }}>
-    <path d="m9 18 6-6-6-6" />
-  </svg>
-);
-
-// Field supplies Steam's label, spacing, focus highlight and activation. The
-// decorative icons inherit that same color, including its focused appearance.
-const sectionIconPaths: Record<SectionKey, ReactNode> = {
+// The menu's icons (paths for the shared Icon, which takes Steam's text and focus color).
+const sectionIcons: Record<SectionKey, ReactNode> = {
   tdp: <path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z" />,
   fan: <><circle cx="12" cy="12" r="2" /><path d="M12 10C4 1 1 12 10 12M14 12c9-8-2-11-2-2M12 14c8 9 11-2 2-2M10 12c-9 8 2 11 2 2" /></>,
   vibration: <><rect x="7" y="5" width="10" height="14" rx="2" /><path d="m3 7-1 3 1 4-1 3m19-10 1 3-1 4 1 3" /></>,
@@ -129,63 +125,6 @@ const sectionIconPaths: Record<SectionKey, ReactNode> = {
   wifi: <><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0m-11 4a6 6 0 0 1 8 0" /><circle cx="12" cy="20" r=".8" /></>,
   modules: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
   about: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10h.01" /></>,
-};
-const SectionIcon: FC<{ section: SectionKey }> = ({ section }) => (
-  <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
-    style={{ display: "block", width: "1.2em", height: "1.2em", flexShrink: 0 }}>
-    {sectionIconPaths[section]}
-  </svg>
-);
-
-const SectionLink: FC<{
-  section: SectionKey;
-  title: string;
-  description: string;
-  statusNote?: string;
-  restoreFocus?: boolean;
-  onClick: () => void;
-}> = ({ section, title, description, statusNote, restoreFocus, onClick }) => {
-  const fieldRef = useRef<HTMLDivElement>(null);
-  const visible = useQuickAccessVisible();
-  useEffect(() => {
-    if (restoreFocus && visible) fieldRef.current?.focus();
-    // Returning to the list restores its selection once. QAM/dropdown visibility
-    // and status polling must not move the user's current Steam focus.
-  }, [restoreFocus]);
-  return (
-  <PanelSectionRow>
-    <Field
-      ref={fieldRef}
-      label={title}
-      icon={<SectionIcon section={section} />}
-      bottomSeparator="standard"
-      verticalAlignment="center"
-      description={statusNote ? <>{description}<div style={{ fontSize: "11px", opacity: 0.7, marginTop: "2px" }}>{statusNote}</div></> : description}
-      childrenLayout="inline"
-      childrenContainerWidth="min"
-      focusable
-      highlightOnFocus
-      onActivate={onClick}
-    >
-      <Chevron />
-    </Field>
-  </PanelSectionRow>
-  );
-};
-
-const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBack }) => {
-  const backRef = useRef<HTMLDivElement>(null);
-  const visible = useQuickAccessVisible();
-  useEffect(() => {
-    if (visible) backRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    // One focus handoff on page entry, never on a poll or dropdown dismissal.
-  }, []);
-  return <PanelSection title={title}>
-    <PanelSectionRow>
-      <div ref={backRef}><ButtonItem layout="below" onClick={onBack}>‹ All Controls</ButtonItem></div>
-    </PanelSectionRow>
-  </PanelSection>;
 };
 
 const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, device }) => {
@@ -208,9 +147,10 @@ const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, d
   };
   const fail = (key: ModuleKey, text: string) => {
     setError({key, text});
-    toaster.toast({title: moduleLabels[key], body: text});
+    toast(moduleLabels[key], text);
   };
-  return <PanelSection title="Manage Modules">
+  // The page header already says "Manage modules".
+  return <PanelSection>
     {infoRow("Choose your modules", "Turning a module off stops it and hides it. Its settings are kept.")}
     {(Object.keys(moduleLabels) as ModuleKey[]).filter(name => moduleShown(modules[name])).map(name => <PanelSectionRow key={name}>
       <ToggleField label={moduleLabels[name]} checked={moduleChecked(modules[name])} disabled={busy !== null || moduleLocked(modules[name])}
@@ -223,7 +163,7 @@ const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, d
   </PanelSection>;
 };
 
-const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPTY_MODULES, device = {}} = {}) => {
+const Controls: FC<{modules?: ModuleStates; device?: Device; home?: string}> = ({modules = EMPTY_MODULES, device = {}, home = ""} = {}) => {
   const visible = useQuickAccessVisible();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [onScreen, setOnScreen] = useState(true);
@@ -243,6 +183,9 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
     return () => observer.disconnect();
   }, []);
   const lastOpenedSection = useRef<SectionKey | null>(null);
+  // An open page with unsaved edits (Fan curve, TDP Custom limits) says what leaving it drops; null when nothing would.
+  const unsaved = useRef<(() => string | null) | null>(null);
+  const guardLeave = (check: (() => string | null) | null) => { unsaved.current = check; };
   const openSection = (section: SectionKey) => {
     lastOpenedSection.current = section;
     setActiveSection(section);
@@ -280,49 +223,53 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
     return text ? infoRow(moduleLabels[module], text) : null;
   };
   const summary = (module: ModuleKey, description: string) => ({
-    description: overviewDescription(overview, module, description), statusNote: overviewNote(overview, module),
+    description: overviewDescription(overview, module, description), note: overviewNote(overview, module),
   });
+  // Coming back from a page focuses its row once, and only while the menu is shown (SectionLink reads it on mount).
+  const link = (section: SectionKey, title: string, text: { description: string; note?: string }) =>
+    <SectionLink icon={sectionIcons[section]} title={title} focus={visible && focusSection === section}
+      onOpen={() => openSection(section)} {...text} />;
 
   if (!activeSection) return <PageShell rootRef={panelRef}>
-    <PanelSection title="Hardware Controls">
+    <PanelSection title="Hardware controls">
       {betaNoticeTitle(device) && infoRow(betaNoticeTitle(device), betaNoticeText(device))}
       {Object.values(modules).some(state => state?.maintenance) && infoRow("Controller controls paused", "Firmware maintenance is in progress. Saved controller settings have not been changed.")}
-      {moduleEnabled(modules, "tdp") && <SectionLink section="tdp" restoreFocus={focusSection === "tdp"} title={moduleLabels.tdp} {...summary("tdp", tdpSummary(overview.tdp))} onClick={() => openSection("tdp")} />}{startingRow("tdp")}
-      {moduleEnabled(modules, "fan") && <SectionLink section="fan" restoreFocus={focusSection === "fan"} title={moduleLabels.fan} {...summary("fan", fanSummary(overview.fan))} onClick={() => openSection("fan")} />}{startingRow("fan")}
-      {moduleEnabled(modules, "vibration") && <SectionLink section="vibration" restoreFocus={focusSection === "vibration"} title={moduleLabels.vibration} {...summary("vibration", vibrationSummary(overview, strengthOnly(device)))} onClick={() => openSection("vibration")} />}{startingRow("vibration")}
-      {moduleEnabled(modules, "rgb") && <SectionLink section="rgb" restoreFocus={focusSection === "rgb"} title={moduleLabels.rgb} {...summary("rgb", rgbSummary(overview.rgb, device.power_led !== false))} onClick={() => openSection("rgb")} />}{startingRow("rgb")}
-      {moduleEnabled(modules, "remap") && <SectionLink section="remap" restoreFocus={focusSection === "remap"} title={moduleLabels.remap} {...summary("remap", remapSummary(overview.remap))} onClick={() => openSection("remap")} />}{startingRow("remap")}
+      {moduleEnabled(modules, "tdp") && link("tdp", moduleLabels.tdp, summary("tdp", tdpSummary(overview.tdp)))}{startingRow("tdp")}
+      {moduleEnabled(modules, "fan") && link("fan", moduleLabels.fan, summary("fan", fanSummary(overview.fan)))}{startingRow("fan")}
+      {moduleEnabled(modules, "vibration") && link("vibration", moduleLabels.vibration, summary("vibration", vibrationSummary(overview, strengthOnly(device))))}{startingRow("vibration")}
+      {moduleEnabled(modules, "rgb") && link("rgb", moduleLabels.rgb, summary("rgb", rgbSummary(overview.rgb, device.power_led !== false)))}{startingRow("rgb")}
+      {moduleEnabled(modules, "remap") && link("remap", moduleLabels.remap, summary("remap", remapSummary(overview.remap)))}{startingRow("remap")}
       {startingRow("controller")}
-      {(moduleEnabled(modules, "controller") || device.firmware !== false) && <SectionLink section="controller" restoreFocus={focusSection === "controller"}
-        title={moduleEnabled(modules, "controller") ? moduleLabels.controller : "Controller firmware"}
-        {...(moduleEnabled(modules, "controller") ? summary("controller", controllerSummary(overview.controller))
+      {(moduleEnabled(modules, "controller") || device.firmware !== false) && link("controller",
+        moduleEnabled(modules, "controller") ? moduleLabels.controller : "Controller firmware",
+        moduleEnabled(modules, "controller") ? summary("controller", controllerSummary(overview.controller))
           : { description: "Controller update status and Lenovo firmware updates" })}
-        onClick={() => openSection("controller")} />}
-      {moduleEnabled(modules, "battery") && <SectionLink section="battery" restoreFocus={focusSection === "battery"} title={moduleLabels.battery} {...summary("battery", batterySummary(overview.battery, controllerBatteries ? overview.controller_batteries : undefined))} onClick={() => openSection("battery")} />}{startingRow("battery")}
-      {moduleEnabled(modules, "display") && <SectionLink section="display" restoreFocus={focusSection === "display"} title={moduleLabels.display} {...summary("display", displaySummary(overview.display))} onClick={() => openSection("display")} />}{startingRow("display")}
-      {moduleEnabled(modules, "wifi") && <SectionLink section="wifi" restoreFocus={focusSection === "wifi"} title={moduleLabels.wifi} {...summary("wifi", wifiSummary(overview.wifi))} onClick={() => openSection("wifi")} />}{startingRow("wifi")}
+      {moduleEnabled(modules, "battery") && link("battery", moduleLabels.battery, summary("battery", batterySummary(overview.battery, controllerBatteries ? overview.controller_batteries : undefined)))}{startingRow("battery")}
+      {moduleEnabled(modules, "display") && link("display", moduleLabels.display, summary("display", displaySummary(overview.display)))}{startingRow("display")}
+      {moduleEnabled(modules, "wifi") && link("wifi", moduleLabels.wifi, summary("wifi", wifiSummary(overview.wifi)))}{startingRow("wifi")}
     </PanelSection>
     <PanelSection title="Plugin">
-      <SectionLink section="modules" restoreFocus={focusSection === "modules"} title="Manage Modules" description="Enable, disable and hide individual hardware modules" onClick={() => openSection("modules")} />
-      <SectionLink
-        section="about" restoreFocus={focusSection === "about"}
-        title="About"
-        description={`Legion Go 2 Companion · v${overview.version}`}
-        onClick={() => openSection("about")}
-      />
+      {link("modules", "Manage modules", { description: "Enable, disable and hide individual hardware modules" })}
+      {link("about", "About", { description: `Version ${overview.version} · updates` })}
     </PanelSection>
   </PageShell>;
 
-  const title = activeSection === "modules" ? "Manage Modules"
+  const title = activeSection === "modules" ? "Manage modules"
     : activeSection === "about" ? "About"
     : activeSection === "controller" && !moduleEnabled(modules, "controller") ? "Controller firmware"
     : moduleLabels[activeSection];
 
-  return <PageShell rootRef={panelRef}>
-    <SectionHeader title={title} onBack={() => setActiveSection(null)} />
+  // B and ‹ All Controls: unsaved edits are dropped only after "Discard changes?"; Cancel stays on the page.
+  const back = () => {
+    const lost = unsaved.current?.();
+    if (!lost) { setActiveSection(null); return; }
+    confirmAction("Discard changes?", lost, "Discard", () => setActiveSection(null), { destructive: true });
+  };
+  return <PageShell rootRef={panelRef} onBack={back}>
+    <PageHeader title={title} back="All Controls" onBack={back} focus={visible} />
     {activeSection === "modules" && <ModulesPage modules={modules} device={device} />}
-    {activeSection === "tdp" && <TdpPage visible={onScreen} />}
-    {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} />}
+    {activeSection === "tdp" && <TdpPage visible={onScreen} guardLeave={guardLeave} />}
+    {activeSection === "fan" && <FanPage viewVisible={onScreen} isViewVisible={panelOnScreen} guardLeave={guardLeave} />}
     {activeSection === "vibration" && <VibrationPage strengthOnly={strengthOnly(device)} />}
     {activeSection === "display" && <DisplayPage visible={onScreen} />}
     {activeSection === "wifi" && <WifiPage visible={onScreen} />}
@@ -331,14 +278,11 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
     {activeSection === "controller" && (moduleEnabled(modules, "controller") ? <ControllerPage visible={pageVisible} firmware={device.firmware !== false} />
       : <FirmwarePanel visible={pageVisible} allowUpdates={!Object.values(modules).some(state => state?.maintenance)} />)}
     {activeSection === "battery" && <BatteryPage visible={onScreen} controllers={controllerBatteries} />}
-    {activeSection === "about" && <>
-      <PanelSection title="Legion Go 2 Companion">
-        {infoRow(`Version ${overview.version}`, "All-in-one hardware controls for Decky Loader.")}
-        {infoRow("Author", "Rayek · BSD-3-Clause open-source plugin. Vibration portions also retain their MIT notice.")}
-      </PanelSection>
-      <UpdateSection currentVersion={overview.version} />
-      <DeviceReportSection />
-    </>}
+    {activeSection === "about" && <AboutPage name="Legion Go 2 Companion" version={overview.version}
+      description="All-in-one hardware controls for Decky Loader." license="BSD-3-Clause" source="github.com/Rayekkk/LegionGo2Companion"
+      notes="Copyright (c) 2026 Rayekkk. Vibration portions also retain their MIT notice." updates={updates ?? undefined} home={home}>
+      <DeviceReportSection home={home} />
+    </AboutPage>}
   </PageShell>;
 };
 
@@ -359,6 +303,7 @@ const Content: FC = () => {
   // The backend answers get_version before it has detected the console (applicable null): wait, don't flash every module.
   if (!status || (!status.blocked && consoleDetecting(status.modules))) return <PageShell><PanelSection title="Checking installed plugins">
     {infoRow("Checking compatibility", "Hardware controls will appear after the check completes.")}
+    <PanelSectionRow><Spinner /></PanelSectionRow>
   </PanelSection></PageShell>;
   if (status.blocked) return <PageShell>
     <PanelSection title="Companion paused">
@@ -373,7 +318,7 @@ const Content: FC = () => {
     </PanelSection>
     {status.device?.firmware !== false && <FirmwarePanel visible={visible} allowUpdates={false} />}
   </PageShell>;
-  return <Controls modules={status.modules} device={status.device} />;
+  return <Controls modules={status.modules} device={status.device} home={status.home} />;
 };
 
 const Icon: FC = () => (
@@ -394,7 +339,8 @@ const resetSession = (active: boolean) => {
 };
 
 export default definePlugin(() => {
-  startUpdates();
+  updates?.dispose();
+  updates = new UpdateController({ check: checkUpdates, download: downloadUpdate }, "legiongo2companion");
   frontendActive = true;
   resetSession(true);
   const listener = addEventListener<[GuardStatus]>("companion_guard", updateGuard);
@@ -408,7 +354,8 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <Icon />,
     onDismount() {
-      stopUpdates();
+      updates?.dispose();
+      updates = null;
       frontendActive = false;
       resetSession(false);
       tdpWatcherEnabled = vibeWatcherEnabled = false;

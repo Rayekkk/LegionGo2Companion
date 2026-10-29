@@ -29,7 +29,7 @@ run(async () => {
     h.respond('rgb_set_effect',{ok:false,error:'Enable RGB control first.',state:rgb});await settle();
     assert.equal(h.toasts.at(-1).body,'Enable RGB control first.');assert.equal(reads(),1,'a refusal with its status needs no re-read');
     find(h.render(),'Effect').props.onChange({data:'breathe'});await settle();
-    h.respond('rgb_set_effect',{ok:false,error:'This module is disabled. Enable it in Manage Modules.'});await settle();
+    h.respond('rgb_set_effect',{ok:false,error:'This module is disabled. Enable it in Manage modules.'});await settle();
     assert.equal(h.toasts.at(-1).body,'The change could not be confirmed. Reopen Lighting to check the current state.');
     assert.equal(reads(),2,'a refusal without status re-reads it');
     h.unmount();

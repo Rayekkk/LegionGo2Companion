@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { type Result } from "./result";
-import { confirmAction, detailsRows, infoRow, statusPlaceholder, rpc } from "./shared";
+import { rpc } from "./shared";
+import { confirmAction, detailsRows, infoRow, notify as toast, statusPlaceholder } from "./ui";
 import {
   actionShown, backendName, bandNote, bandOptions, canRun, CHANGED, CONFIRMATIONS, driverText, frequencyText, linkText, networkName,
   operationVerified, POLICY_ACTIONS, savedPolicy, UNVERIFIED, wifiNotice, type Policy, type WifiAction, type WifiStatus,
@@ -35,7 +36,7 @@ const answered = <T,>(answer: Result<T>) => {
   if (!answer.ok && !answer.state) throw new Error(answer.error);
   return answer;
 };
-const notify = (body: string) => toaster.toast({ title: "Wi-Fi", body });
+const notify = (body: string) => toast("Wi-Fi", body);
 
 export const WifiPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
   const visible = useQuickAccessVisible() && tabShown;

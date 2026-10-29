@@ -4,7 +4,7 @@
 // TDP page: its sections.
 
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { confirmAction, detailsRows, infoRow } from "./shared";
+import { confirmAction, detailsRows, infoRow } from "./ui";
 import {
   absolute, BATTERY_PRESETS_LABEL, BATTERY_PRESETS_NOTE, extrasConfirm, extrasNote, extrasShown, FALLBACK_MAX,
   fromAbsolute, helperRetryShown, limitsText, normalise, offsetMax, powerSummary, PRESET_LABELS, PRESET_ORDER,
@@ -52,7 +52,7 @@ export const powerSection = (s: TdpState) => {
       if (base) (base.ac ? setAcTuning : setTuning)(base.tuning);
       clearDraft();
       proceed();
-    });
+    }, { destructive: true });
   };
 
   // ── Preset handler ────────────────────────────────────────────────────────────
@@ -524,7 +524,7 @@ export const moreSection = (s: TdpState) => {
         <ButtonItem layout="below" disabled={loading} description={failureFor("delete")}
           onClick={() => confirmAction(`Delete profile for ${game.name}?`,
             `Its power, CPU Boost and energy settings are removed. ${game.name} will use Global settings.`,
-            "Delete", () => void deleteProfile())}>
+            "Delete", () => void deleteProfile(), { destructive: true })}>
           {`Delete profile for ${game.name}`}
         </ButtonItem>
       </PanelSectionRow>}

@@ -1,41 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Helpers shared by the Decky pages. Render helpers are plain functions (not
-// components) so the element tree is exactly what the page used to inline.
+// Helpers shared by the Decky pages: D2 calls, edit queues and the running app watcher (render helpers are in ui.tsx).
 import { callable } from "@decky/api";
-import { ButtonItem, ConfirmModal, Field, findModuleExport, PanelSection, PanelSectionRow, Router, showModal, Spinner } from "@decky/ui";
-import { Fragment, type ReactNode } from "react";
+import { findModuleExport, Router } from "@decky/ui";
 import { settle, type Result } from "./result";
-
-/** A read-only row; `focusable` keeps it reachable with the D-pad. */
-export const infoRow = (label: ReactNode, description?: ReactNode) =>
-  <PanelSectionRow><Field focusable label={label} description={description} /></PanelSectionRow>;
-
-/**
- * Ask first; only for actions that close apps, can drop Wi-Fi, delete data or raise hardware limits.
- * The dialog takes focus from the Quick Access menu, so `onOK` usually runs while the page is hidden:
- * gate it on what the dialog showed, not on visibility, and report its outcome with a toast.
- */
-export const confirmAction = (title: string, description: string, ok: string, onOK: () => void) =>
-  showModal(<ConfirmModal strTitle={title} strDescription={description} strOKButtonText={ok}
-    strCancelButtonText="Cancel" onOK={onOK} />);
-
-/**
- * A page's last rows: "Show details" and, below it, rare repair actions and then
- * the technical facts, so the last row stays a focusable, always-enabled field.
- */
-export const detailsRows = (shown: boolean, toggle: () => void, rows: Array<[ReactNode, ReactNode]>, actions?: ReactNode) => <>
-  <PanelSectionRow><ButtonItem layout="below" onClick={toggle}>{shown ? "Hide details" : "Show details"}</ButtonItem></PanelSectionRow>
-  {shown && actions}
-  {shown && rows.map(([label, description], index) => <Fragment key={index}>{infoRow(label, description)}</Fragment>)}
-</>;
-
-/** A page's first snapshot: a spinner while loading, the error and a retry once it failed. */
-export const statusPlaceholder = ({ title, label, error, onRetry, retryLabel = "Retry status" }:
-  { title?: string; label: string; error: string; onRetry: () => void; retryLabel?: string }) =>
-  <PanelSection title={title}>
-    <PanelSectionRow>{error ? <Field focusable label={label} description={error} /> : <Spinner />}</PanelSectionRow>
-    {error && <PanelSectionRow><ButtonItem layout="below" onClick={onRetry}>{retryLabel}</ButtonItem></PanelSectionRow>}
-  </PanelSection>;
 
 /**
  * callable() through the backend's D2 answers ({ok, error?, state?}): the state, also of a refusal that carries one

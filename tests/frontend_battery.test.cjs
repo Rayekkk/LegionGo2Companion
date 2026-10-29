@@ -67,7 +67,7 @@ run(async()=>{
     h.methods.battery_get_controller_levels=()=>levels.promise;
     h.methods.battery_get_status=()=>{if(fail)throw Error('battery unavailable');return base();};
     await h.ready();assert.match(content(h.tree),/Status unavailable/);
-    fail=false;button(h,'Check again').props.onClick();await settle();h.render();
+    fail=false;button(h,'Try again').props.onClick();await settle();h.render();
     assert.ok(toggle(h),'Retrying console status must not wait for the old controller request.');
     assert.equal(count(h,'battery_get_controller_levels'),1,'A console read error must not duplicate an in-flight controller read.');
     levels.resolve(controllerBase());await settle();h.unmount();
@@ -114,7 +114,7 @@ run(async()=>{
   // D2 answers: a refusal without status (refused before any change) shows the generic text, as a rejected call did;
   // a read that the backend refuses still shows its status and its error.
   h=harness();await h.ready();
-  h.methods.battery_set_enabled=()=>({ok:false,error:'This module is disabled. Enable it in Manage Modules.'});
+  h.methods.battery_set_enabled=()=>({ok:false,error:'This module is disabled. Enable it in Manage modules.'});
   toggle(h).props.onChange(true);await settle();h.render();
   assert.equal(h.toasts.at(-1).body,'The change could not be confirmed. Check the battery state before trying again.');
   h.unmount();h=harness();

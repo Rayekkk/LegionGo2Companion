@@ -16,7 +16,7 @@ run(async () => {
     assert.ok(find(failed, 'Display status unavailable'), 'A failed poll cannot present a saved display snapshot as current.');
     retained(false); await settle();
     assert.equal(h.calls.some(c => c.name === 'display_set_edid_fix'), false, 'Retained controls cannot write after a failed read.');
-    findButton(failed, 'Retry status').props.onClick();
+    findButton(failed, 'Try again').props.onClick();
     h.respond('display_get_state', display); await settle();
     assert.ok(find(h.render(), 'Fix HDR brightness in games'), 'A fresh read restores controls.');
     h.unmount();

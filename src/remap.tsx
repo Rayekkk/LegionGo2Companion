@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -12,7 +12,8 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import type { Result } from "./result";
-import { infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
+import { mutationQueue, rpc } from "./shared";
+import { infoRow, notify as toast, statusPlaceholder } from "./ui";
 import { BUTTONS, enableNote, mappingEditable } from "../desktop/native/remap.mjs";
 
 interface ActionOption {
@@ -110,13 +111,13 @@ export const RemapPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true 
     const run = async () => {
       let needsRefresh = false;
       if (mounted.current) { setBusy(true); setError(""); setFailed(null); }
-      const fail = (text: string) => { setFailed({control, text}); toaster.toast({ title: "Button mapping", body: text }); };
+      const fail = (text: string) => { setFailed({control, text}); toast("Button mapping", text); };
       try {
         const { ok, error, state } = await operation();
         if (!mounted.current) return;
         if (state) setStatus(state);
         else needsRefresh = true;
-        if (ok) toaster.toast({ title: "Button mapping", body: message });
+        if (ok) toast("Button mapping", message);
         else fail(state ? error || "The controller did not confirm the new mapping." : UNCONFIRMED);
       } catch {
         needsRefresh = true;

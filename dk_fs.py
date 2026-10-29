@@ -15,6 +15,8 @@ files too big to hold whole; writing into a folder the caller opened, for the sh
 Guarantees:
 - A write is atomic: temp file in the same folder (O_EXCL, never through a symlink), fsync, rename, fsync of the
   folder. A crash leaves the old file or the new one, never a mix. A failed write removes its temp file.
+  The content may be bytes, a file object or a function writing into the open temp file, which runs only once the
+  file exists (a folder that cannot be written fails before a costly build) and cancels the write by raising.
 - Symlinks: with no_links (default: when running as root) a symlinked file or a symlinked last folder component
   is refused (UnsafePath) for writes and reads alike, on POSIX through O_NOFOLLOW on the opened folder, so it cannot
   be swapped in between check and use; links higher up are the system's choice. A user plugin (not root) reads and writes through a
@@ -55,7 +57,8 @@ Guarantees:
 - write_atomic(commit=...) runs only the rename inside the caller's context manager (DeckyEQ updates.py), so a
   caller that must stop publishing at once (the updater's close() on unload) never waits for a slow write or fsync.
 - An OSError the system raises (EACCES, ENOSPC, EIO) is passed on as it is and may name the full path: a caller
-  that shows errors to users turns it into its own short text (DeckyEQ's storage does).
+  that shows errors to users turns it into text without it with shown(e) (strerror, else the type's name;
+  UnsafePath keeps its own text) and logs the full error (DeckyLS, DeckyEQ, DeckyVibranceHDR did it locally).
 
 Deliberately not here: locking (callers serialise writes to one file), schemas (pass `validate`), Decky's
 SettingsManager API (Ayaneo3Companion's safe_settings.py is a thin layer on top, Legion's AtomicSettingsManager
@@ -93,6 +96,15 @@ def _name(path):
 
 class Damaged(ValueError):
     """A file exists but its content cannot be used."""
+
+
+def shown(error):
+    """error's text for users. An OSError the system raises names its full path (with the user's name): only its
+    description (strerror, else its type's name); UnsafePath's own text names no folder above the file, so it stays.
+    Anything else is str(error). The caller logs the full error."""
+    if isinstance(error, OSError) and not isinstance(error, UnsafePath):
+        return error.strerror or type(error).__name__
+    return str(error)
 
 
 def _is_root():
@@ -160,6 +172,8 @@ def open_directory(parts, fd=None, create=None, check=None):
 def _copy(data, f):
     if isinstance(data, (bytes, bytearray, memoryview)):
         f.write(data)
+    elif callable(data):  # writes the content itself (built while the file is open: DeckyVibranceHDR's LUT)
+        data(f)
     else:  # a binary file object: copied in chunks, never held in memory whole
         while block := data.read(CHUNK):
             f.write(block)
@@ -184,8 +198,9 @@ def sha256_file(path):
 
 def write_atomic(path, data, mode=None, *, no_links=None, strict_sync=False, folder_mode=None, folder_fd=None,
                  commit=None, owner=None):
-    """Replace path with data (bytes, or a binary file object read to its end). mode=None keeps the mode of the file
-    being replaced (0o644 for a new one); no_links=None refuses symlinks only when running as root. folder_fd: an
+    """Replace path with data: bytes, a binary file object read to its end, or a function data(file) that writes
+    the content into the open temp file (binary; an exception it raises cancels the write). mode=None keeps the
+    mode of the file being replaced (0o644 for a new one); no_links=None refuses symlinks only when running as root. folder_fd: an
     open folder (POSIX) to write path, a bare file name, in; the fd stays the caller's. commit: a callable giving a
     context manager the rename alone runs in (it may raise to cancel the write). owner: (uid, gid) of the new
     file (POSIX), instead of the replaced file's or the folder's."""

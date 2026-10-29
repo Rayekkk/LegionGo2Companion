@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   PanelSection,
@@ -10,7 +10,8 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import type { Result } from "./result";
-import { detailsRows, infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
+import { mutationQueue, rpc } from "./shared";
+import { detailsRows, infoRow, notify as toast, statusPlaceholder } from "./ui";
 import { controllersText, levelText, protectionChecked, protectionLocked, protectionNote, RESET_DONE, RESET_LABEL, RESET_NOTE, resetShown } from "../desktop/native/battery.mjs";
 
 export interface BatteryStatus {
@@ -65,7 +66,7 @@ const unavailableControllerBatteries = (): ControllerBatteryStatus => ({
 
 const protectionLabel = (enabled: boolean | null) =>
   enabled === true ? "On" : enabled === false ? "Off" : "Unknown";
-const notify = (body: string) => toaster.toast({ title: "Battery", body });
+const notify = (body: string) => toast("Battery", body);
 
 const controllerLevel = (value: number | null | undefined, connection: string | null | undefined) =>
   levelText(value) !== "—" ? levelText(value) : connection === "detached" ? "Not connected" : "Unknown";
@@ -206,7 +207,7 @@ export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ 
   }, []);
 
   if (!status) return statusPlaceholder({ title: "Battery", label: "Status unavailable", error,
-    onRetry: () => void refresh(), retryLabel: "Check again" });
+    onRetry: () => void refresh() });
 
   const capacity = levelText(status.capacity);
   const restore = () => void apply(() => releaseBatteryControl(), "Previous charging mode restored.", "restore");

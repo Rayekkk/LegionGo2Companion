@@ -6,6 +6,22 @@ All notable changes to Legion Go 2 Companion, newest first.
 
 ### Changed
 
+- **Decky panel looks like the rest of the family** (the same layout, texts and states in all of Rayek's plugins):
+  - **B** on a page goes back to All Controls instead of closing the Quick Access menu, and the row you came from
+    is selected again. Leaving Fan Control with an unsaved curve or TDP with Custom limits not applied (with B or
+    **‹ All Controls**) first asks **Discard changes?**; Cancel keeps you on the page with your edits.
+  - **About:** the plugin's version and author first, then **Save device report**, and **Updates** at the very
+    bottom. The update texts match the other plugins ("Installed version X", "Up to date", "Could not complete" with
+    the reason), and a saved ZIP or device report shows as `~/…` instead of the full path.
+  - **Loading and errors:** TDP and Vibration show a spinner while they start instead of "Initializing...", and a
+    page that cannot read its status says so with one **Try again** button (it was "Retry status", "Retry settings"
+    or "Check again").
+  - **Fan Control:** the curve graph and the full screen editor use the shared frame and colors; nothing about
+    editing the curve changed except that B is now labeled "Done" while editing.
+  - **Confirmations:** "Discard unsaved changes?" and "Delete profile for …?" now show Steam's warning style.
+  - **Texts:** sentence case in titles and labels ("Hardware controls", "Manage modules", "Enable fan control");
+    module names stay as they are. Toasts last the same in every module (longer for messages of more than one
+    sentence).
 - **Clearer errors:** when something fails unexpectedly, the panel and the Desktop app show a short message and
   the details go to the Decky log, never file paths.
 - **Updates:** **Check for updates** asks GitHub again on every click instead of showing a result up to a minute

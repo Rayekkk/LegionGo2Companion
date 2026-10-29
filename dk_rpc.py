@@ -24,7 +24,11 @@ set within `wait` seconds; an unexpected exception is logged with its traceback 
 message that carries only the exception's type (str(e) may hold a path, and so the user's name); an exception of
 a `shown` type (the plugin's own refusals, written for users: e.g. RuntimeError("This device is not an AYANEO 3"))
 or of the plugin's own subclass of one becomes fail(str(e)) and one warning line without a traceback, while
-Python's own subclasses (JSONDecodeError, UnicodeDecodeError, NotImplementedError...) stay unexpected errors; a method that keeps failing the same way logs it
+Python's own subclasses (JSONDecodeError, UnicodeDecodeError, NotImplementedError...) stay unexpected errors; with
+`state` (a function of the plugin object, plain or async) a refusal carries the state as it is, so the panel shows
+it beside the reason (a failing `state` is logged and the refusal answered without one); with log_fails=True a
+fail() the method returns itself is logged as a refusal too (one warning line), so a plugin needs no local helper
+that logs and answers (off by default: plugins that log their own refusals would log them twice); a method that keeps failing the same way logs it
 once until it succeeds again (the panel polls); fail() and ok() build the only two shapes; asyncio.CancelledError is not swallowed (Decky's unload must still cancel); the method
 keeps its name and signature for Decky's dispatch and for DeckyKit's overview.
 Deliberately not here: argument validation (each method checks its own input), timeouts of the work itself (a
@@ -33,6 +37,7 @@ method that can hang uses dk_process/dk_net deadlines).
 
 import asyncio
 import functools
+import inspect
 import sys
 
 WAIT = 60  # seconds a call waits for _main
@@ -55,11 +60,20 @@ def _refusal(error, shown):
                              and kind.__module__.partition(".")[0] not in sys.stdlib_module_names)
 
 
-def boundary(logger, ready=None, wait=WAIT, shown=()):
+def boundary(logger, ready=None, wait=WAIT, shown=(), state=None, log_fails=False):
     """Decorator for the public RPC methods: waits for ready (an asyncio.Event set at the end of _main), then turns
     an unexpected exception into fail() and logs it with its traceback. shown: exception types whose message is
-    written for the user (answered as it is, logged without a traceback)."""
+    written for the user (answered as it is, logged without a traceback). state: state(plugin) for those refusals'
+    answers (may be async). log_fails: a returned fail() is logged as a refusal."""
     shown = tuple(shown)
+
+    async def current(plugin, name):
+        try:
+            value = state(plugin)
+            return await value if inspect.isawaitable(value) else value
+        except Exception:  # the refusal still answers, without a state
+            logger.error(f"{name}: the state for a refusal could not be read", exc_info=True)
+            return None
 
     def wrap(method):
         last = [None]  # the failure logged last: a method that keeps failing the same way logs it once
@@ -82,10 +96,13 @@ def boundary(logger, ready=None, wait=WAIT, shown=()):
             except Exception as e:  # the RPC boundary: logged with its traceback, never sent on to the panel
                 if _refusal(e, shown):
                     log(logger.warning, f"{method.__name__} refused: {e}", (type(e), str(e)))
-                    return fail(e)
+                    return fail(e, await current(self, method.__name__) if state is not None else None)
                 log(logger.error, f"{method.__name__} failed", (type(e), str(e)), exc_info=True)
                 return fail(f"Unexpected error ({type(e).__name__}). Details are in the Decky log.")
-            last[0] = None
+            if log_fails and isinstance(result, dict) and result.get("ok") is False:
+                log(logger.warning, f"{method.__name__} refused: {result.get('error')}", ("fail", result.get("error")))
+            else:
+                last[0] = None
             return result
         return call
     return wrap

@@ -18,13 +18,13 @@ run(async () => {
       modules: name => name.startsWith('./') ? new Proxy({}, { get: (_, key) => key.startsWith('get') ? async () => { reads.push(key); return {}; }
         : /^(start|stop)/.test(key) ? () => {} : key === 'rgbSummary' ? (_status, power) => power ? 'with power light' : 'rings only'
         : key.endsWith('Summary') ? () => '' : key }) : undefined });
-    const links = tree => nodes(tree).filter(n => n.props?.onClick && typeof n.props?.title === 'string').map(n => n.props.title);
+    const links = tree => nodes(tree).filter(n => n.props?.onOpen && typeof n.props?.title === 'string').map(n => n.props.title);
     const go2 = h.render(GO2);
-    assert.deepEqual(links(go2), [...NAMES.map(n => TITLES[n]), 'Manage Modules', 'About'], 'a Go 2 83N0 keeps every module');
+    assert.deepEqual(links(go2), [...NAMES.map(n => TITLES[n]), 'Manage modules', 'About'], 'a Go 2 83N0 keeps every module');
     assert.equal(find(go2, n => n.props?.title === 'Lighting').props.description, 'with power light');
     await settle(); reads.length = 0;
     const goS = h.render(GO_S); await settle();
-    assert.deepEqual(links(goS), ['TDP', 'Lighting', 'Battery', 'Wi-Fi', 'Manage Modules', 'About'],
+    assert.deepEqual(links(goS), ['TDP', 'Lighting', 'Battery', 'Wi-Fi', 'Manage modules', 'About'],
       'modules that do not apply and the controller firmware link are hidden');
     assert.equal(find(goS, n => n.props?.title === 'Lighting').props.description, 'rings only');
     assert.ok(!reads.some(name => /Fan|Vibe|Remap|Display|ControllerStatus|ControllerBattery|Driver/.test(name)),
@@ -32,7 +32,7 @@ run(async () => {
 
     // About offers the device report on every console, also an unknown one where no module applies.
     for (const props of [GO2, GO_S, { modules: status(NAMES), device: {} }]) {
-      find(h.render(props), n => n.props?.title === 'About' && n.props?.onClick).props.onClick();
+      find(h.render(props), n => n.props?.title === 'About' && n.props?.onOpen).props.onOpen();
       const about = h.render(props);
       assert.ok(find(about, n => n.type === 'DeviceReportSection'), `device report on ${props.device.console ?? 'an unknown console'}`);
       find(about, n => n.props?.onBack).props.onBack();
@@ -58,7 +58,7 @@ run(async () => {
     const rows = props => nodes(page(props)).filter(n => n.type === 'ToggleField').map(n => n.props.label);
     assert.deepEqual(rows(GO2), NAMES.map(n => TITLES[n]));
     assert.equal(label(page(GO2), 'Lighting').props.description, 'Stick lights and power button light.');
-    assert.deepEqual(rows(GO_S), ['TDP', 'Lighting', 'Battery', 'Wi-Fi'], 'Manage Modules lists only what applies');
+    assert.deepEqual(rows(GO_S), ['TDP', 'Lighting', 'Battery', 'Wi-Fi'], 'Manage modules lists only what applies');
     assert.equal(label(page(GO_S), 'Lighting').props.description, 'Stick lights.');
   }
   {

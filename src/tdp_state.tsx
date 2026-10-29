@@ -304,7 +304,7 @@ export const useTdpState = (tabShown: boolean) => {
           readyRef.current = true;
           setReady(true);
         } else {
-          setSetupErr("TDP and CPU controls are still starting. Retry status if this continues.");
+          setSetupErr("TDP and CPU controls are still starting. Try again if this continues.");
         }
       } catch (error) {
         if (current()) setSetupErr(errorText(error));

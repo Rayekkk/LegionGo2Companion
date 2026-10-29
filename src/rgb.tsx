@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -14,7 +14,8 @@ import {
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import type { Result } from "./result";
-import { infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
+import { mutationQueue, rpc } from "./shared";
+import { infoRow, notify as toast, statusPlaceholder } from "./ui";
 import { controlNote, effectsEditable, POWER_LED_BETA_TEXT, powerChecked as powerShown, powerNote, RESTORE_NOTE, ringsNote, SPEEDS, speedStep,
   usesColor as colorEffect, usesSpeed as speedEffect } from "../desktop/native/rgb.mjs";
 
@@ -249,7 +250,7 @@ export const RgbPage: FC<{ visible?: boolean; powerLight?: boolean }> = ({ visib
     const run = async () => {
       let needsRefresh = false;
       if (mounted.current) { setError(""); setFailed(null); }
-      const fail = (text: string) => { setFailed({ control, text }); toaster.toast({ title: "Lighting", body: text }); };
+      const fail = (text: string) => { setFailed({ control, text }); toast("Lighting", text); };
       try {
         const { ok, error, state } = await operation();
         if (!mounted.current) return;
@@ -259,7 +260,7 @@ export const RgbPage: FC<{ visible?: boolean; powerLight?: boolean }> = ({ visib
         } else if (state) setStatus(state);
         else needsRefresh = true;
         if (!ok) fail(state ? error || "The lights did not confirm the change." : UNCONFIRMED);
-        else if (control === "restore") toaster.toast({ title: "Lighting", body: "Original lighting restored." });
+        else if (control === "restore") toast("Lighting", "Original lighting restored.");
       } catch {
         needsRefresh = true;
         if (!mounted.current) return;
