@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-import { toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import { type Result } from "./result";
 import { confirmAction, detailsRows, infoRow, statusPlaceholder, rpc } from "./shared";
 import {
   actionShown, backendName, bandNote, bandOptions, canRun, CHANGED, CONFIRMATIONS, driverText, frequencyText, linkText, networkName,
@@ -11,27 +12,34 @@ import {
 
 export { wifiSummary, type WifiStatus } from "../desktop/native/wifi.mjs";
 
-interface WifiResult {
-  success: boolean;
+/** A band change or reconnect: its state (`error` there is the refusal code; the answer's `error` is the text). */
+interface WifiOperation {
   error?: string;
   message?: string;
   detail?: string;
   reconnected?: boolean;
   frequency?: number | null;
 }
+type WifiResult = Result<WifiOperation>;
 
 export const getWifiStatus = rpc<[], WifiStatus>("wifi_get_status");
-const setBandPolicy = rpc<[mode: Policy, allowUnverifiedScan?: boolean], WifiResult>("wifi_set_band_policy");
-const rescanAndReconnect = rpc<[targetBand?: "high" | "six"], WifiResult>("wifi_rescan_and_reconnect");
+const readStatus = callable<[], Result<WifiStatus>>("wifi_get_status");
+const setBandPolicy = callable<[mode: Policy, allowUnverifiedScan?: boolean], WifiResult>("wifi_set_band_policy");
+const rescanAndReconnect = callable<[targetBand?: "high" | "six"], WifiResult>("wifi_rescan_and_reconnect");
 
-const resultMessage = (result: WifiResult) =>
-  [result.message, result.detail].filter(Boolean).join(" — ") ||
-  "The operation could not be verified.";
+const UNCONFIRMED = "The operation could not be verified.";
+const resultMessage = (result?: WifiOperation) =>
+  [result?.message, result?.detail].filter(Boolean).join(" — ") || UNCONFIRMED;
+/** A refusal without a state never reached the module (its guard): it reads as a failed call, as it did before D2. */
+const answered = <T,>(answer: Result<T>) => {
+  if (!answer.ok && !answer.state) throw new Error(answer.error);
+  return answer;
+};
 const notify = (body: string) => toaster.toast({ title: "Wi-Fi", body });
 
 export const WifiPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
   const visible = useQuickAccessVisible() && tabShown;
-  const inFlight = useRef<Promise<WifiStatus> | null>(null);
+  const inFlight = useRef<Promise<Result<WifiStatus>> | null>(null);
   const refreshAfterRead = useRef(false);
   const operationInFlight = useRef(false);
   const mounted = useRef(true);
@@ -51,15 +59,16 @@ export const WifiPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }
   const refresh = useCallback(async (verifyOperation = false): Promise<WifiStatus | null> => {
     if (!mounted.current || !isVisible.current || inFlight.current || (operationInFlight.current && !verifyOperation)) return null;
     const revision = readRevision.current;
-    const request = getWifiStatus();
+    const request = readStatus();
     inFlight.current = request;
     try {
-      const next = await request;
+      const answer = answered(await request);
       if (!mounted.current || !isVisible.current || revision !== readRevision.current) return null;
-      latestStatus.current = next.success ? next : null;
-      setStatus(next.success ? next : null);
-      setStatusError(next.success ? "" : next.message ?? "Wi-Fi status is unavailable.");
-      return next.success ? next : null;
+      const next = answer.ok ? answer.state ?? null : null;
+      latestStatus.current = next;
+      setStatus(next);
+      setStatusError(next ? "" : answer.error || "Wi-Fi status is unavailable.");
+      return next;
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current) {
         latestStatus.current = null; setStatus(null);
@@ -101,16 +110,16 @@ export const WifiPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }
       let result: WifiResult | undefined;
       const fail = (message: string) => { setError(message); notify(message); };
       try {
-        result = await operation();
+        result = answered(await operation());
         if (!mounted.current) return;
-        if (!result.success) fail(resultMessage(result));
+        if (!result.ok) fail(result.error || UNCONFIRMED);
       } catch {
         if (mounted.current) fail("The backend call ended before the result could be verified.");
       } finally {
         await inFlight.current?.catch(() => undefined);
         const verified = await refresh(true);
-        if (mounted.current && isVisible.current && result?.success) {
-          if (operationVerified(action, before, verified)) notify(resultMessage(result));
+        if (mounted.current && isVisible.current && result?.ok) {
+          if (operationVerified(action, before, verified)) notify(resultMessage(result.state));
           else fail(UNVERIFIED);
         }
         operationInFlight.current = false;

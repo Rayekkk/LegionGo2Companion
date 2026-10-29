@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -11,6 +11,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import type { Result } from "./result";
 import { infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { BUTTONS, enableNote, mappingEditable } from "../desktop/native/remap.mjs";
 
@@ -20,7 +21,6 @@ interface ActionOption {
 }
 
 export interface RemapStatus {
-  success: boolean;
   supported: boolean;
   enabled: boolean;
   active: boolean;
@@ -32,11 +32,9 @@ export interface RemapStatus {
   error?: string;
 }
 
-interface RemapResult {
-  success: boolean;
-  error?: string;
-  status?: RemapStatus;
-}
+// A change answers D2 itself: the new status, also with a refusal (a refusal before any change has none).
+type RemapResult = Result<RemapStatus>;
+const UNCONFIRMED = "The mapping could not be confirmed. Check the buttons before trying again.";
 
 // Accepted edits survive page close. Every later menu/page snapshot follows them.
 const mutations = mutationQueue();
@@ -45,9 +43,9 @@ export const getRemapStatus = async () => {
   if (mutations.pending) await mutations.tail;
   return readRemapStatus();
 };
-const setRemapEnabled = rpc<[boolean], RemapResult>("remap_set_enabled");
-const setRemapAction = rpc<[string, string], RemapResult>("remap_set_action");
-const restoreRemapDefaults = rpc<[], RemapResult>("remap_restore_defaults");
+const setRemapEnabled = callable<[boolean], RemapResult>("remap_set_enabled");
+const setRemapAction = callable<[string, string], RemapResult>("remap_set_action");
+const restoreRemapDefaults = callable<[], RemapResult>("remap_restore_defaults");
 
 // Every status lists all actions with labels, and saved actions are always one of them.
 const actionLabel = (status: RemapStatus | undefined, action: string) =>
@@ -114,15 +112,15 @@ export const RemapPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true 
       if (mounted.current) { setBusy(true); setError(""); setFailed(null); }
       const fail = (text: string) => { setFailed({control, text}); toaster.toast({ title: "Button mapping", body: text }); };
       try {
-        const result = await operation();
+        const { ok, error, state } = await operation();
         if (!mounted.current) return;
-        if (result.status) setStatus(result.status);
+        if (state) setStatus(state);
         else needsRefresh = true;
-        if (result.success) toaster.toast({ title: "Button mapping", body: message });
-        else fail(result.error || "The controller did not confirm the new mapping.");
+        if (ok) toaster.toast({ title: "Button mapping", body: message });
+        else fail(state ? error || "The controller did not confirm the new mapping." : UNCONFIRMED);
       } catch {
         needsRefresh = true;
-        if (mounted.current) fail("The mapping could not be confirmed. Check the buttons before trying again.");
+        if (mounted.current) fail(UNCONFIRMED);
       } finally {
         mutations.done();
         pending.current -= 1;

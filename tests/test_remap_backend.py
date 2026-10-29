@@ -472,7 +472,7 @@ mapping:
         plugin = remap_backend.Plugin()
         with patch.object(plugin, "get_status", return_value={"enabled": False}):
             result = asyncio.run(plugin.set_action("desktop", "shell-command"))
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
 
     def test_function_key_actions_cover_f1_through_f12(self):
         for number in range(1, 13):

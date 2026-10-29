@@ -75,11 +75,7 @@ export class AppWatcher {
   // loop's five-second tick to it.
   static resume() {
     if (!this.started) return;
-    void reapply()
-      .then((res) => {
-        if (!res.success) console.warn("[legiongo2companion] tdp.resume_reapply_failed");
-      })
-      .catch(() => console.error("[legiongo2companion] tdp.resume_reapply_failed"));
+    void reapply().catch(() => console.error("[legiongo2companion] tdp.resume_reapply_failed"));
   }
 
   static async check(app = runningApp()) {

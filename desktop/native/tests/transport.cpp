@@ -113,8 +113,8 @@ private slots:
         connect(&server,&QTcpServer::newConnection,this,[&] {
             auto *socket=server.nextPendingConnection();connect(socket,&QTcpSocket::readyRead,this,[socket] {
                 socket->readAll();if(socket->property("answered").toBool())return;socket->setProperty("answered",true);
-                const QByteArray body("{\"result\":{\"success\":false,\"error\":\"privateResponseMarker\"}}");
-                socket->write("HTTP/1.1 200 OK\r\nContent-Length: "+QByteArray::number(body.size())+"\r\nConnection: close\r\n\r\n"+body);socket->disconnectFromHost();
+                const QByteArray body("{\"error\":\"privateResponseMarker\"}");
+                socket->write("HTTP/1.1 409 Conflict\r\nContent-Length: "+QByteArray::number(body.size())+"\r\nConnection: close\r\n\r\n"+body);socket->disconnectFromHost();
             });connect(socket,&QTcpSocket::disconnected,socket,&QObject::deleteLater);
         });
         RpcClient client(path);QSignalSpy replies(&client,&RpcClient::finished);
@@ -131,11 +131,10 @@ private slots:
         QTest::addColumn<bool>("failed");
         QTest::newRow("empty-http-error") << QByteArray("{\"error\":\"\"}") << 409 << true;
         QTest::newRow("null-http-error") << QByteArray("{\"error\":null}") << 409 << true;
-        QTest::newRow("empty-operation-error") << QByteArray("{\"result\":{\"success\":false,\"error\":\"\"}}") << 200 << true;
-        QTest::newRow("reason") << QByteArray("{\"result\":{\"success\":false,\"reason\":\"Busy\"}}") << 200 << true;
-        QTest::newRow("no-message") << QByteArray("{\"result\":{\"success\":false}}") << 200 << true;
-        QTest::newRow("success-empty-error") << QByteArray("{\"result\":{\"success\":true,\"error\":\"\"}}") << 200 << false;
-        QTest::newRow("success") << QByteArray("{\"result\":{\"success\":true}}") << 200 << false;
+        QTest::newRow("no-result") << QByteArray("{}") << 200 << true;
+        QTest::newRow("state-error-field") << QByteArray("{\"result\":{\"error\":\"\"}}") << 200 << false;
+        QTest::newRow("state") << QByteArray("{\"result\":{\"enabled\":true}}") << 200 << false;
+        QTest::newRow("null-state") << QByteArray("{\"result\":null}") << 200 << false;
     }
     void failureWithoutMessageStillFails() {
         QFETCH(QByteArray,body); QFETCH(int,status); QFETCH(bool,failed);

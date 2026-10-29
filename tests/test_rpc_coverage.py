@@ -87,16 +87,16 @@ class RgbRpcTests(unittest.TestCase):
         return self.memory.data['state'][key]
 
     def control(self, rings=True):
-        self.assertTrue(run(self.plugin.set_control_enabled(True))['success'])
+        self.assertTrue(run(self.plugin.set_control_enabled(True))['ok'])
         if rings:
-            self.assertTrue(run(self.plugin.set_rings_enabled(True))['success'])
+            self.assertTrue(run(self.plugin.set_rings_enabled(True))['ok'])
 
     def test_every_setter_is_refused_until_rgb_control_is_enabled(self):
         calls = (self.plugin.set_rings_enabled(True), self.plugin.set_effect('breathe'),
                  self.plugin.set_color(120, 50), self.plugin.set_brightness(80), self.plugin.set_speed(100))
         for call in calls:
             result = run(call)
-            self.assertFalse(result['success'])
+            self.assertFalse(result['ok'])
             self.assertEqual(result['error'], 'Enable RGB control first.')
         self.assertEqual({name: self.attr(name) for name in LED}, {name: value for name, value in LED.items()})
 
@@ -112,7 +112,12 @@ class RgbRpcTests(unittest.TestCase):
                self.plugin.set_brightness(50.0), self.plugin.set_brightness(True), self.plugin.set_speed(101),
                self.plugin.set_speed(-1), self.plugin.set_speed('5'))
         for call in bad:
-            self.assertFalse(run(call)['success'])
+            result = run(call)
+            self.assertFalse(result['ok'])
+            # D2: the refusal names the problem and carries the unchanged status for the page.
+            self.assertTrue(result['error'])
+            self.assertEqual(result['state']['settings']['brightness'], state['brightness'])
+            self.assertNotIn('success', result['state'])
         self.assertEqual({name: self.attr(name) for name in LED}, before)
         self.assertEqual(self.memory.data['state'], state)
 
@@ -120,23 +125,23 @@ class RgbRpcTests(unittest.TestCase):
         self.control(rings=False)
         self.assertEqual(self.attr('enabled'), 'false')
         result = run(self.plugin.set_rings_enabled(True))
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.attr('enabled'), 'true')
-        self.assertTrue(result['status']['settings']['rings_enabled'])
-        self.assertTrue(run(self.plugin.set_effect('Breathe'))['success'])  # case-insensitive
+        self.assertTrue(result['state']['settings']['rings_enabled'])
+        self.assertTrue(run(self.plugin.set_effect('Breathe'))['ok'])  # case-insensitive
         self.assertEqual((self.attr('effect'), self.saved('effect')), ('breathe', 'breathe'))
-        self.assertTrue(run(self.plugin.set_color(120, 50))['success'])
+        self.assertTrue(run(self.plugin.set_color(120, 50))['ok'])
         self.assertEqual(self.attr('multi_intensity'), '50 100 50')
         self.assertEqual((self.saved('hue'), self.saved('saturation')), (120, 50))
-        self.assertTrue(run(self.plugin.set_brightness(80))['success'])
+        self.assertTrue(run(self.plugin.set_brightness(80))['ok'])
         self.assertEqual((self.attr('brightness'), self.saved('brightness')), ('80', 80))
         result = run(self.plugin.set_speed(100))
-        self.assertTrue(result['success'])
+        self.assertTrue(result['ok'])
         self.assertEqual((self.attr('speed'), self.saved('speed')), ('100', 100))
-        self.assertEqual({key: result['status']['settings'][key] for key in ('effect', 'hue', 'saturation', 'brightness', 'speed')},
+        self.assertEqual({key: result['state']['settings'][key] for key in ('effect', 'hue', 'saturation', 'brightness', 'speed')},
                          {'effect': 'breathe', 'hue': 120, 'saturation': 50, 'brightness': 80, 'speed': 100})
-        self.assertFalse(result['status']['recovery_required'])
-        self.assertTrue(run(self.plugin.set_rings_enabled(False))['success'])
+        self.assertFalse(result['state']['recovery_required'])
+        self.assertTrue(run(self.plugin.set_rings_enabled(False))['ok'])
         self.assertEqual(self.attr('enabled'), 'false')
 
     def test_unconfirmed_hardware_write_rolls_the_led_and_the_saved_state_back(self):
@@ -153,23 +158,23 @@ class RgbRpcTests(unittest.TestCase):
         with patch.object(rgb_backend, '_write_attr', side_effect=final_enable_not_confirmed):
             result = run(self.plugin.set_brightness(80))
         self.assertEqual(refused, ['true'])
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('did not confirm', result['error'])
         self.assertEqual((self.attr('brightness'), self.saved('brightness')), ('20', 20))
         self.assertIsNone(self.saved('pending'))
-        self.assertFalse(result['status']['recovery_required'])
+        self.assertFalse(result['state']['recovery_required'])
 
     def test_power_led_is_changed_through_the_register_and_remembers_the_original(self):
         for invalid in (1, 'on', None):
-            self.assertFalse(run(self.plugin.set_power_led(invalid))['success'])
+            self.assertFalse(run(self.plugin.set_power_led(invalid))['ok'])
         self.assertEqual(self.register.value, 0xA5 | LED_OFF_BIT)
         result = run(self.plugin.set_power_led(True))
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.register.value, 0xA5)  # only bit 6 moved
-        self.assertTrue(result['status']['power_led']['current'])
-        self.assertTrue(result['status']['power_led']['managed'])
+        self.assertTrue(result['state']['power_led']['current'])
+        self.assertTrue(result['state']['power_led']['managed'])
         self.assertIs(self.saved('power_led_original_enabled'), False)
-        self.assertTrue(run(self.plugin.set_power_led(False))['success'])
+        self.assertTrue(run(self.plugin.set_power_led(False))['ok'])
         self.assertEqual(self.register.value, 0xA5 | LED_OFF_BIT)
         self.assertIs(self.saved('power_led_original_enabled'), False)  # first-seen value is kept
 
@@ -180,34 +185,34 @@ class RgbRpcTests(unittest.TestCase):
         self.register = Stuck(0xA5 | LED_OFF_BIT)
         with patch.object(rgb_backend, '_write_power_led', wraps=rgb_backend._write_power_led) as write:
             result = run(self.plugin.set_power_led(True))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertEqual([call.args for call in write.call_args_list], [(True,), (False,)])  # apply, then rollback
         self.assertEqual(self.register.value, 0xA5 | LED_OFF_BIT)
         self.assertFalse(self.saved('power_led_managed'))
-        self.assertFalse(result['status']['recovery_required'])
+        self.assertFalse(result['state']['recovery_required'])
 
     def test_restore_original_puts_back_the_led_and_the_power_button_and_releases_control(self):
         self.control()
-        self.assertTrue(run(self.plugin.set_effect('rainbow'))['success'])
-        self.assertTrue(run(self.plugin.set_color(240, 80))['success'])
-        self.assertTrue(run(self.plugin.set_brightness(90))['success'])
-        self.assertTrue(run(self.plugin.set_speed(10))['success'])
-        self.assertTrue(run(self.plugin.set_power_led(True))['success'])
+        self.assertTrue(run(self.plugin.set_effect('rainbow'))['ok'])
+        self.assertTrue(run(self.plugin.set_color(240, 80))['ok'])
+        self.assertTrue(run(self.plugin.set_brightness(90))['ok'])
+        self.assertTrue(run(self.plugin.set_speed(10))['ok'])
+        self.assertTrue(run(self.plugin.set_power_led(True))['ok'])
         self.assertEqual(self.register.value, 0xA5)
         result = run(self.plugin.restore_original())
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         for name in ('enabled', 'effect', 'brightness', 'multi_intensity', 'speed', 'profile', 'mode'):
             self.assertEqual(self.attr(name), LED[name], name)
         self.assertEqual(self.register.value, 0xA5 | LED_OFF_BIT)
         self.assertFalse(self.saved('control_enabled'))
         self.assertFalse(self.saved('power_led_managed'))
         self.assertIsNone(self.saved('original_rgb'))
-        self.assertFalse(result['status']['recovery_required'])
+        self.assertFalse(result['state']['recovery_required'])
 
     def test_restore_original_without_anything_owned_changes_nothing(self):
         before = {name: self.attr(name) for name in LED}
         result = run(self.plugin.restore_original())
-        self.assertTrue(result['success'])
+        self.assertTrue(result['ok'])
         self.assertEqual({name: self.attr(name) for name in LED}, before)
         self.assertEqual(self.register.value, 0xA5 | LED_OFF_BIT)
 
@@ -251,29 +256,29 @@ class VibrationRpcTests(unittest.TestCase):
 
     def test_rumble_mode_sets_both_handles_and_the_saved_profile(self):
         result = run(self.plugin.set_rumble_mode(2))
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual({k: v for k, v in self.hardware().items() if 'rumble_mode' in k},
                          {'left_handle/rumble_mode': 'standard', 'right_handle/rumble_mode': 'standard'})
         self.assertEqual(self.profile()['mode'], 2)
-        self.assertEqual(result['settings']['mode'], 2)
+        self.assertEqual(result['state']['settings']['mode'], 2)
         self.assertEqual(self.hardware()['rumble_intensity'], 'medium')  # other attributes keep their values
 
     def test_rumble_mode_index_is_clamped_to_what_the_driver_offers(self):
-        self.assertTrue(run(self.plugin.set_rumble_mode(99))['success'])
+        self.assertTrue(run(self.plugin.set_rumble_mode(99))['ok'])
         self.assertEqual(self.hardware()['left_handle/rumble_mode'], 'rpg')
-        self.assertTrue(run(self.plugin.set_rumble_mode(-4))['success'])
+        self.assertTrue(run(self.plugin.set_rumble_mode(-4))['ok'])
         self.assertEqual(self.hardware()['right_handle/rumble_mode'], 'fps')
 
     def test_rumble_mode_uses_the_modes_the_driver_advertises(self):
         (self.device / 'left_handle/rumble_mode_index').write_text('alpha beta gamma\n')
-        self.assertTrue(run(self.plugin.set_rumble_mode(1))['success'])
+        self.assertTrue(run(self.plugin.set_rumble_mode(1))['ok'])
         self.assertEqual(self.hardware()['left_handle/rumble_mode'], 'beta')
 
     def test_touchpad_intensity_levels_and_clamping(self):
         for level, name in ((0, 'off'), (1, 'low'), (3, 'high'), (9, 'high'), (-2, 'off')):
             with self.subTest(level=level):
                 result = run(self.plugin.set_touchpad_intensity(level))
-                self.assertTrue(result['success'], result)
+                self.assertTrue(result['ok'], result)
                 self.assertEqual(self.hardware()['touchpad/vibration_intensity'], name)
         self.assertEqual(self.profile()['touchpadIntensity'], 0)
 
@@ -283,15 +288,16 @@ class VibrationRpcTests(unittest.TestCase):
                      self.plugin.set_rumble_mode(None), self.plugin.set_touchpad_intensity('1'),
                      self.plugin.set_touchpad_intensity(1.5), self.plugin.set_touchpad_intensity(False)):
             result = run(call)
-            self.assertFalse(result['success'])
+            self.assertFalse(result['ok'])
             self.assertIn('integer', result['error'])
+            self.assertNotIn('state', result)  # nothing changed: the panel re-reads the profile
         self.assertEqual((self.hardware(), self.profile()), before)
 
     def test_stale_profile_expectation_is_refused_without_a_write(self):
         before = (self.hardware(), self.profile())
         for call in (self.plugin.set_rumble_mode(3, '555', '555'), self.plugin.set_touchpad_intensity(3, '555', '555')):
             result = run(call)
-            self.assertFalse(result['success'])
+            self.assertFalse(result['ok'])
             self.assertIn('Active profile changed', result['error'])
         self.assertEqual((self.hardware(), self.profile()), before)
 
@@ -299,23 +305,24 @@ class VibrationRpcTests(unittest.TestCase):
         before = self.profile()['mode']
         with patch.object(vibe, '_write_attr', return_value=False):
             result = run(self.plugin.set_rumble_mode(4))
-        self.assertFalse(result['success'])
+        self.assertEqual((result['ok'], result['error'], result['state']['settings']['mode']),
+                         (False, vibe.NOT_CONFIRMED, before))
         self.assertEqual(self.profile()['mode'], before)  # both UIs show what the controller has
         self.assertEqual(self.hardware(), FIRMWARE_DEFAULTS)
 
     def test_reapply_sets_the_saved_profile_back_after_the_controller_reset(self):
         self.store.replace({'schema_version': 2, 'baseline': {}, 'game_profiles': {'0': {
             'overwrite': False, 'settings': {'level': 3, 'mode': 1, 'touchpadIntensity': 0, 'touchpadEnabled': False}}}})
-        self.assertTrue(run(self.plugin.reapply())['success'])
+        self.assertTrue(run(self.plugin.reapply())['ok'])
         saved = {'rumble_intensity': 'high', 'left_handle/rumble_mode': 'racing', 'right_handle/rumble_mode': 'racing',
                  'touchpad/vibration_intensity': 'off', 'touchpad/vibration_enabled': 'false'}
         self.assertEqual(self.hardware(), saved)
         self.write_hardware(FIRMWARE_DEFAULTS)  # resume: firmware is back at its defaults
         with patch.object(vibe, '_write_attr', wraps=vibe._write_attr) as write:
             result = run(self.plugin.reapply())
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.hardware(), saved)
-        self.assertEqual(result['settings']['level'], 3)
+        self.assertEqual(result['state']['settings']['level'], 3)
         # Every setting is read back twice before it is skipped as "already set" (a stale reply cannot pass).
         self.assertEqual(len(write.call_args_list), 5)
         self.assertTrue(all(call.args[4] is True for call in write.call_args_list))
@@ -324,7 +331,7 @@ class VibrationRpcTests(unittest.TestCase):
         with patch.object(vibe, '_discover', return_value=(None, None)), \
                 patch.object(vibe, '_REAPPLY_WAIT_S', 0.0):
             result = run(self.plugin.reapply())
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertEqual(self.hardware(), FIRMWARE_DEFAULTS)
 
 
@@ -498,7 +505,7 @@ class RemapRpcTests(unittest.TestCase):
     def test_invalid_enabled_value_is_refused_and_nothing_is_loaded(self):
         for value in ('yes', 1, None, [True]):
             result = run(self.plugin.set_enabled(value))
-            self.assertFalse(result['success'])
+            self.assertFalse(result['ok'])
             self.assertIn('invalid remapper setting', result['error'])
         self.assertEqual(self.loads, [])
         self.assertFalse(self.state()['enabled'])
@@ -506,54 +513,54 @@ class RemapRpcTests(unittest.TestCase):
 
     def test_enable_captures_the_live_profile_applies_the_mappings_and_disable_restores_it(self):
         result = run(self.plugin.set_enabled(True))
-        self.assertTrue(result['success'], result)
-        self.assertTrue(result['status']['enabled'])
-        self.assertTrue(result['status']['active'])
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(result['state']['enabled'])
+        self.assertTrue(result['state']['active'])
         self.assertEqual(self.state()['baseline_profile'], BASE_PROFILE)
         self.assertEqual(remap_backend._profile_name(self.hardware), remap_backend.PROFILE_NAME)
         self.assertTrue(remap_backend._profile_matches(self.hardware, remap_backend._sanitize_state(self.state())))
         # The unrelated mapping of the user's own profile is still there.
         self.assertIn('button: LeftPaddle1', self.hardware)
         result = run(self.plugin.set_enabled(False))
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertFalse(self.state()['enabled'])
         self.assertIsNone(self.state()['baseline_profile'])
         self.assertEqual(remap_backend._profile_name(self.hardware), 'Custom User Profile')
         self.assertEqual(self.blocks(self.hardware), self.blocks(BASE_PROFILE))
 
     def test_restore_defaults_returns_both_buttons_to_the_original_mappings(self):
-        self.assertTrue(run(self.plugin.set_enabled(True))['success'])
-        self.assertTrue(run(self.plugin.set_action('desktop', 'f1'))['success'])
-        self.assertTrue(run(self.plugin.set_action('page', 'f2'))['success'])
+        self.assertTrue(run(self.plugin.set_enabled(True))['ok'])
+        self.assertTrue(run(self.plugin.set_action('desktop', 'f1'))['ok'])
+        self.assertTrue(run(self.plugin.set_action('page', 'f2'))['ok'])
         self.assertIn('keyboard: KeyF1', self.hardware)
         self.assertIn('keyboard: KeyF2', self.hardware)
         result = run(self.plugin.restore_defaults())
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual((self.state()['desktop_action'], self.state()['page_action']), ('default', 'default'))
         self.assertNotIn('keyboard: KeyF1', self.hardware)
         self.assertNotIn('keyboard: KeyF2', self.hardware)
         self.assertIn('button: Guide', self.hardware)
         self.assertIn('button: Screenshot', self.hardware)
-        self.assertTrue(result['status']['active'])
+        self.assertTrue(result['state']['active'])
         self.assertTrue(remap_backend._profile_matches(self.hardware, remap_backend._sanitize_state(self.state())))
 
     def test_restore_defaults_while_disabled_only_resets_the_saved_choices(self):
         self.memory.data['state'] = remap_backend._sanitize_state({'desktop_action': 'f3', 'page_action': 'escape'})
         result = run(self.plugin.restore_defaults())
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual((self.state()['desktop_action'], self.state()['page_action']), ('default', 'default'))
         self.assertFalse(self.state()['enabled'])
         self.assertEqual(self.loads, [])
         self.assertEqual(self.hardware, BASE_PROFILE)
 
     def test_restore_defaults_failure_is_reported_with_the_current_status(self):
-        self.assertTrue(run(self.plugin.set_enabled(True))['success'])
-        self.assertTrue(run(self.plugin.set_action('desktop', 'f1'))['success'])
+        self.assertTrue(run(self.plugin.set_enabled(True))['ok'])
+        self.assertTrue(run(self.plugin.set_action('desktop', 'f1'))['ok'])
         self.fail_load = True
         result = run(self.plugin.restore_defaults())
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('D-Bus temporarily unavailable', result['error'])
-        self.assertTrue(result['status']['enabled'])
+        self.assertTrue(result['state']['enabled'])
         self.assertIn('keyboard: KeyF1', self.hardware)  # the live mapping was not half-changed
 
 
@@ -573,11 +580,10 @@ class TdpRpcTests(unittest.TestCase):
     def test_invalid_app_ids_are_refused(self):
         for app_id in ('', None, '../x', 'a b', 'x' * 65, 'a/b', {}):
             with self.subTest(app_id=app_id):
-                result = self.rpc('get_game_profile', app_id)
-                self.assertEqual((result['exists'], result['profile'], result['error']), (False, {}, 'invalid app id'))
+                self.assertEqual(self.rpc('get_game_profile', app_id), {'ok': False, 'error': 'invalid app id'})
 
     def test_unknown_game_has_no_profile_and_no_error(self):
-        self.assertEqual(self.rpc('get_game_profile', '999'),
+        self.assertEqual(self.rpc('get_game_profile', '999')['state'],
                          {'exists': False, 'active': False, 'profile': {}, 'ac_separate': False, 'ac_profile': {}})
 
     def test_saved_game_profile_is_returned_clamped_with_its_separate_ac_values(self):
@@ -587,7 +593,7 @@ class TdpRpcTests(unittest.TestCase):
             '456': {'spl': 1000, 'sppt': 900, 'fppt': 800},
             '789': {'spl': 20000, 'sppt': 21000, 'fppt': 22000, 'ac_separate': 'yes'},
         })
-        result = self.rpc('get_game_profile', '123')
+        result = self.rpc('get_game_profile', '123')['state']
         self.assertTrue(result['exists'])
         self.assertEqual({k: result['profile'][k] for k in ('spl', 'sppt', 'fppt', 'preset')},
                          {'spl': 18000, 'sppt': 22000, 'fppt': 30000, 'preset': 'Quiet'})
@@ -595,34 +601,33 @@ class TdpRpcTests(unittest.TestCase):
         self.assertEqual({k: result['ac_profile'][k] for k in ('spl', 'sppt', 'fppt', 'ac_preset')},
                          {'spl': 25000, 'sppt': 28000, 'fppt': 32000, 'ac_preset': 'Plugged'})
         # Out-of-range values are clamped on read; ordering spl <= sppt <= fppt holds.
-        low = self.rpc('get_game_profile', '456')['profile']
+        low = self.rpc('get_game_profile', '456')['state']['profile']
         self.assertLessEqual(low['spl'], low['sppt'])
         self.assertLessEqual(low['sppt'], low['fppt'])
         self.assertGreaterEqual(low['spl'], 5000)
         # A non-bool flag is not trusted; without AC values the AC profile mirrors the battery one.
-        odd = self.rpc('get_game_profile', '789')
+        odd = self.rpc('get_game_profile', '789')['state']
         self.assertFalse(odd['ac_separate'])
         self.assertEqual({k: odd['ac_profile'][k] for k in ('spl', 'sppt', 'fppt')}, {'spl': 20000, 'sppt': 21000, 'fppt': 22000})
-        self.assertEqual(self.rpc('get_game_profile', 123)['exists'], True)  # numeric Steam ids are accepted
+        self.assertEqual(self.rpc('get_game_profile', 123)['state']['exists'], True)  # numeric Steam ids are accepted
 
     def test_plugin_enabled_rejects_non_bool(self):
         before = self.ppts()
         for value in (1, 0, 'true', None):
             result = self.rpc('set_plugin_enabled', value)
-            self.assertFalse(result['success'])
-            self.assertIn('boolean', result['stderr'])
+            self.assertEqual(result, {'ok': False, 'error': 'enabled must be a boolean'})
         self.assertEqual(self.ppts(), before)
         self.assertEqual(self.profile_writes, [])
 
     def test_disable_hands_the_firmware_back_and_enable_applies_the_saved_limits_again(self):
-        self.assertTrue(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 18000, 22000, 30000)['ok'])
         self.assertEqual((self.profile.read_text(), self.ppts()), ('custom', (18, 22, 30)))
         result = self.rpc('set_plugin_enabled', False)
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.profile.read_text(), 'balanced')
         self.assertFalse(self.saved().getSetting('settings')['enabled'])
         result = self.rpc('set_plugin_enabled', True)
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.profile.read_text(), 'custom')
         state = self.saved().getSetting('settings')
         self.assertTrue(state['enabled'])
@@ -631,11 +636,11 @@ class TdpRpcTests(unittest.TestCase):
     def test_enable_uses_the_running_games_profile(self):
         self.seed(profiles={'123': {'spl': 12000, 'sppt': 14000, 'fppt': 16000}}, enabled=False)
         self.app = '123'
-        self.assertTrue(self.rpc('set_plugin_enabled', True)['success'])
+        self.assertTrue(self.rpc('set_plugin_enabled', True)['ok'])
         self.assertEqual(self.ppts(), (12, 14, 16))
 
     def test_failed_restore_keeps_the_plugin_enabled(self):
-        self.assertTrue(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 18000, 22000, 30000)['ok'])
         tdp, read = tdp_core.tdp, tdp_core.tdp._read_sysfs
         profile = tdp._profile_path()
         self.assertIsNotNone(profile)
@@ -643,7 +648,7 @@ class TdpRpcTests(unittest.TestCase):
         with patch.object(tdp, '_read_sysfs',
                           side_effect=lambda path: 'custom' if path == profile else read(path)):
             result = self.rpc('set_plugin_enabled', False)
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertTrue(self.saved().getSetting('settings')['enabled'])
 
 

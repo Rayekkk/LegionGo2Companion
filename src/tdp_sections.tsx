@@ -77,17 +77,15 @@ export const powerSection = (s: TdpState) => {
     const a = absolute(next);
     try {
       if (editingAc && appId) {
-        const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, key);
+        await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, key);
         if (!operationCurrent(scope)) return;
-        if (!r.success) throw new Error(r.stderr || "The preset was not saved.");
         setSavedAcPreset(key);
         done(`${PRESET_LABELS[key]} saved for ${game!.name} on charger.`);
       } else {
-        const r = await applyTdp(
+        await applyTdp(
           toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, key,
           scope.appId);
         if (!operationCurrent(scope)) return;
-        if (!r.success) throw new Error(r.stderr || "The preset was not applied.");
         if (!appId) setGlobalProfile({ ...a, preset: key });
         else setSavedPreset(key);
         done(appId ? `${PRESET_LABELS[key]} saved for ${game!.name}.` : `${PRESET_LABELS[key]} applied.`);
@@ -110,9 +108,8 @@ export const powerSection = (s: TdpState) => {
       // Without a TDP provider the choice only selects which CPU settings to edit.
       if (!tdpAvailable) { setPerGame(next !== "global"); return; }
       if (next === "global") {
-        const result = await setGameProfileActive(app.appId, false);
+        await setGameProfileActive(app.appId, false);
         if (!operationCurrent(op)) return;
-        if (!result.success) throw new Error(result.stderr || "Could not switch to Global settings.");
         setPerGame(false); setAcSeparate(false); setEditingAc(false);
         setSavedPreset(undefined); setSavedAcPreset(undefined);
         const s = await getSettings();
@@ -123,9 +120,8 @@ export const powerSection = (s: TdpState) => {
       }
       let profile: GameProfile | null = null;
       if (!perGame) {
-        const result = await setGameProfileActive(app.appId, true);
+        await setGameProfileActive(app.appId, true);
         if (!operationCurrent(op)) return;
-        if (!result.success) throw new Error(result.stderr || "Could not turn on this game's settings.");
         profile = await getGameProfile(app.appId);
         if (!operationCurrent(op)) return;
         if (!profile.exists || !profile.profile) throw new Error("Game profile data is missing or corrupt.");
@@ -138,9 +134,8 @@ export const powerSection = (s: TdpState) => {
         if (!operationCurrent(op)) return;
         const ac = stored.ac_profile;
         if (!stored.exists || !ac) throw new Error("Game profile data is missing or corrupt.");
-        const result = await setGameAcProfile(app.appId, ac.spl, ac.sppt, ac.fppt, next === "game_ac", "");
+        await setGameAcProfile(app.appId, ac.spl, ac.sppt, ac.fppt, next === "game_ac", "");
         if (!operationCurrent(op)) return;
-        if (!result.success) throw new Error(result.stderr || "Could not change the charger settings.");
         setAcSeparate(next === "game_ac");
         setAcTuning(savedTuning(ac, ac.ac_preset, presets, advancedTdpControl, caps, minW).tuning);
         setEditingAc(next === "game_ac" && acOnline);
@@ -161,9 +156,8 @@ export const powerSection = (s: TdpState) => {
     const op = beginOperation();
     if (!op) return;
     try {
-      const result = await setPluginEnabled(checked);
+      await setPluginEnabled(checked);
       if (!operationCurrent(op)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change TDP control.");
       setEnabled(checked);
       done(checked ? "TDP control on." : "TDP control off. Lenovo's limits are back.");
     } catch (e: unknown) {
@@ -183,7 +177,7 @@ export const powerSection = (s: TdpState) => {
   const runningOwner = backendRunning ? backendRunning.game : perGame;
   const enableDescription = failureFor("enabled") ?? (enabled && (profilePending || profileError) ? "Reading profile…"
     : powerSummary(enabled, runningOwner && game ? game.name : "Global", nowLabel, now,
-      info?.success ? info.values?.package_draw : null, extrasUnlocked, stdCaps));
+      info?.values?.package_draw, extrasUnlocked, stdCaps));
   const presetDescription = failureFor("preset") ?? presetNote(preset, shownPresets(presets, batteryPresets,
     separateBattery, !editingAc && ((perGame && acSeparate) || !acOnline)));
   const scopeDescription = !game ? "" : failureFor("scope") ?? scopeNote(scope === "game_ac" ? "charger" : scope, game.name);
@@ -267,19 +261,17 @@ export const customLimitsSection = (s: TdpState) => {
     const a = absolute(target);
     try {
       if (editingAc && appId) {
-        const r = await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, "custom");
+        await setGameAcProfile(appId, toMw(a.spl), toMw(a.sppt), toMw(a.fppt), acSeparate, "custom");
         if (!operationCurrent(op)) return;
-        if (!r.success) throw new Error(r.stderr || "The limits were not saved.");
         setAcTuning(target);
         setSavedAcPreset("custom");
         clearDraft();
         done(`Saved for ${game!.name} on charger.`);
       } else {
-        const r = await applyTdp(
+        await applyTdp(
           toMw(a.spl), toMw(a.sppt), toMw(a.fppt), appId, "custom",
           op.appId);
         if (!operationCurrent(op)) return;
-        if (!r.success) throw new Error(r.stderr || "The limits were not applied.");
         setTuning(target);
         if (!appId) setGlobalProfile({ ...a, preset: "custom" });
         else setSavedPreset("custom");
@@ -350,9 +342,8 @@ export const moreSection = (s: TdpState) => {
     if (!op) return;
     const app = game;
     try {
-      const deleted = await deleteGameProfile(app.appId);
+      await deleteGameProfile(app.appId);
       if (!operationCurrent(op)) return;
-      if (!deleted.success) throw new Error(deleted.stderr || "Could not delete the profile.");
       setPerGame(false); setProfileExists(false); setAcSeparate(false); setEditingAc(false);
       setSavedPreset(undefined); setSavedAcPreset(undefined);
       const s = await getSettings();
@@ -370,9 +361,8 @@ export const moreSection = (s: TdpState) => {
     if (!op) return;
     try {
     try {
-      const result = await setExtrasUnlockedCall(checked);
+      await setExtrasUnlockedCall(checked);
       if (!operationCurrent(op)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change the 50 W setting.");
       setExtrasUnlocked(checked);
       setFailure(null);
       // Enabling may have just downloaded the helper, which widens the caps.
@@ -424,9 +414,8 @@ export const moreSection = (s: TdpState) => {
     if (!op) return;
     try {
     try {
-      const result = await setAdvancedTdpControlCall(checked);
+      await setAdvancedTdpControlCall(checked);
       if (!operationCurrent(op)) return;
-      if (!result.success) throw new Error(result.stderr || "Could not change Separate boost limits.");
       setAdvancedTdpControl(checked);
       setFailure(null);
       clearDraft();
@@ -478,9 +467,8 @@ export const moreSection = (s: TdpState) => {
     const op = beginOperation();
     if (!op) return;
     try {
-      const result = await setSeparateBatteryPresetsCall(checked);
+      await setSeparateBatteryPresetsCall(checked);
       if (!operationCurrent(op)) return;
-      if (!result.success) throw new Error(result.stderr || `Could not change ${BATTERY_PRESETS_LABEL}.`);
       setSeparateBattery(checked);
       setFailure(null);
     } catch (error) {
@@ -492,9 +480,8 @@ export const moreSection = (s: TdpState) => {
     const op = beginOperation(false, false);
     if (!op) return;
     try {
-      const result = await retryExtras();
+      await retryExtras();
       if (!operationCurrent(op)) return;
-      if (!result.success) throw new Error(result.error || "Retry failed");
       const c = await readCaps();
       if (operationCurrent(op)) { adoptCaps(c); setFailure(null); }
     } catch (error) {

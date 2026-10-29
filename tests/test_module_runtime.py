@@ -86,12 +86,15 @@ class PlatformProbeTests(unittest.TestCase):
             self.assertTrue(module_runtime.kernel_controller(str(devices)))
 
     def test_require_success_raises_not_confirmed_for_any_unconfirmed_reply(self):
-        for reply, message in ((None, 'not confirmed'), ('ok', 'not confirmed'), ({'success': 'true'}, 'not confirmed'),
-                               ({'success': False, 'stderr': 'busy'}, 'busy'),
-                               ({'success': False, 'error': 'E1', 'message': 'm'}, 'E1')):
+        for reply, message in ((None, 'not confirmed'), ('ok', 'not confirmed'), ({'ok': 'true'}, 'not confirmed'),
+                               ({'enabled': True}, 'not confirmed'), ({'ok': False, 'error': 'Refused.'}, 'Refused')):
             with self.subTest(reply=reply), self.assertRaisesRegex(module_runtime.NotConfirmed, message):
                 module_runtime.require_success(reply)
-        module_runtime.require_success({'success': True})
+        with self.assertRaisesRegex(module_runtime.NotConfirmed, 'No WiFi') as refused:
+            module_runtime.require_success({'ok': False, 'error': 'No WiFi.', 'state': {'error': 'no_wifi'}})
+        self.assertEqual(refused.exception.code, 'no_wifi')
+        module_runtime.require_success({'ok': True, 'state': {}})
+        module_runtime.require_success({'ok': True})
 
 
 

@@ -554,7 +554,7 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
                     patch.object(device_report, "collect", return_value="text") as collect, \
                     patch.object(device_report, "save", return_value="/home/x/Desktop/r.txt") as save:
                 results = await asyncio.gather(plugin.save_device_report(), plugin.save_device_report())
-            self.assertEqual(results, [{"success": True, "path": "/home/x/Desktop/r.txt"}] * 2)
+            self.assertEqual(results, [{"ok": True, "state": {"path": "/home/x/Desktop/r.txt"}}] * 2)
             collect.assert_called_once()  # Two clicks share one report.
             sent = collect.call_args.args[0]
             self.assertEqual(sent["user"], USER)
@@ -562,7 +562,7 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(sent["fan"]["telemetry"], "no Fan session: no EC readings to pass on")
             save.assert_called_once_with("text", "/home/" + USER, 1000, 1000)
             with patch.object(main, "_session_account", return_value=None):
-                self.assertFalse((await plugin.save_device_report())["success"])
+                self.assertFalse((await plugin.save_device_report())["ok"])
             await plugin._unload()
 
     async def test_a_click_after_a_timed_out_one_shares_the_running_collection(self):
@@ -582,11 +582,11 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
                     patch.object(device_report, "TOTAL_SECONDS", -4.8), \
                     patch.object(device_report, "collect", side_effect=slow) as collect, \
                     patch.object(device_report, "save", return_value="/home/x/Desktop/r.txt"):
-                self.assertFalse((await plugin.save_device_report())["success"], "timed out")
+                self.assertFalse((await plugin.save_device_report())["ok"], "timed out")
                 second = asyncio.ensure_future(plugin.save_device_report())
                 await asyncio.sleep(0.05)
                 release.set()
-                self.assertEqual(await second, {"success": True, "path": "/home/x/Desktop/r.txt"})
+                self.assertEqual(await second, {"ok": True, "state": {"path": "/home/x/Desktop/r.txt"}})
             collect.assert_called_once()
             await plugin._unload()
 

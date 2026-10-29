@@ -85,7 +85,7 @@ class RemapRecoveryTests(unittest.TestCase):
         plugin = remap.Plugin()
         with patch.object(plugin, "get_status", new_callable=AsyncMock, return_value={}):
             for button, action in (([], "default"), ("desktop", {})):
-                self.assertFalse(asyncio.run(plugin.set_action(button,action))["success"])
+                self.assertFalse(asyncio.run(plugin.set_action(button,action))["ok"])
 
 
 class RemapScalarTests(unittest.TestCase):
@@ -105,7 +105,7 @@ class RemapScalarTests(unittest.TestCase):
                 patch.object(remap, '_get_profile', side_effect=lambda _: current[0]), \
                 patch.object(remap, '_load_profile', side_effect=load):
             result = remap._mutate_sync({'enabled': True})
-            self.assertTrue(result['success'], result)
+            self.assertTrue(result['enabled'], result)
             self.assertEqual(remap._profile_name(current[0]), remap.PROFILE_NAME)
             self.assertNotIn('\n  User\n', current[0])
             self.assertEqual(store.data['state']['baseline_profile'], baseline)
@@ -114,7 +114,7 @@ class RemapScalarTests(unittest.TestCase):
             remap._repair_sync()
             self.assertEqual(store.data['state']['baseline_profile'], baseline)
             result = remap._mutate_sync({'enabled': False})
-            self.assertTrue(result['success'], result)
+            self.assertFalse(result['enabled'], result)
         return current[0]
 
     def test_complete_multiline_name_is_replaced_and_original_scalar_restored(self):

@@ -141,8 +141,42 @@ class WifiResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 results = await asyncio.gather(first, second, return_exceptions=True)
         self.assertIsInstance(results[0], asyncio.CancelledError)
-        self.assertTrue(results[1]['success'])
+        self.assertTrue(results[1]['ok'])
         self.assertEqual(len(runs), 2)
+
+
+class WifiAnswerTests(unittest.IsolatedAsyncioTestCase):
+    """The public methods answer D2: the internal result without `success` is the state, a failure's text is its
+    message and detail, and the refusal code stays in the state for the logs and the update's band restore."""
+    def test_internal_results_become_d2_answers(self):
+        self.assertEqual(wifi._answer({"success": True, "message": "Saved", "reconnected": False}),
+                         {"ok": True, "state": {"message": "Saved", "reconnected": False}})
+        self.assertEqual(wifi._answer(wifi._refusal("no_wifi", "Connect to WiFi first.", detail="No link.")),
+                         {"ok": False, "error": "Connect to WiFi first. — No link.",
+                          "state": {"error": "no_wifi", "message": "Connect to WiFi first.", "detail": "No link."}})
+        self.assertEqual(wifi._answer({"success": False, "error": "band_policy_recovery_required"})["error"],
+                         "The operation could not be verified.")
+
+    async def test_status_read_answers_d2(self):
+        plugin = wifi.Plugin()
+        with patch.object(plugin, '_get_status_sync', return_value={"success": True, "connected": False}):
+            self.assertEqual(await plugin.get_status(), {"ok": True, "state": {"connected": False}})
+        with patch.object(wifi, '_load_settings', side_effect=PermissionError(13, 'Permission denied', '/var/lib/x')):
+            answer = await plugin.get_status()
+        self.assertEqual((answer["ok"], answer["error"], answer["state"]["error"]),
+                         (False, "Permission denied", "unexpected"), "the panel's text names no path")
+
+    async def test_withdraw_and_uninstall_read_the_d2_verdict(self):
+        import module_control, module_runtime
+        plugin = wifi.Plugin()
+        refused = wifi._answer(wifi._refusal("no_wifi", "Connect to WiFi first."))
+        with patch.object(plugin, 'set_band_policy', AsyncMock(return_value=refused)), \
+                patch.object(wifi, 'diagnostic_event') as event:
+            with self.assertRaises(module_runtime.NotConfirmed) as caught:
+                await module_control.withdraw('wifi', plugin)
+            await plugin._uninstall()
+        self.assertEqual((str(caught.exception), caught.exception.code), ("Connect to WiFi first.", "no_wifi"))
+        self.assertEqual([c.args[1] for c in event.call_args_list], ['uninstall_restore_unconfirmed'])
 
 
 class IwdMainConfEditorTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   PanelSection,
@@ -9,11 +9,11 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import type { Result } from "./result";
 import { detailsRows, infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { controllersText, levelText, protectionChecked, protectionLocked, protectionNote, RESET_DONE, RESET_LABEL, RESET_NOTE, resetShown } from "../desktop/native/battery.mjs";
 
 export interface BatteryStatus {
-  success: boolean;
   supported: boolean;
   managed: boolean;
   enabled: boolean | null;
@@ -21,6 +21,7 @@ export interface BatteryStatus {
   charging_status?: string | null;
   capacity?: number | null;
   reason?: string;
+  /** Set exactly when the status is not confirmed (the read answers a refusal that carries it). */
   error?: string;
   backend: "charge_types";
   options?: string[];
@@ -38,11 +39,9 @@ export interface ControllerBatteryStatus {
   reason?: string;
 }
 
-interface BatteryResult {
-  success: boolean;
-  error?: string;
-  status?: BatteryStatus;
-}
+// A change answers D2 itself: the new status, also with a refusal (a refusal before any change has none).
+type BatteryResult = Result<BatteryStatus>;
+const UNCONFIRMED = "The change could not be confirmed. Check the battery state before trying again.";
 
 const mutations = mutationQueue();
 const readBatteryStatus = rpc<[], BatteryStatus>("battery_get_status");
@@ -51,9 +50,9 @@ export const getBatteryStatus = async () => {
   return readBatteryStatus();
 };
 export const getControllerBatteryLevels = rpc<[], ControllerBatteryStatus>("battery_get_controller_levels");
-const setBatteryEnabled = rpc<[boolean], BatteryResult>("battery_set_enabled");
-const releaseBatteryControl = rpc<[], BatteryResult>("battery_release_control");
-const resetChargingMode = rpc<[], BatteryResult>("battery_reset_charging_mode");
+const setBatteryEnabled = callable<[boolean], BatteryResult>("battery_set_enabled");
+const releaseBatteryControl = callable<[], BatteryResult>("battery_release_control");
+const resetChargingMode = callable<[], BatteryResult>("battery_reset_charging_mode");
 
 const unavailableControllerBatteries = (): ControllerBatteryStatus => ({
   available: false,
@@ -129,7 +128,7 @@ export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ 
       const next = await request;
       if (!next || !mounted.current || !isVisible.current || revision !== readRevision.current) return;
       setStatus(next);
-      setError(next.error || (!next.success ? "Battery status could not be read." : ""));
+      setError(next.error || "");
     } catch {
       if (mounted.current && isVisible.current && revision === readRevision.current) {
         setError("Battery status is unavailable. Retrying while this page is open.");
@@ -186,18 +185,17 @@ export const BatteryPage: FC<{ visible?: boolean; controllers?: boolean }> = ({ 
       try {
         // Finish the earlier read before writing, and ignore its stale result.
         await previousRead?.catch(() => undefined);
-        const result = await operation();
+        const { ok, error, state } = await operation();
         // Verification belongs to this transaction; the public menu getter
         // waits for its tail and must not be called from inside that same tail.
-        const next = result.status ?? (result.success ? await readBatteryStatus() : undefined);
+        const next = state ?? (ok ? await readBatteryStatus() : undefined);
         if (!canUpdate()) return;
         if (next) setStatus(next);
-        if (!result.success) fail(result.error || next?.error || "The charging change was not confirmed.");
-        else if (next?.error || next?.success === false) {
-          fail(next.error || "The choice was saved, but the battery state could not be confirmed.");
-        } else notify(message);
+        if (!ok) fail(next ? error || next.error || "The charging change was not confirmed." : UNCONFIRMED);
+        else if (next?.error) fail(next.error);
+        else notify(message);
       } catch {
-        if (canUpdate()) fail("The change could not be confirmed. Check the battery state before trying again.");
+        if (canUpdate()) fail(UNCONFIRMED);
       } finally {
         mutations.done();
         saving.current = false;

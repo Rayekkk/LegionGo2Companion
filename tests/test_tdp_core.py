@@ -383,7 +383,7 @@ class TdpCoreTests(unittest.TestCase):
 
     def test_presets_stay_inside_a_lower_firmware_ceiling(self):
         self.firmware_range((18, 30, 32))
-        presets = self.rpc('get_caps')['presets']
+        presets = self.rpc('get_caps')['state']['presets']
         self.assertEqual(presets['performance'], {'spl': 18, 'sppt': 30, 'fppt': 32})
         self.assertEqual(presets['max'], {'spl': 18, 'sppt': 30, 'fppt': 32})
 
@@ -441,8 +441,8 @@ class TdpCoreTests(unittest.TestCase):
         self.firmware_range((30, 32, 41))
         self.helper_ready()
         self.seed(extras_unlocked=True)
-        self.assertEqual(self.rpc('get_caps')['max'], {'spl': 30, 'sppt': 50, 'fppt': 50})
-        self.assertTrue(self.rpc('apply_tdp', 45000, 60000, 60000)['success'])
+        self.assertEqual(self.rpc('get_caps')['state']['max'], {'spl': 30, 'sppt': 50, 'fppt': 50})
+        self.assertTrue(self.rpc('apply_tdp', 45000, 60000, 60000)['ok'])
         self.assertEqual(self.ppts(), (30, 32, 41))
         self.assertEqual(self.applies(), [[
             '--stapm-limit=30000', '--slow-limit=50000', '--fast-limit=50000']])
@@ -463,28 +463,28 @@ class TdpCoreTests(unittest.TestCase):
     def test_rpc_without_extras_is_clamped_to_firmware_ceilings(self):
         self.helper_ready()
         result = self.rpc('apply_tdp', 45000, 48000, 50000)
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.ppts(), (35, 37, 45))
         self.assertEqual(self.applies(), [])
 
     def test_rpc_with_extras_reaches_ryzenadj(self):
         self.helper_ready()
         self.seed(extras_unlocked=True)
-        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['ok'])
         # The SMU keeps sustained power at the firmware's SPL ceiling; only the boosts go higher.
-        spl_max = self.rpc('get_caps')['std']['spl']
+        spl_max = self.rpc('get_caps')['state']['std']['spl']
         self.assertEqual(self.applies(), [[
             f'--stapm-limit={spl_max * 1000}', '--slow-limit=48000', '--fast-limit=50000']])
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual(caps['max'], dict(caps['std'], sppt=50, fppt=50))
 
     def test_extras_low_sustained_limit_is_shown_as_set_and_not_reapplied(self):
         # Legion Go 2 (2026-10-19): ryzenadj 15/40/50 W reads back STAPM 15, slow 40, fast 50.
         self.helper_ready()
         self.seed(extras_unlocked=True)
-        self.assertTrue(self.rpc('apply_tdp', 15000, 40000, 50000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 40000, 50000)['ok'])
         tdp._refresh_info_cache()  # one info-loop tick
-        values = self.rpc('get_tdp_info')['values']
+        values = self.rpc('get_tdp_info')['state']['values']
         self.assertEqual({key: values[key + '_limit'] for key in ('spl', 'sppt', 'fppt')},
                          {'spl': 15, 'sppt': 40, 'fppt': 50})
         for _ in range(3):
@@ -496,16 +496,16 @@ class TdpCoreTests(unittest.TestCase):
     def test_enabling_extras_downloads_and_verifies_the_helper_once(self):
         self.bin.unlink()
         result = self.rpc('set_extras_unlocked', True)
-        self.assertFalse(result['success'])
-        self.assertIn('offline', result['stderr'])
+        self.assertFalse(result['ok'])
+        self.assertIn('offline', result['error'])
         self.assertFalse(self.saved()['extras_unlocked'])
         self.publish_helper()
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])
         self.assertEqual(self.bin.read_bytes(), HELPER)
         self.assertTrue(self.saved()['extras_unlocked'])
-        self.assertTrue(self.rpc('get_caps')['extras'])
-        self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertTrue(self.rpc('get_caps')['state']['extras'])
+        self.assertTrue(self.rpc('set_extras_unlocked', False)['ok'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])
         self.assertEqual(len(self.downloads), 2)
 
     def test_helper_download_that_fails_verification_installs_nothing(self):
@@ -517,26 +517,26 @@ class TdpCoreTests(unittest.TestCase):
                 if publish is not None:
                     self.publish_helper(**publish)
                 result = self.rpc('set_extras_unlocked', True)
-                self.assertFalse(result['success'])
+                self.assertFalse(result['ok'])
                 if publish is not None:
-                    self.assertIn('checksum mismatch', result['stderr'])
+                    self.assertIn('checksum mismatch', result['error'])
                 self.assertEqual(list(self.bin.parent.iterdir()), [])
                 self.assertEqual(list(self.tmp.iterdir()), [])
                 self.assertFalse(self.saved()['extras_unlocked'])
-                self.assertFalse(self.rpc('get_caps')['extras'])
+                self.assertFalse(self.rpc('get_caps')['state']['extras'])
         self.assertEqual(len(self.downloads), 3)
         self.assertEqual(self.applies(), [])
 
     def test_failed_helper_download_is_reported_until_a_verified_retry(self):
         shutil.rmtree(self.firmware)
         self.bin.unlink()
-        self.assertFalse(self.rpc('retry_extras')['success'])
-        caps = self.rpc('get_caps')
+        self.assertFalse(self.rpc('retry_extras')['ok'])
+        caps = self.rpc('get_caps')['state']
         self.assertFalse(caps['tdp_available'])
         self.assertIn('offline', caps['tdp_error'])
         self.publish_helper()
-        self.assertTrue(self.rpc('retry_extras')['success'])
-        caps = self.rpc('get_caps')
+        self.assertTrue(self.rpc('retry_extras')['ok'])
+        caps = self.rpc('get_caps')['state']
         self.assertTrue(caps['tdp_available'])
         self.assertEqual(caps['tdp_error'], '')
         self.assertTrue(caps['extras'])
@@ -557,7 +557,7 @@ class TdpCoreTests(unittest.TestCase):
             second = asyncio.create_task(self.plugin.retry_extras())  # waits for the running one
             await asyncio.sleep(0.05)
             self.download_gate.set()
-            return [(await task)['success'] for task in (first, second)]
+            return [(await task)['ok'] for task in (first, second)]
         self.assertEqual(asyncio.run(scenario()), [True, True])
         self.assertEqual(len(self.downloads), 1)
         tdp._check_and_enforce()
@@ -579,7 +579,7 @@ class TdpCoreTests(unittest.TestCase):
             await asyncio.sleep(0.05)
             self.assertFalse(off.done(), 'OFF must not commit before the earlier ON')
             self.download_gate.set()
-            return [(await task)['success'] for task in (first, second, off)]
+            return [(await task)['ok'] for task in (first, second, off)]
         self.assertEqual(asyncio.run(scenario()), [True, True, True])
         self.assertEqual(len(self.downloads), 1)
         self.assertFalse(self.saved()['extras_unlocked'])
@@ -589,21 +589,21 @@ class TdpCoreTests(unittest.TestCase):
         self.assertFalse(REAL_BIN_DIR.startswith(REAL_PLUGIN_DIR))
         self.bin.unlink()
         self.publish_helper()
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])
         # Decky's update: unload, uninstall, a new plugin directory, a fresh start.
         asyncio.run(self.plugin._uninstall())
         tdp._ryzenadj_available = False
         plugin = self.start()
-        self.assertTrue(asyncio.run(plugin.get_caps())['extras'])  # no Retry, no new download
+        self.assertTrue(asyncio.run(plugin.get_caps())['state']['extras'])  # no Retry, no new download
         self.assertEqual(len(self.downloads), 1)
-        self.assertTrue(self.rpc('apply_tdp', 30000, 45000, 50000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 30000, 45000, 50000)['ok'])
         self.assertEqual(self.applies()[-1],
                          ['--stapm-limit=30000', '--slow-limit=45000', '--fast-limit=50000'])
 
     def test_helper_is_verified_before_every_run(self):
         self.bin.unlink()
         self.publish_helper()
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])
         self.bin.write_bytes(HELPER + b'tampered')
         self.assertFalse(tdp._apply_limits(30000, 45000, 50000, extras=True)['success'])
         self.assertEqual(self.applies(), [])
@@ -617,9 +617,9 @@ class TdpCoreTests(unittest.TestCase):
         self.publish_helper()
         self.info_failure = b'Unable to init ryzenadj\n'
         result = self.rpc('set_extras_unlocked', True)
-        self.assertFalse(result['success'])
-        self.assertIn(tdp.RYZENADJ_UNSUPPORTED_CPU, result['stderr'])
-        caps = self.rpc('get_caps')
+        self.assertFalse(result['ok'])
+        self.assertIn(tdp.RYZENADJ_UNSUPPORTED_CPU, result['error'])
+        caps = self.rpc('get_caps')['state']
         self.assertEqual((caps['extras'], caps['helper_retry_available'], caps['tdp_available']),
                          (False, False, True))
         self.assertFalse(self.saved()['extras_unlocked'])
@@ -629,8 +629,8 @@ class TdpCoreTests(unittest.TestCase):
         self.publish_helper()
         self.info_failure = (b'CPU Family: Strix Point\n'
                              b'Unable to init power metric table: -1, this does not affect adjustments\n')
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
-        self.assertTrue(self.rpc('get_caps')['extras'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])
+        self.assertTrue(self.rpc('get_caps')['state']['extras'])
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX symlinks')
     def test_helper_directory_that_is_a_symlink_is_refused(self):
@@ -640,8 +640,8 @@ class TdpCoreTests(unittest.TestCase):
         self.bin.parent.symlink_to(elsewhere)
         self.publish_helper()
         result = self.rpc('set_extras_unlocked', True)
-        self.assertFalse(result['success'])
-        self.assertIn('unsafe RyzenAdj directory', result['stderr'])
+        self.assertFalse(result['ok'])
+        self.assertIn('unsafe RyzenAdj directory', result['error'])
         self.assertEqual(list(elsewhere.iterdir()), [])
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX permissions')
@@ -676,10 +676,10 @@ class TdpCoreTests(unittest.TestCase):
                   extras_unlocked=True, spl=40000, sppt=45000, fppt=50000)
         with patch.object(tdp, 'transition') as transition:
             plugin = self.start()
-        self.assertTrue(asyncio.run(plugin.is_ready())['ready'])
+        self.assertTrue(asyncio.run(plugin.is_ready())['state']['ready'])
         self.assertEqual(self.downloads, [tdp.RYZENADJ_URL])  # one attempt, no retry loop
         self.assertIn(('tdp', 'helper_ready', False), [call.args for call in transition.call_args_list])
-        caps = asyncio.run(plugin.get_caps())
+        caps = asyncio.run(plugin.get_caps())['state']
         self.assertEqual((caps['extras'], caps['helper_retry_available']), (False, True))  # Retry as today
         self.assertEqual(self.ppts(), (35, 37, 45))  # runs inside the firmware range meanwhile
         saved = self.saved()
@@ -710,7 +710,7 @@ class TdpCoreTests(unittest.TestCase):
             plugin._tasks = []
         asyncio.run(scenario())
         self.assertEqual(self.bin.read_bytes(), HELPER)
-        self.assertTrue(asyncio.run(plugin.get_caps())['extras'])
+        self.assertTrue(asyncio.run(plugin.get_caps())['state']['extras'])
         tdp._check_and_enforce()  # the next pass runs the Extras target
         self.assertEqual(self.applies(), [
             ['--stapm-limit=30000', '--slow-limit=45000', '--fast-limit=50000']])
@@ -746,13 +746,13 @@ class TdpCoreTests(unittest.TestCase):
             plugin._tasks = []
             return result
         with patch.object(tdp, 'event') as event:
-            self.assertTrue(asyncio.run(scenario())['success'])
+            self.assertTrue(asyncio.run(scenario())['ok'])
         self.assertFalse(self.saved()['extras_unlocked'])
         self.assertFalse(tdp._ryzenadj_available)
         self.assertIn((('tdp', 'helper_job'), {'outcome': 'cancelled', 'reason': 'extras_off'}),
                       [(call.args, call.kwargs) for call in event.call_args_list])
         self.download_gate.set()
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])  # a later choice downloads again
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])  # a later choice downloads again
         self.assertEqual(len(self.downloads), 2)
 
     def test_loaded_spl_is_bounded_by_the_last_sane_firmware_ceiling(self):
@@ -760,7 +760,7 @@ class TdpCoreTests(unittest.TestCase):
         spl_max = self.firmware / tdp.WMI_ATTRS['spl'] / 'max_value'
         self.assertEqual(tdp._load_settings()['spl'], 33000)  # 35 W before any firmware read
         spl_max.write_text('30')
-        self.rpc('get_caps')
+        self.rpc('get_caps')['state']
         self.assertEqual(tdp._load_settings()['spl'], 30000)
         for broken in ('500', '0', None):
             with self.subTest(firmware_spl_max=broken):
@@ -769,34 +769,34 @@ class TdpCoreTests(unittest.TestCase):
                     spl_max.unlink()
                 else:
                     spl_max.write_text(broken)
-                self.rpc('get_caps')
+                self.rpc('get_caps')['state']
                 self.assertEqual(tdp._load_settings()['spl'], 33000)
 
     def test_start_without_firmware_or_helper_is_ready_but_reports_tdp_unavailable(self):
         shutil.rmtree(self.firmware)
         self.bin.unlink()
         plugin = self.start()
-        self.assertTrue(asyncio.run(plugin.is_ready())['ready'])
-        caps = asyncio.run(plugin.get_caps())
+        self.assertTrue(asyncio.run(plugin.is_ready())['state']['ready'])
+        caps = asyncio.run(plugin.get_caps())['state']
         self.assertFalse(caps['tdp_available'])
         self.assertTrue(caps['helper_retry_available'])
         self.assertFalse(tdp._apply_limits(16000, 25000, 30000)['success'])
         self.assertEqual((self.downloads, self.ryzenadj), ([], []))
 
     def test_caps_tell_missing_firmware_from_missing_helper(self):
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual((caps['tdp_available'], caps['extras'], caps['tdp_error']), (True, False, ''))
         self.choices.write_text('low-power balanced performance')  # no tunable profile
-        self.assertFalse(self.rpc('get_caps')['tdp_available'])
+        self.assertFalse(self.rpc('get_caps')['state']['tdp_available'])
         self.choices.write_text('low-power balanced performance custom')
         shutil.rmtree(self.firmware)
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertFalse(caps['tdp_available'])
         self.assertTrue(caps['helper_retry_available'])
         self.assertFalse(caps['extras'])
         self.assertIn('unavailable', caps['tdp_error'])
         self.helper_ready()
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual((caps['tdp_available'], caps['extras'], caps['helper_retry_available']),
                          (True, True, False))
 
@@ -810,16 +810,16 @@ class TdpCoreTests(unittest.TestCase):
         with patch.object(tdp.Plugin, '_ready', False), \
                 patch.object(tdp.Plugin, '_setup_error', None):
             self.assertEqual(tdp._apply_limits(15000, 20000, 25000)['stderr'], tdp.UNSUPPORTED_MODEL)
-            self.assertFalse(self.rpc('set_cpu_boost', True)['success'])
-            caps = self.rpc('get_caps')
+            self.assertFalse(self.rpc('set_cpu_boost', True)['ok'])
+            caps = self.rpc('get_caps')['state']
             self.assertFalse(caps['tdp_available'])
             self.assertEqual(caps['tdp_error'], tdp.UNSUPPORTED_MODEL)
-            self.assertFalse(self.rpc('retry_extras')['success'])
+            self.assertFalse(self.rpc('retry_extras')['ok'])
             with tdp._mutation_lock:
                 self.assertTrue(tdp._release_controls_locked()['success'])
             plugin = tdp.Plugin()
             asyncio.run(plugin._main())
-            self.assertEqual(asyncio.run(plugin.is_ready()),
+            self.assertEqual(asyncio.run(plugin.is_ready())['state'],
                              {'ready': False, 'error': tdp.UNSUPPORTED_MODEL})
             self.assertEqual(plugin._tasks, [])
         self.assertEqual(self.downloads, [])
@@ -834,7 +834,7 @@ class TdpCoreTests(unittest.TestCase):
             (self.firmware / tdp.WMI_ATTRS[key] / 'max_value').write_text(str(high))
 
     def test_go_2_keeps_its_measured_presets_and_max(self):
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual(caps['presets'], {
             'silent': {'spl': 8, 'sppt': 15, 'fppt': 20},
             'balanced': {'spl': 16, 'sppt': 25, 'fppt': 30},
@@ -847,7 +847,7 @@ class TdpCoreTests(unittest.TestCase):
     def test_go_s_uses_its_bios_presets(self):
         self.machine = '83N6'
         self.firmware_range((40, 43, 53))
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual(caps['presets'], {
             'silent': {'spl': 10, 'sppt': 15, 'fppt': 20},
             'balanced': {'spl': 15, 'sppt': 25, 'fppt': 30},
@@ -862,18 +862,18 @@ class TdpCoreTests(unittest.TestCase):
                 self.firmware_range((40, 43, 53))
                 self.bin.unlink(missing_ok=True)
                 self.seed(extras_unlocked=True)  # saved before, or by hand: never honoured
-                caps = self.rpc('get_caps')
+                caps = self.rpc('get_caps')['state']
                 self.assertEqual((caps['extras'], caps['helper_retry_available'], caps['tdp_available']),
                                  (False, False, True))
                 self.assertEqual(caps['max'], {'spl': 40, 'sppt': 43, 'fppt': 53})
-                self.assertFalse(self.rpc('get_extras_unlocked'))
+                self.assertFalse(self.rpc('get_extras_unlocked')['state'])
                 result = self.rpc('set_extras_unlocked', True)
-                self.assertFalse(result['success'])
-                self.assertIn(tdp.EXTRAS_UNAVAILABLE, result['stderr'])
-                self.assertFalse(self.rpc('retry_extras')['success'])
+                self.assertFalse(result['ok'])
+                self.assertIn(tdp.EXTRAS_UNAVAILABLE, result['error'])
+                self.assertFalse(self.rpc('retry_extras')['ok'])
                 self.assertEqual(self.downloads, [])
                 self.helper_ready()  # even a verified helper left on disk is not used
-                self.assertTrue(self.rpc('apply_tdp', 45000, 60000, 60000)['success'])
+                self.assertTrue(self.rpc('apply_tdp', 45000, 60000, 60000)['ok'])
                 self.assertEqual(self.ppts(), (40, 43, 53))
                 self.assertEqual(self.applies(), [])
 
@@ -886,29 +886,29 @@ class TdpCoreTests(unittest.TestCase):
                 self.firmware_range(std)
                 self.helper_ready()
                 self.seed(extras_unlocked=True)
-                self.assertEqual(self.rpc('get_caps')['max'], extras)
-                self.assertTrue(self.rpc('get_extras_unlocked'))
+                self.assertEqual(self.rpc('get_caps')['state']['max'], extras)
+                self.assertTrue(self.rpc('get_extras_unlocked')['state'])
 
     def test_a_machine_type_placed_by_product_version_gets_its_consoles_tdp(self):
         self.firmware_range((40, 43, 53))
         with patch.object(tdp, '_device', return_value=('gos', '83ZZ')):  # a Go S of a later batch
-            caps = self.rpc('get_caps')
+            caps = self.rpc('get_caps')['state']
             self.assertEqual((caps['tdp_available'], caps['extras']), (True, False))
             self.assertEqual(caps['presets']['performance'], {'spl': 30, 'sppt': 35, 'fppt': 40})
-            self.assertTrue(self.rpc('apply_tdp', 15000, 25000, 30000)['success'])
+            self.assertTrue(self.rpc('apply_tdp', 15000, 25000, 30000)['ok'])
         self.assertEqual(self.ppts(), (15, 25, 30))
 
     def test_go_1_uses_its_bios_presets_and_max_is_its_ceiling(self):
         self.machine = '83E1'
         self.firmware_range((30, 32, 41))
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual(caps['presets'], {
             'silent': {'spl': 8, 'sppt': 15, 'fppt': 20},
             'balanced': {'spl': 15, 'sppt': 25, 'fppt': 30},
             'performance': {'spl': 20, 'sppt': 32, 'fppt': 35},
             'max': {'spl': 30, 'sppt': 32, 'fppt': 41},
         })
-        self.assertTrue(self.rpc('apply_tdp', 30000, 32000, 41000, preset_name='max')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 30000, 32000, 41000, preset_name='max')['ok'])
         self.assertEqual(self.ppts(), (30, 32, 41))  # the firmware path, not the Go 2's 35/37/45
         self.assertEqual(self.applies(), [])
 
@@ -916,35 +916,35 @@ class TdpCoreTests(unittest.TestCase):
         self.machine = '83N6'  # Go S: 40/43/53 W
         self.firmware_range((40, 43, 53))
         self.seed(advanced_tdp_control=False)
-        self.assertTrue(self.rpc('apply_tdp', 40000, 43000, 53000, preset_name='custom')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 40000, 43000, 53000, preset_name='custom')['ok'])
         self.assertEqual(self.ppts(), (40, 43, 53))
 
     def test_single_dial_custom_on_a_presets_spl_still_derives_its_boosts(self):
         self.seed(advanced_tdp_control=False)
-        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['ok'])
         self.assertEqual(self.ppts(), (16, 26, 31))  # Balanced's values, chosen on the Custom dial
         self.set_ppts(10, 10, 10)
-        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000)['success'])  # no name: the saved Custom
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000)['ok'])  # no name: the saved Custom
         self.assertEqual(self.ppts(), (16, 26, 31))
         self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000, 'preset': 'custom'}},
                   advanced_tdp_control=False)
         self.app = '123'
-        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, '123')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, '123')['ok'])
         self.assertEqual(self.ppts(), (16, 26, 31))
 
     def test_a_games_battery_sliders_run_on_battery_and_its_charger_values_on_the_charger(self):
         self.seed({'123': {'spl': 12000, 'sppt': 15000, 'fppt': 20000, 'ac_separate': True,
                            'ac_spl': 30000, 'ac_sppt': 35000, 'ac_fppt': 40000}})
         self.app = '123'
-        self.assertTrue(self.rpc('apply_tdp', 14000, 18000, 22000, '123')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 14000, 18000, 22000, '123')['ok'])
         self.assertEqual(self.ppts(), (14, 18, 22))
         self.ac = True
-        self.assertTrue(self.rpc('apply_tdp', 14000, 18000, 22000, '123')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 14000, 18000, 22000, '123')['ok'])
         self.assertEqual(self.ppts(), (30, 35, 40))
 
     def test_presets_and_limits_stay_inside_the_firmware_minimums(self):
         self.firmware_range((35, 37, 45), mins=(10, 16, 18))
-        presets = self.rpc('get_caps')['presets']
+        presets = self.rpc('get_caps')['state']['presets']
         self.assertEqual(presets['silent'], {'spl': 10, 'sppt': 16, 'fppt': 20})
         self.assertEqual(presets['balanced'], {'spl': 16, 'sppt': 25, 'fppt': 30})
         self.helper_ready()
@@ -954,7 +954,7 @@ class TdpCoreTests(unittest.TestCase):
 
     def test_a_firmware_minimum_under_5_w_never_lowers_the_floor(self):
         self.firmware_range((35, 37, 45), mins=(0, 3, 0))
-        self.assertEqual(self.rpc('get_caps')['min'], 5)
+        self.assertEqual(self.rpc('get_caps')['state']['min'], 5)
         self.assertTrue(tdp._apply_limits(1000, 2000, 3000)['success'])
         self.assertEqual(self.ppts(), (5, 5, 5))
 
@@ -962,11 +962,11 @@ class TdpCoreTests(unittest.TestCase):
         self.machine = '83E1'
         shutil.rmtree(self.firmware)
         self.helper_ready()
-        caps = self.rpc('get_caps')
+        caps = self.rpc('get_caps')['state']
         self.assertEqual((caps['tdp_available'], caps['extras'], caps['helper_retry_available'],
                           caps['tdp_error']), (False, False, False, tdp.NO_FIRMWARE_TDP))
         self.seed(extras_unlocked=True)
-        self.assertFalse(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertFalse(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.assertFalse(tdp._apply_limits(15000, 45000, 50000, extras=True)['success'])
         with tdp._mutation_lock:
             self.assertTrue(tdp._release_controls_locked()['success'])
@@ -980,8 +980,8 @@ class TdpCoreTests(unittest.TestCase):
         (policy / 'energy_performance_preference').write_text('balance_performance')
         (policy / 'energy_performance_available_preferences').write_text(
             'default performance balance_performance balance_power power')
-        self.assertTrue(self.rpc('set_cpu_boost', True)['success'])
-        self.assertTrue(self.rpc('set_epp', 'power')['success'])
+        self.assertTrue(self.rpc('set_cpu_boost', True)['ok'])
+        self.assertTrue(self.rpc('set_epp', 'power')['ok'])
         self.assertEqual(((policy / 'boost').read_text(), (policy / 'energy_performance_preference').read_text()),
                          ('1', 'power'))
 
@@ -991,7 +991,7 @@ class TdpCoreTests(unittest.TestCase):
         shutil.move(str(self.firmware), str(instance))
         self.stack.enter_context(patch.object(
             tdp, 'WMI_ROOT', str(self.root / 'firmware-attributes/lenovo-wmi-other-*/attributes')))
-        self.assertTrue(self.rpc('get_caps')['wmi'])
+        self.assertTrue(self.rpc('get_caps')['state']['wmi'])
         self.assertTrue(tdp._apply_limits(18000, 22000, 30000)['success'])
         self.assertEqual((instance / tdp.WMI_ATTRS['fppt'] / 'current_value').read_text(), '30')
 
@@ -1002,7 +1002,7 @@ class TdpCoreTests(unittest.TestCase):
                            'ac_fppt': 50000, 'ac_preset': 'fast'}},
                   extras_unlocked=True, spl=40000, sppt=45000, fppt=50000,
                   active_preset='mine')
-        self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', False)['ok'])
         saved = self.saved()
         self.assertEqual((saved['spl'], saved['sppt'], saved['fppt'], saved['active_preset']),
                          (35000, 37000, 45000, 'custom'))
@@ -1018,7 +1018,7 @@ class TdpCoreTests(unittest.TestCase):
         self.seed({'123': {'spl': 25000, 'sppt': 45000, 'fppt': 50000}},
                   extras_unlocked=True, spl=15000, sppt=20000, fppt=25000)
         self.app = '123'
-        self.assertTrue(self.rpc('set_extras_unlocked', False)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', False)['ok'])
         self.assertEqual(self.ppts(), (25, 37, 45))
 
     def test_a_games_charger_profile_is_saved_on_battery_and_runs_only_on_the_charger(self):
@@ -1028,19 +1028,19 @@ class TdpCoreTests(unittest.TestCase):
         for args in (('123', '30000', 35000, 40000, True), ('123', 30000, 35000, 40000, 'yes'),
                      ('123', 30000, 35000, 40000, True, '', 'no'), ('not an app', 30000, 35000, 40000, True)):
             with self.subTest(args=args):
-                self.assertFalse(self.rpc('set_game_ac_profile', *args)['success'])
-        self.assertTrue(self.rpc('set_game_ac_profile', '123', 30000, 35000, 40000, True)['success'])
+                self.assertFalse(self.rpc('set_game_ac_profile', *args)['ok'])
+        self.assertTrue(self.rpc('set_game_ac_profile', '123', 30000, 35000, 40000, True)['ok'])
         game = self.saved('game_profiles')['123']
         self.assertEqual((game['ac_spl'], game['ac_sppt'], game['ac_fppt']), (30000, 35000, 40000))
         self.assertEqual(self.ppts(), (12, 15, 20))  # on battery: the battery values keep running
         self.ac = True
-        self.assertTrue(self.rpc('set_game_ac_profile', '123', 28000, 33000, 38000, True)['success'])
+        self.assertTrue(self.rpc('set_game_ac_profile', '123', 28000, 33000, 38000, True)['ok'])
         self.assertEqual(self.ppts(), (28, 33, 38))
 
     # Rollback when a change cannot be saved --------------------------------
 
     def test_apply_that_cannot_be_saved_puts_the_previous_limits_back(self):
-        self.assertTrue(self.rpc('apply_tdp', 15000, 18000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 18000, 25000)['ok'])
         with self.disk_full(), self.assertRaisesRegex(RuntimeError, 'previous target restored'):
             self.rpc('apply_tdp', 8000, 10000, 15000)
         self.assertEqual(self.ppts(), (15, 18, 25))
@@ -1091,10 +1091,10 @@ class TdpCoreTests(unittest.TestCase):
 
     def choose(self, preset, app_id=''):
         """Press a preset as both UIs do: its charger values and its name."""
-        values = self.rpc('get_caps')['presets'][preset]
+        values = self.rpc('get_caps')['state']['presets'][preset]
         result = self.rpc('apply_tdp', *(values[key] * 1000 for key in ('spl', 'sppt', 'fppt')),
                           app_id, preset_name=preset)
-        self.assertTrue(result['success'], result)
+        self.assertTrue(result['ok'], result)
 
     def test_presets_run_the_charger_values_on_battery_unless_separate_battery_presets_is_on(self):
         for machine, maxes, preset, ac, battery in (
@@ -1110,19 +1110,19 @@ class TdpCoreTests(unittest.TestCase):
                 tdp._current_ac_online = False
                 self.choose(preset)
                 self.assertEqual(self.ppts(), ac)  # off (the default): as before, on battery too
-                self.assertTrue(self.rpc('set_separate_battery_presets', True)['success'])
+                self.assertTrue(self.rpc('set_separate_battery_presets', True)['ok'])
                 self.assertEqual(self.ppts(), battery)
                 self.assertTrue(self.saved()['separate_battery_presets'])
-                self.assertEqual(self.rpc('get_settings')['battery_preset'], preset)
+                self.assertEqual(self.rpc('get_settings')['state']['battery_preset'], preset)
                 self.ac = True
                 events = tdp._check_and_enforce()
                 self.assertIn('_resettle_generation', events)  # the charger ladder re-asserts it
                 self.assertEqual(self.ppts(), ac)
-                self.assertEqual(self.rpc('get_settings')['battery_preset'], '')
+                self.assertEqual(self.rpc('get_settings')['state']['battery_preset'], '')
                 self.ac = False
                 tdp._check_and_enforce()
                 self.assertEqual(self.ppts(), battery)
-                self.assertTrue(self.rpc('set_separate_battery_presets', False)['success'])
+                self.assertTrue(self.rpc('set_separate_battery_presets', False)['ok'])
                 self.assertEqual(self.ppts(), ac)
                 # The saved preset keeps its charger values and name either way.
                 saved = self.saved()
@@ -1141,14 +1141,14 @@ class TdpCoreTests(unittest.TestCase):
         self.seed(separate_battery_presets=True)
         self.choose('max')
         self.assertEqual(self.ppts(), (35, 37, 45))
-        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['ok'])
         self.assertEqual(self.ppts(), (16, 25, 30))  # Balanced's values, but chosen as Custom
-        self.assertTrue(self.rpc('apply_tdp', 12000, 18000, 22000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 12000, 18000, 22000)['ok'])
         self.assertEqual(self.ppts(), (12, 18, 22))
         tdp._current_ac_online = False
-        self.assertTrue(self.rpc('apply_tdp', 16000, 16000, 30000, preset_name='custom')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 16000, 16000, 30000, preset_name='custom')['ok'])
         self.assertEqual(self.ppts(), (16, 16, 30))  # Balanced's battery values, chosen as Custom
-        self.assertEqual(self.rpc('get_settings')['battery_preset'], '')
+        self.assertEqual(self.rpc('get_settings')['state']['battery_preset'], '')
 
     def test_a_game_preset_on_battery_is_named_by_its_battery_values(self):
         self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'}},
@@ -1157,7 +1157,7 @@ class TdpCoreTests(unittest.TestCase):
         tdp._check_and_enforce()
         tdp._current_ac_online = False
         self.assertEqual(self.ppts(), (8, 8, 20))
-        self.assertEqual(self.rpc('get_settings')['battery_preset'], 'silent')
+        self.assertEqual(self.rpc('get_settings')['state']['battery_preset'], 'silent')
 
     def test_get_settings_names_what_runs_without_reading_the_firmware(self):
         self.seed({'123': {'spl': 8000, 'sppt': 15000, 'fppt': 20000, 'preset': 'silent'}},
@@ -1165,23 +1165,23 @@ class TdpCoreTests(unittest.TestCase):
         self.choose('performance')
         tdp._current_ac_online = False
         with patch.object(tdp, '_wmi_read', side_effect=AssertionError('live firmware read')):
-            settings = self.rpc('get_settings')
+            settings = self.rpc('get_settings')['state']
         self.assertEqual(self.ppts(), (20, 20, 35))
         self.assertEqual((settings['battery_preset'], settings['running']),
                          ('performance', {'spl': 20, 'sppt': 20, 'fppt': 35, 'preset': 'performance', 'battery': True, 'game': False}))
         self.app = '123'
         tdp._check_and_enforce()
         tdp._current_ac_online = False
-        self.assertEqual(self.rpc('get_settings')['running'],
+        self.assertEqual(self.rpc('get_settings')['state']['running'],
                          {'spl': 8, 'sppt': 8, 'fppt': 20, 'preset': 'silent', 'battery': True, 'game': True})
         self.ac = True
         tdp._check_and_enforce()
-        self.assertEqual(self.rpc('get_settings')['running'],
+        self.assertEqual(self.rpc('get_settings')['state']['running'],
                          {'spl': 8, 'sppt': 15, 'fppt': 20, 'preset': 'silent', 'battery': False, 'game': True})
         self.app = ''
         tdp._check_and_enforce()
-        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['success'])
-        self.assertEqual(self.rpc('get_settings')['running'],
+        self.assertTrue(self.rpc('apply_tdp', 16000, 25000, 30000, preset_name='custom')['ok'])
+        self.assertEqual(self.rpc('get_settings')['state']['running'],
                          {'spl': 16, 'sppt': 25, 'fppt': 30, 'preset': 'custom', 'battery': False, 'game': False})
 
     def test_game_profiles_follow_separate_battery_presets(self):
@@ -1217,12 +1217,12 @@ class TdpCoreTests(unittest.TestCase):
     def test_battery_values_follow_the_values_when_the_saved_preset_name_is_stale(self):
         self.seed(active_preset='balanced', spl=20000, sppt=32000, fppt=35000,
                   separate_battery_presets=True)
-        self.assertTrue(self.rpc('reapply')['success'])
+        self.assertTrue(self.rpc('reapply')['ok'])
         self.assertEqual(self.ppts(), (20, 20, 35))  # Performance's values: its battery values
 
     def test_battery_presets_stay_inside_the_firmware_range(self):
         self.firmware_range((35, 37, 45), mins=(10, 12, 18))
-        self.assertEqual(self.rpc('get_caps')['battery_presets'], {
+        self.assertEqual(self.rpc('get_caps')['state']['battery_presets'], {
             'silent': {'spl': 10, 'sppt': 12, 'fppt': 20},
             'balanced': {'spl': 16, 'sppt': 16, 'fppt': 30},
             'performance': {'spl': 20, 'sppt': 20, 'fppt': 35},
@@ -1297,13 +1297,13 @@ class TdpCoreTests(unittest.TestCase):
         tdp._check_and_enforce()
         self.ac = True
         generation = tdp._check_and_enforce()['_resettle_generation']
-        self.assertTrue(self.rpc('apply_tdp', 20000, 25000, 30000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 20000, 25000, 30000)['ok'])
         self.set_ppts(10, 15, 20)
         self.assertTrue(tdp._reapply_current_target(generation))
         self.assertEqual(self.ppts(), (10, 15, 20))
 
     def test_drift_is_reasserted_then_bounded(self):
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.assertEqual(self.ppts(), (15, 20, 25))
         self.profile.write_text('balanced')  # something knocked us off custom
         tdp._check_and_enforce()
@@ -1317,7 +1317,7 @@ class TdpCoreTests(unittest.TestCase):
         self.assertEqual(self.bounces(), tdp.DRIFT_MAX_ATTEMPTS)
 
     def test_unreachable_target_with_a_persistent_live_mismatch_stays_bounded(self):
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.helper_ready()  # enables the live cross-check
         self.profile_writes.clear()
         clock = [100.0]
@@ -1349,7 +1349,7 @@ class TdpCoreTests(unittest.TestCase):
                 self.rpc('set_active_app', '123')
         self.assertEqual(enforce.call_count, 1)
         self.assertEqual(self.ppts(), (10, 10, 10))
-        self.assertTrue(self.rpc('set_plugin_enabled', True)['success'])
+        self.assertTrue(self.rpc('set_plugin_enabled', True)['ok'])
         self.rpc('set_active_app', '222')
         self.assertEqual(self.ppts(), (22, 26, 32))
 
@@ -1388,49 +1388,49 @@ class TdpCoreTests(unittest.TestCase):
         self.rpc('set_active_app', '222')
         self.assertEqual(self.ppts(), (12, 15, 20))
         stale = self.rpc('apply_tdp', 30000, 30000, 30000, '123', '', '123')
-        self.assertEqual((stale['success'], stale['stderr']), (False, 'foreground game changed'))
+        self.assertEqual(stale, {'ok': False, 'error': 'foreground game changed'})
         self.assertEqual(self.ppts(), (12, 15, 20))
         self.assertEqual(self.saved('game_profiles')['123']['spl'], 22000)
 
     # Panel telemetry -------------------------------------------------------
 
     def test_panel_shows_only_a_fresh_hardware_sample(self):
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         clock = [1000.0]
         with patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]):
             tdp._refresh_info_cache()
             clock[0] += 1
-            fresh = self.rpc('get_tdp_info')
+            fresh = self.rpc('get_tdp_info')['state']
             self.assertEqual((fresh['values']['spl_limit'], fresh['sample_age_seconds']), (15, 1))
             clock[0] += 100  # the info loop stopped
-            self.assertEqual(self.rpc('get_tdp_info')['values'], {})
+            self.assertEqual(self.rpc('get_tdp_info')['state']['values'], {})
 
     def test_failed_power_and_limit_reads_leave_no_old_sample(self):
         rapl = self.root / 'powercap/intel-rapl-0'
         rapl.mkdir(parents=True)
         (rapl / 'name').write_text('package-0')
         energy = rapl / 'energy_uj'
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         clock = [1000.0]
         with patch.object(tdp.time, 'monotonic', side_effect=lambda: clock[0]):
             for joules in (1, 13):  # 12 J in one second
                 energy.write_text(str(joules * 1_000_000))
                 tdp._refresh_info_cache()
                 clock[0] += 1
-            values = self.rpc('get_tdp_info')['values']
+            values = self.rpc('get_tdp_info')['state']['values']
             self.assertEqual((values['package_draw'], values['spl_limit']), (12.0, 15))
             energy.unlink()
             for attr in tdp.WMI_ATTRS.values():
                 (self.firmware / attr / 'current_value').unlink()
             tdp._refresh_info_cache()
-            values = self.rpc('get_tdp_info')['values']
+            values = self.rpc('get_tdp_info')['state']['values']
         self.assertNotIn('package_draw', values)
         self.assertNotIn('spl_limit', values)
 
     # Release ---------------------------------------------------------------
 
     def test_release_returns_platform_profile_to_balanced(self):
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.assertEqual(self.profile.read_text(), 'custom')
         self.release()
         self.assertEqual(self.profile.read_text(), 'balanced')
@@ -1506,9 +1506,9 @@ class TdpCoreTests(unittest.TestCase):
         self.store.replace({})
         tdp._migrate()
         self.assertEqual(self.store.getSetting('baseline'), {'pending': True})
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
-        self.assertTrue(self.rpc('set_cpu_boost', True)['success'])
-        self.assertTrue(self.rpc('set_epp', 'balance_power')['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
+        self.assertTrue(self.rpc('set_cpu_boost', True)['ok'])
+        self.assertTrue(self.rpc('set_epp', 'balance_power')['ok'])
         self.assertEqual(self.store.getSetting('baseline'), {
             'platform_profile': 'performance', 'cpu_boost_enabled': False, 'epp': 'power'})
         self.release()
@@ -1522,7 +1522,7 @@ class TdpCoreTests(unittest.TestCase):
         boost, epp = self.cpu_controls('1', 'balance_power')  # set by the old version
         self.seed(cpu_boost_enabled=True, epp='balance_power')
         tdp._migrate()
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.assertEqual(self.store.getSetting('baseline'), {'pending': True, 'after_boot': 'boot-1'})
         self.release()  # nothing known yet: today's defaults
         self.assertEqual((self.profile.read_text(), boost.read_text(), epp.read_text()),
@@ -1531,7 +1531,7 @@ class TdpCoreTests(unittest.TestCase):
         self.profile.write_text('custom')
         boost.write_text('0')
         epp.write_text('power')
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.assertEqual(self.store.getSetting('baseline'), {
             'platform_profile': None, 'cpu_boost_enabled': False, 'epp': 'power'})
         self.release()
@@ -1554,7 +1554,7 @@ class TdpCoreTests(unittest.TestCase):
     def test_invalid_saved_profile_falls_back_to_balanced(self):
         self.store.replace({'settings': {'enabled': True}, 'schema_version': 2,
                             'baseline': {'platform_profile': 'turbo'}})
-        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 20000, 25000)['ok'])
         self.release()
         self.assertEqual(self.profile.read_text(), 'balanced')
 

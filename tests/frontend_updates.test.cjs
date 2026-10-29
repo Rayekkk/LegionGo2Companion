@@ -14,8 +14,8 @@ function harness() {
 }
 function button(tree, text) { const result = findButton(tree, text); assert.ok(result, `Button: ${text}`); return result; }
 const field = (tree, name) => nodes(tree).find(node => node.type === 'Field' && node.props.label === name);
-const check = (patch = {}) => ({ success: true, current_version: '0.6.2', latest_version: '0.6.3', update_available: true, download_available: true, size: 1048576, ...patch });
-const downloaded = { success: true, version: '0.6.3', path: '/home/deck/Downloads/LegionGo2Companion-0.6.3.zip', sha256: 'a'.repeat(64) };
+const check = (patch = {}) => ({ current_version: '0.6.2', latest_version: '0.6.3', update_available: true, download_available: true, size: 1048576, ...patch });
+const downloaded = { version: '0.6.3', path: '/home/deck/Downloads/LegionGo2Companion-0.6.3.zip', sha256: 'a'.repeat(64) };
 
 run(async () => {
   for (const operation of ['updates_check', 'updates_download']) {
@@ -76,13 +76,13 @@ run(async () => {
   failures.reject('updates_check'); await settle();
   assert.match(field(failures.render(), 'Could not complete').props.description, /Network unavailable/);
   button(failures.render(), 'Check for updates').props.onClick();
-  failures.respond('updates_check', { success: false, error: 'GitHub rate limit reached' }); await settle();
+  failures.respond('updates_check', { ok: false, error: 'GitHub rate limit reached' }); await settle();
   assert.match(field(failures.render(), 'Could not complete').props.description, /rate limit/);
   button(failures.render(), 'Check for updates').props.onClick();
   failures.respond('updates_check', check()); await settle();
   assert.equal(field(failures.render(), 'Could not complete'), undefined, 'Successful retry clears the error');
   button(failures.render(), 'Download 0.6.3').props.onClick();
-  failures.respond('updates_download', { success: false, error: 'Checksum mismatch' }); await settle();
+  failures.respond('updates_download', { ok: false, error: 'Checksum mismatch' }); await settle();
   assert.match(field(failures.render(), 'Could not complete').props.description, /Checksum mismatch/);
   assert.equal(field(failures.render(), '0.6.3 downloaded'), undefined);
   button(failures.render(), 'Download 0.6.3').props.onClick();
@@ -92,18 +92,20 @@ run(async () => {
   assert.ok(field(failures.render(), '0.6.3 downloaded'), 'Download can retry after backend and transport failures');
 
   for (const [response, label] of [
-    [check({ no_release: true, latest_version: undefined, update_available: false, download_available: false }), 'No public release yet'],
+    [check({ no_release: true, latest_version: undefined, update_available: false, download_available: false,
+      message: 'No release has been published yet (or the repository is private).' }), 'No public release yet'],
     [check({ download_available: false }), 'New release found'],
     [check({ latest_version: '0.6.2', update_available: false }), 'Up to date'],
     [check({ latest_version: '0.6.1', update_available: false }), 'No newer release'],
   ]) {
     const view = harness(); button(view.render(), 'Check for updates').props.onClick(); view.respond('updates_check', response); await settle();
     assert.ok(field(view.render(), label), label);
+    assert.equal(field(view.render(), 'Could not complete'), undefined, `${label}: no error row`);
     assert.equal(nodes(view.render()).filter(node => node.type === 'ButtonItem').length, 1, 'No unusable download action');
   }
 
   const assetError = harness(); button(assetError.render(), 'Check for updates').props.onClick();
-  assetError.respond('updates_check', check({ download_available: false, error: 'Missing SHA256 checksum for the release ZIP.' })); await settle();
+  assetError.respond('updates_check', check({ download_available: false, message: 'Missing SHA256 checksum for the release ZIP.' })); await settle();
   assert.ok(field(assetError.render(), 'New release found'), 'An unusable asset still identifies the newer release');
   assert.match(field(assetError.render(), 'Could not complete').props.description, /Missing SHA256/, 'Shows the specific asset problem from successful metadata lookup');
   button(assetError.render(), 'Check for updates').props.onClick(); assetError.respond('updates_check', check()); await settle();
@@ -137,10 +139,10 @@ run(async () => {
   assert.deepEqual(report.calls.map(call => call.name), ['save_device_report'], 'A double click saves one report');
   assert.equal(button(report.render(), 'Saving report…').props.disabled, true);
   const savedPath = '/home/deck/Desktop/LegionGoCompanion-device-report-20261021-120000.txt';
-  report.respond('save_device_report', { success: true, path: savedPath }); await settle();
+  report.respond('save_device_report', { ok: true, state: { path: savedPath } }); await settle();
   assert.equal(field(report.render(), 'Device report').props.description.props.children, `Saved to ${savedPath}`);
   button(report.render(), 'Save device report').props.onClick();
-  report.respond('save_device_report', { success: false, error: 'The Desktop directory does not belong to the console user.' }); await settle();
+  report.respond('save_device_report', { ok: false, error: 'The Desktop directory does not belong to the console user.' }); await settle();
   assert.equal(field(report.render(), 'Device report').props.description.props.children, 'The Desktop directory does not belong to the console user.');
   button(report.render(), 'Save device report').props.onClick();
   report.reject('save_device_report', new Error('Backend unavailable')); await settle();

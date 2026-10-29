@@ -3,7 +3,6 @@
 export type Policy = "off" | "five_six_no_24" | "five_six_only" | "six_ghz_only";
 export type WifiAction = "off" | "prefer" | "strict" | "high" | "six" | "sixOnly";
 export interface WifiStatus {
-  success: boolean;
   connected?: boolean;
   settings?: { device_family?: string; device_label?: string; driver?: string; band_policy?: Policy };
   live?: {
@@ -22,8 +21,6 @@ export interface WifiStatus {
     recovery_errors?: string[];
   };
   drift?: Record<string, boolean>;
-  error?: string;
-  message?: string;
 }
 export const POLICY_ACTIONS: Record<Policy, WifiAction>;
 export const CONFIRMATIONS: Record<"five_six_only" | "six_ghz_only", { title: string; ok: string; text: string }>;

@@ -38,9 +38,9 @@ export const statusPlaceholder = ({ title, label, error, onRetry, retryLabel = "
   </PanelSection>;
 
 /**
- * callable() through the backend's D2 answers ({ok, error?, state?}) with the pages' existing handling: the state,
- * also of a refusal that carries one (the page reads its legacy success field until that module's step 2, DeckyKit
- * PLAN Etap C2); any other refusal or failed call is thrown as an Error with its text, as a rejected call was.
+ * callable() through the backend's D2 answers ({ok, error?, state?}): the state, also of a refusal that carries one
+ * (a status read whose error stays on screen, e.g. battery or WiFi); any other refusal or failed call is thrown as an
+ * Error with its text, as a rejected call was.
  */
 export const rpc = <A extends unknown[], T>(name: string) => {
   const call = callable<A, Result<T>>(name);

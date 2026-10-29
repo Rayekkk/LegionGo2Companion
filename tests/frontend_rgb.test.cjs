@@ -12,12 +12,26 @@ run(async () => {
     const writes=h.calls.filter(c=>c.name!=='rgb_get_status');
     assert.equal(writes[0]?.name,'rgb_set_brightness',`The earlier slider save precedes ${action}.`);
     assert.equal(writes.length,1,'The later operation remains queued until the slider finishes.');
-    h.respond('rgb_set_brightness',{success:true,status:{...rgb,settings:{...rgb.settings,brightness:90}}});await settle();
+    h.respond('rgb_set_brightness',{ok:true,state:{...rgb,settings:{...rgb.settings,brightness:90}}});await settle();
     const method=action==='disable'?'rgb_set_control_enabled':action==='restore'?'rgb_restore_original':'rgb_set_effect';
     assert.equal(h.calls.at(-1).name,method);
-    h.respond(method,{success:true,status:rgb});await settle();
+    h.respond(method,{ok:true,state:rgb});await settle();
     for(const [id,t]of [...h.timers])if(t.kind==='timeout'){h.timers.delete(id);t.fn();}
     await settle();assert.equal(h.calls.filter(c=>c.name==='rgb_set_brightness').length,1);
+    h.unmount();
+  }
+  {
+    // D2 answers: a refusal with the current status shows its own text; one without status (refused before any
+    // change) shows the generic text and re-reads, as a rejected call does.
+    const h=harness('rgb.tsx','RgbPage');h.render();h.respond('rgb_get_status',rgb);await settle();
+    const reads=()=>h.calls.filter(c=>c.name==='rgb_get_status').length;
+    find(h.render(),'Effect').props.onChange({data:'breathe'});await settle();
+    h.respond('rgb_set_effect',{ok:false,error:'Enable RGB control first.',state:rgb});await settle();
+    assert.equal(h.toasts.at(-1).body,'Enable RGB control first.');assert.equal(reads(),1,'a refusal with its status needs no re-read');
+    find(h.render(),'Effect').props.onChange({data:'breathe'});await settle();
+    h.respond('rgb_set_effect',{ok:false,error:'This module is disabled. Enable it in Manage Modules.'});await settle();
+    assert.equal(h.toasts.at(-1).body,'The change could not be confirmed. Reopen Lighting to check the current state.');
+    assert.equal(reads(),2,'a refusal without status re-reads it');
     h.unmount();
   }
   {
@@ -50,7 +64,7 @@ run(async () => {
     const writes=h.calls.filter(c=>c.name==='rgb_set_speed');
     assert.equal(writes.length,1,'Only the final speed is saved, once, including on close.');
     assert.equal(writes[0].args[0],100);
-    h.respond('rgb_set_speed',{success:true,status:{...breathing,settings:{...breathing.settings,speed:100}}});await settle();
+    h.respond('rgb_set_speed',{ok:true,state:{...breathing,settings:{...breathing.settings,speed:100}}});await settle();
     if(leave==='timer')h.unmount();
   }
   {
@@ -70,7 +84,7 @@ run(async () => {
     await settle(); h.reject('rgb_set_color'); await settle();
     find(h.render(), 'Brightness').props.onChange(90);
     for (const [id,t] of [...h.timers]) if (t.kind==='timeout') { h.timers.delete(id); t.fn(); }
-    await settle(); h.respond('rgb_set_brightness',{success:true,status:{...rgb,settings:{...rgb.settings,brightness:90}}});
+    await settle(); h.respond('rgb_set_brightness',{ok:true,state:{...rgb,settings:{...rgb.settings,brightness:90}}});
     await settle(); assert.equal(find(h.render(),'Brightness').props.value,90);
     assert.equal(find(h.render(),'Hue').props.value,rgb.settings.hue,'a failed old draft cannot be resurrected by the next verified result');
     h.unmount();
@@ -85,7 +99,7 @@ run(async () => {
     await settle();
     assert.equal(h.calls.filter(c => c.name === 'rgb_set_color').length, 1, 'superseded RGB callback cannot enqueue obsolete work');
     assert.equal(h.calls.find(c => c.name === 'rgb_set_color').args[0], 240);
-    h.respond('rgb_set_color', {success:true,status:{...rgb,settings:{...rgb.settings,hue:240}}}); await settle(); h.unmount();
+    h.respond('rgb_set_color', {ok:true,state:{...rgb,settings:{...rgb.settings,hue:240}}}); await settle(); h.unmount();
   }
   {
     const h = harness('rgb.tsx', 'RgbPage'); h.render(); h.respond('rgb_get_status', rgb); await settle();
@@ -93,11 +107,11 @@ run(async () => {
     for (const [id, timer] of [...h.timers]) if (timer.kind === 'timeout') { h.timers.delete(id); timer.fn(); }
     await settle();
     find(h.render(), 'Brightness').props.onChange(90);
-    h.respond('rgb_set_color', {success:true,status:{...rgb,settings:{...rgb.settings,hue:120}}}); await settle();
+    h.respond('rgb_set_color', {ok:true,state:{...rgb,settings:{...rgb.settings,hue:120}}}); await settle();
     assert.equal(find(h.render(), 'Brightness').props.value, 90, 'old RGB reply preserves a newer unsaved slider draft');
     for (const [id, timer] of [...h.timers]) if (timer.kind === 'timeout') { h.timers.delete(id); timer.fn(); }
     await settle();
-    h.respond('rgb_set_brightness', {success:true,status:{...rgb,settings:{...rgb.settings,hue:120,brightness:90}}});
+    h.respond('rgb_set_brightness', {ok:true,state:{...rgb,settings:{...rgb.settings,hue:120,brightness:90}}});
     await settle(); assert.equal(find(h.render(), 'Hue').props.value, 120); h.unmount();
   }
   // The rules both UIs share (src/rgb.tsx and the Desktop ModulePage.qml import the same module).

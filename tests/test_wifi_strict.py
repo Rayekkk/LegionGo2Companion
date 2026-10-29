@@ -414,7 +414,7 @@ class StrictWifiTests(unittest.TestCase):
         intent = module_control.capture_intent("wifi")
         self.assertEqual(intent["band_policy"], wifi.BAND_POLICY_STRICT_HIGH)
         component = Mock()
-        component.set_band_policy = AsyncMock(return_value={"success": True})
+        component.set_band_policy = AsyncMock(return_value={"ok": True})
         asyncio.run(module_control.restore_intent("wifi", component, intent))
         component.set_band_policy.assert_awaited_once_with(wifi.BAND_POLICY_STRICT_HIGH)
 

@@ -672,7 +672,7 @@ class Plugin:
                 # RPC; enable must not race the underlying raw-port thread.
                 readings = await module_runtime.complete(module_runtime.offload('fan', read_automatic))
                 telemetry = self._client.snapshot() if self._client else None
-        return dict(success=True, supported=self._supported, beta=self._beta, settings=copy.deepcopy(self._state), readings=readings,
+        return dict(supported=self._supported, beta=self._beta, settings=copy.deepcopy(self._state), readings=readings,
                     ownership=(dict(blocked=False, state='companion', reason='') if readings.get('valid') and telemetry and telemetry.get('active')
                         else readings.get('ownership', dict(blocked=True, state='unavailable', reason=readings.get('error', 'Ownership has not been verified.')))),
                     needs_curve_review=not self._settings_valid,

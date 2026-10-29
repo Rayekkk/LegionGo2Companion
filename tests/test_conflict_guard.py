@@ -158,9 +158,9 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(plugin._modules_started)
                     for component in self.components:
                         component._unload.assert_not_awaited()
-                    plugin._rgb.set_brightness=AsyncMock(return_value={"success":True})
+                    plugin._rgb.set_brightness=AsyncMock(return_value={"ok":True})
                     with decoder_nesting_failure(text):
-                        self.assertEqual(await plugin.rgb_set_brightness(20),{"success":True})
+                        self.assertEqual(await plugin.rgb_set_brightness(20),{"ok":True})
                     plugin._rgb.set_brightness.assert_awaited_once_with(20)
                     manifest.write_text(json.dumps({"name": "OtherPlugin"}))
                     status = await plugin.get_version()
@@ -285,7 +285,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
     async def test_failing_scan_blocks_rpcs_only_while_it_fails(self):
         plugin = self.make_plugin()
         plugin._modules_started = True
-        plugin._rgb.set_brightness = AsyncMock(return_value={"success": True})
+        plugin._rgb.set_brightness = AsyncMock(return_value={"ok": True})
         with patch.object(main, "_installed_standalone_plugins", side_effect=PermissionError("denied")) as scan:
             status = await plugin.get_version()
             self.assertTrue(status["blocked"]); self.assertIn("denied", status["guard_error"])
@@ -295,7 +295,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(scan.call_count, 3)  # One retried scan; RPCs reuse its result.
         with patch.object(main, "_installed_standalone_plugins", return_value=[]):
             await plugin._check_guard()
-        self.assertEqual(await plugin.rgb_set_brightness(20), {"success": True})
+        self.assertEqual(await plugin.rgb_set_brightness(20), {"ok": True})
         status = await plugin.get_version()
         self.assertFalse(status["blocked"]); self.assertFalse(status["latched"])
         self.assertTrue(plugin._modules_started)
@@ -314,7 +314,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admission_uses_the_last_scan_instead_of_scanning_each_rpc(self):
         plugin = self.make_plugin()
-        plugin._rgb.set_brightness = AsyncMock(return_value={"success": True})
+        plugin._rgb.set_brightness = AsyncMock(return_value={"ok": True})
         with patch.object(main, "_installed_standalone_plugins", return_value=[]) as scan:
             for _ in range(5):
                 await plugin.rgb_set_brightness(20)
@@ -336,7 +336,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
     async def test_inflight_rpc_finishes_before_modules_stop(self):
         plugin = self.make_plugin(); conflicts = []; entered = asyncio.Event(); finish = asyncio.Event(); order = []
         async def operation(*args):
-            entered.set(); await finish.wait(); order.append("rpc finished"); return {"success": True}
+            entered.set(); await finish.wait(); order.append("rpc finished"); return {"ok": True}
         async def stop(): order.append("modules stopped")
         plugin._wifi.rescan_and_reconnect = operation
         plugin._wifi._unload = AsyncMock(side_effect=stop)

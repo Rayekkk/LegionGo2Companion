@@ -15,6 +15,11 @@ All notable changes to Legion Go 2 Companion, newest first.
   GitHub's own download servers.
 - **Updates:** if something other than a regular file (for example a link) already has the release ZIP's name in
   Downloads, Companion refuses to save there instead of replacing it.
+- **Updates (Desktop app):** when **Check for updates** or **Download** fails, the app shows why and keeps the last
+  result, as the Decky panel does, instead of quietly going back to "GitHub releases".
+- **Wi-Fi (Desktop app):** when a band change or reconnect is refused, the app shows the reason in words, as the
+  Decky panel does, instead of an internal code such as "unsupported_backend". Manage Modules does the same when the
+  saved band setting cannot be restored while turning Wi-Fi on.
 
 ### Fixed
 

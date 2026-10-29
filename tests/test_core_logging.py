@@ -103,10 +103,10 @@ class RgbEventTests(Events, unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_rings_are_reported_once_and_the_recovery_is_visible(self):
         self.save(configured=True, control_enabled=True, original_rgb=SNAPSHOT)
-        self.assertFalse((await self.plugin.reapply())['success'])
-        self.assertFalse((await self.plugin.reapply())['success'])
+        self.assertFalse(await self.plugin.reapply())
+        self.assertFalse(await self.plugin.reapply())
         self.save()  # ring control no longer owned
-        self.assertTrue((await self.plugin.reapply())['success'])
+        self.assertTrue(await self.plugin.reapply())
         rows = self.events('rgb', 'reconcile')
         self.assertEqual([row['context']['status'] for row in rows], ['ring_unavailable', 'confirmed'])
         self.assertEqual([row['level'] for row in rows], ['warning', 'info'])
@@ -364,15 +364,15 @@ class TdpEventTests(Events, unittest.TestCase):
     def unlock_extras(self):
         self.bin.unlink()
         self.publish_helper()
-        self.assertTrue(self.rpc('set_extras_unlocked', True)['success'])
+        self.assertTrue(self.rpc('set_extras_unlocked', True)['ok'])
 
     def test_refused_firmware_writes_name_each_attribute_and_in_place_refusals_stay_info(self):
         self.profile.write_text('custom')
         for attr in tdp.WMI_ATTRS.values():
             self.refuse(self.firmware / attr / 'current_value')
-        self.assertFalse(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
+        self.assertFalse(self.rpc('apply_tdp', 18000, 22000, 30000)['ok'])
         self.refuse(self.profile)
-        self.assertFalse(self.rpc('apply_tdp', 18000, 22000, 30000)['success'])
+        self.assertFalse(self.rpc('apply_tdp', 18000, 22000, 30000)['ok'])
         rows = {(row['context']['attribute'], row['level'], row['context']['outcome'])
                 for row in self.events('tdp', 'attribute_write')}
         expected = {(attr, 'info', 'retried') for attr in tdp.WMI_ATTRS.values()}  # in place: the bounce writes again
@@ -382,7 +382,7 @@ class TdpEventTests(Events, unittest.TestCase):
 
     def test_rollback_exception_is_reported_not_discarded(self):
         self.unlock_extras()
-        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])  # beyond firmware: ryzenadj
+        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['ok'])  # beyond firmware: ryzenadj
         with patch.object(tdp.subprocess, 'Popen', side_effect=OSError(errno.EIO, 'exec failed')):
             try:
                 result = self.rpc('apply_tdp', 45000, 46000, 50000)
@@ -395,9 +395,9 @@ class TdpEventTests(Events, unittest.TestCase):
 
     def test_helper_download_failure_and_verified_retry_have_finite_outcomes(self):
         self.bin.unlink()
-        self.assertFalse(self.rpc('retry_extras')['success'])  # download offline
+        self.assertFalse(self.rpc('retry_extras')['ok'])  # download offline
         self.publish_helper()
-        self.assertTrue(self.rpc('retry_extras')['success'])
+        self.assertTrue(self.rpc('retry_extras')['ok'])
         rows = self.events('tdp', 'helper_ready')
         self.assertEqual([row['context']['status'] for row in rows], ['False', 'True'])
         self.assertEqual(rows[0]['level'], 'warning')
@@ -409,15 +409,15 @@ class TdpEventTests(Events, unittest.TestCase):
         logger = Mock()
         with patch.object(tdp.decky, 'logger', logger):
             result = self.rpc('get_cpu_power_controls')
-        self.assertFalse(result['success'])
-        self.assertEqual(result['error'], 'CPU power controls unavailable')
+        self.assertFalse(result['ok'])
+        self.assertEqual((result['error'], result['state']['error']), ('CPU power controls unavailable',) * 2)
         row, = self.events('tdp', 'cpu_status_failed')
         self.assertEqual(row['error']['type'], 'CorruptSettings')
         self.assertNotLogged(MARKER, logger)
 
     def test_returned_helper_error_stays_out_of_the_log_and_is_not_saved_or_retried(self):
         self.unlock_extras()
-        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 45000, 48000, 50000)['ok'])
         active = self.saved()['active_sppt']
         test, attempts = self, []
 
@@ -453,7 +453,7 @@ class TdpEventTests(Events, unittest.TestCase):
     def test_applied_limits_record_watts_source_and_reason(self):
         self.app = '111'
         self.enforce(passes=1)  # game start without a profile: Global, reason 'global'
-        self.assertTrue(self.rpc('apply_tdp', 15000, 18000, 20000)['success'])
+        self.assertTrue(self.rpc('apply_tdp', 15000, 18000, 20000)['ok'])
         transition, rpc = self.events('tdp', 'limits_applied')
         self.assertEqual({key: transition['context'][key] for key in ('spl', 'sppt', 'fppt', 'source', 'reason')},
                          {'spl': 15, 'sppt': 20, 'fppt': 25, 'source': 'wmi', 'reason': 'global'})

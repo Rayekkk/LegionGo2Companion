@@ -145,17 +145,7 @@ void RpcClient::startNext() {
             if (message.isEmpty()) message = "Companion couldn't complete this. Try again.";
         }
         else if (status != 200 || !document.object().contains("result")) message = "The change wasn't confirmed. Check the current value.";
-        else {
-            result = document.object().value("result").toVariant();
-            const auto map = result.toMap();
-            if (map.contains("success") && !map.value("success").toBool()) {
-                for (const auto &key : {"error", "reason", "stderr"}) {
-                    message = map.value(key).toString().trimmed().left(1000);
-                    if (!message.isEmpty()) break;
-                }
-                if (message.isEmpty()) message = "The change wasn't confirmed. Check the current value.";
-            }
-        }
+        else result = document.object().value("result").toVariant();
         CompanionDiagnostics::rpc(active_.method,active_.id,!message.isEmpty(),active_.mutation,
             status,int(reply_->error()),clock_.elapsed()-reply_->property("diagnosticStarted").toLongLong());
         reply_->deleteLater(); reply_ = nullptr;

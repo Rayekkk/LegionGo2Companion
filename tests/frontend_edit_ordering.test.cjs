@@ -1,19 +1,21 @@
 // Edits accepted by one page instance are ordered against reads and mutations of the next.
 const { assert, run, settle, find, harness, rgb, remap, display } = require('./legion_page_harness.cjs');
+// A page change's D2 reply with the new status.
+const changed = (_spec, status) => ({ ok: true, state: status });
 run(async () => {
   const leasePanel=harness('tdp_state.tsx','useTdpInfo');
   leasePanel.render();
-  leasePanel.reject('set_panel_active');leasePanel.respond('get_tdp_info',{success:true});await settle();
+  leasePanel.reject('set_panel_active');leasePanel.respond('get_tdp_info',{values:{}});await settle();
   leasePanel.fire();leasePanel.reject('set_panel_active');await settle();
   leasePanel.unmount();leasePanel.reject('set_panel_active');await settle();
   assert.equal(leasePanel.calls.filter(call=>call.name==='set_panel_active').length,3,
     'mount, renewal and cleanup tolerate a lost Decky connection');
   {
-    const h=harness('battery.tsx','BatteryPage'),initial={success:true,supported:true,enabled:false,managed:false},
-      final={success:true,supported:true,enabled:true,managed:true};
+    const h=harness('battery.tsx','BatteryPage'),initial={supported:true,enabled:false,managed:false},
+      final={supported:true,enabled:true,managed:true};
     h.render();h.respond('battery_get_status',initial);await settle();
     find(h.render(),'Battery protection').props.onChange(true);await settle();h.unmount();
-    const overview=h.moduleExports.getBatteryStatus();h.respond('battery_set_enabled',{success:true});await settle();
+    const overview=h.moduleExports.getBatteryStatus();h.respond('battery_set_enabled',{ok:true});await settle();
     assert.equal(h.calls.filter(c=>c.name==='battery_get_status').length,2,'A result without a snapshot still starts its verification read inside the transaction.');
     h.respond('battery_get_status',final);await settle();
     assert.equal(h.calls.filter(c=>c.name==='battery_get_status').length,3,'The public getter waits for verification without making the transaction wait for itself.');
@@ -22,8 +24,8 @@ run(async () => {
 
   for (const spec of [
     {file:'battery.tsx',component:'BatteryPage',read:'battery_get_status',getter:'getBatteryStatus',props:{},
-      initial:{success:true,supported:true,enabled:false,managed:false},
-      final:{success:true,supported:true,enabled:true,managed:true},method:'battery_set_enabled',label:'Battery protection',selection:true},
+      initial:{supported:true,enabled:false,managed:false},
+      final:{supported:true,enabled:true,managed:true},method:'battery_set_enabled',label:'Battery protection',selection:true},
     {file:'controller.tsx',component:'ControllerPage',read:'controller_get_status',getter:'getControllerStatus',props:{visible:true},
       initial:{available:true,gyro_source:'system',controlled:false},final:{available:true,gyro_source:'left',controlled:true},
       method:'controller_set_gyro_source',label:'Gyro source',selection:{data:'left'}},
@@ -36,15 +38,15 @@ run(async () => {
     find(h.render(),spec.label).props.onChange(spec.selection);await settle();h.unmount();
     const overview=h.moduleExports[spec.getter]();await settle();
     assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'The main-menu getter must wait for edits accepted by a closed page.');
-    h.respond(spec.method,spec.component==='ControllerPage'?spec.final:{success:true,status:spec.final});await settle();
+    h.respond(spec.method,spec.component==='ControllerPage'?spec.final:changed(spec,spec.final));await settle();
     assert.equal(h.calls.filter(c=>c.name===spec.read).length,2);
     h.respond(spec.read,spec.final);assert.equal(await overview,spec.final);
   }
 
   for (const failed of [false, true]) for (const spec of [
     {file:'battery.tsx',component:'BatteryPage',read:'battery_get_status',props:{},
-      initial:{success:true,supported:true,enabled:false,managed:false},
-      final:{success:true,supported:true,enabled:true,managed:true,requested_enabled:true},
+      initial:{supported:true,enabled:false,managed:false},
+      final:{supported:true,enabled:true,managed:true,requested_enabled:true},
       method:'battery_set_enabled',label:'Battery protection',selection:true,key:'checked',expected:true},
     {file:'controller.tsx',component:'ControllerPage',read:'controller_get_status',props:{visible:true},
       initial:{available:true,gyro_source:'system',controlled:false},
@@ -64,7 +66,7 @@ run(async () => {
       if(spec.component==='ControllerPage')h.render({visible:false});else h.visible(false);
       h.reject(spec.method);
     }
-    else h.respond(spec.method,spec.component==='BatteryPage'?{success:true,status:spec.final}:spec.final);
+    else h.respond(spec.method,spec.component==='BatteryPage'?{ok:true,state:spec.final}:spec.final);
     await settle();
     if(failed) {
       assert.equal(h.calls.filter(c=>c.name===spec.read).length,2,'A hidden reopened page must not read after the old mutation ends.');
@@ -94,17 +96,17 @@ run(async () => {
     assert.equal(h.calls.filter(c=>c.name===spec.method).length,1);
     h.unmount();h.remount();await settle();
     assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'Reopening waits for the accepted mutation tail before reading status.');
-    h.respond(spec.method,{success:true,status:spec.first});await settle();
+    h.respond(spec.method,changed(spec,spec.first));await settle();
     assert.equal(h.calls.filter(c=>c.name===spec.read).length,1,'The second queued edit still precedes the new snapshot.');
     assert.equal(h.calls.filter(c=>c.name===spec.method).length,2);
-    h.respond(spec.method,{success:true,status:spec.final});await settle();
+    h.respond(spec.method,changed(spec,spec.final));await settle();
     assert.equal(h.calls.filter(c=>c.name===spec.read).length,2);
     h.respond(spec.read,spec.final);await settle();
     assert.equal(find(h.render(),spec.label).props.selectedOption,
       spec.file==='rgb.tsx'?'rainbow':'f1','The reopened page displays the last accepted edit.');
     find(h.render(),spec.label).props.onChange(spec.values[2]);await settle();
     assert.equal(h.calls.filter(c=>c.name===spec.method).length,3);
-    h.respond(spec.method,{success:true,status:spec.initial});await settle();h.unmount();
+    h.respond(spec.method,changed(spec,spec.initial));await settle();h.unmount();
   }
   for (const spec of [
     {file:'remap.tsx',component:'RemapPage',read:'remap_get_status',initial:remap,method:'remap_set_action',label:'Desktop button',value:{data:'f3'}},

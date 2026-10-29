@@ -93,8 +93,8 @@ class CpuProfileTests(unittest.TestCase):
 
     def rpc(self, method, *args):
         result = asyncio.run(getattr(self.plugin, method)(*args))
-        self.assertTrue(result['success'], result)
-        return result
+        self.assertTrue(result['ok'], result)
+        return result.get('state')
 
     def game(self, boost=True, epp='204', **values):
         return {'spl': 15000, 'sppt': 18000, 'fppt': 25000,
@@ -128,10 +128,13 @@ class CpuProfileTests(unittest.TestCase):
             failed = asyncio.run(self.plugin.get_cpu_power_controls())
         def shape(value):
             return {key: shape(item) for key, item in value.items()} if isinstance(value, dict) else None
-        self.assertEqual(shape(failed), shape(status))
-        self.assertEqual((failed['success'], failed['available'], failed['epp']['available'],
+        self.assertEqual(shape(failed['state']), shape(status))
+        self.assertFalse(failed['ok'])
+        self.assertEqual(failed['error'], failed['state']['error'])
+        failed = failed['state']
+        self.assertEqual((failed['available'], failed['epp']['available'],
                           failed['cpu_boost']['enabled'], failed['epp']['profiles']),
-                         (False, False, False, None, []))
+                         (False, False, None, []))
 
     def test_uninstall_restores_managed_cpu_controls_and_preserves_settings(self):
         before = self.payload()
@@ -172,7 +175,7 @@ class CpuProfileTests(unittest.TestCase):
                          ['balance_performance'] * 2)
 
     def test_simplified_custom_derives_limits_and_persists_preference(self):
-        self.assertTrue(asyncio.run(self.plugin.get_settings())['advanced_tdp_control'])
+        self.assertTrue(asyncio.run(self.plugin.get_settings())['state']['advanced_tdp_control'])
         self.rpc('set_advanced_tdp_control', False)
         self.assertFalse(self.payload()['settings']['advanced_tdp_control'])
         for spl, expected in ((5000, (5000, 15000, 20000)),
@@ -257,7 +260,7 @@ class CpuProfileTests(unittest.TestCase):
             writer(path, 'balance_performance' if value == 'default' else value)
         with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write):
             result = asyncio.run(self.plugin.set_epp('default'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('previous state restored', result['error'])
         self.assert_hardware(False, 'performance')
         self.assertEqual(self.payload()['settings']['epp'], 'performance')
@@ -273,7 +276,7 @@ class CpuProfileTests(unittest.TestCase):
             writer(path, value)
         with patch.object(tdp, '_write_cpu_power_text', side_effect=second_refused):
             result = asyncio.run(self.plugin.set_epp('power'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('previous state restored', result['error'])
         self.assertEqual([p.read_text() for p in self.epp_paths], ['performance'] * 2)
 
@@ -281,9 +284,9 @@ class CpuProfileTests(unittest.TestCase):
         self.seed({}, epp='performance')
         self.hardware(False, 'performance')
         self.epp_paths[0].write_text('power')
-        self.assertTrue(asyncio.run(self.plugin.set_epp('power'))['success'])
+        self.assertTrue(asyncio.run(self.plugin.set_epp('power'))['ok'])
         self.epp_paths[1].write_text('performance')
-        self.assertTrue(asyncio.run(self.plugin.set_epp('performance'))['success'])
+        self.assertTrue(asyncio.run(self.plugin.set_epp('performance'))['ok'])
         self.assertEqual([p.read_text() for p in self.epp_paths], ['performance'] * 2)
 
     def test_epp_persistence_failure_never_touches_the_hardware(self):
@@ -292,7 +295,7 @@ class CpuProfileTests(unittest.TestCase):
         with patch.object(tdp, '_write_cpu_power_text') as write, \
                 patch.object(tdp, '_write_keys', side_effect=OSError('isolated persistence failure')):
             result = asyncio.run(self.plugin.set_epp('default'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('settings persist failed', result['error'])
         write.assert_not_called()
         self.assert_hardware(False, 'performance')
@@ -328,7 +331,7 @@ class CpuProfileTests(unittest.TestCase):
         with patch.object(tdp, '_read_cpu_power_text', side_effect=flaky_read), \
                 patch.object(tdp, '_write_cpu_power_text', side_effect=write):
             result = asyncio.run(self.plugin.set_epp('power'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('rollback incomplete', result['error'])
         self.assertEqual(self.payload()['settings']['epp'], 'power')
         self.assertTrue(tdp._release_controls_locked()['success'])
@@ -348,7 +351,7 @@ class CpuProfileTests(unittest.TestCase):
             return reader(path)
         with patch.object(tdp, '_read_cpu_power_text', side_effect=read_once_failing),                 patch.object(tdp, '_write_cpu_power_text', side_effect=write):
             result = asyncio.run(self.plugin.set_epp('default'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertEqual(self.epp_paths[0].read_text(), 'balance_performance')
         self.assertEqual(self.payload()['settings']['epp'], 'default')
 
@@ -368,7 +371,7 @@ class CpuProfileTests(unittest.TestCase):
             persist(values)
         with patch.object(tdp, '_write_cpu_power_text', side_effect=refused),                 patch.object(tdp, '_write_keys', side_effect=persist_once):
             result = asyncio.run(self.plugin.set_epp('power'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('isolated write failure', result['error'])
         self.assertIn('settings revert failed: disk full on revert', result['error'])
         self.assert_hardware(False, '77')
@@ -383,7 +386,7 @@ class CpuProfileTests(unittest.TestCase):
                 raise OSError('isolated write failure')
         with patch.object(tdp, '_write_cpu_power_text', side_effect=refused):
             result = asyncio.run(self.plugin.set_epp('power'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('previous state restored', result['error'])
         self.assertIsNone(self.payload()['settings']['epp'])
         self.assert_hardware(False, '77')
@@ -393,9 +396,9 @@ class CpuProfileTests(unittest.TestCase):
         self.hardware(False, '77')
         with patch.object(tdp, '_write_cpu_power_text'):  # the driver accepts and ignores the write
             result = asyncio.run(self.plugin.set_cpu_boost(True))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('readback mismatch; previous state restored', result['error'])
-        self.assertIs(result['cpu_boost']['enabled'], False)
+        self.assertIs(result['state']['cpu_boost']['enabled'], False)
         self.assertIs(self.payload()['settings']['cpu_boost_enabled'], False)
 
     def test_default_epp_rollback_preserves_external_writer(self):
@@ -408,7 +411,7 @@ class CpuProfileTests(unittest.TestCase):
                 writer(str(self.epp_paths[0]), 'power')
         with patch.object(tdp, '_write_cpu_power_text', side_effect=kernel_write):
             result = asyncio.run(self.plugin.set_epp('default'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertIn('changed externally', result['error'])
         self.assertEqual([p.read_text() for p in self.epp_paths], ['power', 'performance'])
         self.assertEqual(self.payload()['settings']['epp'], 'performance')
@@ -417,7 +420,7 @@ class CpuProfileTests(unittest.TestCase):
         self.seed({}, epp='performance')
         self.hardware(False, 'performance')
         self.epp_paths[0].write_text('balance_performance')
-        self.assertFalse(asyncio.run(self.plugin.get_cpu_power_controls())['success'])
+        self.assertFalse(asyncio.run(self.plugin.get_cpu_power_controls())['ok'])
         self.rpc('set_epp', 'balance_power')
         self.assert_hardware(False, 'balance_power')
 
@@ -461,7 +464,7 @@ class CpuProfileTests(unittest.TestCase):
         self.hardware(False, 'performance')
         before = self.payload()
         result = asyncio.run(self.plugin.set_epp('77'))
-        self.assertFalse(result['success'])
+        self.assertFalse(result['ok'])
         self.assertEqual(self.payload(), before)
         self.assert_hardware(False, 'performance')
         self.assertIsNone(tdp._compatible_saved_epp({'profiles': ['default'], 'numeric_supported': False}, '77'))
@@ -537,9 +540,7 @@ class CpuProfileTests(unittest.TestCase):
         applies_before = len(self.applies)
         with patch.object(safe_settings.dk_fs, 'write_atomic', side_effect=OSError('disk full')):
             result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', '111'))
-        self.assertFalse(result['success'])
-        self.assertFalse(result['applied'])
-        self.assertIn('disk full', result['stderr'])
+        self.assertEqual(result, {'ok': False, 'error': 'Could not save global TDP settings: disk full'})
         self.assertEqual(self.payload(), before)
         self.assertEqual(tuple(self.limits), target)
         self.assertEqual(len(self.applies), applies_before, 'A save-only failure must not write hardware during rollback')
@@ -551,8 +552,8 @@ class CpuProfileTests(unittest.TestCase):
         self.app = '222'
         before = self.payload()
         result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', '111'))
-        self.assertFalse(result['success'])
-        self.assertEqual(result['stderr'], 'foreground game changed')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error'], 'foreground game changed')
         self.assertEqual(self.payload(), before)
         self.assertEqual(self.applies, [])
 
@@ -569,8 +570,8 @@ class CpuProfileTests(unittest.TestCase):
             return result
         with patch.object(tdp, '_apply_limits', side_effect=refused):
             result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', ''))
-        self.assertFalse(result['success'])
-        self.assertIn('previous target restored', result['stderr'])
+        self.assertFalse(result['ok'])
+        self.assertIn('previous target restored', result['error'])
         self.assertEqual(self.payload(), before)
         self.assertEqual(self.limits, [25000, 28000, 35000])
         self.assert_hardware(False, '77')
@@ -693,7 +694,7 @@ class CpuProfileTests(unittest.TestCase):
         self.assertTrue(self.rpc_profile('111')['active'])
 
     def rpc_profile(self, app_id):
-        return asyncio.run(self.plugin.get_game_profile(app_id))
+        return asyncio.run(self.plugin.get_game_profile(app_id))['state']
 
     def test_turning_on_a_game_without_a_profile_starts_from_global(self):
         self.app = '111'
@@ -726,7 +727,7 @@ class CpuProfileTests(unittest.TestCase):
                             'game_profiles': {'111': self.game(preset='balanced'),
                                               '222': self.game(ac_separate=True, ac_spl=25000, ac_preset='performance')},
                             'inactive_game_profiles': {'333': self.game(preset='custom'), '111': self.game()}})
-        rows = {row['app_id']: row for row in asyncio.run(self.plugin.list_game_profiles())['profiles']}
+        rows = {row['app_id']: row for row in asyncio.run(self.plugin.list_game_profiles())['state']['profiles']}
         self.assertEqual(sorted(rows), ['111', '222', '333'])
         self.assertEqual((rows['111']['active'], rows['111']['preset'], rows['111']['spl']), (True, 'balanced', 15000))
         self.assertEqual((rows['222']['ac_separate'], rows['222']['ac_spl'], rows['222']['ac_preset']), (True, 25000, 'performance'))
@@ -753,17 +754,17 @@ class CpuProfileTests(unittest.TestCase):
         snapshot = self.payload()
         for app_id in ('222', '333', '444'):
             with self.subTest(app_id=app_id):
-                self.assertFalse(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, app_id, 'custom', '222', True))['success'])
-                self.assertFalse(asyncio.run(self.plugin.set_game_ac_profile(app_id, 9000, 9000, 9000, True, '', True))['success'])
-                self.assertFalse(asyncio.run(self.plugin.set_cpu_boost(True, app_id, False, '222', True))['success'])
-        self.assertFalse(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, '', 'custom', '222', True))['success'])
+                self.assertFalse(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, app_id, 'custom', '222', True))['ok'])
+                self.assertFalse(asyncio.run(self.plugin.set_game_ac_profile(app_id, 9000, 9000, 9000, True, '', True))['ok'])
+                self.assertFalse(asyncio.run(self.plugin.set_cpu_boost(True, app_id, False, '222', True))['ok'])
+        self.assertFalse(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, '', 'custom', '222', True))['ok'])
         self.assertEqual(self.payload(), snapshot)
 
     def test_a_store_above_the_cap_keeps_every_profile_when_one_is_edited(self):
         many = {str(i): self.game() for i in range(1, 515)}
         self.store.replace({'settings': self.base, 'game_profiles': many,
                             'inactive_game_profiles': {'900': self.game()}, 'schema_version': 2})
-        self.assertEqual(len(asyncio.run(self.plugin.list_game_profiles())['profiles']), 515)
+        self.assertEqual(len(asyncio.run(self.plugin.list_game_profiles())['state']['profiles']), 515)
         self.rpc('apply_tdp', 20000, 22000, 25000, '1', 'custom', '', True)
         payload = self.payload()
         self.assertEqual((len(payload['game_profiles']), len(payload['inactive_game_profiles'])), (514, 1))
@@ -777,7 +778,7 @@ class CpuProfileTests(unittest.TestCase):
         for args in (('', True), ('../x', False), ('111', 'yes'), ('111', 1)):
             with self.subTest(args=args):
                 result = asyncio.run(self.plugin.set_game_profile_active(*args))
-                self.assertFalse(result['success'])
+                self.assertFalse(result['ok'])
         self.assertEqual(self.payload(), before)
 
     def test_unused_profile_above_standard_limits_is_clamped_when_turned_on(self):
@@ -798,9 +799,9 @@ class CpuProfileTests(unittest.TestCase):
                                     ac_fppt=50000, ac_preset='custom')},
                   extras_unlocked=True, spl=45000, sppt=48000, fppt=50000)
         with patch.object(tdp, '_allowed_ceilings_mw', return_value=(35000, 50000, 50000)):
-            state = asyncio.run(self.plugin.get_settings())
+            state = asyncio.run(self.plugin.get_settings())['state']
             self.assertEqual((state['spl'], state['sppt'], state['fppt']), (35000, 48000, 50000))
-            game = asyncio.run(self.plugin.get_game_profile('111'))
+            game = asyncio.run(self.plugin.get_game_profile('111'))['state']
             self.assertEqual(game['profile']['spl'], 35000)
             self.assertEqual((game['ac_profile']['spl'], game['ac_profile']['sppt']), (35000, 47000))
             tdp._check_and_enforce()
@@ -830,7 +831,7 @@ class CpuProfileTests(unittest.TestCase):
                             'stderr': 'firmware refused TDP'}
                 with patch.object(tdp, '_apply_limits', side_effect=failed_apply):
                     result = asyncio.run(getattr(self.plugin, operation)(*args))
-                self.assertFalse(result['success'], result)
+                self.assertFalse(result['ok'], result)
                 self.assertEqual(self.payload(), before)
                 self.assert_hardware(True, '204')
 
@@ -871,7 +872,7 @@ class CpuProfileTests(unittest.TestCase):
         ):
             with self.subTest(method=method, args=args):
                 result = asyncio.run(getattr(self.plugin, method)(*args))
-                self.assertFalse(result['success'], result)
+                self.assertFalse(result['ok'], result)
                 self.assertEqual(self.payload(), before)
                 self.assert_hardware(False, '77')
 
@@ -899,14 +900,14 @@ class CpuProfileTests(unittest.TestCase):
         for method, args, reason in cases:
             with self.subTest(method=method, args=args):
                 result = asyncio.run(getattr(self.plugin, method)(*args))
-                self.assertFalse(result['success'], result)
+                self.assertFalse(result['ok'], result)
                 self.assertEqual(result.get('error', result.get('stderr')), reason)
                 self.assertEqual(self.payload(), before)
                 self.assertEqual(self.applies, [])
                 self.assert_hardware(False, '77')
         # Disabled TDP refuses a TDP edit first, but a CPU edit checks its scope first.
         self.seed({'111': self.game(), '222': self.game()}, enabled=False)
-        self.assertEqual(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, '111', '', '111'))['stderr'],
+        self.assertEqual(asyncio.run(self.plugin.apply_tdp(9000, 9000, 9000, '111', '', '111'))['error'],
                          'plugin disabled')
         self.assertEqual(asyncio.run(self.plugin.set_epp('power', '111', False, '111'))['error'],
                          'foreground game changed')
@@ -933,7 +934,7 @@ class CpuProfileTests(unittest.TestCase):
         with patch.object(self.store, 'commit', side_effect=OSError('disk full')):
             for method, value in (('set_cpu_boost', True), ('set_epp', '204')):
                 result = asyncio.run(getattr(self.plugin, method)(value, '111', False, '111'))
-                self.assertFalse(result['success'], result)
+                self.assertFalse(result['ok'], result)
                 self.assert_hardware(False, '77')
                 self.assertEqual(self.payload(), before)
 
@@ -947,7 +948,7 @@ class CpuProfileTests(unittest.TestCase):
             real_write(path, value)
         with patch.object(tdp, '_write_cpu_power_text', side_effect=write):
             result = asyncio.run(self.plugin.set_epp('204', '111', False, '111'))
-        self.assertFalse(result['success'], result)
+        self.assertFalse(result['ok'], result)
         self.assert_hardware(False, '77')
         self.assertEqual(self.payload(), before)
 
@@ -1047,3 +1048,39 @@ class CpuProfileTests(unittest.TestCase):
         status = self.rpc('get_cpu_power_controls', '111', True)
         self.assertEqual((status['profile']['cpu_boost_enabled'], status['profile']['epp']), (True, '204'))
         self.assertEqual(self.payload(), before)
+
+
+class D2AnswerTests(unittest.TestCase):
+    """Every TDP RPC answers D2 itself (DeckyKit PLAN Etap C2, D2 step 2)."""
+
+    def test_a_cpu_status_is_the_state_and_a_failed_outcome_a_refusal_that_carries_it(self):
+        status = {'available': True, 'cpu_boost': {}, 'epp': {}, 'error': ''}
+        self.assertEqual(tdp._cpu_answer({**status, 'success': True}), {'ok': True, 'state': status})
+        refused = {**status, 'error': 'foreground game changed'}
+        self.assertEqual(tdp._cpu_answer({**refused, 'success': False}),
+                         {'ok': False, 'error': 'foreground game changed', 'state': refused})
+        self.assertEqual(tdp._cpu_answer({**status, 'success': False})['error'], tdp.NOT_CONFIRMED)
+
+    def test_an_extras_result_answers_with_its_text_and_no_command_output(self):
+        self.assertEqual(tdp._answer(tdp._ok()), {'ok': True})
+        self.assertEqual(tdp._answer(tdp._fail('enabled must be a boolean')),
+                         {'ok': False, 'error': 'enabled must be a boolean'})
+        self.assertEqual(tdp._answer({'success': False}), {'ok': False, 'error': tdp.NOT_CONFIRMED})
+
+    def test_a_tdp_result_keeps_its_fields_as_the_state_and_a_failure_only_its_text(self):
+        self.assertEqual(tdp._answer(tdp._ok(applied=False, saved_only=True, stored=True)),
+                         {'ok': True, 'state': {'applied': False, 'saved_only': True, 'stored': True}})
+        self.assertEqual(tdp._answer(tdp._fail('plugin disabled', applied=False, saved_only=False)),
+                         {'ok': False, 'error': 'plugin disabled'})
+        self.assertEqual(tdp._answer({'success': False, 'error': 'TDP: restoration was not confirmed'}),
+                         {'ok': False, 'error': 'TDP: restoration was not confirmed'})
+
+    def test_reads_answer_their_payload_as_the_state(self):
+        plugin = tdp.Plugin()
+        self.assertEqual(asyncio.run(plugin.is_ready()), {'ok': True, 'state': {'ready': False, 'error': ''}})
+        self.assertEqual(asyncio.run(plugin.set_panel_active(False)), {'ok': True})
+        self.assertEqual(asyncio.run(plugin.get_game_profile('../x')), {'ok': False, 'error': 'invalid app id'})
+        self.assertEqual(asyncio.run(plugin.apply_tdp(1, 2, 3)), {'ok': False, 'error': 'not ready'})
+
+    def test_power_info_before_the_start_is_a_refusal_without_a_sample(self):
+        self.assertEqual(asyncio.run(tdp.Plugin().get_tdp_info()), {'ok': False, 'error': 'not ready'})

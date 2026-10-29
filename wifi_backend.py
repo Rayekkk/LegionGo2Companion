@@ -11,6 +11,7 @@ import json
 import time
 import asyncio
 from diagnostics import configure_worker, event as diagnostic_event, shown, transition as diagnostic_transition
+import dk_rpc
 import module_runtime
 from dk_process import PYTHON, run, system_env
 import subprocess
@@ -168,6 +169,16 @@ def _save_settings(data: dict):
 def _refusal(error: str, message: str, **extra) -> dict:
     """The reply to a request refused before anything was changed."""
     return {"success": False, "error": error, "message": message, **extra}
+
+
+def _answer(result: dict) -> dict:
+    """An internal result as the RPC's D2 answer: its fields without ``success`` are the state (``error`` there is the
+    refusal code), and a failure's text for the user is its message and detail."""
+    state = {key: value for key, value in result.items() if key != "success"}
+    if result.get("success") is True:
+        return dk_rpc.ok(state)
+    text = " — ".join(str(state[key]) for key in ("message", "detail") if state.get(key))
+    return dk_rpc.fail(text or "The operation could not be verified.", state=state)
 
 
 def _first_reason(*checks) -> str:
@@ -1988,13 +1999,13 @@ class Plugin:
                     cancelled_cleanup=self._release_band_policy_file_lock
                 )
             except Exception as exc:
-                return _refusal("band_policy_lock_failed", "The network-operation lock is unavailable.",
-                                detail=str(exc))
+                return _answer(_refusal("band_policy_lock_failed", "The network-operation lock is unavailable.",
+                                        detail=str(exc)))
             try:
-                return await self._worker_complete(self._rescan_and_reconnect_sync, target_band)
+                return _answer(await self._worker_complete(self._rescan_and_reconnect_sync, target_band))
             except Exception as exc:
                 diagnostic_event('wifi', 'manual_reconnect_failed', level='error', stage='admission', code=type(exc).__name__)
-                return self._unexpected_response(exc)
+                return _answer(self._unexpected_response(exc))
             finally:
                 self._release_band_policy_file_lock(file_lock)
 
@@ -2424,7 +2435,7 @@ class Plugin:
             # Settings stay: Decky also uninstalls before every update, and main keeps
             # the band policy for the next start to restore.
             results = await self._release_all()
-            if not results["band_policy"].get("success"):
+            if not results["band_policy"]["ok"]:
                 diagnostic_event('wifi', 'uninstall_restore_unconfirmed', level='error', stage='band_policy', pending=True)
         except Exception as e:
             diagnostic_event('wifi', 'uninstall_failed', level='error', error=e, repeat=60)
@@ -2468,7 +2479,7 @@ class Plugin:
 
     def _unexpected_response(self, e: Exception) -> dict:
         """The reply of a catch-all exception handler; callers log the error themselves."""
-        return {"success": False, "error": "unexpected", "message": str(e)}
+        return {"success": False, "error": "unexpected", "message": shown(e)}
 
     def _nmcli_modify(self, uuid: str, key: str, value: str, timeout: int = 5) -> dict:
         return self._run_cmd(["/usr/bin/nmcli", "con", "mod", "uuid", uuid, key, value], timeout=timeout)
@@ -2479,7 +2490,7 @@ class Plugin:
         # NetworkManager/iw are blocking system tools. Keep them away from
         # Decky's shared asyncio loop so a slow status read cannot stall other
         # Companion modules.
-        return await asyncio.to_thread(self._get_status_sync)
+        return _answer(await asyncio.to_thread(self._get_status_sync))
 
     def _get_status_sync(self) -> dict:
         # Short (2 s) read-only timeouts plus a 10-second UI interval keep
@@ -2588,11 +2599,11 @@ class Plugin:
             except Exception as e:
                 diagnostic_event('wifi', 'band_policy_failed', level='error', stage='lock', code=type(e).__name__)
                 await self._restart_high_band_monitor()
-                return _refusal("band_policy_lock_failed", "The cross-process rollback lock is unavailable.",
-                                detail=str(e), rolled_back=False)
+                return _answer(_refusal("band_policy_lock_failed", "The cross-process rollback lock is unavailable.",
+                                        detail=str(e), rolled_back=False))
             try:
-                return await self._worker_complete(
-                    lambda: self._set_band_policy_impl(mode, allow_unverified_scan=allow_unverified_scan))
+                return _answer(await self._worker_complete(
+                    lambda: self._set_band_policy_impl(mode, allow_unverified_scan=allow_unverified_scan)))
             finally:
                 # LOCK_UN and close are local, non-blocking operations. Doing
                 # this directly also guarantees progress if executor threads

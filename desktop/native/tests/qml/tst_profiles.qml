@@ -63,7 +63,7 @@ TestCase {
         panel.loadPower();
         compare(field("tdp","Preset").visible(),true);
         verify(!allFields("tdp").some(item=>item.kind==="paragraph" && item.get()==="Loading power limits…"));
-        fake.data=Object.assign({},fake.data,{get_version:{version:"2.2.1",modules:{}},updates_check:{success:true,current_version:"2.2.1",no_release:true,update_available:false,download_available:false}});
+        fake.data=Object.assign({},fake.data,{get_version:{version:"2.2.1",modules:{}},updates_check:{current_version:"2.2.1",no_release:true,update_available:false,download_available:false}});
         compare(field("about","Updates").get(),"No public release yet");
         fake.data=Object.assign({},fake.data,{updates_check:{}});
         compare(field("about","Updates").get(),"GitHub releases");
@@ -116,14 +116,14 @@ TestCase {
     }
     function test_inactiveGlobalSaveExplainsThatTheGameProfileStillApplies() {
         panel.editPower("spl",18);
-        fake.mutationDone("apply_tdp",{success:true,saved_only:true,applied:false,
+        fake.mutationDone("apply_tdp",{saved_only:true,applied:false,
             message:"Global TDP settings saved. They will apply when no game profile is active."},true);
         compare(panel.powerDirty,false);
         compare(field("tdp","Power profile").get(),"Saved for Global. It applies when no game profile is active.");
         panel.editPower("spl",19);compare(field("tdp","Power profile").get(),"");
-        fake.mutationDone("apply_tdp",{success:false},false);
+        fake.mutationDone("apply_tdp",{},false);
         compare(panel.powerDirty,true);compare(field("tdp","Power profile").get(),"");
-        fake.mutationDone("apply_tdp",{success:true,applied:true},true);
+        fake.mutationDone("apply_tdp",{applied:true},true);
         compare(panel.powerDirty,false);compare(field("tdp","Power profile").get(),"");
     }
     function test_changedGameDoesNotReceiveOldDraft() {
@@ -578,7 +578,7 @@ TestCase {
         verify(!panel.fieldEnabled("display",edid),"unreadable settings pause the switch, as in Decky");
     }
     function wifiState(settings,live,extra) {
-        fake.data=Object.assign({},fake.data,{wifi_get_status:Object.assign({success:true,connected:true,
+        fake.data=Object.assign({},fake.data,{wifi_get_status:Object.assign({connected:true,
             settings:Object.assign({device_family:"legion_go_2",driver:"mt7921e",band_policy:"off"},settings),
             live:Object.assign({wifi_backend:"iwd",connection_state:"connected",connection_uuid:"home",frequency:"5180"},live)},extra || {})});
     }
@@ -619,13 +619,16 @@ TestCase {
     function test_wifiChangeIsVerifiedInTheNextStatus() {
         wifiState({},{});
         field("wifi","Band").set("five_six_no_24");compare(fake.calls[0].args[0],"five_six_no_24");
-        fake.mutationDone("wifi_set_band_policy",{success:true},true);
+        fake.mutationDone("wifi_set_band_policy",{message:"Saved"},true);
         fake.changed("wifi_get_status");
         compare(fake.error,"The final connection or setting could not be verified. Check the current Wi-Fi state.");
         fake.error="";field("wifi","Band").set("five_six_no_24");
-        fake.mutationDone("wifi_set_band_policy",{success:true},true);
+        fake.mutationDone("wifi_set_band_policy",{message:"Saved"},true);
         wifiState({band_policy:"five_six_no_24"},{});fake.changed("wifi_get_status");
         compare(fake.error,"");
+        // A refused change (HTTP 409) shows its own error; the next status is not checked against it.
+        field("wifi","Band").set("off");fake.mutationDone("wifi_set_band_policy",undefined,false);
+        fake.changed("wifi_get_status");compare(fake.error,"");
     }
     function test_unknownExtendedLimitsStateIsOffAndKeepsStandardCaps() {
         fake.data=Object.assign({},fake.data,{get_caps:{min:5,extras:true,tdp_available:true,presets:{},

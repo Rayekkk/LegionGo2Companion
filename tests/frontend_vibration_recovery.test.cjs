@@ -2,6 +2,8 @@
 const { assert, run, settle: wait, deferred, mount: load } = require('./legion_harness.cjs');
 const settle = () => wait(24);
 const values = { level: 2, mode: 1, touchpadIntensity: 2, touchpadEnabled: true };
+// A backend refusal (D2) with the state it carries; every other fixture is the state of an accepted call.
+const refused = (error, state) => ({ ok: false, error, ...(state ? { state } : {}) });
 const settings = (app = '0', level = 2, overwrite = false) => ({ settings: { ...values, level }, app_id: app, profile_id: overwrite ? app : '0', overwrite });
 const base = {
   vibe_is_ready: { ready: true, error: '' }, vibe_get_settings: settings(),
@@ -39,7 +41,7 @@ run(async () => {
   // previous hardware write is pending. Closing still commits the final edit.
   for (const failed of [false, true]) {
     const first = deferred(); let writes = 0;
-    const h = mount({ vibe_set_intensity: level => ++writes === 1 ? first.promise : { success: true, ...settings('0', level) } });
+    const h = mount({ vibe_set_intensity: level => ++writes === 1 ? first.promise : { ...settings('0', level) } });
     await ready(h);
     for (const level of [0, 1, 2, 3, 1, 2, 0]) {
       const slider = find(h.render(), 'Vibration strength'); assert.equal(slider.props.disabled, false);
@@ -47,7 +49,7 @@ run(async () => {
     }
     find(h.render(), 'Vibration strength').props.onChange(3); h.unmount(); await settle();
     assert.equal(writes, 1);
-    if (failed) first.reject(Error('old write failed')); else first.resolve({ success: true, ...settings('0', 0) });
+    if (failed) first.reject(Error('old write failed')); else first.resolve({ ...settings('0', 0) });
     for (let i = 0; i < 20; i++) await settle();
     assert.deepEqual(h.calls.filter(c => c.name === 'vibe_set_intensity').map(c => c.args[0]), [0, 3]);
     assert.equal(h.toasts.length, 0, 'An obsolete failure cannot replace the latest accepted edit.');
@@ -55,16 +57,16 @@ run(async () => {
   {
     const first = deferred(), order = []; let writes = 0;
     const h = mount({
-      vibe_set_intensity: level => { order.push(['level', level]); return ++writes === 1 ? first.promise : { success: true, ...settings('0', level) }; },
-      vibe_set_rumble_mode: mode => { order.push(['mode', mode]); return { success: true, settings: { ...values, mode } }; },
-      vibe_reset_to_default: () => { order.push(['reset']); return { success: true, settings: values }; },
+      vibe_set_intensity: level => { order.push(['level', level]); return ++writes === 1 ? first.promise : { ...settings('0', level) }; },
+      vibe_set_rumble_mode: mode => { order.push(['mode', mode]); return { settings: { ...values, mode } }; },
+      vibe_reset_to_default: () => { order.push(['reset']); return { settings: values }; },
     });
     await ready(h);
     for (const [label, value] of [['Vibration strength', 0], ['Vibration mode', 0], ['Vibration strength', 1], ['Vibration mode', 1], ['Vibration strength', 3]]) {
       find(h.render(), label).props.onChange(value); h.flush(); await settle();
     }
     const reset = button(h.render(), 'Reset to defaults').props.onClick(); await settle();
-    first.resolve({ success: true, ...settings('0', 0) }); await reset; await settle();
+    first.resolve({ ...settings('0', 0) }); await reset; await settle();
     assert.deepEqual(order, [['level', 0], ['mode', 1], ['level', 3], ['reset']], 'Each field keeps its latest value before the reset barrier.');
     find(h.render(), 'Vibration strength').props.onChange(1); h.flush(); await settle();
     assert.deepEqual(order.at(-1), ['level', 1], 'A new edit after reset is applied normally.'); h.unmount();
@@ -72,13 +74,13 @@ run(async () => {
   {
     const first = deferred(); let writes = 0;
     const h = mount({ vibe_get_settings: settings('111', 2, true),
-      vibe_set_active_app: app => ({ success: true, changed: true, ...settings(app, 2, true) }),
-      vibe_set_intensity: level => ++writes === 1 ? first.promise : { success: true, settings: { ...values, level } },
+      vibe_set_active_app: app => ({ changed: true, ...settings(app, 2, true) }),
+      vibe_set_intensity: level => ++writes === 1 ? first.promise : { settings: { ...values, level } },
     }, 111);
     await ready(h); h.startWatcher(); await settle();
     for (const level of [0, 1]) { find(h.render(), 'Vibration strength').props.onChange(level); h.flush(); await settle(); }
     await h.game(222); find(h.render(), 'Vibration strength').props.onChange(3); h.flush(); await settle();
-    first.resolve({ success: true, ...settings('111', 0, true) });
+    first.resolve({ ...settings('111', 0, true) });
     for (let i = 0; i < 10; i++) await settle();
     assert.deepEqual(h.calls.filter(c => c.name === 'vibe_set_intensity').map(c => Array.from(c.args)),
       [[0, '111', '111'], [1, '111', '111'], [3, '222', '222']], 'Coalescing never mixes different profile contexts.'); h.unmount();
@@ -88,7 +90,7 @@ run(async () => {
     find(await ready(h),'Vibration strength').props.onChange(3);h.unmount();await settle();
     const overview=h.getOverviewSettings();await settle();
     assert.equal(count(h,'vibe_get_settings'),1,'The main-menu vibration getter follows saves from the closed page.');
-    h.responses.vibe_get_settings=settings('0',3);pending.resolve({...settings('0',3),success:true});
+    h.responses.vibe_get_settings=settings('0',3);pending.resolve({...settings('0',3)});
     const current=await overview;assert.equal(current.settings.level,3);assert.equal(count(h,'vibe_get_settings'),2);
   }
 
@@ -98,12 +100,12 @@ run(async () => {
     let tree=await ready(h);find(tree,'Vibration strength').props.onChange(3);find(tree,'Vibration mode').props.onChange(0);
     h.unmount();await settle();h.remount();await settle();
     assert.equal(count(h,'vibe_get_settings'),1,'A reopened vibration page waits for all accepted slider saves.');
-    first.resolve({...settings('0',3),success:true});await settle();
+    first.resolve({...settings('0',3)});await settle();
     assert.equal(count(h,'vibe_set_rumble_mode'),1);
     assert.equal(count(h,'vibe_get_settings'),1,'The second queued save still precedes the initial snapshot.');
     h.responses.vibe_get_settings={...settings('0',3),settings:{...values,level:3,mode:failed?1:0}};
     if(failed)second.reject(new Error('mode change interrupted'));
-    else second.resolve({...h.responses.vibe_get_settings,success:true});
+    else second.resolve({...h.responses.vibe_get_settings});
     await settle();tree=h.render();
     assert.equal(count(h,'vibe_get_settings'),2,'A settled mutation tail immediately admits the new snapshot, including after failure.');
     assert.equal(find(tree,'Vibration strength').props.value,3);assert.equal(find(tree,'Vibration mode').props.value,failed?1:0);
@@ -127,8 +129,8 @@ run(async () => {
 
   for (const metadata of [false,true]) {
     const saved={...values,level:1,mode:0};
-    const h=mount({vibe_reset_to_default:{success:false,settings:saved,error:'hardware disconnected',
-      ...(metadata?{app_id:'0',profile_id:'0',overwrite:false}:{})}});
+    const h=mount({vibe_reset_to_default:refused('hardware disconnected',{settings:saved,
+      ...(metadata?{app_id:'0',profile_id:'0',overwrite:false}:{})})});
     await button(await ready(h),'Reset to defaults').props.onClick();await settle();
     assert.equal(find(h.render(),'Vibration strength').props.value,1,'Failed hardware apply still displays the settings committed by Reset.');
     assert.equal(find(h.render(),'Vibration mode').props.value,0);
@@ -140,7 +142,7 @@ run(async () => {
     click();click();await settle();
     assert.equal(count(h,'vibe_test_vibration'),1,'Repeated taps start one vibration test.');
     h.unmount();const writes=h.writes;
-    if(failed)playing.reject(new Error('test disconnected'));else playing.resolve({success:true});
+    if(failed)playing.reject(new Error('test disconnected'));else playing.resolve({ok:true});
     await settle();assert.equal(h.writes,writes,'A completed vibration test cannot update an unmounted page.');
     click();await settle();assert.equal(count(h,'vibe_test_vibration'),1);
   }
@@ -151,7 +153,7 @@ run(async () => {
     assert.equal(count(h,'vibe_set_intensity'),1,'Testing flushes the latest slider gesture.');
     assert.equal(count(h,'vibe_test_vibration'),0,'The test waits for the current settings to finish saving.');
     if(leave)h.unmount();
-    writing.resolve({...settings('0',3),success:true});await settle();
+    writing.resolve({...settings('0',3)});await settle();
     assert.equal(count(h,'vibe_test_vibration'),leave?0:1,'A queued test is cancelled when its page closes.');
     h.unmount();
   }
@@ -167,21 +169,21 @@ run(async () => {
   {
     const writing=deferred(),heartbeat=deferred();let stored=settings('111',1);
     const h=mount({vibe_get_settings:()=>structuredClone(stored),
-      vibe_set_active_app:()=>({...stored,success:true,changed:false}),vibe_set_intensity:()=>writing.promise},111);
+      vibe_set_active_app:()=>({...stored,changed:false}),vibe_set_intensity:()=>writing.promise},111);
     await ready(h);h.startWatcher();await settle();
     find(h.render(),'Vibration strength').props.onChange(3);h.flush();await settle();
     h.responses.vibe_set_active_app=()=>heartbeat.promise;const checking=h.heartbeat();await settle();
-    stored=settings('111',3);writing.resolve({...stored,success:true});await settle();
-    heartbeat.resolve({...settings('111',1),success:true,changed:false});await checking;await settle();
+    stored=settings('111',3);writing.resolve({...stored});await settle();
+    heartbeat.resolve({...settings('111',1),changed:false});await checking;await settle();
     assert.equal(find(h.render(),'Vibration strength').props.value,3,'heartbeat started during a write cannot undo its completion');h.unmount();
   }
   {
     const old=deferred();const h=mount({vibe_get_settings:settings('111'),
-      vibe_set_active_app:id=>({...settings(id,2,id!=='0'),success:true,changed:true})},111);
+      vibe_set_active_app:id=>({...settings(id,2,id!=='0'),changed:true})},111);
     await ready(h);h.startWatcher();await settle();
-    h.responses.vibe_set_active_app=id=>id==='111'?old.promise:({...settings(id,3,true),success:true,changed:true});
+    h.responses.vibe_set_active_app=id=>id==='111'?old.promise:({...settings(id,3,true),changed:true});
     const checking=h.heartbeat();await settle();await h.game(222);
-    old.resolve({...settings('111'),success:true,changed:false});await checking;await settle();
+    old.resolve({...settings('111'),changed:false});await checking;await settle();
     assert.equal(find(h.render(),'Vibration strength').props.value,3,'new game is delivered immediately after a busy old heartbeat');
     assert.equal(find(h.render(),'Per-game profile').props.checked,true);
     find(h.render(),'Vibration strength').props.onChange(1);h.flush();await settle();
@@ -191,16 +193,16 @@ run(async () => {
     const oldHeartbeat = deferred(); let stored = settings('111', 1, false);
     const h = mount({
       vibe_get_settings: () => structuredClone(stored),
-      vibe_set_active_app: () => ({success:true,changed:false,...structuredClone(stored)}),
-      vibe_set_profile_overwrite: (_app, enabled) => { stored = settings('111', 2, enabled); return {success:true,...structuredClone(stored)}; },
-      vibe_set_intensity: level => { stored = {...stored,settings:{...stored.settings,level}}; return {success:true,...structuredClone(stored)}; },
+      vibe_set_active_app: () => ({changed:false,...structuredClone(stored)}),
+      vibe_set_profile_overwrite: (_app, enabled) => { stored = settings('111', 2, enabled); return {...structuredClone(stored)}; },
+      vibe_set_intensity: level => { stored = {...stored,settings:{...stored.settings,level}}; return {...structuredClone(stored)}; },
     }, 111);
     await ready(h); h.startWatcher(); await settle();
     const captured = structuredClone(stored); h.responses.vibe_set_active_app = () => oldHeartbeat.promise;
     const heartbeat = h.heartbeat(); await settle();
     if (action === 'toggle') await find(h.render(), 'Per-game profile').props.onChange(true);
     else { find(h.render(), 'Vibration strength').props.onChange(3); h.flush(); }
-    await settle(); oldHeartbeat.resolve({success:true,changed:false,...captured}); await heartbeat; await settle();
+    await settle(); oldHeartbeat.resolve({changed:false,...captured}); await heartbeat; await settle();
     assert.equal(find(h.render(), 'Per-game profile').props.checked, action === 'toggle', 'delayed heartbeat cannot undo committed profile scope');
     assert.equal(find(h.render(), 'Vibration strength').props.value, action === 'toggle' ? 2 : 3, 'delayed heartbeat cannot undo a committed slider');
     find(h.render(), 'Vibration strength').props.onChange(0); h.flush(); await settle();
@@ -210,9 +212,9 @@ run(async () => {
   // A reset is ordered after every deferred gesture, so no old timer can undo it.
   let stored = { ...values };
   const reset = mount({
-    vibe_set_intensity: level => { stored.level = level; return { success: true, settings: { ...stored } }; },
-    vibe_set_rumble_mode: mode => { stored.mode = mode; return { success: true, settings: { ...stored } }; },
-    vibe_reset_to_default: () => { stored = { ...values }; return { success: true, settings: { ...stored } }; },
+    vibe_set_intensity: level => { stored.level = level; return { settings: { ...stored } }; },
+    vibe_set_rumble_mode: mode => { stored.mode = mode; return { settings: { ...stored } }; },
+    vibe_reset_to_default: () => { stored = { ...values }; return { settings: { ...stored } }; },
   });
   let tree = await ready(reset);
   find(tree, 'Vibration strength').props.onChange(3); find(tree, 'Vibration mode').props.onChange(0); tree = reset.render();
@@ -226,7 +228,7 @@ run(async () => {
   reset.flush(); alreadyQueued.forEach(fn => fn()); await settle(); assert.equal(stored.level, 2);
   assert.equal(count(reset, 'vibe_set_intensity'), 1, 'A cleared callback cannot replay a gesture after Reset'); reset.unmount();
 
-  const coalesced = mount({ vibe_set_intensity: level => ({ success: true, settings: { ...values, level } }) });
+  const coalesced = mount({ vibe_set_intensity: level => ({ settings: { ...values, level } }) });
   tree = await ready(coalesced); find(tree, 'Vibration strength').props.onChange(1);
   const superseded = [...coalesced.timers.values()].find(t => t.kind === 'timeout').fn;
   tree = coalesced.render(); find(tree, 'Vibration strength').props.onChange(3); superseded(); coalesced.flush(); await settle();
@@ -235,18 +237,18 @@ run(async () => {
   // A reset also waits for a write already in flight, and duplicate activation coalesces.
   const writing = deferred(), order = [];
   const serial = mount({ vibe_set_intensity: () => { order.push('write'); return writing.promise; },
-    vibe_reset_to_default: () => { order.push('reset'); return { success: true, settings: values }; } });
+    vibe_reset_to_default: () => { order.push('reset'); return { settings: values }; } });
   tree = await ready(serial); const resetCallback = button(tree, 'Reset to defaults').props.onClick;
   find(tree, 'Vibration strength').props.onChange(3); serial.flush(); await settle();
   const one = resetCallback(), two = resetCallback(); await settle(); assert.deepEqual(order, ['write']);
-  writing.resolve({ success: true, settings: { ...values, level: 3 } }); await one; await two; await settle();
+  writing.resolve({ settings: { ...values, level: 3 } }); await one; await two; await settle();
   assert.deepEqual(order, ['write', 'reset']); assert.equal(find(serial.render(), 'Vibration strength').props.value, 2); serial.unmount();
 
   // Success, rejection payloads and thrown errors from old games cannot change the new page.
   for (const action of ['toggle', 'reset']) for (const result of ['success', 'failure', 'throw']) {
     const delayed = deferred();
     const h = mount({ vibe_get_settings: settings('111', 1, false),
-      vibe_set_active_app: app => ({ success: true, changed: true, ...settings(app, app === '222' ? 0 : 1, app === '222') }),
+      vibe_set_active_app: app => ({ changed: true, ...settings(app, app === '222' ? 0 : 1, app === '222') }),
       vibe_set_profile_overwrite: () => delayed.promise, vibe_reset_to_default: () => delayed.promise,
     }, 111);
     tree = await ready(h); h.startWatcher(); await settle(); tree = h.render();
@@ -254,7 +256,8 @@ run(async () => {
     await settle(); await h.game(222); tree = h.render();
     assert.equal(find(tree, 'Vibration strength').props.value, 0); assert.equal(find(tree, 'Per-game profile').props.checked, true);
     if (result === 'throw') delayed.reject(Error('old game failed'));
-    else delayed.resolve({ success: result === 'success', error: 'old game failed', settings: { ...values, level: 3 }, overwrite: true });
+    else if (result === 'success') delayed.resolve({ settings: { ...values, level: 3 }, overwrite: true });
+    else delayed.resolve(refused('old game failed', { settings: { ...values, level: 3 }, overwrite: true }));
     await pending; await settle(); tree = h.render();
     assert.equal(find(tree, 'Vibration strength').props.value, 0, `${action}/${result} keeps the new game's values`);
     assert.equal(find(tree, 'Per-game profile').props.checked, true, `${action}/${result} keeps the new game's profile enabled`);
@@ -284,23 +287,23 @@ run(async () => {
   // Slow initialization and heartbeat snapshots cannot roll back a newer game or draft.
   const caps = deferred();
   const initial = mount({ vibe_get_settings: settings('111', 1), vibe_get_capabilities: () => caps.promise,
-    vibe_set_active_app: app => ({ success: true, changed: true, ...settings(app, app === '222' ? 0 : 1, true) }),
+    vibe_set_active_app: app => ({ changed: true, ...settings(app, app === '222' ? 0 : 1, true) }),
   }, 111);
   initial.render(); await settle(); initial.startWatcher(); await settle(); await initial.game(222);
   caps.resolve({ mode: ['fps', 'racing'] }); await settle(); tree = initial.render();
   assert.equal(find(tree, 'Vibration strength').props.value, 0); initial.unmount();
   const field = deferred();
   const heartbeat = mount({ vibe_get_settings: settings('111', 1, true),
-    vibe_set_active_app: app => ({ success: true, changed: false, ...settings(app, 1, true) }), vibe_set_intensity: () => field.promise }, 111);
+    vibe_set_active_app: app => ({ changed: false, ...settings(app, 1, true) }), vibe_set_intensity: () => field.promise }, 111);
   tree = await ready(heartbeat); heartbeat.startWatcher(); await settle(); tree = heartbeat.render();
   find(tree, 'Vibration strength').props.onChange(3); heartbeat.flush(); await settle(); await heartbeat.heartbeat();
   assert.equal(find(heartbeat.render(), 'Vibration strength').props.value, 3);
-  field.resolve({ success: true, settings: { ...values, level: 3 } }); await settle();
+  field.resolve({ settings: { ...values, level: 3 } }); await settle();
   assert.equal(find(heartbeat.render(), 'Vibration strength').props.value, 3); heartbeat.unmount();
 
   // Pending gestures survive both temporary hiding and closing the page.
   for (const leave of ['hide', 'unmount']) {
-    const h = mount({ vibe_get_settings: settings('111', 1, true), vibe_set_intensity: { success: true, settings: { ...values, level: 3 } } }, 111);
+    const h = mount({ vibe_get_settings: settings('111', 1, true), vibe_set_intensity: { settings: { ...values, level: 3 } } }, 111);
     tree = await ready(h); find(tree, 'Vibration strength').props.onChange(3); h[leave](); if (leave === 'hide') h.flush(); await settle();
     assert.equal(count(h, 'vibe_set_intensity'), 1); assert.deepEqual(Array.from(h.calls.find(call => call.name === 'vibe_set_intensity').args), [3, '111', '111']);
     assert.equal([...h.timers.values()].filter(t => t.kind === 'timeout').length, 0, `no debounce timer survives ${leave}`);
@@ -327,14 +330,14 @@ run(async () => {
   failedSwitch.unmount();
   // A hardware failure after a successful commit must adopt the committed scope.
   const savedSwitch = mount({ vibe_get_settings: settings('111', 1, false),
-    vibe_set_profile_overwrite: { success: false, error: 'device unplugged', ...settings('111', 2, true) } }, 111);
+    vibe_set_profile_overwrite: refused('device unplugged', settings('111', 2, true)) }, 111);
   tree = await ready(savedSwitch); await find(tree, 'Per-game profile').props.onChange(true); await settle(); tree = savedSwitch.render();
   assert.equal(find(tree, 'Per-game profile').props.checked, true);
   find(tree, 'Vibration strength').props.onChange(3); savedSwitch.flush(); await settle();
   assert.deepEqual(Array.from(savedSwitch.calls.find(c => c.name === 'vibe_set_intensity').args), [3, '111', '111']);
   savedSwitch.unmount();
   const rejectedField = mount({ vibe_get_settings: settings('111', 1, true),
-    vibe_set_intensity: { success: false, error: 'profile changed', ...settings('111', 2, false) } }, 111);
+    vibe_set_intensity: refused('profile changed', settings('111', 2, false)) }, 111);
   tree = await ready(rejectedField); find(tree, 'Vibration strength').props.onChange(3); rejectedField.flush(); await settle();
   tree = rejectedField.render(); assert.equal(find(tree, 'Per-game profile').props.checked, false);
   find(tree, 'Vibration strength').props.onChange(1); rejectedField.flush(); await settle();
@@ -388,12 +391,26 @@ run(async () => {
   // shows the value the controller kept.
   for (const [saved, error, body] of [
     [3, 'Controller not connected. The change is saved and applies when it connects.', 'Controller not connected. The change is saved and applies when it connects.'],
-    [2, undefined, 'Could not apply setting: The driver rejected the change'],
+    [2, "The change wasn't confirmed. Check the current value.", "Could not apply setting: The change wasn't confirmed. Check the current value."],
   ]) {
-    const h = mount({ vibe_set_intensity: () => ({ success: false, ...(error ? { error } : {}), ...settings('0', saved) }) });
+    const h = mount({ vibe_set_intensity: () => refused(error, settings('0', saved)) });
     find(await ready(h), 'Vibration strength').props.onChange(3); h.flush(); await settle();
     assert.equal(find(h.render(), 'Vibration strength').props.value, saved);
     assert.deepEqual(h.toasts.map(t => t.body), [body]); h.unmount();
+  }
+  // A refusal without a state (the module guard) reads as a failed call: its text, and the panel re-reads the profile.
+  {
+    const h = mount({ vibe_set_intensity: refused('Vibration is turned off in Manage Modules.') });
+    find(await ready(h), 'Vibration strength').props.onChange(3); h.flush(); await settle();
+    assert.deepEqual(h.toasts.map(t => t.body), ['Could not apply setting: Vibration is turned off in Manage Modules.']);
+    assert.equal(count(h, 'vibe_get_settings'), 2, 'The refused edit re-reads the saved profile.');
+    assert.equal(find(h.render(), 'Vibration strength').props.value, 2); h.unmount();
+  }
+  for (const answer of [{ ok: true }, refused('Intensity is Off - raise it to feel the test')]) {
+    const h = mount({ vibe_test_vibration: answer });
+    await button(await ready(h), 'Test vibration').props.onClick(); await settle();
+    assert.deepEqual(h.toasts.map(t => t.body), answer.ok ? [] : ['Test vibration failed: Intensity is Off - raise it to feel the test']);
+    h.unmount();
   }
 
   // The names and rule both UIs share (src/vibration.tsx and the Desktop ModulePage.qml import the same module).

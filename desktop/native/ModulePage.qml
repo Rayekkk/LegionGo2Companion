@@ -257,7 +257,7 @@ RowLayout {
         if(settings.enabled!==true || !now)return "";
         const profile=stored()?null:gameProfile(),own=profile?!!profile.exists && profile.active!==false:!now.global;
         const info=s("get_tdp_info");
-        return Tdp.powerSummary(true,own?gameTitle(running()):"Global",now.label,now,info.success?info.values?.package_draw:null,unlocked(),stdCaps());
+        return Tdp.powerSummary(true,own?gameTitle(running()):"Global",now.label,now,info.values?.package_draw,unlocked(),stdCaps());
     }
     function setExtras(value) {
         if(!value) { change("set_extras_unlocked",[false]); return; }
@@ -474,7 +474,7 @@ RowLayout {
                 notice("",()=>display().edid_reason || "")
             ]}],
             wifi:[{title:"Wi-Fi",fields:[
-                notice("",()=>{const notice=Wifi.wifiNotice(wifi());return wifi().error || wifi().message || (notice?notice[0]+". "+notice[1]:"");}),
+                notice("",()=>{const notice=Wifi.wifiNotice(wifi());return notice?notice[0]+". "+notice[1]:"";}),
                 text("Network",()=>Wifi.networkName(wifi()),{note:()=>Wifi.linkText(wifi())}),
                 choices("Band",()=>Wifi.savedPolicy(wifi()),setWifiPolicy,()=>Wifi.bandOptions(wifi()),
                     {kind:"options",note:()=>Wifi.bandNote(wifi()),visible:()=>Wifi.actionShown(wifi(),"band"),available:()=>Wifi.bandOptions(wifi()).length>1}),
@@ -532,7 +532,7 @@ RowLayout {
         function onWindowActiveChanged() { if(!backend.windowActive)panel.wifiCheck=null; }
         function onMutationDone(method,result,success) {
             if(method==="modules_set_enabled")panel.applyingModule="";
-            if(method.startsWith("wifi_") && panel.wifiCheck)panel.wifiCheck=success && result?.success!==false?Object.assign({},panel.wifiCheck,{done:true}):null;
+            if(method.startsWith("wifi_") && panel.wifiCheck)panel.wifiCheck=success?Object.assign({},panel.wifiCheck,{done:true}):null;
             // Switching the boost model drops the draft, as in Decky.
             if(method==="set_advanced_tdp_control" && success) { panel.powerDirty=false; panel.loadPower(); }
             if(method==="apply_tdp" || method==="set_game_ac_profile") {

@@ -27,7 +27,7 @@ TestCase {
         fake.data={get_version:{blocked:false,modules:{fan:{ready:true},tdp:{ready:true},controller:{ready:true},display:{ready:true}}},
             fan_get_state:{readings:{valid:true,rpm:2400,apu_temperature:55.5,age_seconds:0,automatic:true},settings:{enabled:false,display_unit:"rpm"},limits:{max_rpm:4800}},
             battery_get_status:{capacity:78,charging_status:"Charging",enabled:true},get_power_source:{ac:true},
-            get_settings:{active_preset:"balanced"},get_tdp_info:{success:true,values:{spl_limit:20,sppt_limit:25,fppt_limit:30,package_draw:18}},
+            get_settings:{active_preset:"balanced"},get_tdp_info:{values:{spl_limit:20,sppt_limit:25,fppt_limit:30,package_draw:18}},
             wifi_get_status:{connected:true,live:{ssid:"Test network",frequency:"5180",wifi_backend:"iwd"},settings:{band_policy:"off"}},controller_get_status:{available:true,gyro_source:"system"},
             battery_get_controller_levels:{left:80,right:90},vibe_get_settings:{settings:{level:2}},vibe_get_capabilities:{intensity:["off","low","medium","high"]}};
         view=createTemporaryObject(factory,this);verify(view!==null);

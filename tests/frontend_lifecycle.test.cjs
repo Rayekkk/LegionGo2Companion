@@ -178,7 +178,7 @@ run(async()=>{
  let tree;
  const compatibilityNote='This kernel supports EPP presets only. Saved EPP 77 uses balance performance.';
  const notes=[];
- const legacy=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:'',
+ const legacy=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{available:true,error:'',
    cpu_boost:{available:true,enabled:false,error:''},
    epp:{available:true,error:'',min:0,max:255,value:'balance_performance',numeric_value:128,numeric_supported:false,
         profiles:['default','performance','balance_performance','balance_power','power'],compatibility_note:compatibilityNote}}},
@@ -187,7 +187,7 @@ run(async()=>{
  assert.equal(notes.at(-1),compatibilityNote,'The compatibility note is handed to the page for Show details.');
  assert.equal(legacy.calls.filter(c=>c.name==='set_epp').length,0);
  legacy.unmount();
- const presetState=(requested='performance')=>({success:true,available:true,error:'',
+ const presetState=(requested='performance')=>({available:true,error:'',
    profile:{app_id:'',ac_profile:false,active:true,cpu_boost_enabled:null,epp:requested},
    cpu_boost:{available:true,enabled:true,error:''},
    epp:{available:true,error:'',min:0,max:255,value:requested==='default'?'balance_performance':requested,
@@ -212,15 +212,15 @@ run(async()=>{
  assert.ok(find(tree,'CPU energy preference · Prefer GPU'));
  presets.unmount();
  for(const leave of ['unmount','hide']){
-   const epp=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{success:true,available:true,error:"",
+   const epp=mount('tdp.tsx','CpuPowerControlsSection',{get_cpu_power_controls:{available:true,error:"",
       cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'128',numeric_value:128,numeric_supported:true,profiles:[]}},
-      set_epp:{success:true,available:true,error:"",cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'204',numeric_value:204,numeric_supported:true,profiles:[]}}});
+      set_epp:{available:true,error:"",cpu_boost:{available:true,enabled:true,error:""},epp:{available:true,error:"",min:0,max:255,value:'204',numeric_value:204,numeric_supported:true,profiles:[]}}});
    epp.render();await settle();tree=epp.render();const slider=find(tree,'CPU energy preference');assert.ok(slider);slider.props.onChange(80);
    epp[leave]();await settle();assert.equal(epp.calls.filter(c=>c.name==='set_epp').length,1);
    assert.equal(epp.calls.find(c=>c.name==='set_epp').args[0],'204');epp.unmount();
  }
  const cpuState=(profile={app_id:'111',ac_profile:false,active:true,cpu_boost_enabled:true,epp:'128'})=>({
-   success:true,available:true,error:'',profile,
+   available:true,error:'',profile,
    cpu_boost:{available:true,enabled:true,error:''},
    epp:{available:true,error:'',min:0,max:255,value:'128',numeric_value:128,numeric_supported:true,profiles:[]}
  });
@@ -358,6 +358,26 @@ run(async()=>{
    {appId:'222',acProfile:false,expectedAppId:'222'});
  mismatched.render();await settle();tree=mismatched.render();
  assert.equal(find(tree,'CPU Boost').props.disabled,true);mismatched.unmount();
+ // D2: a refusal with the status shows it and its error; one without (the module guard) is a failed call.
+ const refusedState={...cpuState(),error:'foreground game changed'};
+ const refusedRead=mount('tdp.tsx','CpuPowerControlsSection',{
+   get_cpu_power_controls:{ok:false,error:'EPP read failed',state:{...cpuState(),error:'EPP read failed'}},
+   set_cpu_boost:{ok:false,error:'foreground game changed',state:refusedState},
+ },{appId:'111',acProfile:false,expectedAppId:'111'});
+ refusedRead.render();await settle();tree=refusedRead.render();
+ assert.equal(find(tree,'CPU Boost').props.description,'EPP read failed');
+ assert.equal(find(tree,'CPU Boost').props.checked,true,'A refused read still shows the hardware it read.');
+ find(tree,'CPU Boost').props.onChange(false);await settle();tree=refusedRead.render();
+ assert.equal(find(tree,'CPU Boost').props.description,'foreground game changed');
+ assert.equal(find(tree,'CPU Boost').props.checked,true);
+ assert.equal(count(refusedRead,'get_cpu_power_controls'),1,'A refusal with its status needs no reread.');
+ refusedRead.unmount();
+ const guarded=mount('tdp.tsx','CpuPowerControlsSection',{
+   get_cpu_power_controls:cpuState(),set_cpu_boost:{ok:false,error:'TDP is turned off.'},
+ },{appId:'111',acProfile:false,expectedAppId:'111'});
+ guarded.render();await settle();find(guarded.render(),'CPU Boost').props.onChange(false);await settle();
+ assert.equal(count(guarded,'get_cpu_power_controls'),2,'A refusal without a status rereads the controls.');
+ assert.equal(find(guarded.render(),'CPU Boost').props.checked,true);guarded.unmount();
  // Scope controls cannot delete or change a profile underneath a pending CPU
  // save. Multiple keyed instances keep independent ownership of this guard.
  const page=mount('tdp.tsx','TdpPage',{

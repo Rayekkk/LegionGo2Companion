@@ -10,7 +10,7 @@ run(async () => {
     vibe_get_settings: { settings: { level: 2, mode: 2, touchpadEnabled: false } },
     vibe_get_driver_status: { found: true }, display_get_state: display, wifi_get_status: wifi,
     rgb_get_status: rgb, remap_get_status: remap,
-    battery_get_status: { success: true, supported: true, managed: true, enabled: true, requested_enabled: true },
+    battery_get_status: { supported: true, managed: true, enabled: true, requested_enabled: true },
     battery_get_controller_levels: { available: true, left: 75, right: 82, connection_left: 'attached', connection_right: 'attached' },
     controller_get_status: {} };
   const answerOverview = (h, except = []) => {
@@ -193,7 +193,8 @@ run(async () => {
     answerOverview(h); await settle(); h.advance(10000); h.fire();
     h.respond('battery_get_status', { supported: false, reason: 'Battery firmware unavailable' });
     h.respond('controller_get_status', { available: true, recovery_pending: true, reason: 'Restore the interrupted controller change' });
-    h.respond('wifi_get_status', { success: false, error: 'unexpected', message: 'Wireless settings could not be verified' });
+    h.respond('wifi_get_status', { ok: false, error: 'Wireless settings could not be verified',
+      state: { error: 'unexpected', message: 'Wireless settings could not be verified' } });
     answerOverview(h); await settle();
     assert.equal(section(h, 'Battery').description, 'Battery firmware unavailable');
     assert.equal(section(h, 'Gyro & touchpad').description, 'Restore the interrupted controller change');

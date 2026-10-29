@@ -4,12 +4,12 @@
 export const DEVICE_REPORT_TITLE = "Save device report";
 export const DEVICE_REPORT_DESCRIPTION = "Saves a text file to your Desktop with this console's hardware and firmware details and read-only firmware tables (DSDT) and EC readings, for a bug report. No serial numbers, network names or user names.";
 /** The outcome of save_device_report: where the file is, or why it is not. */
-export const deviceReportResult = result => result?.success === true && result.path ? `Saved to ${result.path}`
+export const deviceReportResult = result => result?.path ? `Saved to ${result.path}`
   : result?.error || "The device report could not be saved. Try again.";
 
 /** [headline, detail] for the last successful updates_check; before one, how to check. */
 export function updateStatus(check, currentVersion) {
-  if (!check?.success) return ["GitHub releases", `Installed version: ${currentVersion}. Check for updates when you need them.`];
+  if (typeof check?.update_available !== "boolean") return ["GitHub releases", `Installed version: ${currentVersion}. Check for updates when you need them.`];
   if (check.no_release) return ["No public release yet", `Installed version: ${currentVersion}. A download will appear after a release is published on GitHub.`];
   if (check.update_available) {
     if (!check.download_available) return ["New release found", `Version ${check.latest_version} has no downloadable plugin ZIP yet. Check again later.`];

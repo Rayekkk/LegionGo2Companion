@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -13,6 +13,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
+import type { Result } from "./result";
 import { infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { controlNote, effectsEditable, POWER_LED_BETA_TEXT, powerChecked as powerShown, powerNote, RESTORE_NOTE, ringsNote, SPEEDS, speedStep,
   usesColor as colorEffect, usesSpeed as speedEffect } from "../desktop/native/rgb.mjs";
@@ -43,7 +44,6 @@ interface RgbEffect {
 }
 
 export interface RgbStatus {
-  success: boolean;
   settings?: RgbSettings;
   rgb?: {
     supported: boolean;
@@ -64,11 +64,9 @@ export interface RgbStatus {
   error?: string;
 }
 
-interface RgbResult {
-  success: boolean;
-  error?: string;
-  status?: RgbStatus;
-}
+// A change answers D2 itself: the new status, also with a refusal (a refusal before any change has none).
+type RgbResult = Result<RgbStatus>;
+const UNCONFIRMED = "The change could not be confirmed. Reopen Lighting to check the current state.";
 
 const mutations = mutationQueue();
 const readRgbStatus = rpc<[], RgbStatus>("rgb_get_status");
@@ -76,14 +74,14 @@ export const getRgbStatus = async () => {
   if (mutations.pending) await mutations.tail;
   return readRgbStatus();
 };
-const setControlEnabled = rpc<[boolean], RgbResult>("rgb_set_control_enabled");
-const setRingsEnabled = rpc<[boolean], RgbResult>("rgb_set_rings_enabled");
-const setEffect = rpc<[string], RgbResult>("rgb_set_effect");
-const setColor = rpc<[number, number], RgbResult>("rgb_set_color");
-const setBrightness = rpc<[number], RgbResult>("rgb_set_brightness");
-const setSpeed = rpc<[number], RgbResult>("rgb_set_speed");
-const setPowerLed = rpc<[boolean], RgbResult>("rgb_set_power_led");
-const restoreOriginal = rpc<[], RgbResult>("rgb_restore_original");
+const setControlEnabled = callable<[boolean], RgbResult>("rgb_set_control_enabled");
+const setRingsEnabled = callable<[boolean], RgbResult>("rgb_set_rings_enabled");
+const setEffect = callable<[string], RgbResult>("rgb_set_effect");
+const setColor = callable<[number, number], RgbResult>("rgb_set_color");
+const setBrightness = callable<[number], RgbResult>("rgb_set_brightness");
+const setSpeed = callable<[number], RgbResult>("rgb_set_speed");
+const setPowerLed = callable<[boolean], RgbResult>("rgb_set_power_led");
+const restoreOriginal = callable<[], RgbResult>("rgb_restore_original");
 
 const EFFECT_LABELS: Record<string, string> = {
   monocolor: "Solid",
@@ -253,20 +251,20 @@ export const RgbPage: FC<{ visible?: boolean; powerLight?: boolean }> = ({ visib
       if (mounted.current) { setError(""); setFailed(null); }
       const fail = (text: string) => { setFailed({ control, text }); toaster.toast({ title: "Lighting", body: text }); };
       try {
-        const result = await operation();
+        const { ok, error, state } = await operation();
         if (!mounted.current) return;
         settleDrafts();
-        if (result.status?.settings) {
-          setStatus({ ...result.status, settings: { ...result.status.settings, ...drafts.current } });
-        } else if (result.status) setStatus(result.status);
+        if (state?.settings) {
+          setStatus({ ...state, settings: { ...state.settings, ...drafts.current } });
+        } else if (state) setStatus(state);
         else needsRefresh = true;
-        if (!result.success) fail(result.error || "The lights did not confirm the change.");
+        if (!ok) fail(state ? error || "The lights did not confirm the change." : UNCONFIRMED);
         else if (control === "restore") toaster.toast({ title: "Lighting", body: "Original lighting restored." });
       } catch {
         needsRefresh = true;
         if (!mounted.current) return;
         settleDrafts();
-        fail("The change could not be confirmed. Reopen Lighting to check the current state.");
+        fail(UNCONFIRMED);
       } finally {
         mutations.done();
         pendingCount.current -= 1;

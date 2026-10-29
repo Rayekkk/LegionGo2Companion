@@ -13,77 +13,28 @@ import {
 import { FC, ReactNode, useEffect, useRef, useState } from "react";
 import { DisplayPage } from "./display";
 import { TdpPage, startTdpWatcher, stopTdpWatcher } from "./tdp";
-import { overviewSummary, type RunningLimits } from "../desktop/native/tdp.mjs";
-import { FanPage, getFanState, fanSummary, type FanState } from "./fan";
-import {
-  VibrationPage,
-  getVibrationSettings,
-  startVibrationWatcher,
-  stopVibrationWatcher,
-} from "./vibration";
-import { getWifiStatus, WifiPage, wifiSummary, type WifiStatus } from "./wifi";
-import { getRgbStatus, RgbPage, rgbSummary, type RgbStatus } from "./rgb";
-import { getRemapStatus, RemapPage, remapSummary, type RemapStatus } from "./remap";
-import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySummary,
-  type BatteryStatus, type ControllerBatteryStatus } from "./battery";
-import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
+import { FanPage, fanSummary } from "./fan";
+import { VibrationPage, startVibrationWatcher, stopVibrationWatcher } from "./vibration";
+import { WifiPage, wifiSummary } from "./wifi";
+import { RgbPage, rgbSummary } from "./rgb";
+import { RemapPage, remapSummary } from "./remap";
+import { BatteryPage, batterySummary } from "./battery";
+import { ControllerPage, controllerSummary } from "./controller";
 import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
 import { errorText, infoRow, rpc } from "./shared";
+import { configureOverviewModules, currentOverview, displaySummary, EMPTY_MODULES, guardOverview, invalidateOverviewReads,
+  moduleEnabled, type ModuleKey, type ModuleStates, type Overview, overviewDescription, overviewNote, pauseOverview,
+  PLUGIN_VERSION, pollOverview, resetOverview, tdpSummary, vibrationSummary, watchOverview } from "./overview";
 import { strengthOnly } from "../desktop/native/vibration.mjs";
 import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, consoleDetecting, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
-type ModuleKey = "tdp" | "fan" | "vibration" | "display" | "wifi" | "rgb" | "remap" | "battery" | "controller";
 type SectionKey = ModuleKey | "about" | "modules";
-type ModuleStates = Partial<Record<ModuleKey, {enabled: boolean; applicable?: boolean | null; ready?: boolean; pending?: boolean; maintenance?: boolean; starting?: boolean; error?: string; note?: string}>>;
-const EMPTY_MODULES: ModuleStates = {};
 // What applies to this console besides the modules (get_version.device); a missing value is shown.
 type Device = {console?: string | null; model?: string | null; firmware?: boolean; power_led?: boolean; controller_driver?: boolean};
 // Key order is the menu and Manage Modules order.
 const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
-const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => moduleShown(modules[key]) && modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
 const setModuleEnabled = rpc<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
-
-interface TdpSettings {
-  enabled?: boolean;
-  active_preset?: string;
-  active_spl?: number;
-  active_sppt?: number;
-  active_fppt?: number;
-  running?: RunningLimits;
-  spl?: number;
-  sppt?: number;
-  fppt?: number;
-}
-
-interface VibeSettingsResponse {
-  settings?: { level?: number; mode?: number; touchpadEnabled?: boolean };
-}
-
-interface DriverStatus { found?: boolean }
-
-interface DisplayState {
-  steamos_update_needed?: boolean;
-  edid_fix?: boolean;
-  edid_patched?: boolean;
-  settings_error?: string;
-}
-
-interface Overview {
-  version: string;
-  reads?: Partial<Record<OverviewField, { unavailable: boolean; note?: string }>>;
-  tdp?: TdpSettings;
-  fan?: FanState;
-  vibration?: VibeSettingsResponse;
-  driver?: DriverStatus;
-  display?: DisplayState;
-  wifi?: WifiStatus;
-  rgb?: RgbStatus;
-  remap?: RemapStatus;
-  battery?: BatteryStatus;
-  controller_batteries?: ControllerBatteryStatus;
-  controller?: ControllerStatus;
-}
 
 interface GuardStatus {
   modules?: ModuleStates;
@@ -97,9 +48,6 @@ interface GuardStatus {
   message?: string;
 }
 const getVersion = rpc<[], GuardStatus>("get_version");
-// Injected by rollup from package.json; shown until the backend reports its own version.
-declare const __PLUGIN_VERSION__: string;
-const PLUGIN_VERSION = __PLUGIN_VERSION__;
 let guardStatus: GuardStatus | null = null;
 const guardListeners = new Set<(status: GuardStatus) => void>();
 let tdpWatcherEnabled = false;
@@ -115,8 +63,7 @@ const pauseUnavailableGuard = () => {
   // A missing/malformed reply is transient, not a latched plugin conflict.
   tdpWatcherEnabled = vibeWatcherEnabled = false;
   stopTdpWatcher(); stopVibrationWatcher();
-  overviewPaused = true;
-  clearOverview();
+  pauseOverview();
   guardListeners.forEach(listener => listener({version: PLUGIN_VERSION, blocked: true,
     guard_error: "Could not verify installed plugins. Check the Decky connection and try again."}));
 };
@@ -127,11 +74,7 @@ const updateGuard = (status: GuardStatus) => {
   // A late response must never unlock a latched conflict in this load; a transient scan error may clear.
   if (guardStatus?.latched && !status.latched) return;
   guardStatus = status;
-  overviewPaused = status.blocked;
-  if (status.blocked) clearOverview();
-  configureOverviewModules(status.modules ?? EMPTY_MODULES);
-  overviewCache = { ...overviewCache, version: status.version };
-  publishOverview();
+  guardOverview(status.blocked, status.modules ?? EMPTY_MODULES, status.version);
   const enabled = status.blocked === false;
   const tdpEnabled = enabled && moduleEnabled(status.modules ?? {}, "tdp");
   const vibeEnabled = enabled && moduleEnabled(status.modules ?? {}, "vibration");
@@ -158,158 +101,6 @@ const refreshGuard = async () => {
     pauseUnavailableGuard();
   } finally { if (guardRead === request) guardRead = null; }
 };
-const getTdpSettings = rpc<[], TdpSettings>("get_settings");
-const getVibeSettings = getVibrationSettings;
-const getDriverStatus = rpc<[], DriverStatus>("vibe_get_driver_status");
-const getDisplayState = rpc<[], DisplayState>("display_get_state");
-
-// Keep confirmed summaries and in-flight reads across QAM remounts. Each source
-// publishes independently, so a slow hardware/network probe cannot hide ready data.
-type OverviewField = Exclude<keyof Overview, "version" | "reads">;
-const OVERVIEW_DELAY_MS = 30000;
-interface OverviewSource {
-  key: OverviewField;
-  module: ModuleKey;
-  read: () => Promise<Partial<Overview>>;
-  revision: number;
-  pending: Promise<Partial<Overview>> | null;
-  lastReadAt: number | null;
-  failures: number;
-  pendingSince: number | null;
-}
-const overviewSources: OverviewSource[] = [
-  { key: "tdp", module: "tdp", read: async () => ({ tdp: await getTdpSettings() }) },
-  { key: "fan", module: "fan", read: async () => ({ fan: await getFanState(() =>
-    frontendActive && !overviewPaused && !!overviewPollers.size && [...overviewViewChecks].some(check => check())) }) },
-  { key: "vibration", module: "vibration", read: async () => ({ vibration: await getVibeSettings() }) },
-  { key: "driver", module: "vibration", read: async () => ({ driver: await getDriverStatus() }) },
-  { key: "display", module: "display", read: async () => ({ display: await getDisplayState() }) },
-  { key: "wifi", module: "wifi", read: async () => ({ wifi: await getWifiStatus() }) },
-  { key: "rgb", module: "rgb", read: async () => ({ rgb: await getRgbStatus() }) },
-  { key: "remap", module: "remap", read: async () => ({ remap: await getRemapStatus() }) },
-  { key: "battery", module: "battery", read: async () => ({ battery: await getBatteryStatus() }) },
-  { key: "controller_batteries", module: "battery",
-    read: async () => ({ controller_batteries: await getControllerBatteryLevels() }) },
-  { key: "controller", module: "controller", read: async () => ({ controller: await getControllerStatus() }) },
-].map(source => ({ ...source, revision: 0, pending: null,
-  lastReadAt: null, failures: 0, pendingSince: null } as OverviewSource));
-let overviewCache: Overview = { version: PLUGIN_VERSION };
-let overviewModules = EMPTY_MODULES;
-let overviewPaused = true;
-const overviewListeners = new Set<(overview: Overview) => void>();
-const overviewPollers = new Set<(overview: Overview) => void>();
-const overviewViewChecks = new Set<() => boolean>();
-let overviewVisibleStarted: number | null = null;
-let overviewVisibleSpent = 0;
-const overviewVisibleTime = () => overviewVisibleSpent + (overviewVisibleStarted === null
-  ? 0 : Math.max(0, Date.now() - overviewVisibleStarted));
-const readAge = (milliseconds: number) => {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
-  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
-};
-const publishOverview = () => {
-  const now = Date.now(), visibleTime = overviewVisibleTime();
-  const reads: Overview["reads"] = {};
-  for (const source of overviewSources) {
-    const delayed = source.pendingSince !== null && visibleTime - source.pendingSince >= OVERVIEW_DELAY_MS;
-    const unavailable = source.lastReadAt === null && (source.failures > 0 || delayed);
-    let note: string | undefined;
-    if (unavailable) note = delayed ? "Still waiting for an update. Check the Decky connection if this continues."
-      : "Retrying while this menu is open.";
-    else if (source.lastReadAt !== null) {
-      const age = readAge(now - source.lastReadAt);
-      if (source.failures >= 2 || delayed) note = `Older data · Last read ${age} ago${delayed ? " · Update delayed" : " · Retrying…"}`;
-      else if (source.pendingSince !== null && now - source.lastReadAt >= OVERVIEW_DELAY_MS)
-        note = `Updating… · Last read ${age} ago`;
-    }
-    reads[source.key] = { unavailable, note };
-  }
-  overviewCache = { ...overviewCache, reads };
-  overviewListeners.forEach(listener => listener(overviewCache));
-};
-const invalidateOverviewReads = () => {
-  overviewSources.forEach(source => { source.revision += 1; source.failures = 0; source.pendingSince = null; });
-  overviewCache = { ...overviewCache, reads: {} };
-};
-const clearOverview = () => {
-  invalidateOverviewReads();
-  overviewSources.forEach(source => { source.lastReadAt = null; });
-  overviewCache = { version: PLUGIN_VERSION };
-};
-const configureOverviewModules = (modules: ModuleStates) => {
-  for (const source of overviewSources) {
-    if (moduleEnabled(overviewModules, source.module) !== moduleEnabled(modules, source.module)) {
-      source.revision += 1;
-      source.lastReadAt = null; source.failures = 0; source.pendingSince = null;
-      overviewCache = { ...overviewCache, [source.key]: undefined,
-        reads: { ...overviewCache.reads, [source.key]: undefined } };
-    }
-  }
-  overviewModules = modules;
-};
-const readOverviewSource = (source: OverviewSource) => {
-  if (!frontendActive || overviewPaused || !overviewPollers.size ||
-      !moduleEnabled(overviewModules, source.module)
-      || (source.key === "controller_batteries" && !moduleShown(overviewModules.controller))) return;
-  if (source.pendingSince === null) source.pendingSince = overviewVisibleTime();
-  if (source.pending) return;
-  const revision = source.revision;
-  const request = source.read();
-  source.pending = request;
-  void request.then(value => {
-    if (!frontendActive || overviewPaused || revision !== source.revision) return;
-    if (!value[source.key] || typeof value[source.key] !== "object" || Array.isArray(value[source.key]))
-      throw new Error("Status unavailable");
-    source.lastReadAt = Date.now(); source.failures = 0; source.pendingSince = null;
-    overviewCache = { ...overviewCache, ...value };
-    publishOverview();
-  }).catch(() => {
-    if (!frontendActive || overviewPaused || revision !== source.revision) return;
-    source.pendingSince = null;
-    // Hidden time and hidden failures are not evidence of a failing module.
-    // Keep its last report, including any hardware warning returned with it.
-    if (overviewPollers.size) {
-      source.failures += 1;
-      if (source.key === "fan" && overviewCache.fan) overviewCache = { ...overviewCache,
-        fan: { ...overviewCache.fan, readings: { valid: false, error: "Fresh fan reading unavailable." } } };
-      publishOverview();
-    }
-  }).finally(() => {
-    if (source.pending !== request) return;
-    source.pending = null;
-    // A page edit or module transition can invalidate an earlier read. If the
-    // overview is visible again, refresh that source without waiting for a timer.
-    if (revision !== source.revision) readOverviewSource(source);
-  });
-};
-const refreshOverview = () => {
-  if (!frontendActive || overviewPaused || !overviewPollers.size) return;
-  overviewSources.forEach(readOverviewSource);
-  publishOverview();
-};
-
-const overviewDescription = (overview: Overview, module: ModuleKey, description: string) => {
-  if (module === "fan") return description; // Keep measured numbers separate from fault status.
-  const sources = overviewSources.filter(source => source.module === module);
-  if (module === "display" && overview.display?.settings_error) return overview.display.settings_error;
-  // A returned error/recovery state is a fresh report, not a rejected RPC.
-  // Never replace it with an earlier healthy cache or a generic retry message.
-  for (const source of sources) {
-    if (source.key === "controller_batteries") continue;
-    const value = overview[source.key] as { error?: string; reason?: string; message?: string;
-      success?: boolean; supported?: boolean; available?: boolean; recovery_pending?: boolean; recovery_required?: boolean } | undefined;
-    if (value?.error) return (module === "wifi" && value.message) || value.error;
-    if (value?.recovery_pending || value?.recovery_required) return value.reason
-      || ((module === "battery" || module === "controller") && description) || "An interrupted change needs recovery";
-    if (value?.success === false || value?.supported === false || value?.available === false)
-      return value.reason || value.message || (value.success !== false && description) || "Status unavailable";
-  }
-  if (module === "vibration" && overview.driver?.found === false) return description;
-  return sources.some(source => source.key !== "controller_batteries"
-    && overview.reads?.[source.key]?.unavailable) ? "Status unavailable" : description;
-};
-const overviewNote = (overview: Overview, module: ModuleKey) => overviewSources
-  .filter(source => source.module === module).map(source => overview.reads?.[source.key]?.note).filter(Boolean).join(" · ") || undefined;
 
 const PageShell: FC<{ children: ReactNode; rootRef?: {current: HTMLDivElement | null} }> = ({ children, rootRef }) => (
   <div ref={rootRef} data-companion-page style={{ width: "100%", maxWidth: "100%", minWidth: 0, overflowX: "hidden", boxSizing: "border-box" }}>
@@ -397,27 +188,6 @@ const SectionHeader: FC<{ title: string; onBack: () => void }> = ({ title, onBac
   </PanelSection>;
 };
 
-const tdpSummary = (settings?: TdpSettings) => settings ? overviewSummary(settings) : "Power limits and CPU settings";
-
-const VIBE_LEVELS = ["Off", "Low", "Medium", "High"];
-const VIBE_MODES = ["FPS", "Racing", "Standard", "SPG", "RPG"];
-
-/** goS: the Legion Go S beta has no vibration modes. */
-const vibrationSummary = (overview: Overview, goS = false) => {
-  if (overview.driver && !overview.driver.found) return "Controller driver not detected";
-  const settings = overview.vibration?.settings;
-  if (!settings) return "Handles, touchpad and per-game profiles";
-  const touchpad = settings.touchpadEnabled === true ? "On"
-    : settings.touchpadEnabled === false ? "Off" : "Unknown";
-  const mode = goS ? "" : ` · ${VIBE_MODES[settings.mode ?? 0] ?? "Custom"}`;
-  return `${VIBE_LEVELS[settings.level ?? 2] ?? "Custom"}${mode} · Touchpad ${touchpad}`;
-};
-
-const displaySummary = (state?: DisplayState) => {
-  const fix = !state?.edid_fix ? "HDR game fix off" : state.edid_patched ? "HDR game fix on" : "HDR game fix not active yet";
-  return state?.steamos_update_needed ? `Update SteamOS to 3.9 · ${fix}` : fix;
-};
-
 const ModulesPage: FC<{ modules: ModuleStates; device: Device }> = ({ modules, device }) => {
   const [busy, setBusy] = useState<ModuleKey | null>(null);
   // The failed control shows its error until the next action.
@@ -460,7 +230,7 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
   const pageVisible = visible && onScreen; // QAM open and the Companion tab actually shown
   const panelOnScreen = () => !panelRef.current || panelRef.current.getClientRects().length > 0;
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
-  const [overview, setOverview] = useState<Overview>(overviewCache);
+  const [overview, setOverview] = useState<Overview>(currentOverview);
   useEffect(() => {
     const element = panelRef.current;
     if (!element) return;
@@ -480,19 +250,15 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
   const focusSection = lastOpenedSection.current && lastOpenedSection.current in moduleLabels
     && lastOpenedSection.current !== "controller" && !moduleEnabled(modules, lastOpenedSection.current as ModuleKey)
     ? "modules" : lastOpenedSection.current;
-  useEffect(() => {
-    // An already-running read may finish while QAM is hidden. Keep the mounted
-    // view in sync with its cache without starting further hardware reads.
-    overviewListeners.add(setOverview);
-    return () => { overviewListeners.delete(setOverview); };
-  }, []);
+  // An already-running read may finish while QAM is hidden: keep the mounted view in sync without reading more.
+  useEffect(() => watchOverview(setOverview), []);
   // get_version supplies a fresh modules object on every guard check. Depend
   // only on effective enablement, not object identity, to preserve pending reads.
   const enabledModules = (Object.keys(moduleLabels) as ModuleKey[])
     .map(key => moduleEnabled(modules, key) ? "1" : "0").join("");
   useEffect(() => {
     configureOverviewModules(modules);
-    setOverview(overviewCache);
+    setOverview(currentOverview());
   }, [enabledModules]);
   useEffect(() => {
     if (activeSection && activeSection !== "controller" && activeSection in moduleLabels && !moduleEnabled(modules, activeSection as ModuleKey)) setActiveSection(null);
@@ -503,21 +269,7 @@ const Controls: FC<{modules?: ModuleStates; device?: Device}> = ({modules = EMPT
     // polling only; section navigation belongs to the explicit links/back button.
     if (activeSection) { invalidateOverviewReads(); return; }
     if (!visible || !onScreen) return;
-    if (!overviewPollers.size) overviewVisibleStarted = Date.now();
-    overviewPollers.add(setOverview);
-    overviewViewChecks.add(panelOnScreen);
-    setOverview(overviewCache);
-    refreshOverview();
-    const timer = setInterval(refreshOverview, 10000);
-    const fanSource = overviewSources.find(source => source.key === "fan")!;
-    const fanTimer = moduleEnabled(modules, "fan") ? setInterval(() => {
-      readOverviewSource(fanSource); publishOverview();
-    }, 1000) : undefined;
-    return () => {
-      clearInterval(timer); if (fanTimer !== undefined) clearInterval(fanTimer); overviewPollers.delete(setOverview);
-      overviewViewChecks.delete(panelOnScreen);
-      if (!overviewPollers.size) { overviewVisibleSpent = overviewVisibleTime(); overviewVisibleStarted = null; }
-    };
+    return pollOverview(setOverview, panelOnScreen, moduleEnabled(modules, "fan"));
   }, [activeSection, enabledModules, visible, onScreen]);
 
   // Controller battery levels come from the Gyro & touchpad controllers (not the Go S or a Go 1 on older firmware).
@@ -634,23 +386,17 @@ const Icon: FC = () => (
 );
 
 // A plugin load or unload discards the previous session's guard and overview state.
-const resetSession = () => {
+const resetSession = (active: boolean) => {
   guardRevision += 1;
   guardRead = null;
   guardStatus = null;
-  clearOverview();
-  overviewPaused = true;
-  overviewListeners.clear();
-  overviewPollers.clear();
-  overviewVisibleStarted = null; overviewVisibleSpent = 0;
+  resetOverview(active);
 };
 
 export default definePlugin(() => {
   startUpdates();
   frontendActive = true;
-  resetSession();
-  overviewModules = EMPTY_MODULES;
-  overviewSources.forEach(source => { source.pending = null; });
+  resetSession(true);
   const listener = addEventListener<[GuardStatus]>("companion_guard", updateGuard);
   void refreshGuard();
   return {
@@ -664,7 +410,7 @@ export default definePlugin(() => {
     onDismount() {
       stopUpdates();
       frontendActive = false;
-      resetSession();
+      resetSession(false);
       tdpWatcherEnabled = vibeWatcherEnabled = false;
       removeEventListener("companion_guard", listener);
       guardListeners.clear();

@@ -2,17 +2,17 @@
 // Copyright (c) 2026 Rayekkk
 
 
+import { callable } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 import { DEVICE_REPORT_DESCRIPTION, DEVICE_REPORT_TITLE, type DeviceReport, deviceReportResult,
   type UpdateCheck, updateStatus } from "../desktop/native/updates.mjs";
-import { errorText, infoRow, rpc } from "./shared";
+import { settle, type Result } from "./result";
+import { errorText, infoRow } from "./shared";
 
 interface UpdateDownload {
-  success: boolean;
   path?: string;
   version?: string;
-  error?: string;
 }
 
 type UpdateState = {
@@ -22,9 +22,9 @@ type UpdateState = {
   error?: string;
 };
 
-const checkUpdates = rpc<[], UpdateCheck>("updates_check");
-const downloadUpdate = rpc<[string], UpdateDownload>("updates_download");
-const saveDeviceReport = rpc<[], DeviceReport>("save_device_report");
+const checkUpdates = callable<[], Result<UpdateCheck>>("updates_check");
+const downloadUpdate = callable<[string], Result<UpdateDownload>>("updates_download");
+const saveDeviceReport = callable<[], Result<DeviceReport>>("save_device_report");
 const listeners = new Set<(state: UpdateState) => void>();
 let state: UpdateState = { busy: null };
 let generation = 0;
@@ -60,12 +60,8 @@ export const DeviceReportSection: FC = () => {
     if (running.current) return;
     running.current = true;
     setBusy(true);
-    let text: string;
-    try {
-      text = deviceReportResult(await saveDeviceReport());
-    } catch (error) {
-      text = deviceReportResult({ success: false, error: errorText(error, "") });
-    }
+    const answer = await settle(saveDeviceReport());
+    const text = deviceReportResult(answer.ok ? answer.state : answer);
     running.current = false;
     if (mounted.current) { setMessage(text); setBusy(false); }
   };
@@ -97,15 +93,18 @@ export const UpdateSection: FC<{ currentVersion: string }> = ({ currentVersion }
     publish({ ...state, busy: kind, error: undefined });
     try {
       if (kind === "check") {
-        const result = await checkUpdates();
+        const answer = await settle(checkUpdates());
         if (!active || requestGeneration !== generation) return;
-        if (!result.success) throw new Error(result.error || "Could not check GitHub releases. Try again.");
-        publish({ ...state, check: result, error: result.error });
+        const check = answer.state;
+        if (!answer.ok || !check) throw new Error(answer.error || "Could not check GitHub releases. Try again.");
+        // A newer release that cannot be offered says why below the status.
+        publish({ ...state, check, error: check.update_available && !check.download_available ? check.message : undefined });
       } else {
-        const result = await downloadUpdate(expected!);
+        const answer = await settle(downloadUpdate(expected!));
         if (!active || requestGeneration !== generation) return;
-        if (!result.success || !result.path || result.version !== expected) {
-          throw new Error(result.error || "Could not confirm the downloaded ZIP. Try again.");
+        const result = answer.state;
+        if (!answer.ok || !result?.path || result.version !== expected) {
+          throw new Error(answer.error || "Could not confirm the downloaded ZIP. Try again.");
         }
         publish({ ...state, download: result });
       }

@@ -24,7 +24,7 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_checks_work_with_tdp_disabled_and_do_not_initialize_hardware(self):
         plugin = self.make_plugin()
         plugin._module_state['tdp'] = {'enabled': False}
-        self.assertTrue((await plugin.updates_check())['success'])
+        self.assertTrue((await plugin.updates_check())['ok'])
         plugin._updates.check.assert_called_once_with(True)  # a click asks GitHub again (DeckyKit dk_update)
         self.assertFalse(plugin._modules_started)
 
@@ -38,6 +38,23 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
         public = [name for name, fn in vars(main.Plugin).items()
                   if not name.startswith('_') and name not in main._UNGUARDED_RPCS and inspect.iscoroutinefunction(fn)]
         self.assertEqual({name for name in public if main._rpc_module(name) == 'tdp'}, main.TDP_RPCS)
+
+    async def test_answers_are_d2_with_dk_update_fields_as_the_state(self):
+        plugin = self.make_plugin()
+        newer = {'ok': True, 'current_version': '0.6.2', 'latest_version': '0.7.0', 'update_available': True,
+                 'download_available': False, 'message': 'The release has no single plugin ZIP yet.'}
+        plugin._updates.check.return_value = newer
+        self.assertEqual(await plugin.updates_check(), {'ok': True, 'state': {k: v for k, v in newer.items() if k != 'ok'}})
+        self.assertTrue(newer['ok'], "dk_update's cached view is not changed")
+        plugin._updates.check.return_value = {'ok': False, 'current_version': '0.6.2', 'update_available': False,
+                                              'download_available': False, 'error': 'GitHub rate limit reached.'}
+        self.assertEqual(await plugin.updates_check(), {'ok': False, 'error': 'GitHub rate limit reached.'})
+        plugin._updates.download.return_value = {'ok': True, 'path': '/home/deck/Downloads/a.zip', 'version': '0.7.0',
+                                                 'sha256': 'a' * 64}
+        self.assertEqual((await plugin.updates_download('0.7.0'))['state']['path'], '/home/deck/Downloads/a.zip')
+        plugin._updates_home = None
+        self.assertEqual(await plugin.updates_download('0.7.0'), {
+            'ok': False, 'error': 'The desktop user is unavailable; the file cannot be saved safely.'})
 
     async def test_blocked_or_closing_never_starts_network_work(self):
         for field in ('_guard_blocked', '_closing'):

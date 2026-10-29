@@ -172,10 +172,10 @@ export const extrasConfirm = state => ({ title: `Allow up to ${FALLBACK_MAX.fppt
 
 const wattText = value => value == null ? "–" : Number(value).toFixed(0);
 /** The "Limits now" readout from get_tdp_info. */
-export const limitsText = info => info?.success
+export const limitsText = info => info?.values
   ? `SPL ${wattText(info.values?.spl_limit)} · SPPT ${wattText(info.values?.sppt_limit)} · FPPT ${wattText(info.values?.fppt_limit)} W` : "—";
 /** The "Set by" readout from get_tdp_info. */
-export const sourceText = info => (info?.success && info.values?.source) || "—";
+export const sourceText = info => info?.values?.source || "—";
 
 // ── CPU ───────────────────────────────────────────────────────────────────────
 export const EPP_NAMED_VALUES = { performance: 0, balance_performance: 128, balance_power: 191, power: 255 };

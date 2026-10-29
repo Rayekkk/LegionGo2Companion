@@ -123,11 +123,11 @@ class IntegrationTests(unittest.TestCase):
         plugin._tdp.get_caps = AsyncMock(return_value={"min": 5})
         plugin._vibration.get_driver_status = AsyncMock(return_value={"found": True})
         plugin._display.get_state = AsyncMock(return_value={"setup_done": True})
-        plugin._wifi.get_status = AsyncMock(return_value={"success": True})
+        plugin._wifi.get_status = AsyncMock(return_value={"ok": True, "state": {}})
         plugin._wifi.rescan_and_reconnect = AsyncMock(
-            return_value={"success": True, "frequency": 5320}
+            return_value={"ok": True, "state": {"frequency": 5320}}
         )
-        plugin._rgb.get_status = AsyncMock(return_value={"success": True})
+        plugin._rgb.get_status = AsyncMock(return_value={"ok": True, "state": {}})
 
         self.assertEqual(asyncio.run(plugin.get_caps()), {"min": 5})
         self.assertEqual(
@@ -137,12 +137,12 @@ class IntegrationTests(unittest.TestCase):
             asyncio.run(plugin.display_get_state()), {"setup_done": True}
         )
         self.assertEqual(
-            asyncio.run(plugin.wifi_get_status()), {"success": True}
+            asyncio.run(plugin.wifi_get_status()), {"ok": True, "state": {}}
         )
         self.assertEqual(
-            asyncio.run(plugin.wifi_rescan_and_reconnect())["frequency"], 5320
+            asyncio.run(plugin.wifi_rescan_and_reconnect())["state"]["frequency"], 5320
         )
-        self.assertTrue(asyncio.run(plugin.rgb_get_status())["success"])
+        self.assertTrue(asyncio.run(plugin.rgb_get_status())["ok"])
 
     def test_lifecycle_tolerates_component_without_migration(self):
         plugin = support.LegacyPlugin()
@@ -234,7 +234,7 @@ class RootForwardingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_root_forwards_reset_context_guards(self):
         plugin = support.LegacyPlugin()
-        plugin._vibration.reset_to_default = AsyncMock(return_value={'success': True})
+        plugin._vibration.reset_to_default = AsyncMock(return_value={'ok': True, 'state': {}})
         await plugin.vibe_reset_to_default('111', '111')
         plugin._vibration.reset_to_default.assert_awaited_once_with('111', '111')
 

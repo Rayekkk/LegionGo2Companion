@@ -79,7 +79,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfigured_start_status_and_shutdown_never_write(self):
         await self.plugin._main()
-        status = await self.plugin.get_status()
+        status = (await self.plugin.get_status())["state"]
         await self.plugin._unload()
         await self.plugin._uninstall()
         self.assertTrue(status["supported"])
@@ -97,8 +97,8 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.externally_select("Long_Life")
         released = await self.plugin.release_control()
         enabled = await self.plugin.set_enabled(False)
-        self.assertFalse(released["success"])
-        self.assertFalse(enabled["success"])
+        self.assertFalse(released["ok"])
+        self.assertFalse(enabled["ok"])
         self.assertEqual(self.current(), "Long_Life")
         self.assertEqual(self.writes, [])
 
@@ -116,7 +116,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         Path(self.store.path).write_text('{"state":', encoding="utf-8")
         self.store.read()
         self.assertTrue(self.store.recovery_error)
-        self.assertFalse((await self.plugin.release_control())["success"])
+        self.assertFalse((await self.plugin.release_control())["ok"])
         Path(self.store.path).unlink()
         with self.assertRaises(battery.BatteryError):
             self.plugin._load()
@@ -124,7 +124,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin._load(), battery.DEFAULT_STATE)
         self.assertFalse(self.store.recovery_error)
         await self.plugin._main()
-        self.assertTrue((await self.plugin.get_status())["success"])
+        self.assertTrue((await self.plugin.get_status())["ok"])
 
     async def test_temporary_hardware_absence_keeps_the_valid_saved_preference_retryable(self):
         await self.plugin.set_enabled(True)
@@ -139,21 +139,21 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_disabled_choice_preserves_fast_without_hardware_write(self):
         result = await self.plugin.set_enabled(False)
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.writes, [])
-        self.assertEqual(result["status"]["baseline"], "Fast")
-        self.assertFalse(result["status"]["requested_enabled"])
+        self.assertEqual(result["state"]["baseline"], "Fast")
+        self.assertFalse(result["state"]["requested_enabled"])
 
     async def test_enable_disable_preserves_original_fast_and_commits_real_state(self):
         result = await self.plugin.set_enabled(True)
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Long_Life")
-        self.assertEqual(result["status"]["baseline"], "Fast")
-        self.assertTrue(result["status"]["enabled"])
+        self.assertEqual(result["state"]["baseline"], "Fast")
+        self.assertTrue(result["state"]["enabled"])
         saved = json.loads(Path(self.store.path).read_text())
         self.assertTrue(saved["state"]["requested_enabled"])
         result = await self.plugin.set_enabled(False)
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Fast")
         self.assertEqual(self.writes, ["Long_Life", "Fast"])
 
@@ -174,11 +174,11 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
                 original(path, mode)
         self.writer.side_effect = misapply
         result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertIn("did not confirm", result["error"])
         self.assertEqual(self.current(), "Fast")
         self.assertEqual(self.store.settings, snapshot)
-        self.assertFalse(result["status"]["managed"])
+        self.assertFalse(result["state"]["managed"])
 
     async def test_readback_error_after_write_restores_original_mode(self):
         original_read = battery._read_attr
@@ -191,7 +191,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             return original_read(path, *args)
         with patch.object(battery, "_read_attr", side_effect=read):
             result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertEqual(self.current(), "Fast")
         self.assertEqual(self.writes, ["Long_Life", "Fast"])
         self.assertFalse(self.plugin._load()["managed"])
@@ -200,7 +200,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.plugin, "_save", side_effect=PermissionError(
                 errno.EACCES, "Permission denied", "/home/deck/private/battery.json")):
             result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "Battery setting failed: Permission denied. Previous settings were restored.")
         self.assertNotIn("battery.json", json.dumps(result))
 
@@ -217,7 +217,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
                 raise OSError("fsync failed after rename")
         with patch.object(self.store, "commit", side_effect=fail_after_commit):
             result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertEqual(self.current(), "Fast")
         self.assertEqual(self.store.settings, snapshot)
         self.assertEqual(json.loads(Path(self.store.path).read_text()), snapshot)
@@ -230,16 +230,16 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.writer.side_effect = fail_restore
         with patch.object(self.plugin, "_save", side_effect=OSError("disk full")):
             result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertIn("Hardware rollback failed", result["error"])
-        self.assertTrue(result["status"]["enabled"])
-        self.assertFalse(result["status"]["managed"])
-        self.assertTrue(result["status"]["recovery_pending"])
+        self.assertTrue(result["state"]["enabled"])
+        self.assertFalse(result["state"]["managed"])
+        self.assertTrue(result["state"]["recovery_pending"])
         self.writer.side_effect = self.write_mode
         result = await self.plugin.release_control()
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Fast")
-        self.assertFalse(result["status"]["recovery_pending"])
+        self.assertFalse(result["state"]["recovery_pending"])
 
     async def test_stop_during_a_startup_repair_rolls_back_and_leaves_no_pending_recovery(self):
         await self.plugin.set_enabled(True)
@@ -264,17 +264,17 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
     async def test_release_restores_fast_only_while_own_setting_is_active(self):
         await self.plugin.set_enabled(True)
         result = await self.plugin.release_control()
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Fast")
-        self.assertFalse(result["status"]["managed"])
+        self.assertFalse(result["state"]["managed"])
         await self.plugin.set_enabled(True)
         self.externally_select("Standard")
         count = len(self.writes)
         result = await self.plugin.release_control()
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Standard")
         self.assertEqual(len(self.writes), count)
-        self.assertFalse(result["status"]["managed"])
+        self.assertFalse(result["state"]["managed"])
 
     async def test_uninstall_restores_baseline_but_unload_only_stops_monitor(self):
         await self.plugin.set_enabled(True)
@@ -298,7 +298,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         try:
             await updated._main()
             self.assertEqual(self.current(), "Long_Life")
-            status = await updated.get_status()
+            status = (await updated.get_status())["state"]
             self.assertTrue(status["managed"])
             self.assertTrue(status["requested_enabled"])
             self.assertEqual(updated._load()["baseline"], "Fast")
@@ -320,7 +320,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_preference_and_actual_state_are_reported_separately(self):
         await self.plugin.set_enabled(True)
         self.externally_select("Standard")
-        result = await self.plugin.get_status()
+        result = (await self.plugin.get_status())["state"]
         self.assertTrue(result["requested_enabled"])
         self.assertFalse(result["enabled"])
         self.assertEqual(self.current(), "Standard")  # A status read never enforces.
@@ -344,14 +344,14 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.set_enabled(True)
         with self.mode_conflict(), patch.object(battery, "event") as logged:
             await self.plugin._main()
-            status = await self.plugin.get_status()
+            status = (await self.plugin.get_status())["state"]
             self.assertEqual((status["supported"], status["mode_conflict"]), (False, True))
             self.assertEqual((status["reason"], status["error"]), (battery.MODE_CONFLICT,) * 2)
             self.assertEqual(self.writes, ["Long_Life"], "nothing is written without the click")
             result = await self.plugin.reset_charging_mode()
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.writes, ["Long_Life", "Standard", "Long_Life"], "Standard, then the saved choice as at start")
-        self.assertEqual((result["status"]["mode_conflict"], result["status"]["enabled"], result["status"]["error"]),
+        self.assertEqual((result["state"]["mode_conflict"], result["state"]["enabled"], result["state"]["error"]),
                          (False, True, ""))
         self.assertEqual(self.plugin._load()["baseline"], "Fast")
         self.assertIn("mode_reset", [call.args[1] for call in logged.call_args_list])
@@ -360,14 +360,14 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         with self.mode_conflict():
             await self.plugin._main()
             result = await self.plugin.reset_charging_mode()
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.writes, ["Standard"])
-        self.assertEqual((result["status"]["current_mode"], result["status"]["managed"]), ("Standard", False))
+        self.assertEqual((result["state"]["current_mode"], result["state"]["managed"]), ("Standard", False))
 
     async def test_a_reset_is_refused_while_the_mode_can_be_read(self):
         await self.plugin._main()
         result = await self.plugin.reset_charging_mode()
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertIn("can be read", result["error"])
         self.assertEqual((self.writes, self.current()), ([], "Fast"))
 
@@ -438,30 +438,30 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_or_ambiguous_system_battery_disables_controls(self):
         (self.device / "present").write_text("0")
-        status = await self.plugin.get_status()
+        status = (await self.plugin.get_status())["state"]
         self.assertFalse(status["supported"])
         self.assertIn("No system battery", status["reason"])
         (self.device / "present").write_text("1")
         self.make_battery("BAT1", "System")
         result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertIn("More than one", result["error"])
         self.assertEqual(self.writes, [])
 
     async def test_controller_battery_is_not_selected(self):
         self.make_battery("hid-controller", "Device")
         self.make_battery("BAT2", "Device")
-        status = await self.plugin.get_status()
+        status = (await self.plugin.get_status())["state"]
         self.assertTrue(status["supported"])
 
     async def test_missing_interface_and_other_device_never_write(self):
         (self.device / "charge_types").unlink()
         result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.externally_select("Fast")
         (self.root / "class/dmi/id/product_name").write_text("82XA")  # A Lenovo outside the Legion Go family
         result = await self.plugin.set_enabled(True)
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertIn("only on the Lenovo Legion Go consoles", result["error"])
         self.assertEqual(self.writes, [])
 
@@ -470,11 +470,11 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         path = self.device / "charge_types"
         path.chmod(0o444)
         try:
-            status = await self.plugin.get_status()
+            status = (await self.plugin.get_status())["state"]
             self.assertFalse(status["supported"])
             self.assertIn("read-only", status["reason"])
             result = await self.plugin.set_enabled(True)
-            self.assertFalse(result["success"])
+            self.assertFalse(result["ok"])
             self.assertEqual(self.writes, [])
         finally:
             path.chmod(0o644)
@@ -485,11 +485,11 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 (self.device / "charge_types").write_text(text)
                 result = await self.plugin.set_enabled(True)
-                self.assertFalse(result["success"])
+                self.assertFalse(result["ok"])
         self.externally_select("Fast")
         for value in (1, 0, "true", None, {}, []):
             result = await self.plugin.set_enabled(value)
-            self.assertFalse(result["success"])
+            self.assertFalse(result["ok"])
         self.assertEqual(self.writes, [])
 
     async def test_invalid_saved_baseline_never_applies(self):
@@ -498,16 +498,28 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(battery.BatteryError):
             await self.plugin._main()
         status = await self.plugin.get_status()
-        self.assertFalse(status["success"])
+        self.assertFalse(status["ok"])
         self.assertIn("restoration state", status["error"])
         self.assertEqual(self.writes, [])
+
+    async def test_a_status_is_refused_exactly_when_it_carries_an_error(self):
+        status = await self.plugin.get_status()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["state"]["error"], "")
+        self.assertNotIn("success", status["state"])
+        # An exception without any text still leaves the page and the Desktop app a reason.
+        with patch.object(self.plugin, "_load", side_effect=OSError()):
+            status = await self.plugin.get_status()
+        self.assertFalse(status["ok"])
+        self.assertEqual((status["error"], status["state"]["error"]), ("Battery status could not be read.",) * 2)
+        self.assertEqual(status["state"]["reason"], "Saved settings could not be read.")
 
     async def test_release_commit_failure_preserves_managed_hardware_and_setting(self):
         await self.plugin.set_enabled(True)
         snapshot = copy.deepcopy(self.store.settings)
         with patch.object(self.plugin, "_save", side_effect=OSError("disk full")):
             result = await self.plugin.release_control()
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertEqual(self.current(), "Long_Life")
         self.assertEqual(self.store.settings, snapshot)
 
@@ -522,7 +534,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
     async def test_baseline_long_life_is_preserved_without_inventing_fast_mode(self):
         self.externally_select("Long_Life")
         result = await self.plugin.set_enabled(False)
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Standard")
         await self.plugin.release_control()
         self.assertEqual(self.current(), "Long_Life")
@@ -537,7 +549,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         durable = json.loads(Path(self.store.path).read_text())
         self.assertEqual(durable["pending"]["before_mode"], "Fast")
         count = len(self.writes)
-        status = await self.plugin.get_status()
+        status = (await self.plugin.get_status())["state"]
         self.assertTrue(status["recovery_pending"])
         self.assertTrue(status["enabled"])
         self.assertFalse(status["managed"])
@@ -578,7 +590,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.current(), "Long_Life")
         self.assertTrue(self.plugin._load()["managed"])
         result = await self.plugin.release_control()
-        self.assertTrue(result["success"])
+        self.assertTrue(result["ok"])
         self.assertEqual(self.current(), "Fast")
 
     async def test_pending_recovery_preserves_a_third_mode_selected_externally(self):
@@ -603,7 +615,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.externally_select("Long_Life")
         await self.plugin._main()
         result = await self.plugin.release_control()
-        self.assertFalse(result["success"])
+        self.assertFalse(result["ok"])
         self.assertEqual(self.current(), "Long_Life")
         self.assertEqual(self.writes, [])
 

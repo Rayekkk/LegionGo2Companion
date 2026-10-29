@@ -11,14 +11,14 @@ import {
   boostNote, boostUsable, editorControls, EPP_NAMED_VALUES, EPP_PREFERENCE, eppLabel, eppNote, eppPercent, eppTitle,
   eppUnavailable, eppValue, type CpuPowerControls,
 } from "../desktop/native/tdp.mjs";
-import { getCpuPowerControls, notify, notifyFailure, setCpuBoost, setEpp } from "./tdp_api";
+import { getCpuPowerControls, notify, notifyFailure, setCpuBoost, setEpp, type CpuAnswer } from "./tdp_api";
 
 // ── CPU power controls ────────────────────────────────────────────────────────
 
 export const EPP_DEBOUNCE_MS = 350;
 
-export const unavailableCpuPowerControls = (error = ""): CpuPowerControls => ({
-  success: false,
+export const unavailableCpuPowerControls = (error = ""): CpuAnswer => ({
+  ok: false,
   available: false,
   cpu_boost: { available: false, enabled: null, error: "" },
   epp: {
@@ -39,9 +39,9 @@ export const unavailableCpuPowerControls = (error = ""): CpuPowerControls => ({
  * closed only on a reply without the structure the editor reads, or one for a
  * different profile than the editor asked for.
  */
-export function checkedCpuPowerControls(value: unknown, appId: string, acProfile: boolean): CpuPowerControls {
-  const raw = value as CpuPowerControls | null;
-  if (!raw || typeof raw !== "object" || typeof raw.success !== "boolean" || typeof raw.available !== "boolean" ||
+export function checkedCpuPowerControls(value: unknown, appId: string, acProfile: boolean): CpuAnswer {
+  const raw = value as CpuAnswer | null;
+  if (!raw || typeof raw !== "object" || typeof raw.ok !== "boolean" || typeof raw.available !== "boolean" ||
       !raw.cpu_boost || typeof raw.cpu_boost !== "object" || !raw.epp || typeof raw.epp !== "object" ||
       !Array.isArray(raw.epp.profiles)) {
     throw new Error("Backend returned incompatible CPU power controls.");
@@ -147,7 +147,7 @@ export const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
         return;
       }
       acceptControls(next);
-      setRequestError(next.success ? "" : next.error);
+      setRequestError(next.ok ? "" : next.error);
     } catch (error) {
       if (!mountedRef.current || !visibleRef.current ||
           readId !== readSequenceRef.current || mutationEpoch !== mutationEpochRef.current ||
@@ -219,7 +219,7 @@ export const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
     try {
       const next = checkedCpuPowerControls(await request(), appId, acProfile);
       if (!mountedRef.current) {
-        if (!next.success) notify("TDP", next.error || next.epp.error || next.cpu_boost.error);
+        if (!next.ok) notify("TDP", next.error || next.epp.error || next.cpu_boost.error);
         return;
       }
       if (actionId !== actionSequenceRef.current) {
@@ -227,7 +227,7 @@ export const CpuPowerControlsSection: FC<CpuPowerControlsSectionProps> = ({
         return;
       }
       acceptControls(next);
-      if (!next.success) {
+      if (!next.ok) {
         const controlError = kind === "boost" ? next.cpu_boost.error : next.epp.error;
         const message = next.error || controlError || "The backend rejected the change.";
         setRequestError(message);

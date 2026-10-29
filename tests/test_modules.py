@@ -17,6 +17,7 @@ import display_backend as display
 from safe_settings import AtomicSettingsManager
 import rgb_backend as rgb
 import fan_backend
+import wifi_backend
 
 
 class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
@@ -35,7 +36,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         plugin = support.LegacyPlugin()
         for name in main.MODULE_NAMES:
             setattr(plugin, '_' + name, types.SimpleNamespace(_main=AsyncMock(), _migration=AsyncMock(),
-                _unload=AsyncMock(), _uninstall=AsyncMock(), get_status=AsyncMock(return_value={'success': True})))
+                _unload=AsyncMock(), _uninstall=AsyncMock(), get_status=AsyncMock(return_value={'ok': True})))
         return plugin
 
     async def asyncTearDown(self):
@@ -75,7 +76,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         fresh._rgb._main.assert_awaited_once()
         await fresh.modules_set_enabled('battery', True)
         fresh._battery._main.assert_awaited_once()
-        self.assertTrue((await fresh.battery_get_status())['success'])
+        self.assertTrue((await fresh.battery_get_status())['ok'])
         await fresh._unload()
 
     async def test_failed_cleanup_stays_pending_and_retry_is_required(self):
@@ -144,21 +145,22 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
             await self.plugin._uninstall()
         self.assertEqual(captured, [(unittest.mock.call('wifi'),)], 'the choice is read before uninstall restores it')
         updated = self.make_plugin()
-        updated._wifi.set_band_policy = AsyncMock(return_value={'success': True})
+        updated._wifi.set_band_policy = AsyncMock(return_value=wifi_backend._answer({'success': True}))
         await updated._main()
         updated._wifi.set_band_policy.assert_awaited_once_with('five_six_only')
         self.assertEqual(updated._module_state['wifi'], {'enabled': True})
         await updated._unload()
 
     def updated_with_band_policy(self, *results):
-        """The plugin an update starts, holding the band policy _uninstall kept for it."""
+        """The plugin an update starts, holding the band policy _uninstall kept for it; WiFi answers each result
+        as its D2 answer (a refusal's code in the state)."""
         self.plugin._module_state['wifi'] = {'enabled': True, 'update': True, 'resume': {'band_policy': 'five_six_only'}}
         self.plugin._save_modules()
         updated = self.make_plugin()
         seen = []
         def answer(mode, *args):
             seen.append(updated._module_status()['wifi'])
-            return results[min(len(seen), len(results)) - 1]
+            return wifi_backend._answer(results[min(len(seen), len(results)) - 1])
         updated._wifi.set_band_policy = AsyncMock(side_effect=answer)
         return updated, seen
 
@@ -327,7 +329,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['rgb']['error'], '')
         self.assertEqual(self.plugin._rgb._main.await_count, 2)
         self.assertEqual(self.plugin._rgb._unload.await_count, 2, 'Cleanup precedes the retry')
-        self.assertTrue((await self.plugin.rgb_get_status())['success'])
+        self.assertTrue((await self.plugin.rgb_get_status())['ok'])
 
     async def test_explicit_unsuccessful_start_result_is_exposed(self):
         self.plugin._wifi._main.return_value = {'success': False, 'error': 'Recovery journal needs attention'}
@@ -592,34 +594,34 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         async def retry():
             entered.set()
             await finish.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._tdp.retry_extras = AsyncMock(side_effect=retry)
         task = asyncio.create_task(self.plugin.retry_extras())
         try:
             await asyncio.wait_for(entered.wait(), 1)
             self.assertFalse(self.plugin._guard_lock.locked())
             self.assertEqual(len(self.plugin._update_jobs), 1)
-            self.assertTrue((await asyncio.wait_for(self.plugin.battery_get_status(), 1))['success'])
+            self.assertTrue((await asyncio.wait_for(self.plugin.battery_get_status(), 1))['ok'])
         finally:
             finish.set()
-            self.assertTrue((await task)['success'])
+            self.assertTrue((await task)['ok'])
 
     async def test_enabling_extras_download_does_not_block_other_tdp_rpcs(self):
         entered, finish = asyncio.Event(), asyncio.Event()
         async def slow_enable(enabled):
             entered.set()
             await finish.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._tdp.set_extras_unlocked = AsyncMock(side_effect=slow_enable)
-        self.plugin._tdp.set_active_app = AsyncMock(return_value={'success': True})
+        self.plugin._tdp.set_active_app = AsyncMock(return_value={'ok': True})
         task = asyncio.create_task(self.plugin.set_extras_unlocked(True))
         try:
             await asyncio.wait_for(entered.wait(), 1)
             self.assertFalse(self.plugin._rpc_locks['tdp'].locked())
-            self.assertTrue((await asyncio.wait_for(self.plugin.set_active_app('123'), 1))['success'])
+            self.assertTrue((await asyncio.wait_for(self.plugin.set_active_app('123'), 1))['ok'])
         finally:
             finish.set()
-            self.assertTrue((await task)['success'])
+            self.assertTrue((await task)['ok'])
 
     async def test_invalid_enabled_and_unknown_module_are_rejected(self):
         for name, value in [('unknown', False), ('rgb', 0), ('rgb', 'false')]:
@@ -631,14 +633,14 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main, 'withdraw', new=AsyncMock(return_value='')):
             await self.plugin.modules_set_enabled('battery', False)
         fresh = self.make_plugin()
-        fresh._battery.set_enabled = AsyncMock(return_value={'success': True})
+        fresh._battery.set_enabled = AsyncMock(return_value={'ok': True})
         await fresh.modules_set_enabled('battery', True)
         fresh._battery.set_enabled.assert_awaited_once_with(True)
         self.assertEqual(fresh._module_state['battery'], {'enabled': True})
 
     async def test_failed_reenable_keeps_intent_and_stops_module(self):
         self.plugin._module_state['battery'] = {'enabled': False, 'resume': {'managed': True, 'enabled': True}}
-        self.plugin._battery.set_enabled = AsyncMock(return_value={'success': False, 'error': 'unavailable'})
+        self.plugin._battery.set_enabled = AsyncMock(return_value={'ok': False, 'error': 'unavailable'})
         with self.assertRaisesRegex(RuntimeError, 'unavailable'):
             await self.plugin.modules_set_enabled('battery', True)
         self.plugin._battery._unload.assert_awaited_once()
@@ -689,7 +691,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
                                      ('modules_set_enabled', ('bogus', False), {})]:
             with self.subTest(method=method, args=args, kwargs=kwargs), self.assertRaises(module_runtime.ControllerPaused):
                 await getattr(self.plugin, method)(*args, **kwargs)
-        self.assertEqual(await self.plugin.battery_get_status(), {'success': True})
+        self.assertEqual(await self.plugin.battery_get_status(), {'ok': True})
         self.assertTrue((await self.plugin.modules_set_enabled('fan', True))['fan']['enabled'])
 
     async def test_interrupted_reenable_finishes_saved_intent_on_startup(self):
@@ -780,8 +782,8 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(rgb_backend, '_load_state', return_value=state):
             intent = module_control.capture_intent('rgb')
         self.assertEqual(set(intent), {'control_enabled', 'power_led_managed', 'power_led_enabled'})
-        c = types.SimpleNamespace(set_control_enabled=AsyncMock(return_value={'success': True}),
-                                  set_power_led=AsyncMock(return_value={'success': True}))
+        c = types.SimpleNamespace(set_control_enabled=AsyncMock(return_value={'ok': True}),
+                                  set_power_led=AsyncMock(return_value={'ok': True}))
         await module_control.restore_intent('rgb', c, intent)
         c.set_control_enabled.assert_awaited_once_with(True)
         c.set_power_led.assert_awaited_once_with(False)
@@ -810,7 +812,7 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
         import wifi_backend
         c = wifi_backend.Plugin()
         with patch.object(c, '_unload', AsyncMock()), \
-                patch.object(c, 'set_band_policy', AsyncMock(return_value={'success':True})), \
+                patch.object(c, 'set_band_policy', AsyncMock(return_value={'ok':True})), \
                 patch.object(wifi_backend.os, 'remove') as remove:
             await module_control.withdraw('wifi', c)
         remove.assert_not_called()
@@ -879,13 +881,13 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         async def slow():
             entered.set()
             await release.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._wifi.get_status.side_effect = slow
         task = asyncio.create_task(self.plugin.wifi_get_status())
         await entered.wait()
         try:
             result = await asyncio.wait_for(self.plugin.rgb_get_status(), .5)
-            self.assertTrue(result['success'])
+            self.assertTrue(result['ok'])
         finally:
             release.set()
             await task
@@ -927,9 +929,9 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         async def slow():
             entered.set()
             await release.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._rgb.get_status.side_effect = slow
-        self.plugin._rgb.set_brightness = AsyncMock(return_value={'success': True})
+        self.plugin._rgb.set_brightness = AsyncMock(return_value={'ok': True})
         first = asyncio.create_task(self.plugin.rgb_get_status())
         await entered.wait()
         second = asyncio.create_task(self.plugin.rgb_set_brightness(80))
@@ -947,7 +949,7 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         async def slow():
             entered.set()
             await release.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._remap.get_status.side_effect = slow
         self.plugin._controller.get_battery_levels = AsyncMock(return_value={'available': True})
         first = asyncio.create_task(self.plugin.remap_get_status())
@@ -967,7 +969,7 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         async def slow():
             entered.set()
             await release.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._rgb.get_status.side_effect = slow
         rpc = asyncio.create_task(self.plugin.rgb_get_status())
         await entered.wait()
@@ -1059,7 +1061,7 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         async def slow_read():
             entered.set()
             await release.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._wifi.get_status = slow_read
         hardware = asyncio.create_task(self.plugin.wifi_get_status())
         await asyncio.wait_for(entered.wait(), 1)
@@ -1095,7 +1097,7 @@ class ModuleResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         async def slow_read():
             entered.set()
             await release.wait()
-            return {'success': True}
+            return {'ok': True}
         self.plugin._wifi.get_status = slow_read
         hardware = asyncio.create_task(self.plugin.wifi_get_status())
         await asyncio.wait_for(entered.wait(), 1)

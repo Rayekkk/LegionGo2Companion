@@ -4,6 +4,7 @@
 # https://github.com/Rayekkk/LeGo-Vibe-Control
 
 import decky
+import dk_rpc
 import module_runtime
 from diagnostics import event, shown, transition
 from active_app import DEFAULT_APP, normalise_app_id, resolve_running_app, scan_proc_for_appid
@@ -51,6 +52,8 @@ MAX_GAME_PROFILES = 512
 MAX_NAME_LENGTH = 128
 # Same text as NOT_CONNECTED in desktop/native/vibration.mjs (both UIs show it as is).
 NOT_CONNECTED = "Controller not connected. The change is saved and applies when it connects."
+# A write the controller did not take; the Desktop app showed this text for these refusals before D2.
+NOT_CONFIRMED = "The change wasn't confirmed. Check the current value."
 
 # How long reapply() keeps looking for the controller after a resume. The
 # notification fires the moment the system wakes, several seconds before USB has
@@ -989,7 +992,7 @@ class Plugin:
                 if _resume_detected():
                     decky.logger.info(
                         "[lego-vibe] backend detected resume from suspend")
-                    if (await self.reapply())["success"]:
+                    if (await self.reapply())["ok"]:
                         _drift_interval = _DRIFT_INTERVAL_S
                     last_check = time.monotonic()
                     continue
@@ -1102,8 +1105,7 @@ class Plugin:
         global _active_app_id
         app_id = normalise_app_id(app_id if app_id not in (None, "") else DEFAULT_APP)
         if app_id is None:
-            return {"success": False, "changed": False,
-                    "error": "invalid app id", **(await _offload(_settings_payload))}
+            return dk_rpc.fail("invalid app id", state={"changed": False, **(await _offload(_settings_payload))})
         def _do() -> dict:
             global _active_app_id, _active_app_ts
             changed = app_id != _active_app_id or app_id != _running_app_id()
@@ -1113,10 +1115,11 @@ class Plugin:
             values = payload["settings"]
             if (not changed and getattr(self, "_active_applied", False)
                     and _last_applied_values == values):
-                return {"success": True, "changed": False, **payload}
+                return dk_rpc.ok({"changed": False, **payload})
             ok = _apply_settings(values)
             self._active_applied = ok
-            return {"success": ok, "changed": changed, **payload}
+            state = {"changed": changed, **payload}
+            return dk_rpc.ok(state) if ok else dk_rpc.fail(NOT_CONFIRMED, state=state)
         return await _offload(_do)
 
     async def _set_field(self, field: str, value, expected_app_id=None, expected_profile_id=None) -> dict:
@@ -1124,44 +1127,44 @@ class Plugin:
             profiles, payload = _profile_context()
             if ((expected_app_id is not None and expected_app_id != payload["app_id"])
                     or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
-                return {"success": False, "error": "Active profile changed; reload and try again", **payload}
+                return dk_rpc.fail("Active profile changed; reload and try again", state=payload)
             values = _update_active(field, value, profiles=profiles, profile_id=payload["profile_id"])
             if _apply_settings(values, new=(field,)):
                 _go_s_remember((field,), payload)
-                return {"success": True, **payload, "settings": values}
+                return dk_rpc.ok({**payload, "settings": values})
             if _get_device_path() is None:
                 # No controller yet: keep the choice; hotplug applies it, as before.
                 _go_s_remember((field,), payload)
-                return {"success": False, **payload, "settings": values, "error": NOT_CONNECTED}
+                return dk_rpc.fail(NOT_CONNECTED, state={**payload, "settings": values})
             # Rejected: save and re-write the previous value so both UIs show what the controller has.
             values = _update_active(field, payload["settings"][field], profile_id=payload["profile_id"])
             _apply_settings(values)
-            return {"success": False, **payload, "settings": values}
+            return dk_rpc.fail(NOT_CONFIRMED, state={**payload, "settings": values})
         return await _offload(_do)
 
     async def set_intensity(self, level: int, expected_app_id=None, expected_profile_id=None) -> dict:
         if type(level) is not int:
-            return {"success": False, "error": "level must be an integer"}
+            return dk_rpc.fail("level must be an integer")
         return await self._set_field(PKEY_LEVEL, max(0, min(3, int(level))), expected_app_id, expected_profile_id)
 
     async def set_rumble_mode(self, mode_idx: int, expected_app_id=None, expected_profile_id=None) -> dict:
         """Set the vibration pattern; the firmware plays its own demo, so none is added here."""
         if _is_go_s():
-            return {"success": False, "error": "Vibration modes are not available on this console."}
+            return dk_rpc.fail("Vibration modes are not available on this console.")
         if type(mode_idx) is not int:
-            return {"success": False, "error": "mode must be an integer"}
+            return dk_rpc.fail("mode must be an integer")
         return await self._set_field(PKEY_MODE, max(0, min(63, mode_idx)), expected_app_id, expected_profile_id)
 
     async def set_touchpad_intensity(self, level: int, expected_app_id=None, expected_profile_id=None) -> dict:
         if _is_go_s():
-            return {"success": False, "error": "Touchpad vibration strength is not available on this console."}
+            return dk_rpc.fail("Touchpad vibration strength is not available on this console.")
         if type(level) is not int:
-            return {"success": False, "error": "level must be an integer"}
+            return dk_rpc.fail("level must be an integer")
         return await self._set_field(PKEY_TP_INT, max(0, min(3, int(level))), expected_app_id, expected_profile_id)
 
     async def set_touchpad_enabled(self, enabled: bool, expected_app_id=None, expected_profile_id=None) -> dict:
         if type(enabled) is not bool:
-            return {"success": False, "error": "enabled must be a boolean"}
+            return dk_rpc.fail("enabled must be a boolean")
         return await self._set_field(PKEY_TP_EN, enabled, expected_app_id, expected_profile_id)
 
     async def reset_to_default(self, expected_app_id=None, expected_profile_id=None) -> dict:
@@ -1169,7 +1172,7 @@ class Plugin:
             profiles, payload = _profile_context()
             if ((expected_app_id is not None and expected_app_id != payload["app_id"])
                     or (expected_profile_id is not None and expected_profile_id != payload["profile_id"])):
-                return {"success": False, "error": "Active profile changed; reload and try again", **payload}
+                return dk_rpc.fail("Active profile changed; reload and try again", state=payload)
             app_id = payload["profile_id"]
             entry = profiles.setdefault(app_id, {"overwrite": app_id != DEFAULT_APP,
                                                  "settings": {}})
@@ -1179,10 +1182,8 @@ class Plugin:
             offline = not ok and _get_device_path() is None
             if ok or offline:
                 _go_s_remember(_GO_S_SETTINGS, payload)
-            result = {"success": ok, **payload, "settings": entry["settings"]}
-            if offline:
-                result["error"] = NOT_CONNECTED
-            return result
+            state = {**payload, "settings": entry["settings"]}
+            return dk_rpc.ok(state) if ok else dk_rpc.fail(NOT_CONNECTED if offline else NOT_CONFIRMED, state=state)
         return await _offload(_do)
 
     @module_runtime.controller_operation('vibration')
@@ -1201,15 +1202,15 @@ class Plugin:
                 _forget_device()
             values = _active_values()
             first = False
-            return {"success": _apply_settings(values, verify=True), "settings": values}
+            return _apply_settings(values, verify=True), {"settings": values}
 
         while True:
-            result = await _offload(_do)
-            if result["success"] or time.monotonic() >= deadline:
-                transition("vibration", "profile_apply", result["success"], initial=False,
-                           level="info" if result["success"] else "warning",
-                           stage="resume", outcome="confirmed" if result["success"] else "deferred")
-                return result
+            ok, state = await _offload(_do)
+            if ok or time.monotonic() >= deadline:
+                transition("vibration", "profile_apply", ok, initial=False,
+                           level="info" if ok else "warning",
+                           stage="resume", outcome="confirmed" if ok else "deferred")
+                return dk_rpc.ok(state) if ok else dk_rpc.fail(NOT_CONFIRMED, state=state)
             await asyncio.sleep(_REAPPLY_STEP_S)
 
     # ---- Per-game profiles ------------------------------------------ #
@@ -1219,7 +1220,7 @@ class Plugin:
         """Turn a per-game profile on or off and apply the result."""
         app_id = normalise_app_id(app_id, allow_default=False)
         if app_id is None or type(enabled) is not bool:
-            return {"success": False, "error": "invalid profile request"}
+            return dk_rpc.fail("invalid profile request")
         name = name[:MAX_NAME_LENGTH] if isinstance(name, str) else ""
 
         def _do() -> dict:
@@ -1227,8 +1228,7 @@ class Plugin:
             entry = profiles.get(app_id)
             if entry is None:
                 if len(profiles) >= MAX_GAME_PROFILES:
-                    return {**context, "success": False,
-                            "error": "The vibration profile limit has been reached."}
+                    return dk_rpc.fail("The vibration profile limit has been reached.", state=context)
                 # Seed a new per-game profile from whatever is active right now.
                 entry = {"overwrite": enabled, "settings": _active_values(profiles, context["app_id"])}
                 profiles[app_id] = entry
@@ -1244,8 +1244,9 @@ class Plugin:
             profile_id = _resolve_app_id(profiles, running)
             values = _active_values(profiles, running)
             ok = _apply_settings(values)
-            return {"success": ok, "settings": values, "app_id": running, "configured": context["configured"],
-                    "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
+            state = {"settings": values, "app_id": running, "configured": context["configured"],
+                     "profile_id": profile_id, "overwrite": profile_id != DEFAULT_APP}
+            return dk_rpc.ok(state) if ok else dk_rpc.fail(NOT_CONFIRMED, state=state)
         return await _offload(_do)
 
     # ---- Driver status ---------------------------------------------- #
@@ -1258,11 +1259,11 @@ class Plugin:
     async def test_vibration(self, duration_ms: int = 500) -> dict:
         global _ff_busy
         if _is_go_s():
-            return {"success": False, "error": "Test vibration is not available on this console."}
+            return dk_rpc.fail("Test vibration is not available on this console.")
         if _ff_busy:
             # Dropping the request beats queueing a pile of buzzes behind a
             # slider the user is still dragging.
-            return {"success": False, "error": "A vibration is already playing"}
+            return dk_rpc.fail("A vibration is already playing")
         # Claimed before the first await: everything below yields to the event
         # loop, so checking here and setting the flag later would let two
         # concurrent taps both get through and stack their effects.
@@ -1271,8 +1272,7 @@ class Plugin:
             values = await _offload(_active_values)
             level = values[PKEY_LEVEL]
             if level <= 0:
-                return {"success": False,
-                        "error": "Intensity is Off - raise it to feel the test"}
+                return dk_rpc.fail("Intensity is Off - raise it to feel the test")
 
             intensity_pct = [0, 33, 66, 100][max(0, min(3, level))]
             duration = max(100, min(2000, int(duration_ms)))
@@ -1283,14 +1283,14 @@ class Plugin:
             ff_path = await _offload(_find_ff_device)
             if ff_path is None:
                 decky.logger.warning("[lego-vibe] test_vibration: no FF device found")
-                return {"success": False, "error": "No matching Legion controller rumble input was found. Reconnect the controller and retry."}
+                return dk_rpc.fail("No matching Legion controller rumble input was found. Reconnect the controller and retry.")
 
             await module_runtime.complete(_offload(_play_rumble, ff_path, duration, magnitude))
             event("vibration", "test_complete", duration_ms=duration, outcome="confirmed")
-            return {"success": True}
+            return dk_rpc.ok()
         except Exception as exc:
             _ff_device_cache["node"] = None
             event('vibration', 'test_failed', level='warning', error=exc)
-            return {"success": False, "error": shown(exc)}
+            return dk_rpc.fail(shown(exc))
         finally:
             _ff_busy = False

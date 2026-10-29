@@ -328,9 +328,14 @@ class NotConfirmed(RuntimeError):
         self.code = code
 
 
+def refusal_code(result):
+    """A refusal's code: WiFi's D2 answer keeps it as the state's `error`."""
+    return (result.get('state') or {}).get('error')
+
+
 def require_success(result):
-    if not isinstance(result, dict) or result.get('success') is not True:
+    """Raise NotConfirmed unless a D2 answer says ok."""
+    if not isinstance(result, dict) or result.get('ok') is not True:
         detail = result if isinstance(result, dict) else {}
-        raise NotConfirmed(detail.get('error') or detail.get('message')
-                           or detail.get('stderr') or 'Hardware restoration was not confirmed.',
-                           detail.get('error'))
+        raise NotConfirmed(detail.get('error') or 'Hardware restoration was not confirmed.',
+                           refusal_code(detail))

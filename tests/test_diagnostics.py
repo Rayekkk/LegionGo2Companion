@@ -442,13 +442,13 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
         from desktop_bridge import DesktopBridge
         self.plugin.__class__=self.main.Plugin  # both frontends see the D2 face
-        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'success':False,'stderr':'token=SECRET'}))
+        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'ok':False,'error':'token=SECRET'}))
         failure=await self.plugin.apply_tdp(15000,18000,20000)
-        self.assertEqual((failure['ok'],failure['state']['success']),(False,False))
-        self.plugin._tdp.apply_tdp.return_value={'success':True,'private':'not logged'}
+        self.assertFalse(failure['ok'])
+        self.plugin._tdp.apply_tdp.return_value={'ok':True,'state':{'private':'not logged'}}
         bridge=DesktopBridge(self.plugin,['apply_tdp'])
         success=await bridge.dispatch('apply_tdp',[15000,18000,20000])
-        self.assertTrue(success['success'])
+        self.assertEqual(success,{'private':'not logged'})
         terminals=[r for r in self.records if r['event'] in ('rpc_failed','rpc_completed')]
         self.assertEqual([r['event'] for r in terminals],['rpc_failed','rpc_completed'])
         self.assertEqual([r['context']['source'] for r in terminals],['decky','desktop'])
@@ -462,7 +462,7 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(6):
             with self.assertRaises(ConnectionResetError):await self.plugin.fan_get_state()
         self.plugin._fan.get_state.side_effect=None
-        self.plugin._fan.get_state.return_value={'success':True,'settings':{'enabled':False}}
+        self.plugin._fan.get_state.return_value={'settings':{'enabled':False}}
         value=await self.plugin.fan_get_state();self.assertFalse(value['settings']['enabled'])
         health=[r for r in self.records if r['event']=='rpc_health']
         self.assertEqual([r['context']['status'] for r in health],['failed','ok'])
@@ -471,10 +471,11 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_expected_refusal_is_info_but_a_failed_change_stays_a_warning(self):
         from unittest.mock import AsyncMock
-        refusal={'success':False,'error':'unsupported_backend','message':'High-band preference requires the iwd WiFi backend.'}
+        import wifi_backend
+        refusal=wifi_backend._answer({'success':False,'error':'unsupported_backend','message':'High-band preference requires the iwd WiFi backend.'})
         self.plugin._wifi=Mock(set_band_policy=AsyncMock(return_value=refusal))
         self.assertIs(await self.plugin.wifi_set_band_policy('high_only'),refusal)
-        self.plugin._wifi.set_band_policy.return_value={'success':False,'error':'band_policy_apply_failed'}
+        self.plugin._wifi.set_band_policy.return_value=wifi_backend._answer({'success':False,'error':'band_policy_apply_failed'})
         await self.plugin.wifi_set_band_policy('high_only')
         terminals=[r for r in self.records if r['event'] in ('rpc_failed','rpc_completed')]
         self.assertEqual([(r['event'],r['level'],r['context']['outcome']) for r in terminals],
@@ -484,8 +485,8 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
     async def test_calls_refused_by_the_conflict_guard_are_not_reported_again(self):
         from unittest.mock import AsyncMock
         from desktop_bridge import DesktopBridge
-        self.plugin._fan=Mock(get_state=AsyncMock(return_value={'success':True}))
-        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'success':True}))
+        self.plugin._fan=Mock(get_state=AsyncMock(return_value={}))
+        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'ok':True}))
         self.plugin._guard_blocked=True
         with self.assertRaisesRegex(RuntimeError,'paused'):await self.plugin.fan_get_state()
         with self.assertRaisesRegex(RuntimeError,'paused'):await self.plugin.apply_tdp(15000,18000,20000)
@@ -504,9 +505,9 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_logging_cannot_change_success_failure_or_guard_admission(self):
         from unittest.mock import AsyncMock
-        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'success':True}))
+        self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'ok':True}))
         with patch.object(diag,'_sink',side_effect=OSError(errno.ENOSPC,'full')):
-            self.assertTrue((await self.plugin.apply_tdp(15000,18000,20000))['success'])
+            self.assertTrue((await self.plugin.apply_tdp(15000,18000,20000))['ok'])
             self.plugin._tdp.apply_tdp.side_effect=OSError(errno.EIO,'bad')
             with self.assertRaises(OSError):await self.plugin.apply_tdp(15000,18000,20000)
             self.plugin._module_state['tdp']={'enabled':False}
@@ -518,7 +519,7 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         private='PRIVATE_UNLABELLED_RPC_ARGUMENT_731'
         self.plugin._vibration=vibration_backend.Plugin()
         value=await self.plugin.vibe_test_vibration(private)
-        self.assertFalse(value['success'])
+        self.assertFalse(value['ok'])
         self.assertIn(private,value['error'])  # Existing caller response unchanged.
         self.assertNotIn(private,json.dumps(self.records))
         self.assertTrue(any(r['event']=='rpc_failed' for r in self.records))

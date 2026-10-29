@@ -1,7 +1,7 @@
 const { assert, run, settle, find, findButton, harness, rgb, remap, display, cases } = require('./legion_page_harness.cjs');
 run(async () => {
   for (const [file,component,read,value] of [...cases,
-    ['battery.tsx','BatteryPage','battery_get_status',{success:true,supported:false}],
+    ['battery.tsx','BatteryPage','battery_get_status',{supported:false}],
     ['controller.tsx','ControllerPage','controller_get_status',{supported:false}],
   ]) {
     // Controller visibility is a prop; the other pages follow QAM visibility.
@@ -49,14 +49,14 @@ run(async () => {
     const h = harness(spec.file, spec.component); h.render(); h.respond(spec.read, spec.initial); await settle();
     let tree = h.render(); h.fire();
     const control = find(tree, spec.label); assert.ok(control, spec.label); control.props.onChange(spec.value); await settle();
-    h.respond(spec.method, spec.file === 'display.tsx' ? spec.next : { success: true, status: spec.next }); await settle();
+    h.respond(spec.method, spec.file === 'display.tsx' ? spec.next : { ok: true, state: spec.next }); await settle();
     tree = h.render(); const saved = find(tree, spec.label).props;
     h.respond(spec.read, spec.initial); await settle(); tree = h.render();
     assert.equal(find(tree, spec.label).props.checked, saved.checked, `${spec.component} keeps the saved toggle`);
     assert.equal(find(tree, spec.label).props.selectedOption, saved.selectedOption, `${spec.component} keeps the saved dropdown`);
     h.unmount();
   }
-  for (const [file, component, read, initial] of [...cases, ['battery.tsx', 'BatteryPage', 'battery_get_status', { success: true, supported: false }]]) {
+  for (const [file, component, read, initial] of [...cases, ['battery.tsx', 'BatteryPage', 'battery_get_status', { supported: false }]]) {
     const tab = harness(file, component); tab.render({ visible: false }); await settle();
     tab.fire(); assert.equal(tab.calls.filter(c => c.name === read).length, 0, `${component} does not read while its tab is hidden`);
     tab.render({ visible: true }); await settle();

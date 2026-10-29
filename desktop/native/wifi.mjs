@@ -20,6 +20,8 @@ function bandName(frequency) {
 }
 
 export const savedPolicy = status => status?.settings?.band_policy ?? "off";
+// A status read the backend answered (a refusal has no settings, and neither does the Desktop app before its first read).
+const read = status => !!status?.settings;
 const backendOf = status => { const b = status?.live?.wifi_backend; return b === "iwd" || b === "wpa_supplicant" ? b : ""; };
 // Every Legion Go (wifi_backend.LEGION_GO_FAMILIES) with the MT7922 driver.
 const supported = status => ["legion_go", "legion_go_s", "legion_go_2"].includes(status?.settings?.device_family) && status.settings.driver === "mt7921e";
@@ -33,7 +35,7 @@ function inactivePolicy(status) {
 
 /** Whether an action may start now. Automatic stays available whenever there is something to restore. */
 export function canRun(status, action) {
-  if (!status?.success) return false;
+  if (!read(status)) return false;
   const backend = backendOf(status), live = status.live || {}, policy = savedPolicy(status);
   if (!backend) return false;
   // Automatic only removes Companion's own change; the backend recovers or refuses it.
@@ -86,7 +88,7 @@ export function bandNote(status) {
 
 /** Why Wi-Fi changes are unavailable, as [title, detail], or null. */
 export function wifiNotice(status) {
-  if (!status?.success) return null;
+  if (!read(status)) return null;
   const live = status.live || {};
   if (!supported(status)) return ["Wi-Fi tweaks unavailable", "Only for the Legion Go Wi-Fi card (MT7922)."];
   if (live.recovery_required) return ["Wi-Fi settings are locked",
@@ -109,7 +111,7 @@ export const driverText = status => `${status?.settings?.driver ?? "unknown"}${s
 export const frequencyText = status => status?.connected && status.live?.frequency ? `${status.live.frequency} MHz` : "—";
 
 export function wifiSummary(status) {
-  if (!status?.success || !status.settings) return "Wi-Fi status unavailable";
+  if (!read(status)) return "Wi-Fi status unavailable";
   if (!backendOf(status)) return "Wi-Fi backend unavailable";
   const inactive = inactivePolicy(status);
   const link = status.connected ? bandName(status.live?.frequency)
@@ -120,7 +122,7 @@ export function wifiSummary(status) {
 /** Whether a successful action is visible in the status read after it, on the same backend and network. */
 export function operationVerified(action, before, after) {
   const live = after?.live || {};
-  if (!after?.success || before?.live?.wifi_backend !== live.wifi_backend) return false;
+  if (!read(after) || before?.live?.wifi_backend !== live.wifi_backend) return false;
   if (before?.live?.connection_uuid && before.live.connection_uuid !== live.connection_uuid) return false;
   if (live.recovery_required || live.band_policy_error) return false;
   const expected = Object.keys(POLICY_ACTIONS).find(id => POLICY_ACTIONS[id] === action);

@@ -132,7 +132,7 @@ run(async () => {
     const h = mount({ game: 111 }); await ready(h); h.defer('set_game_profile_active');
     chooseScope(h, 'global'); await settle(); const old = h.pending('set_game_profile_active');
     await h.game(222); const before = JSON.stringify(h.render()), settingsReads = count(h, 'get_settings'), toasts = h.toasts.length;
-    failure ? h.reject(old) : h.resolve(old, { success: true }); await settle();
+    failure ? h.reject(old) : h.resolve(old, {}); await settle();
     assert.equal(JSON.stringify(h.render()), before); assert.equal(count(h, 'get_settings'), settingsReads);
     assert.equal(h.toasts.length, toasts); h.unmount();
   });
@@ -147,7 +147,7 @@ run(async () => {
     const h = mount({ game: 111 }); await ready(h); h.defer('apply_tdp');
     pickPreset(h, 'performance'); await settle(); const old = h.pending('apply_tdp');
     await h.game(222); const before = JSON.stringify(h.render()), toasts = h.toasts.length;
-    failure ? h.reject(old) : h.resolve(old, { success: true }); await settle();
+    failure ? h.reject(old) : h.resolve(old, {}); await settle();
     assert.equal(JSON.stringify(h.render()), before); assert.equal(h.toasts.length, toasts); h.unmount();
   });
   await test('old advanced-control refresh and AC errors are scoped to the requested game', async () => {
@@ -163,16 +163,16 @@ run(async () => {
   await test('returning to the same app and unmounting do not revive old responses', async () => {
     const h = mount({ game: 111 }); await ready(h); h.defer('apply_tdp'); pickPreset(h, 'performance');
     const old = h.pending('apply_tdp'); await h.game(222); await h.game(111); const before = JSON.stringify(h.render());
-    h.resolve(old, { success: true }); await settle(); assert.equal(JSON.stringify(h.render()), before);
+    h.resolve(old, {}); await settle(); assert.equal(JSON.stringify(h.render()), before);
     h.defer('apply_tdp'); pickPreset(h, 'performance'); const pending = h.pending('apply_tdp');
-    h.unmount(); const writes = h.writes; h.resolve(pending, { success: true }); await settle(); assert.equal(h.writes, writes);
+    h.unmount(); const writes = h.writes; h.resolve(pending, {}); await settle(); assert.equal(h.writes, writes);
   });
   await test('an old failure that lands after the Router changed does not reach the new game', async () => {
     const h = mount({ game: 111 }); await ready(h);
     h.defer('set_game_profile_active'); chooseScope(h, 'global'); await settle();
     const old = h.pending('set_game_profile_active'); h.defer('set_active_app'); const change = h.game(222);
     await settle(); h.reject(old); await settle(); // Router changed before its backend report completed.
-    h.resolve(h.pending('set_active_app'), { success: true }); await change;
+    h.resolve(h.pending('set_active_app'), {}); await change;
     assert.doesNotMatch(JSON.stringify(h.render()), /old game request failed/);
     assert.equal(h.toasts.length, 0); h.unmount();
   });
@@ -205,7 +205,7 @@ run(async () => {
     assert.equal(cpu(view).props.appId, '111'); assert.equal(count(h, 'apply_tdp'), applies);
     h.defer('retry_extras'); const retry = button(view, 'Retry helper download'); retry.props.onClick(); retry.props.onClick();
     assert.equal(count(h, 'retry_extras'), 1);
-    h.responses.get_caps = caps; h.resolve(h.pending('retry_extras'), { success: true }); await settle();
+    h.responses.get_caps = caps; h.resolve(h.pending('retry_extras'), { ok: true }); await settle();
     assert.equal(field(h.render(), 'Enable TDP control').props.disabled, false); h.unmount();
   });
   await test('background helper capability is adopted by one visible read and hidden reads are ignored', async () => {
@@ -290,7 +290,7 @@ run(async () => {
     assert.equal(enableDescription(h), 'Reading profile…');
     h.resolve(h.pending('get_game_profile'), profile(22, true)); await settle();
     assert.equal(enableDescription(h), 'Game 222: Custom · 22 W');
-    h.callbacks.tdp_info({ success: true, values: { package_draw: 9.44 } });
+    h.callbacks.tdp_info({ values: { package_draw: 9.44 } });
     assert.equal(enableDescription(h), 'Game 222: Custom · 22 W · drawing 9.4 W');
     h.callbacks.power_source({ ac: true });
     assert.equal(enableDescription(h), 'Game 222: Custom · 24 W · drawing 9.4 W', 'on charger the charger values run');
@@ -436,6 +436,16 @@ run(async () => {
     assert.equal(count(h, 'apply_tdp'), 1); assert.equal(presetButton(h.render(), 'custom').props.description, 'Set your own limits below.');
     assert.ok(button(h.render(), 'Apply')); h.unmount();
   });
+  await test('a refused preset or Enable TDP control shows the backend text and keeps what ran before', async () => {
+    const refused = { ok: false, error: 'firmware refused; previous target restored' };
+    const h = mount({ responses: { apply_tdp: refused, set_plugin_enabled: refused } }); await ready(h);
+    pickPreset(h, 'max'); await settle();
+    assert.equal(h.toasts.at(-1).body, refused.error);
+    assert.equal(presetButton(h.render(), 'custom').props.children, '> Custom');
+    field(h.render(), 'Enable TDP control').props.onChange(false); await settle();
+    assert.equal(h.toasts.at(-1).body, refused.error);
+    assert.equal(field(h.render(), 'Enable TDP control').props.checked, true); h.unmount();
+  });
   await test('the panel names what runs now from get_settings.running, and falls back without it', async () => {
     const saved = { enabled: true, spl: 16000, sppt: 25000, fppt: 30000, active_preset: 'balanced' };
     const old = mount({ responses: { get_settings: saved } }); await ready(old);
@@ -555,7 +565,9 @@ run(async () => {
     assert.equal(T.eppValue(40), '102');
     assert.deepEqual(['default', 'performance', 'balance_performance', 'balance_power', 'power', 'low-power'].map(T.eppLabel),
       ['System default', 'Prefer CPU', 'Balanced · Prefer CPU', 'Balanced · Prefer GPU', 'Prefer GPU', 'Low power']);
-    assert.equal(T.limitsText({ success: true, values: { spl_limit: 20, sppt_limit: 25 } }), 'SPL 20 · SPPT 25 · FPPT – W');
+    assert.equal(T.limitsText({ values: { spl_limit: 20, sppt_limit: 25 } }), 'SPL 20 · SPPT 25 · FPPT – W');
+    assert.equal(T.limitsText(undefined), '—');  // no answer yet, or a refused read
+    assert.deepEqual([T.sourceText({ values: { source: 'ryzenadj' } }), T.sourceText({ values: {} })], ['ryzenadj', '—']);
   });
   console.log(`Passed ${tests} TDP recovery regressions.`);
 });

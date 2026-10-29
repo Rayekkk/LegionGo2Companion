@@ -24,6 +24,7 @@ from typing import Any, Callable, NamedTuple
 
 import decky
 from diagnostics import event, shown, transition
+import dk_rpc
 import module_runtime
 
 from safe_settings import SettingsManager
@@ -913,7 +914,7 @@ def _transaction(
         applied = apply()
     except Exception as exc:
         applied = False
-        detail = str(exc)
+        detail = shown(exc)
     else:
         detail = ""
 
@@ -959,7 +960,6 @@ def _status() -> dict[str, Any]:
         and power_current != state["power_led_enabled"]
     )
     return {
-        "success": True,
         "settings": {key: copy.deepcopy(state[key]) for key in (
             "configured", "control_enabled", "rings_enabled", "effect", "hue",
             "saturation", "brightness", "speed", "power_led_managed",
@@ -1061,8 +1061,7 @@ class Plugin:
             try:
                 if _resume_detected():
                     decky.logger.info("[lego-rgb] backend detected resume from suspend")
-                    result = await self.reapply()
-                    retry_pending = not result["success"]
+                    retry_pending = not await self.reapply()
                     retry_delay = RESUME_CHECK_S
                     last_check = time.monotonic()
                     continue
@@ -1144,11 +1143,15 @@ class Plugin:
                 return change()
 
         success, error = await _offload(_locked)
-        return {"success": success, "error": error, "status": await self.get_status()}
+        status = await self.get_status()
+        return dk_rpc.ok(status) if success else dk_rpc.fail(error, state=status)
+
+    async def _refuse(self, error: str) -> dict[str, Any]:
+        return dk_rpc.fail(error, state=await self.get_status())
 
     async def set_control_enabled(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
-            return {"success": False, "error": "enabled must be a boolean"}
+            return await self._refuse("enabled must be a boolean")
 
         def _change() -> tuple[bool, str]:
             state = _load_state()
@@ -1195,34 +1198,34 @@ class Plugin:
 
     async def set_rings_enabled(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
-            return {"success": False, "error": "enabled must be a boolean"}
+            return await self._refuse("enabled must be a boolean")
         return await self._set_rgb_field(rings_enabled=enabled)
 
     async def set_effect(self, effect: str) -> dict[str, Any]:
         if not isinstance(effect, str) or effect.lower() not in RGB_EFFECTS:
-            return {"success": False, "error": "unsupported lighting effect"}
+            return await self._refuse("unsupported lighting effect")
         return await self._set_rgb_field(effect=effect.lower())
 
     async def set_color(self, hue: int, saturation: int) -> dict[str, Any]:
         if type(hue) is not int or type(saturation) is not int:
-            return {"success": False, "error": "color values must be integers"}
+            return await self._refuse("color values must be integers")
         if not 0 <= hue <= 359 or not 0 <= saturation <= 100:
-            return {"success": False, "error": "color value is outside the supported range"}
+            return await self._refuse("color value is outside the supported range")
         return await self._set_rgb_field(hue=hue, saturation=saturation)
 
     async def set_brightness(self, brightness: int) -> dict[str, Any]:
         if type(brightness) is not int or not 0 <= brightness <= 100:
-            return {"success": False, "error": "brightness must be from 0 to 100"}
+            return await self._refuse("brightness must be from 0 to 100")
         return await self._set_rgb_field(brightness=brightness)
 
     async def set_speed(self, speed: int) -> dict[str, Any]:
         if type(speed) is not int or not 0 <= speed <= 100:
-            return {"success": False, "error": "speed must be from 0 to 100"}
+            return await self._refuse("speed must be from 0 to 100")
         return await self._set_rgb_field(speed=speed)
 
     async def set_power_led(self, enabled: bool) -> dict[str, Any]:
         if type(enabled) is not bool:
-            return {"success": False, "error": "enabled must be a boolean"}
+            return await self._refuse("enabled must be a boolean")
 
         def _change() -> tuple[bool, str]:
             supported, reason = _power_capability()
@@ -1291,7 +1294,7 @@ class Plugin:
         self._settle_force = True  # once more as the window ends
 
     @module_runtime.controller_operation('rgb')
-    async def reapply(self) -> dict[str, Any]:
+    async def reapply(self) -> bool:
         self.controller_event()
         deadline = time.monotonic() + REAPPLY_WAIT_S
         while True:
@@ -1299,5 +1302,5 @@ class Plugin:
             needs_rgb = state["control_enabled"]
             success = await _offload(_reconcile, force=True)
             if success or not needs_rgb or time.monotonic() >= deadline:
-                return {"success": success, "status": await self.get_status()}
+                return success
             await asyncio.sleep(REAPPLY_STEP_S)

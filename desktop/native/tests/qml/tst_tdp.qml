@@ -112,7 +112,7 @@ TestCase {
         compare(spl.maximum(),50);
         spl.set(50);compare(applied(),[50,50,50]);
         fake.data=Object.assign({},fake.data,{get_settings:settings(true,20,21,22)});
-        fake.mutationDone("set_advanced_tdp_control",{success:true},true);
+        fake.mutationDone("set_advanced_tdp_control",null,true);
         verify(field("Slow boost").visible());verify(field("Fast boost").visible());
         compare(limits(),[20,21,22],"Separate boost limits starts from the saved values");
     }
@@ -158,7 +158,7 @@ TestCase {
     // Rules and texts from tdp.mjs, the same as in the Decky panel.
     function test_summaryWarnsAboveLenovosLimitOnlyWithout50Watts() {
         start(true,40,45,50);
-        fake.data=Object.assign({},fake.data,{get_tdp_info:{success:true,values:{package_draw:18.25,spl_limit:40}}});
+        fake.data=Object.assign({},fake.data,{get_tdp_info:{values:{package_draw:18.25,spl_limit:40}}});
         compare(field("Enable TDP control").note(),"Global: Custom · 40 W · drawing 18.3 W · above Lenovo's limit");
         fake.data=Object.assign({},fake.data,{get_extras_unlocked:true});
         compare(field("Enable TDP control").note(),"Global: Custom · 40 W · drawing 18.3 W");

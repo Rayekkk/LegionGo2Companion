@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 const ts = require(path.join(root, 'node_modules/typescript'));
 // These src/ modules always run for real, even where tests stub other pages; so does every desktop/native/*.mjs.
-const REAL_MODULES = new Set(['./shared', './result', './tdp_api', './tdp_watcher', './tdp_cpu', './tdp_state', './tdp_sections']);
+const REAL_MODULES = new Set(['./shared', './result', './tdp_api', './tdp_watcher', './tdp_cpu', './tdp_state', './tdp_sections', './vibration_api', './overview']);
 
 // Fake timers leave no native event-loop handle, so a pending top-level promise
 // would let Node exit successfully; require explicit completion instead.
@@ -50,7 +50,7 @@ const text = node => node == null || node === false ? '' : typeof node !== 'obje
 
 // mount(file, options) → harness. Options:
 //   component: export rendered by render(); append: source appended (test-only exports)
-//   responses: {rpc: value | fn(...args)}; missing RPCs return `fallback` (default {success:true})
+//   responses: {rpc: value | fn(...args)}; missing RPCs return `fallback` (default {}, an empty state)
 //   strict: reject RPCs without a response; deferAll: every RPC stays pending until respond/reject; api/ui/window/globals: extra context
 //   modules: {'./x': value} or (name) => value for stubbed relative imports
 //   clock: initial Date.now()/performance.now() value (fake clock), visible: QAM visibility
@@ -76,7 +76,7 @@ function mount(file, options = {}) {
     },
   };
   const responses = options.responses ?? {}; // by reference: tests may swap replies later
-  const fallback = 'fallback' in options ? options.fallback : { success: true };
+  const fallback = 'fallback' in options ? options.fallback : {};
   const callable = name => (...args) => {
     const call = { name, args, settled: false }; calls.push(call);
     const deferredCount = deferCounts.get(name) ?? 0;

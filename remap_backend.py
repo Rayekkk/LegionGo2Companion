@@ -20,6 +20,7 @@ from typing import Any
 
 import decky
 from diagnostics import event, shown, transition
+import dk_rpc
 from dk_process import run
 import module_runtime
 
@@ -616,7 +617,6 @@ def _inputplumber_version() -> str:
 def _status_sync() -> dict[str, Any]:
     state = _load_state()
     response: dict[str, Any] = {
-        "success": True,
         "supported": False,
         "enabled": state["enabled"],
         "active": False,
@@ -800,10 +800,10 @@ class Plugin:
     async def _mutate(self, changes):
         try:
             status = await module_runtime.offload('remap', _mutate_sync, changes)
-            return {"success": True, "status": status}
+            return dk_rpc.ok(status)
         except Exception as exc:
             event('remap', 'change_failed', level='warning', error=exc)
-            return {"success": False, "error": shown(exc), "status": await self.get_status()}
+            return dk_rpc.fail(shown(exc), state=await self.get_status())
 
     async def set_enabled(self, enabled):
         return await self._mutate({"enabled": enabled})
@@ -811,7 +811,7 @@ class Plugin:
     async def set_action(self, button, action):
         if (not isinstance(button, str) or not isinstance(action, str)
                 or button not in BUTTON_SOURCES or action not in ACTION_LABELS):
-            return {"success": False, "error": "Unsupported button or action.", "status": await self.get_status()}
+            return dk_rpc.fail("Unsupported button or action.", state=await self.get_status())
         return await self._mutate({f"{button}_action": action})
 
     async def restore_defaults(self):

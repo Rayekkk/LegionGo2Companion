@@ -62,7 +62,7 @@ run(async () => {
     assert.equal(label(page(GO_S), 'Lighting').props.description, 'Stick lights.');
   }
   {
-    const rgb = { success: true, settings: { configured: true, control_enabled: true, rings_enabled: true, effect: 'monocolor' },
+    const rgb = { settings: { configured: true, control_enabled: true, rings_enabled: true, effect: 'monocolor' },
       rgb: { supported: true, effects: [] }, power_led: { supported: false } };
     for (const powerLight of [true, false]) {
       const h = mount('rgb.tsx', { component: 'RgbPage', responses: { rgb_get_status: () => rgb } });
@@ -100,7 +100,7 @@ run(async () => {
     const SENT = 'Beta on this console: Companion sends these settings to the controller but cannot read them back, so the page shows what Companion set.';
     const UNSENT = `${SENT} Companion sends nothing until you change a setting here.`;
     const unsent = mount('vibration.tsx', { component: 'VibrationPage', responses: { ...responses,
-      vibe_get_settings: () => ({ ...responses.vibe_get_settings(), configured: false }), vibe_set_intensity: () => ({ success: true }) } });
+      vibe_get_settings: () => ({ ...responses.vibe_get_settings(), configured: false }), vibe_set_intensity: () => ({ ...responses.vibe_get_settings(), configured: true }) } });
     unsent.render({ strengthOnly: true }); await settle();
     assert.equal(label(unsent.render({ strengthOnly: true }), 'Beta')?.props.description, UNSENT);
     label(unsent.render({ strengthOnly: true }), 'Vibration strength').props.onChange(3);
@@ -110,7 +110,7 @@ run(async () => {
   }
   {
     const h = mount('battery.tsx', { component: 'BatteryPage', responses: {
-      battery_get_status: () => ({ success: true, supported: true, managed: false, enabled: false, capacity: 80, options: ['Standard', 'Long_Life'] }),
+      battery_get_status: () => ({ supported: true, managed: false, enabled: false, capacity: 80, options: ['Standard', 'Long_Life'] }),
       battery_get_controller_levels: () => ({ available: true, left: 50, right: 60 }) } });
     h.render({ controllers: false }); await settle(); const tree = h.render({ controllers: false });
     assert.doesNotMatch(text(tree), /Controllers/, 'integrated controllers report no separate batteries');

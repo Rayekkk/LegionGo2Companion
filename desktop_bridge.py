@@ -86,11 +86,11 @@ class DesktopBridge:
         inspect.signature(function).bind(*args)
         with diagnostics.source_context('desktop'):
             result = await function(*args)
-        # The plugin's RPCs answer D2 ({ok, error?, state?}); the native app keeps its HTTP contract: the state
-        # (also of a refusal that carries one: the app reads its own success field) or a 409 with the error.
+        # The plugin's RPCs answer D2 ({ok, error?, state?}); the native app keeps its HTTP contract: the state or a
+        # 409 with the error.
         if override is not None or not isinstance(result, dict) or 'ok' not in result:
             return result
-        if result['ok'] or 'state' in result:
+        if result['ok']:
             return result.get('state')
         raise Refused(result.get('error') or "Companion couldn't complete this. Try again.")
 

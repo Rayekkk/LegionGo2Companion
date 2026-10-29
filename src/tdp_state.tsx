@@ -516,7 +516,6 @@ export const useTdpState = (tabShown: boolean) => {
         const requestedGame = game;
         const gp = await getGameProfile(requestedGame.appId);
         if (!current(requestedGame.appId)) return;
-        if (gp.error && !gp.exists) throw new Error(gp.error);
         if (gp.exists && !gp.profile) throw new Error("Game profile data is missing or corrupt.");
         // An unused profile is kept for later; the game runs on Global settings.
         if (gp.exists && gp.active !== false) { showGameProfile(gp); setRunningRevision((n) => n + 1); }

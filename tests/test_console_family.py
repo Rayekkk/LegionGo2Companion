@@ -196,7 +196,7 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         for name in main.MODULE_NAMES:
             setattr(self.plugin, "_" + name, types.SimpleNamespace(
                 _main=AsyncMock(), _migration=AsyncMock(), _unload=AsyncMock(), _uninstall=AsyncMock(),
-                get_state=AsyncMock(return_value={"success": True}), set_enabled=AsyncMock(),
+                get_state=AsyncMock(return_value={}), set_enabled=AsyncMock(),
                 controller_event=Mock(), applicable=lambda name=name: name not in ("fan", "display")))
         self.plugin._start_desktop = AsyncMock()
 

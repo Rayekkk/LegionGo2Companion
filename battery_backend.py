@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import decky
+import dk_rpc
 import module_runtime
 from diagnostics import event, shown, transition
 from safe_settings import SettingsManager
@@ -249,7 +250,7 @@ class Plugin:
     def _status(self) -> dict[str, Any]:
         with self._lock:
             out: dict[str, Any] = {
-                "success": True, "supported": False, "managed": False,
+                "supported": False, "managed": False,
                 "enabled": None, "requested_enabled": None,
                 "charging_status": None, "capacity": None, "reason": "",
                 "error": self._error, "backend": "charge_types", "options": [],
@@ -260,10 +261,11 @@ class Plugin:
                 state = self._load()
                 out.update({key: state[key] for key in ("managed", "requested_enabled", "baseline")})
                 if settings.getSetting("pending", None) is not None:
-                    out.update(success=False, recovery_pending=True,
+                    out.update(recovery_pending=True,
                                error=self._error or "An interrupted battery change needs recovery before further changes.")
             except Exception as exc:
-                out.update(success=False, error=shown(exc), reason="Saved settings could not be read.")
+                # A status is a refusal exactly when it carries an error, so the error is never empty.
+                out.update(error=shown(exc) or "Battery status could not be read.", reason="Saved settings could not be read.")
                 return out
             try:
                 device = _detect()
@@ -275,8 +277,6 @@ class Plugin:
                 out["charging_status"] = _optional_attr(device["battery"] / "status")
             except Exception as exc:
                 out.update(reason=shown(exc), mode_conflict=isinstance(exc, ModeConflict))
-            if self._error:
-                out["success"] = False
             return out
 
     @staticmethod
@@ -491,34 +491,22 @@ class Plugin:
             event('battery','restore_failed',level='warning',stage='uninstall',reason='operation_unconfirmed',pending=True,restored=False)
 
     async def get_status(self):
-        result = await self._thread(self._status)
-        if not result["success"]:
-            return {**result, "status": copy.deepcopy(result)}
-        return result
+        status = await self._thread(self._status)
+        return dk_rpc.fail(status["error"], state=status) if status["error"] else dk_rpc.ok(status)
+
+    async def _change(self, operation, *args):
+        try:
+            return dk_rpc.ok(await self._thread(operation, *args))
+        except Exception as exc:
+            self._error = shown(exc)
+            event('battery', 'change_failed', level='warning', error=exc)
+            return dk_rpc.fail(self._error, state=await self._thread(self._status))
 
     async def set_enabled(self, enabled: bool):
-        try:
-            status = await self._thread(self._set, enabled)
-            return {"success": True, "status": status}
-        except Exception as exc:
-            self._error = shown(exc)
-            event('battery', 'change_failed', level='warning', error=exc)
-            return {"success": False, "error": self._error, "status": await self.get_status()}
+        return await self._change(self._set, enabled)
 
     async def reset_charging_mode(self):
-        try:
-            status = await self._thread(self._reset_charging_mode)
-            return {"success": True, "status": status}
-        except Exception as exc:
-            self._error = shown(exc)
-            event('battery', 'change_failed', level='warning', error=exc)
-            return {"success": False, "error": self._error, "status": await self.get_status()}
+        return await self._change(self._reset_charging_mode)
 
     async def release_control(self):
-        try:
-            status = await self._thread(self._release)
-            return {"success": True, "status": status}
-        except Exception as exc:
-            self._error = shown(exc)
-            event('battery', 'change_failed', level='warning', error=exc)
-            return {"success": False, "error": self._error, "status": await self.get_status()}
+        return await self._change(self._release)

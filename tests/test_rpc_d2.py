@@ -3,6 +3,7 @@
 reaches it, and the Desktop bridge turns D2 back into the native app's HTTP contract (200 {result} / 409 {error})."""
 import json
 import unittest
+import unittest.mock
 from unittest.mock import AsyncMock, Mock
 
 import support
@@ -13,16 +14,15 @@ import test_desktop_bridge
 
 class AdapterTests(unittest.TestCase):
     def test_a_payload_is_the_state_unchanged(self):
-        for payload in ({'success': True, 'stored': True}, {'settings': {}}, True, False, [1], 'text'):
+        for payload in ({'stored': True}, {'settings': {}}, True, False, [1], 'text'):
             self.assertEqual(main._d2(payload), {'ok': True, 'state': payload})
         self.assertEqual(main._d2(None), {'ok': True})
 
-    def test_a_failed_payload_is_a_refusal_that_keeps_its_fields(self):
-        payload = {'success': False, 'stderr': 'ryzenadj failed', 'returncode': 2}
-        self.assertEqual(main._d2(payload), {'ok': False, 'error': 'ryzenadj failed', 'state': payload})
-        self.assertEqual(main._d2({'success': False, 'error': 'no_wifi', 'reason': 'x'})['error'], 'no_wifi')
-        self.assertEqual(main._d2({'success': False, 'error': ' ', 'reason': 'busy'})['error'], 'busy')
-        self.assertEqual(main._d2({'success': False})['error'], "The change wasn't confirmed. Check the current value.")
+    def test_an_answer_already_in_d2_passes_unchanged(self):
+        for answer in ({'ok': True, 'state': {'enabled': True}}, {'ok': True},
+                       {'ok': False, 'error': 'Unsupported button or action.', 'state': {'enabled': False}},
+                       {'ok': False, 'error': 'Refused.'}):
+            self.assertIs(main._d2(answer), answer)
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -67,6 +67,28 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('version', version['state'])
 
 
+class LoggedOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    """_logged_rpc reads the verdict of a D2 answer (ok); a plain payload says neither."""
+    async def outcomes(self, answer):
+        events = []
+        async def change(self):
+            return answer
+        with unittest.mock.patch.object(main.diagnostics, 'event', side_effect=lambda *a, **k: events.append((a[1], k))):
+            self.assertIs(await main._logged_rpc(change, 'remap_set_enabled')(None), answer)
+        return [(name, fields.get('outcome'), fields.get('reason')) for name, fields in events if name != 'rpc_started']
+
+    async def test_answers_are_classified_by_their_verdict(self):
+        for answer, expected in (
+                ({'ok': True, 'state': {}}, ('rpc_completed', 'succeeded', None)),
+                ({'ok': False, 'error': 'Busy.'}, ('rpc_failed', 'not_confirmed', 'backend_reported_failure')),
+                # WiFi's D2 refusal keeps its code as the state's error.
+                ({'ok': False, 'error': 'No WiFi.', 'state': {'error': 'no_wifi'}}, ('rpc_completed', 'refused', 'no_wifi')),
+                ({'state': 1}, ('rpc_completed', 'returned', None)),
+                ({'enabled': True}, ('rpc_completed', 'returned', None))):
+            with self.subTest(answer=answer):
+                self.assertEqual(await self.outcomes(answer), [expected])
+
+
 class Fake:
     """Answers the way main.Plugin's D2 face does."""
     async def get_version(self):
@@ -74,8 +96,8 @@ class Fake:
 
     async def change(self, value):
         return ({'ok': True, 'state': {'saved': value}} if value == 'good'
-                else {'ok': False, 'error': 'Refused for users.', 'state': {'success': False, 'error': 'Refused for users.'}}
-                if value == 'carried' else {'ok': False, 'error': 'Refused for users.'})
+                else {'ok': False, 'error': 'Refused for users.', 'state': {'enabled': False}}
+                if value == 'with state' else {'ok': False, 'error': 'Refused for users.'})
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
@@ -96,9 +118,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_d2_becomes_the_native_http_contract(self):
         self.assertEqual(await self.answer('good'), (b'200', {'result': {'saved': 'good'}}))
-        # A refusal with its payload: the app reads its own success field, as before D2.
-        self.assertEqual(await self.answer('carried'),
-                         (b'200', {'result': {'success': False, 'error': 'Refused for users.'}}))
+        # Every refusal is the 409 the app shows, also one that carries the state for the Decky panel.
+        self.assertEqual(await self.answer('with state'), (b'409', {'error': 'Refused for users.'}))
         self.assertEqual(await self.answer('bare'), (b'409', {'error': 'Refused for users.'}))
 
     async def test_a_refusal_is_a_runtime_error_for_the_bridge_and_not_logged_twice(self):

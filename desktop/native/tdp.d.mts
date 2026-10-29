@@ -10,7 +10,7 @@ export interface CapsInfo {
 }
 export interface CapsState { tdpAvailable: boolean; extrasAvailable: boolean; helperRetryAvailable: boolean; tdpError: string }
 export interface TdpValues { spl_limit?: number; sppt_limit?: number; fppt_limit?: number; package_draw?: number; source?: string }
-export interface TdpInfo { success: boolean; values: TdpValues; error?: string }
+export interface TdpInfo { values: TdpValues; sample_age_seconds?: number | null }
 export interface RunningLimits { spl: number; sppt: number; fppt: number; preset: PresetKey; battery: boolean; game: boolean }
 export interface SettingsLimits {
   running?: RunningLimits; spl?: number; sppt?: number; fppt?: number; active_spl?: number; active_sppt?: number; active_fppt?: number; active_preset?: string;
@@ -23,7 +23,7 @@ export interface EppControl {
 }
 /** Shared payload for the CPU power controls getter and both setters. */
 export interface CpuPowerControls {
-  success: boolean; available: boolean; cpu_boost: CpuBoostControl; epp: EppControl; error: string;
+  available: boolean; cpu_boost: CpuBoostControl; epp: EppControl; error: string;
   profile?: { app_id: string; ac_profile: boolean; active: boolean; cpu_boost_enabled: boolean | null; epp: string | null };
 }
 

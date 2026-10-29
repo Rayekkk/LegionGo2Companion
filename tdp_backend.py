@@ -32,6 +32,7 @@ if PLUGIN_DIR not in sys.path:
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
 # name before we are imported, and sys.modules wins over sys.path.
 import dk_net  # noqa: E402 - needs the sys.path line above
+import dk_rpc  # noqa: E402
 
 # Root's own directory outside Decky's tree: Decky deletes the plugin directory on
 # every update (it uninstalls first), and the helper has to outlive that.
@@ -220,6 +221,25 @@ def _ok(**extra) -> dict:
 
 def _fail(stderr: str, **extra) -> dict:
     return {"success": False, "stdout": "", "stderr": stderr, "returncode": -1, **extra}
+
+
+NOT_CONFIRMED = "The change wasn't confirmed. Check the current value."
+
+
+def _answer(result: dict) -> dict:
+    """An _ok/_fail result as D2: its other fields (applied, stored, saved_only…) are the state, a failure only its
+    text for the user; stdout and returncode are not state."""
+    if not result["success"]:
+        return dk_rpc.fail(result.get("stderr") or result.get("error") or NOT_CONFIRMED)
+    state = {k: v for k, v in result.items() if k not in ("success", "stdout", "stderr", "returncode")}
+    return dk_rpc.ok(state or None)
+
+
+def _cpu_answer(status: dict) -> dict:
+    """A CPU power status as D2: a failed outcome is a refusal that carries the status, whose error stays on screen."""
+    if status.pop("success"):
+        return dk_rpc.ok(status)
+    return dk_rpc.fail(status["error"] or NOT_CONFIRMED, state=status)
 
 
 def _defaults() -> dict:
@@ -2394,7 +2414,7 @@ class Plugin:
     _setup_error: str | None = None
 
     async def is_ready(self) -> dict:
-        return {"ready": self._ready, "error": self._setup_error or ""}
+        return dk_rpc.ok({"ready": self._ready, "error": self._setup_error or ""})
 
     async def get_settings(self) -> dict:
         def _do() -> dict:
@@ -2402,7 +2422,7 @@ class Plugin:
             running = state["running"] = _running(state)
             state["battery_preset"] = running["preset"] if running["battery"] else ""  # read by the UIs before "running"
             return state
-        return await _offload(_do)
+        return dk_rpc.ok(await _offload(_do))
 
     async def get_cpu_power_controls(self, app_id: str = "", ac_profile: bool = False) -> dict:
         def _do() -> dict:
@@ -2418,7 +2438,7 @@ class Plugin:
                     return _cpu_power_controls_error_status(
                         "CPU power controls unavailable", selected or "",
                         ac_profile if type(ac_profile) is bool else False)
-        return await _offload(_do)
+        return _cpu_answer(await _offload(_do))
 
     async def _set_cpu_control(self, field: str, value, app_id: str,
                                ac_profile: bool, expected_app_id: str | None, stored: bool = False) -> dict:
@@ -2445,7 +2465,7 @@ class Plugin:
                         return _cpu_power_controls_error_status(
                             "CPU power operation failed", selected or "",
                             ac_profile if type(ac_profile) is bool else False)
-        return await _offload(_do)
+        return _cpu_answer(await _offload(_do))
 
     async def set_cpu_boost(self, enabled: bool, app_id: str = "", ac_profile: bool = False,
                             expected_app_id: str | None = None, stored: bool = False) -> dict:
@@ -2458,7 +2478,7 @@ class Plugin:
             SETTINGS_FIELD_EPP, value, app_id, ac_profile, expected_app_id, stored)
 
     async def get_power_source(self) -> dict:
-        return {"ac": await _offload(_get_ac_online)}
+        return dk_rpc.ok({"ac": await _offload(_get_ac_online)})
 
     async def retry_extras(self) -> dict:
         """Download and verify RyzenAdj: on the user's Extras or Retry, or once at a start
@@ -2473,11 +2493,11 @@ class Plugin:
 
     async def _retry_extras(self, extra_cancel: threading.Event | None = None) -> dict:
         if not _supported_model():
-            return {"success": False, "error": UNSUPPORTED_MODEL}
+            return dk_rpc.fail(UNSUPPORTED_MODEL)
         if not _extras_supported():
-            return {"success": False, "error": EXTRAS_UNAVAILABLE}
+            return dk_rpc.fail(EXTRAS_UNAVAILABLE)
         if _ryzenadj_available:
-            return {"success": True}  # queued behind the retry that verified it
+            return dk_rpc.ok()  # queued behind the retry that verified it
         unload = self._helper_cancel
         def cancelled() -> bool:
             return unload.is_set() or (extra_cancel is not None and extra_cancel.is_set())
@@ -2488,13 +2508,13 @@ class Plugin:
                     raise RuntimeError("Verified RyzenAdj is unavailable")
                 with _mutation_lock:
                     if cancelled():
-                        return {"success": False, "error": "RyzenAdj download was cancelled"}
+                        return dk_rpc.fail("RyzenAdj download was cancelled")
                     _ryzenadj_available = True
                     self._helper_error = ""
                     _current_game_id = "\x00"
                     _transition_key = None
                 transition("tdp", "helper_ready", True, outcome="verified")
-                return {"success": True}
+                return dk_rpc.ok()
             except Exception as exc:
                 if not cancelled():
                     self._helper_error = shown(exc)
@@ -2503,16 +2523,16 @@ class Plugin:
                 else:
                     event("tdp", "helper_job", outcome="cancelled",
                           reason="module_shutdown" if unload.is_set() else "extras_off")
-                return {"success": False, "error": shown(exc)}
+                return dk_rpc.fail(shown(exc))
         return await _offload(retry)
 
-    async def get_extras_unlocked(self) -> bool:
+    async def get_extras_unlocked(self) -> dict:
         s = await _offload(_load_settings)
-        return s.get("extras_unlocked", False) and _extras_supported()
+        return dk_rpc.ok(s.get("extras_unlocked", False) and _extras_supported())
 
     async def set_advanced_tdp_control(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
-            return {"success": False, "stderr": "enabled must be a boolean"}
+            return dk_rpc.fail("enabled must be a boolean")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
@@ -2535,13 +2555,13 @@ class Plugin:
                         if not result["success"]:
                             return restore_failed(result)
                 _save_settings(state)
-                return {"success": True}
-        return await _offload(_do)
+                return _ok()
+        return _answer(await _offload(_do))
 
     async def set_separate_battery_presets(self, enabled: bool) -> dict:
         """Silent/Balanced/Performance on battery: the firmware's battery values, or the AC ones."""
         if type(enabled) is not bool:
-            return _fail("enabled must be a boolean")
+            return dk_rpc.fail("enabled must be a boolean")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
@@ -2560,13 +2580,13 @@ class Plugin:
                             return restore_failed(result)
                 _save_settings(state)
                 return _ok()
-        return await _offload(_do)
+        return _answer(await _offload(_do))
 
     async def set_extras_unlocked(self, enabled: bool) -> dict:
         if enabled is False:
             self._start_fetch_cancel.set()  # the start's download serves Extras that are now off
         async with self._extras_lock:
-            return await self._set_extras_unlocked(enabled)
+            return _answer(await self._set_extras_unlocked(enabled))
 
     async def _set_extras_unlocked(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
@@ -2575,7 +2595,7 @@ class Plugin:
             return _fail(EXTRAS_UNAVAILABLE)
         if enabled and not _ryzenadj_available:
             helper = await self._retry_extras()
-            if not helper["success"]:
+            if not helper["ok"]:
                 return _fail(f"Extras needs the verified RyzenAdj helper: {helper['error']}")
         def _do():
             with _tdp_user_transaction() as restore_failed:
@@ -2611,8 +2631,7 @@ class Plugin:
     async def get_game_profile(self, app_id: str) -> dict:
         app_id = normalise_app_id(app_id)
         if app_id is None:
-            return {"exists": False, "profile": {}, "ac_separate": False,
-                    "ac_profile": {}, "error": "invalid app id"}
+            return dk_rpc.fail("invalid app id")
         def _do() -> dict:
             p = _load_profiles().get(app_id)
             active = p is not None
@@ -2636,7 +2655,7 @@ class Plugin:
                                 "ac_preset": p.get("ac_preset", ""),
                                 **_effective_cpu_values(state, p, True)},
             }
-        return await _offload(_do)
+        return dk_rpc.ok(await _offload(_do))
 
     async def list_game_profiles(self) -> dict:
         """Every saved game profile, for browsing; a profile kept under Global is inactive."""
@@ -2650,14 +2669,14 @@ class Plugin:
                                     "preset": p.get("preset", ""), "spl": spl,
                                     "ac_preset": p.get("ac_preset", ""), "ac_spl": p.get("ac_spl", spl)}
             return {"profiles": list(rows.values())}
-        return await _offload(_do)
+        return dk_rpc.ok(await _offload(_do))
 
     async def set_game_ac_profile(self, app_id: str, spl: int, sppt: int, fppt: int, ac_separate: bool, preset_name: str = "",
                                   stored: bool = False) -> dict:
         app_id = normalise_app_id(app_id)
         if (app_id is None or type(ac_separate) is not bool or type(stored) is not bool
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
-            return _fail("invalid profile request")
+            return dk_rpc.fail("invalid profile request")
         preset_name = _safe_label(preset_name)
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
@@ -2702,12 +2721,12 @@ class Plugin:
                              SETTINGS_KEY_GAME_PROFILES: profiles})
                 event("tdp", "ac_profile_saved", scope="game_ac", enabled=ac_separate)
                 return _ok()
-        return await _offload(_do)
+        return _answer(await _offload(_do))
 
     async def delete_game_profile(self, app_id: str) -> dict:
         app_id = normalise_app_id(app_id)
         if app_id is None:
-            return _fail("invalid app id")
+            return dk_rpc.fail("invalid app id")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 profiles, inactive = _load_profiles(), _load_inactive_profiles()
@@ -2728,7 +2747,7 @@ class Plugin:
         event("tdp", "profile_deleted", scope="game",
               level="info" if result["success"] else "warning",
               outcome="confirmed" if result["success"] else "failed")
-        return result
+        return _answer(result)
 
     async def set_game_profile_active(self, app_id: str, active: bool) -> dict:
         """Use a game's own profile, or keep it unused so the game follows Global.
@@ -2738,7 +2757,7 @@ class Plugin:
         """
         app_id = normalise_app_id(app_id)
         if app_id is None or type(active) is not bool:
-            return _fail("invalid profile request")
+            return dk_rpc.fail("invalid profile request")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
@@ -2771,11 +2790,11 @@ class Plugin:
         event("tdp", "profile_active" if active else "profile_inactive", scope="game",
               level="info" if result["success"] else "warning",
               outcome="confirmed" if result["success"] else "failed")
-        return result
+        return _answer(result)
 
     async def set_plugin_enabled(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
-            return _fail("enabled must be a boolean")
+            return dk_rpc.fail("enabled must be a boolean")
         def _do() -> dict:
             with _tdp_user_transaction() as restore_failed:
                 state = _load_settings()
@@ -2795,7 +2814,7 @@ class Plugin:
                 return result
         result = await _offload(_do)
         decky.logger.info(f"[legotdp] Plugin enabled={enabled} success={result['success']}")
-        return result
+        return _answer(result)
 
     async def get_caps(self) -> dict:
         """Slider ceilings in watts. `std` is what the firmware accepts over WMI;
@@ -2837,15 +2856,16 @@ class Plugin:
                                            and not _ryzenadj_unsupported),
                 "presets": _presets(),
             }
-        return await _offload(_do)
+        return dk_rpc.ok(await _offload(_do))
 
-    async def set_panel_active(self, active: bool) -> None:
+    async def set_panel_active(self, active: bool) -> dict:
         """Renew (or drop) the panel's lease on the info loop."""
         global _panel_active, _panel_active_ts
         if type(active) is not bool:
             raise ValueError("active must be a boolean")
         _panel_active = active
         _panel_active_ts = time.monotonic() if active else 0.0
+        return dk_rpc.ok()
 
     async def reapply(self) -> dict:
         """Force the saved limits back; the frontend calls it on resume (no backend hook)."""
@@ -2868,9 +2888,9 @@ class Plugin:
                         "stderr": result.get("stderr", ""),
                         "cpu_power_errors": result.get(
                             "cpu_power_errors", [])}
-        return await _offload(_do)
+        return _answer(await _offload(_do))
 
-    async def set_active_app(self, app_id: str) -> None:
+    async def set_active_app(self, app_id: str) -> dict:
         """Frontend reports the authoritative running-game appid (or '' for none)."""
         global _frontend_appid, _frontend_appid_ts
         normalised = normalise_app_id(app_id, allow_empty=True)
@@ -2882,21 +2902,21 @@ class Plugin:
         # pass re-checks the game under _mutation_lock, so a racing tick is a no-op.
         if self._ready and _get_running_appid() != _current_game_id:
             await self._enforce_pass()
+        return dk_rpc.ok()
 
     async def get_tdp_info(self) -> dict:
         if not self._ready:
-            return {"success": False, "values": {}, "error": "not ready"}
+            return dk_rpc.fail("not ready")
         with _info_cache_lock:
             age = time.monotonic() - _info_cache_ts if _info_cache_ts > 0 else None
-            return {"success": True,
-                    "values": dict(_info_cache) if age is not None and 0 <= age <= 6 else {},
-                    "sample_age_seconds": age}
+            return dk_rpc.ok({"values": dict(_info_cache) if age is not None and 0 <= age <= 6 else {},
+                              "sample_age_seconds": age})
 
     async def apply_tdp(self, spl: int, sppt: int, fppt: int, app_id: str = "",
                         preset_name: str = "",
                         expected_app_id: str | None = None, stored: bool = False) -> dict:
         if not self._ready:
-            return _fail("not ready")
+            return dk_rpc.fail("not ready")
         app_id = normalise_app_id(app_id, allow_empty=True)
         expected_was_supplied = expected_app_id is not None
         expected_app_id = (
@@ -2904,7 +2924,7 @@ class Plugin:
         if (app_id is None or (expected_was_supplied and expected_app_id is None)
                 or type(stored) is not bool or (stored and not app_id)
                 or any(type(value) is not int for value in (spl, sppt, fppt))):
-            return _fail("invalid TDP request")
+            return dk_rpc.fail("invalid TDP request")
         preset_name = _safe_label(preset_name)
 
         def _do() -> dict:
@@ -2922,7 +2942,7 @@ class Plugin:
                         and current_app_id in _load_profiles()):
                     return _save_inactive_global_tdp_locked(s, spl, sppt, fppt, preset_name)
                 return _apply_tdp_locked(s, app_id, spl, sppt, fppt, preset_name)
-        return await _offload(_do)
+        return _answer(await _offload(_do))
 
     async def _push_info(self) -> bool:
         """One refresh, pushed to the panel. True when something went out."""
@@ -2931,7 +2951,7 @@ class Plugin:
         await _offload(_refresh_info_cache)
         with _info_cache_lock:
             values = dict(_info_cache)
-        await decky.emit("tdp_info", {"success": True, "values": values})
+        await decky.emit("tdp_info", {"values": values})
         return True
 
     async def _info_loop(self):
@@ -3100,6 +3120,6 @@ class Plugin:
         def _do() -> None:
             # An in-flight enforce pass may still hold this lock; wait so it cannot re-assert.
             with _mutation_lock:
-                module_runtime.require_success(_release_controls_locked())
+                module_runtime.require_success(_answer(_release_controls_locked()))
         await _offload(_do)
         decky.logger.info("[legotdp] uninstalled")

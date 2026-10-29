@@ -9,7 +9,7 @@ run(async () => {
     const tree=h.render();choose(tree,'off');h.unmount();
     const writes=h.writes;
     if(failed)h.reject('wifi_set_band_policy');
-    else h.respond('wifi_set_band_policy',{success:true,message:'Saved'});
+    else h.respond('wifi_set_band_policy',{message:'Saved'});
     await settle();assert.equal(h.writes,writes,'A late Wi-Fi mutation result cannot update an unmounted page.');
     choose(tree,'off');await settle();
     assert.equal(h.writes,writes,'A queued Wi-Fi callback cannot update an unmounted page.');
@@ -19,7 +19,7 @@ run(async () => {
     const h=harness('wifi.tsx','WifiPage');h.render();h.respond('wifi_get_status',wifi);await settle();
     assert.equal(band(h.render()).props.selectedOption,'five_six_no_24');
     choose(h.render(),'off');
-    h.respond('wifi_set_band_policy',{success:true,reconnected:true,message:'Verified'});await settle();
+    h.respond('wifi_set_band_policy',{reconnected:true,message:'Verified'});await settle();
     assert.equal(h.calls.filter(c=>c.name==='wifi_get_status').length,2,
       'Verified reconnect refreshes immediately instead of holding the page for three seconds.');
     assert.equal([...h.timers.values()].filter(t=>t.kind==='timeout').length,0);
@@ -32,7 +32,7 @@ run(async () => {
   network.fire(); choose(network.render(), 'off'); await settle();
   assert.deepEqual(network.calls.find(c => c.name === 'wifi_set_band_policy').args, ['off']);
   assert.equal(band(network.render()).props.description, 'Applying…');
-  network.respond('wifi_set_band_policy', { success: true, message: 'Saved' }); await settle();
+  network.respond('wifi_set_band_policy', {message: 'Saved' }); await settle();
   const beforeOldRead = network.writes;
   network.respond('wifi_get_status', wifi); await settle();
   assert.equal(network.writes, beforeOldRead, 'old Wi-Fi status cannot overwrite the mutation');
@@ -50,7 +50,7 @@ run(async () => {
   findButton(manualWpa.render(), 'Connect to 6 GHz once').props.onClick(); await settle();
   assert.deepEqual(manualWpa.calls.find(c => c.name === 'wifi_rescan_and_reconnect').args, ['six']);
   assert.equal(findButton(manualWpa.render(), 'Connect to 6 GHz once').props.disabled, true);
-  manualWpa.respond('wifi_rescan_and_reconnect', { success: true, frequency: 6295, message: 'Connected; temporary selection cleared' }); await settle();
+  manualWpa.respond('wifi_rescan_and_reconnect', {frequency: 6295, message: 'Connected; temporary selection cleared' }); await settle();
   manualWpa.respond('wifi_get_status', { ...automaticWpa, live: { ...automaticWpa.live, frequency: '6295' } }); await settle();
   assert.equal(band(manualWpa.render()).props.selectedOption, 'off', 'one-time connection keeps the automatic policy');
   assert.equal(manualWpa.toasts.at(-1).body, 'Connected; temporary selection cleared');
@@ -64,7 +64,7 @@ run(async () => {
   assert.deepEqual([sixAsked.strTitle, sixAsked.strOKButtonText], ['Use only 6 GHz?', 'Use only 6 GHz']);
   assert.match(sixAsked.strDescription, /no Wi-Fi until you choose Automatic/);
   assert.deepEqual(sixOnly.calls.find(c => c.name === 'wifi_set_band_policy').args, ['six_ghz_only', false]);
-  sixOnly.respond('wifi_set_band_policy', { success: true, message: 'Saved' }); await settle();
+  sixOnly.respond('wifi_set_band_policy', {message: 'Saved' }); await settle();
   sixOnly.respond('wifi_get_status', { ...automaticWpa, live: { ...automaticWpa.live, frequency: '6295' },
     settings: { ...automaticWpa.settings, band_policy: 'six_ghz_only' } }); await settle();
   assert.equal(sixOnly.toasts.at(-1).body, 'Saved', 'enabling 6 GHz only is verified');
@@ -92,7 +92,7 @@ run(async () => {
     ['Use only 5/6 GHz?', 'Use only 5/6 GHz', 'Cancel']);
   assert.match(strictAsked.strDescription, /your previous setting comes back automatically/);
   assert.deepEqual(strictWifi.calls.find(c => c.name === 'wifi_set_band_policy').args, ['five_six_only', true]);
-  strictWifi.respond('wifi_set_band_policy', { success: true, message: 'Saved' }); await settle();
+  strictWifi.respond('wifi_set_band_policy', {message: 'Saved' }); await settle();
   strictWifi.respond('wifi_get_status', { ...wifi, connected: false,
     settings: { ...wifi.settings, band_policy: 'five_six_only' } }); await settle();
   assert.equal(band(strictWifi.render()).props.description, 'No 5/6 GHz network. Choose Automatic or Prefer 5/6 GHz.');
@@ -118,8 +118,8 @@ run(async () => {
   const preflightWifi = harness('wifi.tsx', 'WifiPage'); preflightWifi.render();
   preflightWifi.respond('wifi_get_status', wifi); await settle();
   choose(preflightWifi.render(), 'five_six_only'); preflightWifi.confirm(); await settle();
-  preflightWifi.respond('wifi_set_band_policy', { success: false, error: 'preflight_failed',
-    message: 'No fresh 5 or 6 GHz scan result was verified.' }); await settle();
+  preflightWifi.respond('wifi_set_band_policy', { ok: false, error: 'No fresh 5 or 6 GHz scan result was verified.',
+    state: { error: 'preflight_failed', message: 'No fresh 5 or 6 GHz scan result was verified.' } }); await settle();
   preflightWifi.respond('wifi_get_status', wifi); await settle();
   assert.equal(band(preflightWifi.render()).props.description, 'No fresh 5 or 6 GHz scan result was verified.', 'the failure stays on the control');
   assert.equal(preflightWifi.toasts.at(-1).body, 'No fresh 5 or 6 GHz scan result was verified.');
@@ -161,7 +161,7 @@ run(async () => {
   choose(hiddenStrict.render(),'five_six_only');const strictOk=hiddenStrict.modals.at(-1).props.onOK;
   hiddenStrict.visible(false);await settle();strictOk();strictOk();await settle();
   assert.deepEqual(policyCalls(hiddenStrict).map(c=>Array.from(c.args)),[['five_six_only',true]],'Only 5/6 GHz confirmed while hidden runs once');
-  hiddenStrict.respond('wifi_set_band_policy',{success:false,message:'No 5/6 GHz network connected.'});await settle();
+  hiddenStrict.respond('wifi_set_band_policy',{ok:false,error:'No 5/6 GHz network connected.',state:{message:'No 5/6 GHz network connected.'}});await settle();
   assert.equal(hiddenStrict.toasts.at(-1).body,'No 5/6 GHz network connected.','a hidden failure is a toast');
   hiddenStrict.unmount();
 
@@ -190,7 +190,7 @@ run(async () => {
   const hiddenSuccess=harness('wifi.tsx','WifiPage');hiddenSuccess.render();
   hiddenSuccess.respond('wifi_get_status',wifi);await settle();
   choose(hiddenSuccess.render(),'off');await settle();
-  hiddenSuccess.visible(false);hiddenSuccess.respond('wifi_set_band_policy',{success:true,message:'Saved while hidden'});await settle();
+  hiddenSuccess.visible(false);hiddenSuccess.respond('wifi_set_band_policy',{message:'Saved while hidden'});await settle();
   hiddenSuccess.visible(true);hiddenSuccess.respond('wifi_get_status',automaticWpa);await settle();
   assert.equal(hiddenSuccess.toasts.length,0,'a hidden operation neither invents a stale failure nor reports an unverified success');
   assert.equal(band(hiddenSuccess.render()).props.description,'SteamOS picks the band and roams automatically.');
@@ -226,7 +226,7 @@ run(async () => {
   const tree=cleanup.render();choose(tree,'off');choose(tree,'off');await settle();
   assert.equal(policyCalls(cleanup).length,1);
   assert.equal(find(cleanup.render(),'Target').props.description,'Checking the connection…');
-  cleanup.respond('wifi_set_band_policy',{success:true,message:'Cleared'});await settle();
+  cleanup.respond('wifi_set_band_policy',{message:'Cleared'});await settle();
   assert.equal(cleanup.toasts.length,0,'success waits for the actual final state');
   cleanup.respond('wifi_get_status',{...automaticWpa,live:{...wifi.live,wifi_backend:'wpa_supplicant',ssid:' spaced network '}});await settle();
   assert.ok(find(cleanup.render(),' spaced network '));
@@ -236,7 +236,7 @@ run(async () => {
   const mismatched=harness('wifi.tsx','WifiPage');mismatched.render();
   mismatched.respond('wifi_get_status',wifi);await settle();
   choose(mismatched.render(),'off');await settle();
-  mismatched.respond('wifi_set_band_policy',{success:true,message:'Saved'});await settle();
+  mismatched.respond('wifi_set_band_policy',{message:'Saved'});await settle();
   mismatched.respond('wifi_get_status',wifi);await settle();
   assert.match(band(mismatched.render()).props.description,/could not be verified/);
   assert.match(mismatched.toasts.at(-1).body,/could not be verified/);
@@ -273,5 +273,18 @@ run(async () => {
   assert.equal(W.operationVerified('off',wifi,st({band_policy:'off'},{connection_uuid:'other'})),false,'another network is not a verified result');
   assert.equal(W.operationVerified('six',wifi,st({},{frequency:'5975'})),true);
   assert.equal(W.operationVerified('high',wifi,st({},{frequency:'2437'})),false);
+  // D2: a refused status read shows its text; a refusal without a state (the module guard) reads as a failed call.
+  for (const [answer, text] of [
+    [{ ok: false, error: 'Permission denied', state: { error: 'unexpected', message: 'Permission denied' } }, 'Permission denied'],
+    [{ ok: false, error: 'This feature is turned off in Modules.' }, 'Wi-Fi status is unavailable. Retrying while this page is open.']]) {
+    const h = harness('wifi.tsx', 'WifiPage'); h.render(); h.respond('wifi_get_status', answer); await settle();
+    assert.equal(find(h.render(), 'Wi-Fi status unavailable').props.description, text);
+    h.unmount();
+  }
+  const guarded = harness('wifi.tsx', 'WifiPage'); guarded.render(); guarded.respond('wifi_get_status', wifi); await settle();
+  choose(guarded.render(), 'off');
+  guarded.respond('wifi_set_band_policy', { ok: false, error: 'This feature is turned off in Modules.' }); await settle();
+  assert.equal(guarded.toasts.at(-1).body, 'The backend call ended before the result could be verified.');
+  guarded.unmount();
   console.log('Wi-Fi page verified.');
 });

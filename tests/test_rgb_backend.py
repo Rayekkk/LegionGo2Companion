@@ -522,14 +522,14 @@ class RgbBackendTests(unittest.TestCase):
                 patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
             ):
                 result = asyncio.run(plugin.set_control_enabled(True))
-                self.assertTrue(result["success"], result.get("error"))
+                self.assertTrue(result["ok"], result.get("error"))
                 saved = memory.data["state"]
                 self.assertTrue(saved["control_enabled"])
                 self.assertIsNotNone(saved["original_rgb"])
                 self.assertIsNone(saved["pending"])
 
                 result = asyncio.run(plugin.set_control_enabled(False))
-                self.assertTrue(result["success"], result.get("error"))
+                self.assertTrue(result["ok"], result.get("error"))
                 self.assertFalse(memory.data["state"]["control_enabled"])
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
 
@@ -548,7 +548,7 @@ class RgbBackendTests(unittest.TestCase):
                 for change in (plugin.set_control_enabled(True), plugin.set_rings_enabled(True),
                                plugin.set_color(120, 100)):
                     result = asyncio.run(change)
-                    self.assertTrue(result["success"], result.get("error"))
+                    self.assertTrue(result["ok"], result.get("error"))
                 chosen = copy.deepcopy(memory.data["state"])
                 asyncio.run(plugin._uninstall())
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
@@ -582,7 +582,7 @@ class RgbBackendTests(unittest.TestCase):
                 plugin = rgb_backend.Plugin()
                 for change in (plugin.set_control_enabled(True), plugin.set_power_led(False)):
                     result = asyncio.run(change)
-                    self.assertTrue(result["success"], result.get("error"))
+                    self.assertTrue(result["ok"], result.get("error"))
                 self.assertFalse(rgb_backend._read_power_led())
                 asyncio.run(plugin._uninstall())
                 self.assertTrue(rgb_backend._read_power_led(), "uninstall hands the original LED back")
@@ -617,7 +617,7 @@ class RgbBackendTests(unittest.TestCase):
                     patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
                 ):
                     result = asyncio.run(rgb_backend.Plugin().set_control_enabled(True))
-                self.assertTrue(result["success"], result.get("error"))
+                self.assertTrue(result["ok"], result.get("error"))
                 self.assertEqual((led / "effect").read_text().strip(), effect)
                 self.assertEqual((led / "brightness").read_text().strip(), brightness)
                 if rgb is not None:
@@ -637,10 +637,10 @@ class RgbBackendTests(unittest.TestCase):
                 patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
             ):
                 result = asyncio.run(plugin.set_control_enabled(True))
-                self.assertTrue(result["success"], result.get("error"))
+                self.assertTrue(result["ok"], result.get("error"))
 
                 result = asyncio.run(plugin.set_control_enabled(False))
-                self.assertTrue(result["success"], result.get("error"))
+                self.assertTrue(result["ok"], result.get("error"))
                 self.assertEqual((led / "profile").read_text(), "\n")
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
 
@@ -669,9 +669,9 @@ class RgbBackendTests(unittest.TestCase):
                     led_writes(raw) as writes,
                     patch.object(rgb_backend.time, "sleep"),
                 ):
-                    self.assertTrue(asyncio.run(plugin.set_control_enabled(True))["success"])
+                    self.assertTrue(asyncio.run(plugin.set_control_enabled(True))["ok"])
                     result = asyncio.run(plugin.set_rings_enabled(True))
-                    self.assertTrue(result["success"], result.get("error"))
+                    self.assertTrue(result["ok"], result.get("error"))
                     self.assertEqual((led / "profile").read_text().strip(), "3")
                     self.assertEqual((led / "enabled").read_text().strip(), "true")
 
@@ -921,12 +921,12 @@ class PowerLedBetaTests(unittest.TestCase):
                 self.register.value = 0xFF  # off, every other bit set
                 plugin = rgb_backend.Plugin()
                 result = asyncio.run(plugin.set_power_led(True))
-                self.assertTrue(result["success"], result["error"])
+                self.assertTrue(result["ok"], result.get("error"))
                 self.assertEqual(self.register.value, 0xFF & ~(1 << bit))
                 self.assertEqual(set(self.mapped), {address})
-                power = result["status"]["power_led"]
+                power = result["state"]["power_led"]
                 self.assertEqual((power["supported"], power["current"], power["beta"]), (True, True, beta))
-                self.assertTrue(asyncio.run(plugin.set_power_led(False))["success"])
+                self.assertTrue(asyncio.run(plugin.set_power_led(False))["ok"])
                 self.assertEqual(self.register.value, 0xFF)
 
     def test_a_dsdt_that_does_not_describe_the_models_field_hides_the_light_without_mmio(self):
@@ -951,8 +951,8 @@ class PowerLedBetaTests(unittest.TestCase):
             with self.subTest(reason), patch.object(rgb_backend, "settings", MemorySettings()):
                 self.console(dsdt, **dmi)
                 result = asyncio.run(rgb_backend.Plugin().set_power_led(False))
-                self.assertFalse(result["success"])
-                power = result["status"]["power_led"]
+                self.assertFalse(result["ok"])
+                power = result["state"]["power_led"]
                 self.assertEqual((power["supported"], power["beta"]), (False, False))
                 self.assertEqual((self.mapped, self.register.value), ([], 0xFF))
 
@@ -969,12 +969,12 @@ class PowerLedBetaTests(unittest.TestCase):
                 real_set(register, index, value & ~(1 << 5) if len(writes) == 1 else value)
             with patch.object(self.Register, "__setitem__", ec_drops_our_bit):
                 result = asyncio.run(rgb_backend.Plugin().set_power_led(False))
-            self.assertFalse(result["success"])
+            self.assertFalse(result["ok"])
             self.assertIn("did not confirm", result["error"])
             self.assertEqual(writes[0], 0xFF, "only bit 5 was asked to change")
             self.assertEqual(self.register.value, 0xFF & ~(1 << 5), "the original bit is back")
             self.assertFalse(memory.data["state"]["power_led_managed"])
-            self.assertTrue(result["status"]["power_led"]["current"])
+            self.assertTrue(result["state"]["power_led"]["current"])
 
 
 if __name__ == "__main__":

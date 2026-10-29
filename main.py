@@ -95,13 +95,16 @@ _rpc = dk_rpc.boundary(decky.logger, shown=(RuntimeError, ValueError))
 
 
 def _d2(result):
-    """A component's answer as D2: its payload is the state, unchanged (the legacy `success` too, until the module's
-    step 2 in DeckyKit PLAN Etap C2); a payload with success False is a refusal that still carries it."""
-    if isinstance(result, dict) and result.get('success') is False:
-        error = next((str(result[key]).strip() for key in ('error', 'reason', 'stderr')
-                      if result.get(key) and str(result[key]).strip()), '')
-        return dk_rpc.fail(error or "The change wasn't confirmed. Check the current value.", state=result)
+    """A component's answer as D2: dk_rpc.ok/fail as it is, any other payload (reads and plain values) as the state."""
+    if isinstance(result, dict) and type(result.get('ok')) is bool:
+        return result
     return dk_rpc.ok(result)
+
+
+def _verdict(result):
+    """A D2 answer's `ok`; None for a plain payload, which says neither."""
+    verdict = result.get('ok') if isinstance(result, dict) else None
+    return verdict if type(verdict) is bool else None
 
 
 def _public_rpc(function):
@@ -155,16 +158,16 @@ def _logged_rpc(function, name):
             except Exception as exc:
                 failed(error=exc)
                 raise
-            if isinstance(result, dict) and result.get('success') is False and result.get('error') in _REFUSALS:
-                refused(result['error'])
-            elif isinstance(result, dict) and result.get('success') is False:
-                code = result.get('returncode')
-                failed(reason='backend_reported_failure', returncode=code if type(code) is int else None)
+            verdict = _verdict(result)
+            if verdict is False and module_runtime.refusal_code(result) in _REFUSALS:
+                refused(module_runtime.refusal_code(result))
+            elif verdict is False:
+                failed(reason='backend_reported_failure')
             elif quiet:
                 diagnostics.transition(component, 'rpc_health', 'ok', operation=name, initial=False)
             else:
                 diagnostics.event(component, 'rpc_completed', operation=name,
-                    outcome='succeeded' if isinstance(result, dict) and result.get('success') is True else 'returned',
+                    outcome='succeeded' if verdict is True else 'returned',
                     duration_ms=round((time.monotonic() - started) * 1000, 1))
             return result
     return logged
@@ -190,14 +193,11 @@ def _update_event(name, outcome, duration_ms, **fields):
                       stage=fields.get('stage'), repeat=60)
 
 
-def _legacy_update(view):
-    """dk_update's D2 view in the shape the panel and the Desktop app read until step 2 (DeckyKit PLAN Etap C2):
-    `success`, and a newer release that cannot be offered gives its reason as `error`."""
+def _update_answer(view):
+    """dk_update's answer (its fields beside `ok`) as this plugin's D2: the fields are the state, a failure only its
+    error (the panel and the Desktop app keep the last good check and show that)."""
     view = dict(view)
-    view['success'] = view.pop('ok')
-    if view['success'] and view.get('update_available') and not view.get('download_available') and view.get('message'):
-        view['error'] = view['message']
-    return view
+    return dk_rpc.ok(view) if view.pop('ok') else dk_rpc.fail(view.get('error', ''))
 
 
 def _plugin_version() -> str:
@@ -1092,7 +1092,7 @@ class Plugin:
         return await self._tdp.set_panel_active(now < max(self._desktop_panel_deadline, self._qam_panel_deadline))
 
     async def _desktop_panel_active(self, active):
-        return await self._panel_active('_desktop_panel_deadline', active)
+        await self._panel_active('_desktop_panel_deadline', active)  # The bridge passes an override's answer as it is.
 
     async def _unload(self):
         diagnostics.event('plugin', 'shutdown_started', source='backend')
@@ -1244,12 +1244,12 @@ class Plugin:
     # Updates are explicit user actions, independent of hardware module toggles.
 
     async def updates_check(self):
-        return _legacy_update(await asyncio.to_thread(self._updates.check, True))
+        return _update_answer(await asyncio.to_thread(self._updates.check, True))
 
     async def updates_download(self, expected_version: str):
         if not self._updates_home:
-            return {'success': False, 'error': "The desktop user is unavailable; the file cannot be saved safely."}
-        return _legacy_update(await asyncio.to_thread(self._updates.download, expected_version))
+            return dk_rpc.fail("The desktop user is unavailable; the file cannot be saved safely.")
+        return _update_answer(await asyncio.to_thread(self._updates.download, expected_version))
 
     async def save_device_report(self):
         """A read-only hardware and firmware report in the console user's Desktop folder (device_report)."""
@@ -1261,12 +1261,12 @@ class Plugin:
     async def _save_device_report(self):
         account = _session_account()
         if account is None:
-            return {'success': False, 'error': 'The console user is unknown, so the report cannot be saved.'}
+            return dk_rpc.fail('The console user is unknown, so the report cannot be saved.')
         collecting = self._report_collecting
         if collecting is None or collecting.done():  # Otherwise wait for the one still collecting.
             await self._ensure_device()
             try:
-                caps = await asyncio.wait_for(self._tdp.get_caps(), 5.0)
+                caps = (await asyncio.wait_for(self._tdp.get_caps(), 5.0))['state']
             except Exception as exc:
                 caps = type(exc).__name__
             recovery = self._inputplumber_recovery
@@ -1282,12 +1282,12 @@ class Plugin:
             text = await asyncio.wait_for(asyncio.shield(collecting), device_report.TOTAL_SECONDS + 5)
             path = await asyncio.to_thread(device_report.save, text, account.pw_dir, account.pw_uid, account.pw_gid)
         except asyncio.TimeoutError:
-            return {'success': False, 'error': 'Collecting the report took too long. Try again.'}
+            return dk_rpc.fail('Collecting the report took too long. Try again.')
         except (OSError, ValueError) as exc:
             diagnostics.event('plugin', 'device_report_failed', level='warning', error=exc)
-            return {'success': False, 'error': str(exc) if isinstance(exc, ValueError)
-                    else 'The report could not be saved in the Desktop folder.'}
-        return {'success': True, 'path': path}
+            return dk_rpc.fail(str(exc) if isinstance(exc, ValueError)
+                               else 'The report could not be saved in the Desktop folder.')
+        return dk_rpc.ok({'path': path})
 
     async def firmware_get_status(self):
         return await asyncio.to_thread(self._firmware.status)
@@ -1488,7 +1488,7 @@ class Plugin:
 
     async def wifi_set_band_policy(self, mode, allow_unverified_scan=False):
         result = await self._wifi.set_band_policy(mode, allow_unverified_scan)
-        if result.get('success') and self._module_state.get('wifi', {}).get('update'):
+        if result['ok'] and self._module_state.get('wifi', {}).get('update'):
             # The user's new choice replaces the one an update is still restoring.
             self._module_state['wifi'] = {'enabled': True}
             await module_runtime.complete(asyncio.to_thread(self._save_modules))

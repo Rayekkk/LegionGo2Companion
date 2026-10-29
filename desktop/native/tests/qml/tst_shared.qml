@@ -84,20 +84,29 @@ TestCase {
     function test_aFollowUpMutationIsSentOnlyAfterItsFirstHalfSucceeds() {
         const then={method:"set_game_ac_profile",args:["99",15000,18000,25000,true,"",true]};
         model.mutate("set_game_profile_active",["99",true],then);model.page="overview";
-        response(0,{success:true});
+        response(0,null);
         compare(fake.calls[1].method,"set_game_ac_profile");compare(fake.calls[1].args,then.args,"Leaving the page keeps the target and values");
-        response(1,{success:true});fake.calls=[];
-        model.mutate("set_game_profile_active",["99",true],then);response(0,{success:false,stderr:"invalid profile request"});
+        response(1,null);fake.calls=[];
+        model.mutate("set_game_profile_active",["99",true],then);response(0,{},"invalid profile request");
         model.mutate("set_game_profile_active",["99",true],then);response(fake.calls.length-1,{},"Connection lost; result unknown.");
         compare(fake.calls.filter(c=>c.method==="set_game_ac_profile").length,0);
     }
     function test_anRgbWriteUpdatesTheColourTheNextSliderStartsFrom() {
         model.snapshots=Object.assign({},model.snapshots,{rgb_get_status:{settings:{hue:120,saturation:80}}});
         model.mutate("rgb_set_color",[359,80]);
-        response(0,{success:true,status:{settings:{hue:359,saturation:80}}});
+        response(0,{settings:{hue:359,saturation:80}});
         compare(model.state("rgb_get_status").settings.hue,359);
-        model.mutate("rgb_set_brightness",[50]);response(1,{success:false,error:"busy"});
-        compare(model.state("rgb_get_status").settings.hue,359,"A reply without status keeps the last one");
+        // A refusal reaches the app as the bridge's 409 error, never as a status.
+        model.mutate("rgb_set_brightness",[50]);response(1,undefined,"busy");
+        compare(model.state("rgb_get_status").settings.hue,359,"A refusal keeps the last status");
+    }
+    function test_aBatteryChangeAnswersWithTheNewStatus() {
+        model.snapshots=Object.assign({},model.snapshots,{battery_get_status:{managed:false,enabled:false}});
+        model.mutate("battery_set_enabled",[true]);
+        response(0,{managed:true,enabled:true,requested_enabled:true});
+        compare(model.state("battery_get_status").enabled,true);
+        model.mutate("battery_release_control",[]);response(1,undefined,"busy");
+        compare(model.state("battery_get_status").enabled,true,"A refusal keeps the last status");
     }
     function test_vibrationChangeWithoutAControllerShowsTheSavedValueAndWhy() {
         const why="Controller not connected. The change is saved and applies when it connects.";
@@ -107,7 +116,7 @@ TestCase {
         model.windowActive=true;model.controllerDetailsAt=fake.clock; // settings were just read
         model.mutate("vibe_set_intensity",[3,"0","0"]);
         // RpcClient reports a failed reply by its error text.
-        response(fake.calls.length-1,{success:false,error:why,settings:{level:3},app_id:"0",profile_id:"0",overwrite:false},why);
+        response(fake.calls.length-1,undefined,why);
         compare(model.error,why);
         fake.calls=[];model.refreshPanel();
         const read=fake.calls.findIndex(c=>c.method==="vibe_get_settings");
@@ -129,7 +138,7 @@ TestCase {
     function test_internalLeaseCannotUnlockPendingUserMutation() {
         model.mutate("set_plugin_enabled",[false]);verify(model.busy);
         model.issue("set_panel_active",[false],true);response(1,true);verify(model.busy);
-        response(0,{success:true});verify(!model.busy);
+        response(0,null);verify(!model.busy);
     }
     function test_errorKeepsUnknownStateAndNeverRetriesWrite() {
         model.mutate("set_plugin_enabled",[false]);response(0,{},"Connection lost; state unknown.");
@@ -503,7 +512,7 @@ TestCase {
         compare(fake.calls[0].method,"save_device_report");verify(fake.calls[0].mutation);
         verify(model.reportSaving);verify(!model.busy,"the rest of the app stays usable");
         model.saveDeviceReport();compare(fake.calls.length,1);
-        response(0,{success:true,path:"/home/deck/Desktop/report.txt"});
+        response(0,{path:"/home/deck/Desktop/report.txt"});
         verify(!model.reportSaving);compare(model.reportText,"Saved to /home/deck/Desktop/report.txt");
         model.saveDeviceReport();response(1,null,"Backend unavailable.");
         verify(!model.reportSaving);compare(model.reportText,"Backend unavailable.");

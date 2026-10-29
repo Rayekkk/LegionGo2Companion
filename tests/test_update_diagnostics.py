@@ -48,9 +48,9 @@ class UpdateDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             on_event=main._update_event)
         failure=dk_net.NetError('private-secret-marker /home/private/full-path')
         with patch.object(dk_net,'get',side_effect=failure) as metadata:
-            result=main._legacy_update(updater.check());count=len(self.records)
-            for _ in range(20):self.assertEqual(main._legacy_update(updater.check()),result)
-        self.assertFalse(result['success']);self.assertEqual(metadata.call_count,1)
+            result=main._update_answer(updater.check());count=len(self.records)
+            for _ in range(20):self.assertEqual(main._update_answer(updater.check()),result)
+        self.assertFalse(result['ok']);self.assertNotIn('state',result);self.assertEqual(metadata.call_count,1)
         self.assertEqual(len(self.records),count)
         fault=next(value for value in self.records if value['event']=='release_check_failed')
         self.assertEqual((fault['level'],fault['context']['outcome']),('warning','failed'))

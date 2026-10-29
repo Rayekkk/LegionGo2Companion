@@ -158,7 +158,7 @@ QtObject {
     property Connections connection: Connections {
         target: backend.transport
         function onFinished(id, method, result, problem) {
-            if(method==="save_device_report") { backend.reportSaving=false;backend.reportText=Updates.deviceReportResult(problem?{success:false,error:problem}:result); }
+            if(method==="save_device_report") { backend.reportSaving=false;backend.reportText=Updates.deviceReportResult(problem?{error:problem}:result); }
             const request = backend.requests[id];
             if (!request) return;
             const copy = Object.assign({},backend.requests); delete copy[id]; backend.requests = copy;
@@ -200,14 +200,10 @@ QtObject {
                     if(request.mutation)backend.firmwareStepError="";
                     const errors=Object.assign({},backend.readErrors);errors.firmware_get_status="";backend.readErrors=errors;
                 }
-                else if (method === "battery_set_enabled" || method === "battery_release_control" || method === "battery_reset_charging_mode") {
-                    if (result.status) { key = "battery_get_status"; result = result.status; }
-                }
+                else if (method === "battery_set_enabled" || method === "battery_release_control" || method === "battery_reset_charging_mode") key = "battery_get_status";
                 // RGB writes return the new status: hue and saturation are sent together,
                 // so the next slider must start from it, not from the last poll.
-                else if (method.startsWith("rgb_set_") || method==="rgb_restore_original") {
-                    if (result?.status) { key = "rgb_get_status"; result = result.status; }
-                }
+                else if (method.startsWith("rgb_set_") || method==="rgb_restore_original") key = "rgb_get_status";
                 if (method === "get_version") {
                     backend.connected = true;
                     // Disabled modules cannot keep stale telemetry or faults on screen.
@@ -231,7 +227,7 @@ QtObject {
             if (request.mutation) {
                 if (request.blocking) backend.controllerDetailsAt=-1000;
                 backend.mutationDone(method,result,!problem);
-                if (request.then && !problem && result?.success!==false) backend.mutate(request.then.method, request.then.args);
+                if (request.then && !problem) backend.mutate(request.then.method, request.then.args);
                 Qt.callLater(backend.refresh);
             }
         }

@@ -616,7 +616,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(plugin, "_set_band_policy_impl", return_value={"success": True}), \
              patch.object(wifi, "_load_settings", return_value=SETTINGS), \
              patch.object(plugin, "_high_band_monitor", side_effect=monitor):
-            self.assertTrue((await plugin.set_band_policy(wifi.BAND_POLICY_HIGH_ONLY))["success"])
+            self.assertTrue((await plugin.set_band_policy(wifi.BAND_POLICY_HIGH_ONLY))["ok"])
             await asyncio.wait_for(entered.wait(), 1)
             self.assertEqual(loops, [asyncio.get_running_loop()])
             await plugin._stop_high_band_monitor()
@@ -640,7 +640,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             plugin._start_high_band_monitor(SETTINGS)
             self.assertTrue(await asyncio.to_thread(entered.wait, 2))
             save_settings(band_policy="off")
-            self.assertTrue((await asyncio.wait_for(plugin.set_band_policy("off"), 1))["success"])
+            self.assertTrue((await asyncio.wait_for(plugin.set_band_policy("off"), 1))["ok"])
             self.assertIsNone(plugin._high_band_monitor_task)
 
     async def test_monitor_waiting_filegate_is_cancelled_before_off_waits(self):
@@ -661,7 +661,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             self.assertIsNone(plugin._high_band_monitor_task)
             gate.release()
-            self.assertTrue((await asyncio.wait_for(off, 1))["success"])
+            self.assertTrue((await asyncio.wait_for(off, 1))["ok"])
 
 
 class WifiLockCancellationTests(unittest.TestCase):
@@ -732,9 +732,9 @@ class WifiLockFailureTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(wifi, '_load_settings', side_effect=AssertionError('Settings I/O on the event loop')) as read, \
                 patch.object(plugin, '_set_band_policy_impl') as mutate:
             result = await plugin.set_band_policy(wifi.BAND_POLICY_HIGH_ONLY)
-        self.assertFalse(result['success'])
-        self.assertEqual(result['error'], 'band_policy_lock_failed')
-        self.assertIn('lock unavailable', result['detail'])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['state']['error'], 'band_policy_lock_failed')
+        self.assertEqual(result['error'], 'The cross-process rollback lock is unavailable. — lock unavailable')
         read.assert_not_called()
         mutate.assert_not_called()
 
