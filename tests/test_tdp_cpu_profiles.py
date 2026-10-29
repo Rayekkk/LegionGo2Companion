@@ -535,7 +535,7 @@ class CpuProfileTests(unittest.TestCase):
         generation = tdp._arm_ac_settle(target)
         before = self.payload()
         applies_before = len(self.applies)
-        with patch.object(safe_settings, '_atomic_write_bytes', side_effect=OSError('disk full')):
+        with patch.object(safe_settings.dk_fs, 'write_atomic', side_effect=OSError('disk full')):
             result = asyncio.run(self.plugin.apply_tdp(30000, 32000, 40000, '', 'custom', '111'))
         self.assertFalse(result['success'])
         self.assertFalse(result['applied'])
@@ -1032,7 +1032,7 @@ class CpuProfileTests(unittest.TestCase):
                 self.assert_hardware(True, '26')
             finally:
                 await self.plugin._unload()
-        with patch.object(tdp.updater, 'ssl_context'), \
+        with patch.object(tdp.dk_net, 'tls_context'), \
              patch.object(tdp, '_ensure_ryzenadj'), \
              patch.object(tdp, '_wmi_caps', return_value={
                  key: {'min': 5, 'max': top} for key, top in (('spl', 35), ('sppt', 37), ('fppt', 45))}):

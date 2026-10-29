@@ -1,10 +1,9 @@
 # Frontend source and relinking
 
 The generated `dist/index.js` includes code from `@decky/api` 1.1.3 under
-LGPL-2.1. `npm run package` includes its full package source in
-`THIRD_PARTY_SOURCES/decky-api-1.1.3/` and its license in
-`THIRD_PARTY_LICENSES/decky-api-LGPL-2.1.txt` inside the ZIP archive. These
-generated directories are not part of the Git checkout.
+LGPL-2.1. `npm run package` includes its full package source and its license
+(`LICENSE`) in `third_party/decky-api/` inside the ZIP archive. This generated
+directory is not part of the Git checkout.
 
 The source and build inputs for the combined frontend are included in the
 release archive as `src/`, `scripts/`, `rollup.config.js`, `tsconfig.json`,

@@ -128,7 +128,7 @@ class ApplicabilityTests(unittest.TestCase):
             ):
                 for name, value in values.items():
                     stack.enter_context(patch.object(target, name, value))
-            return main.Plugin()._detect_device()
+            return support.LegacyPlugin()._detect_device()
 
     def test_each_console_gets_only_the_modules_that_apply(self):
         for console, setup in CONSOLES.items():
@@ -164,7 +164,7 @@ class ApplicabilityTests(unittest.TestCase):
                 self.assertFalse(fan_backend.Plugin.applicable())  # No DMI at all
 
     def test_a_failing_device_read_does_not_stop_the_start(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         with patch.object(main, "firmware_applies", side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")), \
                 patch.object(main.diagnostics, "event") as event:
             applicable, device = plugin._detect_device()
@@ -173,7 +173,7 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertEqual(event.call_args.args[:2], ("plugin", "device_unknown"))
 
     def test_a_failing_rule_hides_its_module_and_is_logged(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._display = types.SimpleNamespace(applicable=lambda: 1 / 0)
         with patch.object(main.diagnostics, "event") as event:
             applicable, _ = plugin._detect_device()
@@ -192,7 +192,7 @@ class NotApplicableModuleTests(unittest.IsolatedAsyncioTestCase):
         stack.enter_context(patch.object(main, "_installed_standalone_plugins", return_value=[]))
         stack.enter_context(patch.object(main, "capture_intent", return_value={}))
         self.addCleanup(module_runtime._stop_requested.clear)
-        self.plugin = main.Plugin()
+        self.plugin = support.LegacyPlugin()
         for name in main.MODULE_NAMES:
             setattr(self.plugin, "_" + name, types.SimpleNamespace(
                 _main=AsyncMock(), _migration=AsyncMock(), _unload=AsyncMock(), _uninstall=AsyncMock(),

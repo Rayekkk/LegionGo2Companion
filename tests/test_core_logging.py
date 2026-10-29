@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import support
 import diagnostics
+import dk_fs
 import battery_backend as battery
 import controller_backend as controller
 import remap_backend as remap
@@ -302,11 +303,15 @@ class SettingsEventTests(Events, unittest.TestCase):
     def test_backup_failures_identify_each_store_and_recovery_without_values(self):
         with tempfile.TemporaryDirectory() as temporary:
             stores = [AtomicSettingsManager(name, temporary) for name in ('battery_settings', 'rgb_settings')]
-            for store in stores:
-                os.mkdir(store.backup_path)
-                store.replace({'private_setting': 'private-payload-marker'})
-                store.replace({'private_setting': 'private-payload-marker'})
-            os.rmdir(stores[0].backup_path)
+            write_atomic = dk_fs.write_atomic
+            def copy_fails(path, *args, **kwargs):
+                if path.endswith(dk_fs.LAST_GOOD):
+                    raise OSError('copy unavailable')
+                return write_atomic(path, *args, **kwargs)
+            with patch.object(dk_fs, 'write_atomic', side_effect=copy_fails):
+                for store in stores:
+                    store.replace({'private_setting': 'private-payload-marker'})
+                    store.replace({'private_setting': 'private-payload-marker'})
             stores[0].replace({'private_setting': 'private-payload-marker'})
         rows = self.events('settings', 'backup_refresh')
         self.assertEqual([(row['context']['store'], row['context']['status']) for row in rows],

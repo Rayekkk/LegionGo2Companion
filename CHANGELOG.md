@@ -1,6 +1,27 @@
-# 2.4.0
+# Changelog
 
-Released 2026-10-26.
+All notable changes to Legion Go 2 Companion, newest first.
+
+## [Unreleased]
+
+### Changed
+
+- **Clearer errors:** when something fails unexpectedly, the panel and the Desktop app show a short message and
+  the details go to the Decky log, never file paths.
+- **Updates:** **Check for updates** asks GitHub again on every click instead of showing a result up to a minute
+  old. A second **Download** while one is running is refused at once ("A download is already running.") instead
+  of waiting for the first. The update messages are clearer: a release that cannot be offered says why, a missing
+  file in the release ZIP is named, and a network error says what went wrong. A release ZIP is fetched only from
+  GitHub's own download servers.
+- **Updates:** if something other than a regular file (for example a link) already has the release ZIP's name in
+  Downloads, Companion refuses to save there instead of replacing it.
+
+### Fixed
+
+- **Settings:** a damaged settings file is kept as `.corrupt-<time>` before it is replaced, so it can still be
+  looked at; settings that could not be read back are never written.
+
+## [2.4.0] - 2026-10-26
 
 ### Added
 
@@ -26,9 +47,7 @@ Released 2026-10-26.
 - **Stick lights:** your lighting is set again once when Companion starts and once more shortly after a wake, so it no longer stays wrong when the controller wakes with stale values. The lights now also work while one controller is detached (they failed with "The joystick-ring interface does not belong to the expected controller."), and they are set again after a controller is attached or detached.
 - **Fan Control** no longer turns itself off for good when the fan briefly returns to firmware control on its own (seen once while a controller was reattached): Companion takes the fan back after its usual safety checks, up to 3 times in 10 minutes. It still turns Fan Control off when anything else writes the fan speed, and a single misread of the fan setting no longer counts as such a write.
 
-# 2.3.0
-
-Released 2026-10-22.
+## [2.3.0] - 2026-10-22
 
 Companion now runs, as an early beta, on the first Legion Go and the Legion Go S, and updating Companion no longer wipes most of your settings. Nothing changes on a Legion Go 2 83N0 except what is listed below.
 
@@ -58,9 +77,7 @@ Companion now runs, as an early beta, on the first Legion Go and the Legion Go S
 - **Installing or reloading Companion:** when Decky stops Companion while it is still starting (right after installing a ZIP), Companion now stops within Decky's time limit instead of being killed after 5 seconds.
 - **Panel and Desktop app** wait for the console to be detected instead of briefly showing every module on startup.
 
-# 2.2.1
-
-Released 2026-10-20.
+## [2.2.1] - 2026-10-20
 
 The Decky panel and the Desktop app now share one set of rules and texts for every module, so they always agree. Most of this update is internal cleanup with no change in what Companion does; the visible changes are listed below.
 
@@ -103,9 +120,7 @@ The Decky panel and the Desktop app now share one set of rules and texts for eve
 - **Building from source:** `npm run build` no longer deletes the native app in `dist/desktop`, and `npm run package` writes a `.sha256` file next to the ZIP (checked by `verify-package.py`).
 - Settings from the old standalone plugins (LeGoTDP, LeGo Vibe Control, LeGo2 Brightness Fix) and from versions before 2.1.0 are no longer imported. Companion still pauses while those plugins are installed.
 
-# 2.2.0
-
-Released 2026-10-18.
+## [2.2.0] - 2026-10-18
 
 Tested on SteamOS 3.8 Stable. Compatibility was also checked on SteamOS 3.9.3 Beta, where Display uses SteamOS's own Legion Go 2 display profile and Only 6 GHz is available.
 
@@ -213,9 +228,7 @@ Tested on SteamOS 3.8 Stable. Compatibility was also checked on SteamOS 3.9.3 Be
 - A momentary error in that check no longer blocks the panel until Decky restarts.
 - Fewer warnings in the system log for expected events; events from the plugin's first seconds are kept.
 
-# 2.1.0
-
-Released 2026-10-11.
+## [2.1.0] - 2026-10-11
 
 ### New: Fan Control
 
@@ -253,9 +266,7 @@ a time, and return any other controller to firmware automatic before enabling it
 - **Stricter OLED mode validation:** invalid mode requests are rejected before changing settings or installing the legacy display script, instead of silently selecting PQ.
 - **A clearer user guide:** the README now explains controls, recovery and hardware limits, with screenshots of all nine modules, module management and the full-screen fan editor.
 
-# 2.0.0
-
-Released 2026-10-10.
+## [2.0.0] - 2026-10-10
 
 ### New and changed
 
@@ -318,7 +329,7 @@ Released 2026-10-10.
 - Pending changes finish before module shutdown or restoration. Failed module starts are clearly reported, with a retry after partial startup work is cleaned up.
 - Update and optional RyzenAdj downloads handle failures and cancellation more reliably. Settings recovery, restoration and package checks are stricter; outdated build dependencies and unused code have been removed.
 
-# 1.0.4
+## [1.0.4]
 
 ### Added
 
@@ -333,7 +344,7 @@ Released 2026-10-10.
 - Improved Wi-Fi reconnection pacing, live band verification, and rollback when the selected 5/6 GHz policy cannot connect.
 - Stopped additional RGB writes after a failed controller command and report the failure in module status.
 
-# 1.0.3
+## [1.0.3]
 
 ### Added
 
@@ -349,7 +360,7 @@ Released 2026-10-10.
 - Replaced EPP profile labels with Prefer CPU / Prefer GPU and clearer descriptions.
 - Interrupted display resets retain recovery data and can be retried safely.
 
-# 1.0.2
+## [1.0.2]
 
 ### Added
 
@@ -360,7 +371,7 @@ Released 2026-10-10.
 - Informational panels now participate in controller focus, allowing the Decky panel to scroll fully with the joystick.
 - Improved reliability of the Windows settings crash-recovery checks used by the quality workflow.
 
-# 1.0.1
+## [1.0.1]
 
 ### Fixed
 
@@ -368,6 +379,6 @@ Released 2026-10-10.
 - Improved CPU EPP compatibility and Wi-Fi preference recovery when switching SteamOS versions.
 - Retained support for SteamOS 3.10 with Linux kernel 7.2.
 
-# 1.0.0
+## [1.0.0]
 
 Initial release.

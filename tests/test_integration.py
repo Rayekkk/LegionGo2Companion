@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import support
 from support import ROOT, decky  # Installs the Decky/settings stubs first.
 import battery_backend
 import controller_backend
@@ -118,7 +119,7 @@ class IntegrationTests(unittest.TestCase):
                 (False, 20.0), (False, 20.2), (True, 22.0), (False, 22.0), (True, 23.0), (False, 23.5)])
 
     def test_tdp_and_namespaced_wrappers_delegate(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._tdp.get_caps = AsyncMock(return_value={"min": 5})
         plugin._vibration.get_driver_status = AsyncMock(return_value={"found": True})
         plugin._display.get_state = AsyncMock(return_value={"setup_done": True})
@@ -144,7 +145,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(asyncio.run(plugin.rgb_get_status())["success"])
 
     def test_lifecycle_tolerates_component_without_migration(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._tdp = types.SimpleNamespace(_migration=AsyncMock())
         plugin._vibration = types.SimpleNamespace(_migration=AsyncMock())
         plugin._display = types.SimpleNamespace()
@@ -222,7 +223,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(main._plugin_version(),"2.1.0")
 
     def test_get_version_reports_standalone_conflicts(self):
-        response = asyncio.run(main.Plugin().get_version())
+        response = asyncio.run(support.LegacyPlugin().get_version())
         self.assertEqual(response["version"], json.loads((ROOT / "plugin.json").read_text())["version"])
         self.assertIsInstance(response["standalone_plugins"], list)
 
@@ -232,7 +233,7 @@ class RootForwardingTests(unittest.IsolatedAsyncioTestCase):
         await module_runtime.drain('tdp')
 
     async def test_root_forwards_reset_context_guards(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._vibration.reset_to_default = AsyncMock(return_value={'success': True})
         await plugin.vibe_reset_to_default('111', '111')
         plugin._vibration.reset_to_default.assert_awaited_once_with('111', '111')

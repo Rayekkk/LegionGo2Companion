@@ -19,7 +19,7 @@ import subprocess
 import time
 
 from diagnostics import _FIELDS as _CONTEXT, MAX_BYTES, MAX_RECORD, safe_text
-from system_process import system_env
+from dk_process import system_env
 
 MAX_EVENTS = 1000
 MAX_RESPONSE_BYTES = 400 * 1024

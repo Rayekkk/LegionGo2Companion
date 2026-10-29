@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster } from "@decky/api";
+import { toaster } from "@decky/api";
 import { ButtonItem, DropdownItem, DropdownOption, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { FirmwarePanel } from "./firmware";
-import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { detailsRows, errorText, infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { reportingText, SLEEP_DEFAULT, SLEEP_LABEL, SLEEP_TITLE, sleepChange, sleepNote, sleepOptions, sleepShown, sleepText,
   sleepValue, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
   vectorText } from "../desktop/native/controller.mjs";
@@ -53,17 +53,17 @@ interface ControllerDiagnostics {
 }
 
 const mutations = mutationQueue();
-const readControllerStatus = callable<[], ControllerStatus>("controller_get_status");
+const readControllerStatus = rpc<[], ControllerStatus>("controller_get_status");
 export const getControllerStatus = async () => {
   if (mutations.pending) await mutations.tail;
   return readControllerStatus();
 };
-const startDiagnostics = callable<[], ControllerDiagnostics>("controller_start_diagnostics");
-const getDiagnostics = callable<[string], ControllerDiagnostics>("controller_get_diagnostics");
-const stopDiagnostics = callable<[string], ControllerDiagnostics>("controller_stop_diagnostics");
-const setGyroSource = callable<[GyroSource], ControllerStatus>("controller_set_gyro_source");
-const releaseControl = callable<[], ControllerStatus>("controller_release_control");
-const setSleepTime = callable<[number], ControllerStatus>("controller_set_sleep_time");
+const startDiagnostics = rpc<[], ControllerDiagnostics>("controller_start_diagnostics");
+const getDiagnostics = rpc<[string], ControllerDiagnostics>("controller_get_diagnostics");
+const stopDiagnostics = rpc<[string], ControllerDiagnostics>("controller_stop_diagnostics");
+const setGyroSource = rpc<[GyroSource], ControllerStatus>("controller_set_gyro_source");
+const releaseControl = rpc<[], ControllerStatus>("controller_release_control");
+const setSleepTime = rpc<[number], ControllerStatus>("controller_set_sleep_time");
 
 const sourceOptions: DropdownOption[] = Object.entries(sourceLabels).map(([data, label]) => ({ data, label }));
 

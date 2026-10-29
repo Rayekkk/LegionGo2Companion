@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
-import { callable, toaster } from "@decky/api";
+import { toaster } from "@decky/api";
 import { ButtonItem, ConfirmModal, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import { errorText, infoRow } from "./shared";
+import { errorText, infoRow, rpc } from "./shared";
 import { BUSY_LABELS as busyPhases, installConfirm, PHASE_LABELS as phaseLabel, RISK_NOTICE } from "../desktop/native/firmware.mjs";
 
 type FirmwareComponent = { id: string; label: string; installed: string; available: string; newer: boolean; downloaded: boolean };
 type FirmwareStatus = { phase: string; message: string; error: string; component: string; install_enabled: boolean;
   install_reason: string; checked_at: string; token: string; components: FirmwareComponent[] };
-const getStatus = callable<[], FirmwareStatus>("firmware_get_status");
-const checkUpdates = callable<[], FirmwareStatus>("firmware_check");
-const downloadUpdate = callable<[], FirmwareStatus>("firmware_download");
-const installUpdate = callable<[string], FirmwareStatus>("firmware_install");
+const getStatus = rpc<[], FirmwareStatus>("firmware_get_status");
+const checkUpdates = rpc<[], FirmwareStatus>("firmware_check");
+const downloadUpdate = rpc<[], FirmwareStatus>("firmware_download");
+const installUpdate = rpc<[string], FirmwareStatus>("firmware_install");
 const checkPhases = ["idle", "up_to_date", "installed", "failed"];
 const canInstall = (value: FirmwareStatus) => value.phase === "downloaded" && value.install_enabled;
 const has = (table: object, key: unknown) => typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key);

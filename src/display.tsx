@@ -2,10 +2,10 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/LeGo2BrightnessFix
 
-import { callable, useQuickAccessVisible } from "@decky/api";
+import { useQuickAccessVisible } from "@decky/api";
 import { PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { detailsRows, infoRow, statusPlaceholder } from "./shared";
+import { detailsRows, infoRow, statusPlaceholder, rpc } from "./shared";
 import { EDID_FIX_LABEL, EDID_FIX_NOTE, edidStatus, steamosNotice } from "../desktop/native/display.mjs";
 
 interface State {
@@ -17,8 +17,8 @@ interface State {
   edid_game_nits: number;
 }
 
-const getState = callable<[], State>("display_get_state");
-const setEdidFix = callable<[boolean], State>("display_set_edid_fix");
+const getState = rpc<[], State>("display_get_state");
+const setEdidFix = rpc<[boolean], State>("display_set_edid_fix");
 
 export const DisplayPage: FC<{ visible?: boolean }> = ({ visible: tabShown = true }) => {
   const visible = useQuickAccessVisible() && tabShown;

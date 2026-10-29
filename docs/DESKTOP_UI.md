@@ -162,27 +162,23 @@ native tests, then runs the same binaries again on the newest Qt 6 runtime
 
 ## Reproduce
 
-Use Node 24, Python 3.10+, CMake 3.24+, Ninja, a C++17 compiler and a Qt 6.9.x
-SDK (e.g. `aqt install-qt linux desktop 6.9.1 linux_gcc_64`).
+Use Node 24, Python 3.14, CMake 3.24+, Ninja, a C++17 compiler and a Qt 6.9.x
+SDK (e.g. `aqt install-qt linux desktop 6.9.1 linux_gcc_64`). In CI the native
+steps are `scripts/ci-native.sh`.
 
 ```bash
 npm ci --ignore-scripts
-npm run typecheck
-npm run test:frontend
-python -W error -m unittest discover -s tests -p 'test_*.py'
-node scripts/desktop-contract.mjs --check
-npm run build
 python scripts/build-native.py --qt /path/to/Qt/6.9.1/gcc_64 --build /tmp/companion-native --test --bundle dist/desktop
-node scripts/check-desktop-build.mjs --runtime
-npm run package -- --check
-npm run package -- --output /absolute/fresh/path/desktop-candidate.zip
-python scripts/verify-package.py /absolute/fresh/path/desktop-candidate.zip
+npm run check
 ```
 
-`npm run package` takes the tracked files from the committed `HEAD` (`git archive`)
-and only the built `dist/` from the checkout; it refuses uncommitted changes to
-packaged files. Names are sorted, every entry carries the commit date and fixed
-modes, so the same commit, `dist/` and Node version give the same SHA-256.
+`npm run check` runs the types, the backend and frontend tests, the build (with
+`desktop-contract.mjs` and `check-desktop-build.mjs`) and `npm run package`:
+`check-desktop-build.mjs --runtime`, the ZIP in `artifacts/` with its `.sha256`,
+`verify-package.py` and the updaters of earlier releases (`check-legacy-updaters.py`).
+Names are sorted and every entry carries one fixed date and fixed modes, so the same
+files, `dist/` and Node version give the same SHA-256; `npm run package -- --release`
+also refuses uncommitted changes to anything packaged.
 
 `build-native.py --test` runs the CTest suites `transport`, `logviewer`,
 `native_host` and `native_ui` (QML against a fixture backend);

@@ -282,7 +282,7 @@ class RgbBackendTests(unittest.TestCase):
     def test_missing_primary_with_corrupt_backup_does_not_seed_default_ownership(self):
         from safe_settings import SettingsManager
         with tempfile.TemporaryDirectory(prefix="lego-rgb-recovery-") as raw:
-            Path(raw, "rgb_settings.json.bak").write_text('{"state":', encoding="utf-8")
+            Path(raw, "rgb_settings.json.last-good").write_text('{"state":', encoding="utf-8")
             store = SettingsManager("rgb_settings", raw)
             with patch.object(rgb_backend, "settings", store):
                 with self.assertRaises(RuntimeError):

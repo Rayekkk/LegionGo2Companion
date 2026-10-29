@@ -130,7 +130,7 @@ class DetectionTests(unittest.TestCase):
 
 class GateTests(unittest.IsolatedAsyncioTestCase):
     def make_plugin(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         self.components = []
         for name in ("tdp", "vibration", "display", "wifi", "rgb", "remap", "battery", "controller"):
             component = types.SimpleNamespace(_main=AsyncMock(), _migration=AsyncMock(),
@@ -436,7 +436,7 @@ class ConflictAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
 class ConflictLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_conflict_withdraws_fan_before_an_admitted_rpc_finishes(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         client = fan_backend.Client()
         plugin._fan._client = client
         plugin._run_stage = AsyncMock()
@@ -458,7 +458,7 @@ class ConflictLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await task
 
     async def test_transient_incomplete_plugin_manifest_does_not_unload_healthy_modules(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._modules_started = True
         plugin._stop_modules = AsyncMock()
         with patch.object(main, '_installed_standalone_plugins', side_effect=[ValueError('Incomplete plugin manifest'), []]) as scan:
@@ -469,7 +469,7 @@ class ConflictLifecycleTests(unittest.IsolatedAsyncioTestCase):
         plugin._stop_modules.assert_not_awaited()
 
     async def test_persistent_scan_failure_still_withdraws_unverifiable_ownership(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._modules_started = True
         plugin._stop_modules = AsyncMock()
         with patch.object(main, '_installed_standalone_plugins', side_effect=PermissionError('denied')):

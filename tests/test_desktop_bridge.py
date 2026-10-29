@@ -173,7 +173,8 @@ class DesktopBridgeTests(unittest.IsolatedAsyncioTestCase):
         root = Path(__file__).resolve().parents[1]
         expected = set()
         for file in (root / 'src').glob('*.tsx'):
-            expected.update(re.findall(r'callable\s*<[\s\S]*?>\s*\(\s*"([a-z_]+)"', file.read_text(encoding='utf-8')))
+            expected.update(re.findall(r'\b(?:callable|rpc)\s*<[\s\S]*?>\s*\(\s*"([a-z_]+)"',
+                                       file.read_text(encoding='utf-8')))
         for method in expected:
             self.assertTrue(inspect.iscoroutinefunction(getattr(main.Plugin, method, None)), method)
         # Same exclusions as scripts/desktop-contract.mjs (Steam app hints, RPCs the app never calls).

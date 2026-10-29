@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Check that a release ZIP is accepted by the in-plugin updaters users already run.
 
-Usage: python3 scripts/check-legacy-updaters.py LegionGo2Companion-X.Y.Z.zip
+Usage: python scripts/check-legacy-updaters.py [artifacts/LegionGo2Companion-X.Y.Z.zip]
 
 Loads companion_updates.py from the 2.1.0 and 2.2.0 tags (needs the tags fetched)
 and runs the same checks those versions run on a downloaded release: the asset
@@ -37,9 +37,10 @@ def legacy_updater(tag):
 
 
 def main(argv):
-    if len(argv) != 2:
+    if len(argv) > 2:
         sys.exit(__doc__.strip().splitlines()[2])
-    path = Path(argv[1])
+    version = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))["version"]
+    path = Path(argv[1]) if len(argv) == 2 else ROOT / "artifacts" / f"LegionGo2Companion-{version}.zip"
     size = path.stat().st_size
     with zipfile.ZipFile(path) as archive:
         version = json.loads(archive.read("LegionGo2Companion/plugin.json"))["version"]

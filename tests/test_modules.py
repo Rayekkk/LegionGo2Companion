@@ -32,7 +32,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
         self.plugin = self.make_plugin()
 
     def make_plugin(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         for name in main.MODULE_NAMES:
             setattr(plugin, '_' + name, types.SimpleNamespace(_main=AsyncMock(), _migration=AsyncMock(),
                 _unload=AsyncMock(), _uninstall=AsyncMock(), get_status=AsyncMock(return_value={'success': True})))
@@ -709,7 +709,7 @@ class ModuleGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lost_module_settings_never_turn_disabled_modules_back_on(self):
         from pathlib import Path
-        for suffix in ('', '.bak'):
+        for suffix in ('', '.last-good'):
             Path(self.folder.name, 'module_settings.json' + suffix).write_text('{broken')
         fresh = self.make_plugin()
         with patch.object(main, 'withdraw', new=AsyncMock()) as stop:
@@ -819,7 +819,7 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
 class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_error_is_not_reported_once_the_module_is_off(self):
         with tempfile.TemporaryDirectory() as raw, patch.object(main.decky, 'DECKY_PLUGIN_SETTINGS_DIR', raw):
-            loader = main.Plugin()
+            loader = support.LegacyPlugin()
             loader._module_health['rgb'] = {'ready': False, 'error': 'Startup failed.'}
             loader._module_state['rgb'] = {'enabled': True}
             self.assertEqual(loader._module_status()['rgb']['error'], 'Startup failed.')
@@ -837,7 +837,7 @@ class DisplayStartupHealthTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(display.Plugin, '_state', state))
             stack.enter_context(patch.object(display.Plugin, '_task', None))
             stack.enter_context(patch.object(display.Plugin, '_prop_task', None))
-            loader = main.Plugin()
+            loader = support.LegacyPlugin()
             with patch.object(display.Plugin, '_read_settings', side_effect=OSError('disk unavailable')):
                 with self.assertRaisesRegex(OSError, 'disk unavailable'):
                     await loader._start_module('display')
@@ -1146,7 +1146,7 @@ class ModuleEventLoopTests(unittest.IsolatedAsyncioTestCase):
 
 class UnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_unload_withdraws_fan_lease_before_waiting_for_desktop_operations(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         client = fan_backend.Client()
         plugin._fan._client = client
         entered, release = asyncio.Event(), asyncio.Event()

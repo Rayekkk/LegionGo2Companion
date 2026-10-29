@@ -12,7 +12,7 @@ import time
 import asyncio
 from diagnostics import configure_worker, event as diagnostic_event, transition as diagnostic_transition
 import module_runtime
-from system_process import PYTHON, run, system_env
+from dk_process import PYTHON, run, system_env
 import subprocess
 import re
 import sys
@@ -223,7 +223,8 @@ class Plugin:
         busctl, systemctl and curl.
         """
         try:
-            result = run(cmd, timeout, stdin=None, capture_output=True, text=True)
+            # LC_ALL=C, not dk_process's C.UTF-8: the nmcli/iw parsers expect C-locale escaping of SSIDs.
+            result = run(cmd, timeout, env=system_env(LC_ALL="C"), stdin=None, capture_output=True, text=True)
             return {
                 "success": result.returncode == 0,
                 "stdout": result.stdout if preserve_stdout else result.stdout.strip(),

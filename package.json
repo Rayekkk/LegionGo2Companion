@@ -5,28 +5,69 @@
   "license": "BSD-3-Clause",
   "type": "module",
   "scripts": {
-    "build": "rollup -c && node scripts/desktop-contract.mjs && node scripts/check-build.mjs && node scripts/check-desktop-build.mjs",
+    "build": "rollup -c && node scripts/check-build.mjs && node scripts/desktop-contract.mjs && node scripts/check-desktop-build.mjs",
     "watch": "rollup -c -w",
     "typecheck": "tsc --noEmit",
-    "test": "python -m unittest discover -s tests -p test_*.py",
-    "test:desktop": "node scripts/check-desktop-build.mjs",
-    "package": "node scripts/package.mjs",
-    "test:frontend": "node tests/frontend_lifecycle.cjs && node tests/frontend_navigation.cjs && node tests/frontend_guard.cjs && node tests/frontend_battery.cjs && node tests/frontend_controller.cjs && node tests/frontend_firmware.cjs && node tests/frontend_edit_ordering.cjs && node tests/frontend_page_lifecycle.cjs && node tests/frontend_modules.cjs && node tests/frontend_rgb.cjs && node tests/frontend_remap.cjs && node tests/frontend_display.cjs && node tests/frontend_wifi.cjs && node tests/frontend_overview.cjs && node tests/frontend_updates.cjs && node tests/frontend_focusable_info.cjs && node tests/frontend_vibration_recovery.cjs && node tests/frontend_tdp_recovery.cjs && node tests/frontend_fan.cjs && node tests/frontend_consoles.cjs"
+    "test:backend": "python -W error -m unittest discover -s tests -p \"test_*.py\"",
+    "test:frontend": "node --test \"tests/*.test.cjs\"",
+    "package": "node scripts/check-desktop-build.mjs --runtime && node scripts/package.mjs && python scripts/verify-package.py && python scripts/check-legacy-updaters.py",
+    "check": "npm run typecheck && npm run test:backend && npm run test:frontend && npm run build && npm run package"
   },
   "devDependencies": {
     "@decky/api": "^1.1.3",
     "@decky/ui": "^4.12.0",
-    "@rollup/plugin-commonjs": "26.0.3",
-    "@rollup/plugin-json": "6.1.0",
-    "@rollup/plugin-node-resolve": "15.3.1",
-    "@rollup/plugin-replace": "5.0.7",
-    "@rollup/plugin-typescript": "11.1.6",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.0",
     "@types/react": "^19.1.1",
     "@types/react-dom": "^19.1.1",
     "rollup": "^4.0.0",
-    "rollup-plugin-external-globals": "0.11.0",
-    "rollup-plugin-import-assets": "1.1.1",
-    "tslib": "2.8.1",
+    "rollup-plugin-external-globals": "^0.13.0",
+    "tslib": "^2.8.1",
     "typescript": "^5.0.0"
+  },
+  "decky": {
+    "files": [
+      "*.py",
+      "pyudev",
+      "desktop",
+      "dist",
+      "plugin.json",
+      "package.json",
+      "package-lock.json",
+      "rollup.config.js",
+      "tsconfig.json",
+      "src",
+      "scripts/check-build.mjs",
+      "scripts/check-desktop-build.mjs",
+      "scripts/desktop-contract.mjs",
+      "scripts/build-native.py",
+      "scripts/verify-package.py",
+      "scripts/package.mjs",
+      "README.md",
+      "CHANGELOG.md",
+      "SOURCE.md",
+      "docs/DESKTOP_UI.md",
+      "docs/CONTROLLER_FIRMWARE.md",
+      "docs/LOGGING.md",
+      "LICENSE",
+      "LICENSE.MIT",
+      "LICENSE.HUESYNC",
+      "LICENSE.DECKY-ROLLUP",
+      "NOTICE"
+    ],
+    "forbidden": [
+      "(^|/)(tests|artifacts|build|bin|\\.local-validation)(/|$)",
+      "_live\\.py$"
+    ],
+    "folder": "LegionGo2Companion",
+    "keepDist": [
+      "desktop"
+    ],
+    "python": [
+      "3.14"
+    ],
+    "flags": [
+      "root"
+    ]
   }
 }

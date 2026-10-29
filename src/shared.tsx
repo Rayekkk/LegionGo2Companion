@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Helpers shared by the Decky pages. Render helpers are plain functions (not
 // components) so the element tree is exactly what the page used to inline.
+import { callable } from "@decky/api";
 import { ButtonItem, ConfirmModal, Field, findModuleExport, PanelSection, PanelSectionRow, Router, showModal, Spinner } from "@decky/ui";
 import { Fragment, type ReactNode } from "react";
+import { settle, type Result } from "./result";
 
 /** A read-only row; `focusable` keeps it reachable with the D-pad. */
 export const infoRow = (label: ReactNode, description?: ReactNode) =>
@@ -34,6 +36,19 @@ export const statusPlaceholder = ({ title, label, error, onRetry, retryLabel = "
     <PanelSectionRow>{error ? <Field focusable label={label} description={error} /> : <Spinner />}</PanelSectionRow>
     {error && <PanelSectionRow><ButtonItem layout="below" onClick={onRetry}>{retryLabel}</ButtonItem></PanelSectionRow>}
   </PanelSection>;
+
+/**
+ * callable() through the backend's D2 answers ({ok, error?, state?}) with the pages' existing handling: the state,
+ * also of a refusal that carries one (the page reads its legacy success field until that module's step 2, DeckyKit
+ * PLAN Etap C2); any other refusal or failed call is thrown as an Error with its text, as a rejected call was.
+ */
+export const rpc = <A extends unknown[], T>(name: string) => {
+  const call = callable<A, Result<T>>(name);
+  return (...args: A): Promise<T> => settle(call(...args)).then((answer) => {
+    if (answer.ok || "state" in answer) return answer.state as T;
+    throw new Error(answer.error || "Unknown error");
+  });
+};
 
 /** An Error's message; anything else as the fallback, or as text when there is none. */
 export const errorText = (error: unknown, fallback?: string) =>
@@ -74,7 +89,7 @@ const lateChecks = new Set<ReturnType<typeof setTimeout>>();
 /** Router.MainRunningApp, or null when nothing runs or the router is unavailable. */
 export const runningApp = (): RunningApp | null => {
   try {
-    const app = (Router as any)?.MainRunningApp;
+    const app = Router?.MainRunningApp;
     return app?.appid ? app : null;
   } catch {
     return null;
@@ -98,19 +113,23 @@ const checkRunningApp = () => {
  * module, reachable either as a global or through the webpack exports; the
  * legacy call stays as a fallback for older clients.
  */
+/** Steam's registration as an unsubscribe function: it returns an object with unregister() or a plain function. */
+const asUnsub = (reg: SteamUnregister | undefined): (() => void) | null => {
+  if (typeof reg === "function") return reg;
+  if (typeof reg?.unregister === "function") return () => reg.unregister();
+  return null;
+};
+
 function onResumeFromSuspend(handler: () => void): (() => void) | null {
-  const asUnsub = (reg: any): (() => void) | null => {
-    if (typeof reg === "function") return reg;
-    if (typeof reg?.unregister === "function") return () => reg.unregister();
-    return null;
+  const isSleepManager = (e: unknown) => {
+    const candidate = e as SteamSleepManager | null;
+    return !!candidate && typeof candidate === "object" &&
+      (typeof candidate.RegisterForNotifyResumeFromSuspend === "function" ||
+        typeof candidate.NotifyResumeFromSuspend === "function");
   };
-  const isSleepManager = (e: any) =>
-    !!e && typeof e === "object" &&
-    (typeof e.RegisterForNotifyResumeFromSuspend === "function" ||
-      typeof e.NotifyResumeFromSuspend === "function");
 
   try {
-    const mgr = (window as any).SleepManager ?? findModuleExport(isSleepManager);
+    const mgr: SteamSleepManager | undefined = window.SleepManager ?? findModuleExport(isSleepManager);
     const unsub = asUnsub(mgr?.RegisterForNotifyResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
@@ -119,7 +138,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
 
   try {
     const unsub = asUnsub(
-      (window as any).SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
+      window.SteamClient?.System?.RegisterForOnResumeFromSuspend?.(handler));
     if (unsub) return unsub;
   } catch (e) {
     console.warn("[legiongo2companion] game_watcher.legacy_resume_registration_failed");
@@ -135,7 +154,7 @@ function onResumeFromSuspend(handler: () => void): (() => void) | null {
 function startGameWatch() {
   const generation = ++gameGeneration;
   const live = () => generation === gameGeneration;
-  const steam = (window as any).SteamClient;
+  const steam = window.SteamClient;
   try {
     const reg = steam?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
       if (!live()) return;
@@ -146,7 +165,8 @@ function startGameWatch() {
       }, 300);
       lateChecks.add(timer);
     });
-    if (reg?.unregister) gameUnsubs.push(() => reg.unregister());
+    const unsub = asUnsub(reg);
+    if (unsub) gameUnsubs.push(unsub);
   } catch (e) {
     console.warn("[legiongo2companion] game_watcher.app_notifications_unavailable");
   }

@@ -115,6 +115,24 @@ class TdpCoreTests(unittest.TestCase):
                 raise TimeoutError('offline')
             out.write(self.archive)
 
+        def spool(url, folder, limit, sha256=None, *, cancel=None, **_options):
+            # dk_net.spool: the checked body as an anonymous file in folder, else NetError (cancel included).
+            out = tempfile.TemporaryFile(dir=folder)
+            try:
+                self.download(url, out, cancel=cancel)
+                out.seek(0)
+                if sha256 is not None and hashlib.sha256(out.read()).hexdigest() != sha256:
+                    raise tdp.dk_net.Mismatch('checksum mismatch')
+            except tdp.dk_net.NetError:
+                out.close()
+                raise
+            except Exception as error:
+                out.close()
+                raise tdp.dk_net.NetError(str(error)) from error
+            out.seek(0)
+            return out
+
+        self.download = download
         for name, value in {
             'settings': self.store, 'WMI_ROOT': str(self.firmware),
             'PLATFORM_PROFILE_GLOB': str(self.root / 'platform-profile/*/profile'),
@@ -134,8 +152,8 @@ class TdpCoreTests(unittest.TestCase):
         self.stack.enter_context(patch.object(tdp.module_runtime, 'suspend_offset', return_value=0.0))
         self.stack.enter_context(patch.object(tdp._resume_detected, 'last', None))
         self.stack.enter_context(patch.object(tdp.subprocess, 'Popen', Ryzenadj))
-        self.stack.enter_context(patch.object(tdp.updater, 'download_to', side_effect=download))
-        self.stack.enter_context(patch.object(tdp.updater, 'ssl_context'))
+        self.stack.enter_context(patch.object(tdp.dk_net, 'spool', side_effect=spool))
+        self.stack.enter_context(patch.object(tdp.dk_net, 'tls_context'))
         self.stack.enter_context(patch.object(tempfile, 'tempdir', str(self.tmp)))
         self.plugin = tdp.Plugin()
         self.plugin._ready = True
@@ -170,7 +188,7 @@ class TdpCoreTests(unittest.TestCase):
         return patch.object(tdp, '_write_ppt')
 
     def disk_full(self):
-        return patch('safe_settings._atomic_write_bytes',
+        return patch('dk_fs.write_atomic',
                      side_effect=OSError(28, 'No space left on device'))
 
     def publish_helper(self, archive_ok=True, binary_ok=True):
@@ -641,12 +659,12 @@ class TdpCoreTests(unittest.TestCase):
     def test_a_download_cancelled_after_verification_installs_nothing(self):
         self.bin.unlink()
         self.publish_helper()
-        finished, download = [], tdp.updater.download_to.side_effect
+        finished, download = [], self.download
 
         def download_then_cancel(*args, **options):
             download(*args, **options)
             finished.append(True)  # Extras turned off while the archive was checked
-        tdp.updater.download_to.side_effect = download_then_cancel
+        self.download = download_then_cancel
         with self.assertRaises(InterruptedError):
             tdp._download_ryzenadj(cancel=lambda: bool(finished))
         self.assertEqual(list(self.bin.parent.iterdir()), [])

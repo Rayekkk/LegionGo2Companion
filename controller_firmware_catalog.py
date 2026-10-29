@@ -170,12 +170,12 @@ def _check_http(model):
 
 def check_catalog(cancelled, model):
     """Parent wall deadline also covers DNS, TLS, headers and JSON parsing."""
-    from system_process import run_helper
+    from dk_process import run_helper
     from diagnostics import event
     if cancelled.is_set():
         raise CatalogError('Lenovo catalog check stopped.')
-    returncode, data = run_helper([str(Path(__file__).resolve()), '--catalog-data', model], cancelled,
-        WALL_SECONDS, CatalogError('Lenovo catalog check stopped or timed out.'))
+    returncode, data, _ = run_helper([str(Path(__file__).resolve()), '--catalog-data', model], WALL_SECONDS,
+        cancelled.is_set, stopped=CatalogError('Lenovo catalog check stopped or timed out.'))
     if returncode != 0 or len(data) > 16384:
         event('firmware','catalog_helper_failed',stage='catalog',returncode=returncode,
             reason='nonzero_exit' if returncode else 'output_size')

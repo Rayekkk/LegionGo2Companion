@@ -159,13 +159,14 @@ class SettingsProcessCrashTests(unittest.TestCase):
         for checkpoint, primary, backup in (
             ("before_replace:module.json", OLD, OLD),
             ("after_replace:module.json", PENDING, OLD),
-            ("before_replace:module.json.bak", PENDING, OLD),
-            ("after_replace:module.json.bak", PENDING, PENDING),
+            ("before_replace:module.json.last-good", PENDING, OLD),
+            ("after_replace:module.json.last-good", PENDING, PENDING),
         ):
             with self.subTest(checkpoint=checkpoint):
                 self.seed(OLD)
                 self.run_child("commit", checkpoint, PENDING)
-                self.assertEqual(json.loads((self.directory / "module.json.bak").read_text(encoding="utf-8")), backup)
+                self.assertEqual(json.loads((self.directory / "module.json.last-good").read_text(encoding="utf-8")),
+                                 backup)
                 self.assert_reopened(primary)
 
     def test_kill_before_journal_completion_preserves_pending_intent_and_baseline(self):
@@ -181,7 +182,8 @@ class SettingsProcessCrashTests(unittest.TestCase):
                 self.seed(PENDING)
                 (self.directory / "module.json").write_text("{broken", encoding="utf-8")
                 self.run_child("read", checkpoint)
-                self.assertFalse((self.directory / "module.json").exists())
+                # Recovery copies the damaged bytes aside first and replaces the file in one step: never missing.
+                self.assertEqual((self.directory / "module.json").read_text(encoding="utf-8"), "{broken")
                 self.assert_reopened(PENDING)
 
     def test_kill_before_explicit_repair_keeps_unrecoverable_storage_distinct_from_new_install(self):
@@ -192,10 +194,11 @@ class SettingsProcessCrashTests(unittest.TestCase):
         self.run_child("commit", "before_replace:module.json", PENDING)
         recovered = self.run_child("read")
         self.assertEqual(recovered["settings"], {})
-        self.assertIn("primary:", recovered["recovery_error"])
-        self.assertIn("backup:", recovered["recovery_error"])
+        self.assertIn("module.json:", recovered["recovery_error"])
+        self.assertIn("last-good copy:", recovered["recovery_error"])
         self.assertEqual(primary.read_text(encoding="utf-8"), "{broken")
-        self.assertEqual(backup.read_text(encoding="utf-8"), "[]")
+        self.assertEqual((self.directory / "module.json.last-good").read_text(encoding="utf-8"), "[]")
+        self.assertFalse(backup.exists(), "2.4.0's .bak became the .last-good copy")
 
 
 if __name__ == "__main__":

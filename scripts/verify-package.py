@@ -10,14 +10,14 @@ import zipfile
 
 root = Path(__file__).resolve().parents[1]
 manifest = json.loads((root / 'plugin.json').read_text(encoding='utf-8'))
-archive = Path(sys.argv[1]) if len(sys.argv) > 1 else root / f"LegionGo2Companion-{manifest['version']}.zip"
-required = {'main.py', 'bounded_http.py', 'desktop_bridge.py', 'desktop_install.py', 'desktop/launch.py',
+archive = Path(sys.argv[1]) if len(sys.argv) > 1 else root / 'artifacts' / f"LegionGo2Companion-{manifest['version']}.zip"
+required = {'main.py', 'dk_fs.py', 'dk_process.py', 'desktop_bridge.py', 'desktop_install.py', 'desktop/launch.py',
             'diagnostics.py', 'diagnostics_reader.py', 'controller_firmware.py', 'controller_firmware_catalog.py',
             'src/firmware.tsx', 'docs/CONTROLLER_FIRMWARE.md',
             'dist/index.js', 'dist/desktop/legiongo2companion', 'dist/desktop/native-manifest.json',
             'dist/desktop/rpc-methods.json',
             'desktop/native/CMakeLists.txt', 'desktop/native/Main.qml',
-            'plugin.json', 'LICENSE', 'NOTICE', 'SOURCE.md'}
+            'plugin.json', 'LICENSE', 'NOTICE', 'SOURCE.md', 'third_party/decky-api/LICENSE'}
 forbidden = {'.git', '.github', 'node_modules', '__pycache__', 'tests', 'artifacts',
              'build', 'bin', '.venv', 'venv', '.local-validation'}
 with zipfile.ZipFile(archive) as payload:
@@ -39,14 +39,13 @@ with zipfile.ZipFile(archive) as payload:
         assert not forbidden.intersection(path.parts), f'Private path: {path}'
         assert not stat.S_ISLNK(member.external_attr >> 16), f'Symlink: {path}'
         assert not path.name.startswith('.env') and path.suffix.lower() not in {'.pyc', '.pyo', '.pem', '.key', '.log'}
-        assert not path.name.endswith(('_live.py', 'settings.json', 'settings.json.bak', 'session.json'))
+        assert not path.name.endswith(('_live.py', 'settings.json', 'settings.json.bak', 'settings.json.last-good',
+                                       'session.json')) and '.corrupt-' not in path.name
         if member.is_dir():
             continue
         relative = path.relative_to('LegionGo2Companion')
-        if relative.parts[0] == 'THIRD_PARTY_SOURCES':
+        if relative.parts[:2] == ('third_party', 'decky-api'):
             source = root / 'node_modules/@decky/api' / Path(*relative.parts[2:])
-        elif relative.parts[0] == 'THIRD_PARTY_LICENSES':
-            source = root / 'node_modules/@decky/api/LICENSE'
         else:
             source = root / Path(*relative.parts)
         assert source.is_file() and payload.read(member) == source.read_bytes(), f'Stale/unexpected file: {path}'

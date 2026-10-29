@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   PanelSection,
@@ -9,7 +9,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { detailsRows, infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { detailsRows, infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { controllersText, levelText, protectionChecked, protectionLocked, protectionNote, RESET_DONE, RESET_LABEL, RESET_NOTE, resetShown } from "../desktop/native/battery.mjs";
 
 export interface BatteryStatus {
@@ -45,15 +45,15 @@ interface BatteryResult {
 }
 
 const mutations = mutationQueue();
-const readBatteryStatus = callable<[], BatteryStatus>("battery_get_status");
+const readBatteryStatus = rpc<[], BatteryStatus>("battery_get_status");
 export const getBatteryStatus = async () => {
   if (mutations.pending) await mutations.tail;
   return readBatteryStatus();
 };
-export const getControllerBatteryLevels = callable<[], ControllerBatteryStatus>("battery_get_controller_levels");
-const setBatteryEnabled = callable<[boolean], BatteryResult>("battery_set_enabled");
-const releaseBatteryControl = callable<[], BatteryResult>("battery_release_control");
-const resetChargingMode = callable<[], BatteryResult>("battery_reset_charging_mode");
+export const getControllerBatteryLevels = rpc<[], ControllerBatteryStatus>("battery_get_controller_levels");
+const setBatteryEnabled = rpc<[boolean], BatteryResult>("battery_set_enabled");
+const releaseBatteryControl = rpc<[], BatteryResult>("battery_release_control");
+const resetChargingMode = rpc<[], BatteryResult>("battery_reset_charging_mode");
 
 const unavailableControllerBatteries = (): ControllerBatteryStatus => ({
   available: false,

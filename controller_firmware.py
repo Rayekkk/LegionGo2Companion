@@ -159,7 +159,7 @@ def _openssl_executable():
 
 
 def _verify_signature(original):
-    from system_process import NO_WINDOW, run
+    from dk_process import run
     key_der = base64.b64decode(b''.join(PUBLIC_KEY.splitlines()[1:-1]), validate=True)
     if hashlib.sha256(key_der).hexdigest() != KEY_SHA256:
         raise FirmwareError('The trusted firmware key is invalid.')
@@ -175,7 +175,7 @@ def _verify_signature(original):
                 '-signature', str(signature), '-sigopt', 'rsa_padding_mode:pss',
                 '-sigopt', 'rsa_pss_saltlen:32', '-sigopt', 'rsa_mgf1_md:sha256', str(payload)],
                 10, env={'PATH': os.defpath, 'OPENSSL_CONF': os.devnull},
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise FirmwareError('Signature verification could not complete.') from exc
         if result.returncode != 0:
@@ -262,7 +262,7 @@ def _download_http(release, cancelled):
 
 def download_image(release, cancelled):
     """Isolate DNS/HTTP/TLS parsing behind a parent-enforced wall deadline."""
-    from system_process import run_helper
+    from dk_process import run_helper
     from diagnostics import event
     if not isinstance(release, Release) or not valid_image_url(release.url):
         raise FirmwareError('Invalid Lenovo firmware location.')
@@ -273,9 +273,9 @@ def download_image(release, cancelled):
     if cancelled.is_set():
         raise FirmwareError('Firmware preparation stopped before validation.')
     # The helper only downloads bytes. It never owns a device or flashes.
-    returncode, data = run_helper([str(Path(__file__).resolve()), '--download-data', release.component,
-        release.version, release.url, str(release.size)], cancelled, 35,
-        FirmwareError('Firmware preparation stopped before validation.'))
+    returncode, data, _ = run_helper([str(Path(__file__).resolve()), '--download-data', release.component,
+        release.version, release.url, str(release.size)], 35, cancelled.is_set,
+        stopped=FirmwareError('Firmware preparation stopped before validation.'))
     if returncode != 0 or not MIN_IMAGE_BYTES <= len(data) <= MAX_IMAGE_BYTES or (release.size and len(data) != release.size):
         event('firmware','download_helper_failed',level='warning',scope=release.component,
             stage='download',returncode=returncode,bytes=len(data),reason='nonzero_exit' if returncode else 'output_size')
@@ -426,8 +426,8 @@ def build_container(images):
 
 
 def _run_tool(argv, timeout, **streams):
-    from system_process import run, system_env
-    return run(argv, timeout, env=system_env(), **streams)  # fwupd keeps the parent's locale
+    from dk_process import run, system_env
+    return run(argv, timeout, env=system_env(), text=False, **streams)  # fwupd keeps the parent's locale
 
 
 def fwupd_devices():
@@ -459,7 +459,7 @@ def updater_running(proc=Path('/proc')):
 
 def install_blob(container, device_id, log_path):
     """One fwupd write. As root, fwupdtool stops the daemon and runs its own engine."""
-    from system_process import NO_WINDOW, system_env
+    from dk_process import NO_WINDOW, system_env
     started = progress = time.monotonic()
     size = 0
     with open(log_path, 'wb') as log:

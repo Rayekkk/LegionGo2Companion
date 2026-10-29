@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -13,7 +13,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { controlNote, effectsEditable, POWER_LED_BETA_TEXT, powerChecked as powerShown, powerNote, RESTORE_NOTE, ringsNote, SPEEDS, speedStep,
   usesColor as colorEffect, usesSpeed as speedEffect } from "../desktop/native/rgb.mjs";
 
@@ -71,19 +71,19 @@ interface RgbResult {
 }
 
 const mutations = mutationQueue();
-const readRgbStatus = callable<[], RgbStatus>("rgb_get_status");
+const readRgbStatus = rpc<[], RgbStatus>("rgb_get_status");
 export const getRgbStatus = async () => {
   if (mutations.pending) await mutations.tail;
   return readRgbStatus();
 };
-const setControlEnabled = callable<[boolean], RgbResult>("rgb_set_control_enabled");
-const setRingsEnabled = callable<[boolean], RgbResult>("rgb_set_rings_enabled");
-const setEffect = callable<[string], RgbResult>("rgb_set_effect");
-const setColor = callable<[number, number], RgbResult>("rgb_set_color");
-const setBrightness = callable<[number], RgbResult>("rgb_set_brightness");
-const setSpeed = callable<[number], RgbResult>("rgb_set_speed");
-const setPowerLed = callable<[boolean], RgbResult>("rgb_set_power_led");
-const restoreOriginal = callable<[], RgbResult>("rgb_restore_original");
+const setControlEnabled = rpc<[boolean], RgbResult>("rgb_set_control_enabled");
+const setRingsEnabled = rpc<[boolean], RgbResult>("rgb_set_rings_enabled");
+const setEffect = rpc<[string], RgbResult>("rgb_set_effect");
+const setColor = rpc<[number, number], RgbResult>("rgb_set_color");
+const setBrightness = rpc<[number], RgbResult>("rgb_set_brightness");
+const setSpeed = rpc<[number], RgbResult>("rgb_set_speed");
+const setPowerLed = rpc<[boolean], RgbResult>("rgb_set_power_led");
+const restoreOriginal = rpc<[], RgbResult>("rgb_restore_original");
 
 const EFFECT_LABELS: Record<string, string> = {
   monocolor: "Solid",

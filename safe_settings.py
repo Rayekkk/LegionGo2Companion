@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Crash-safe settings storage for root Decky plugins.
+"""Decky's SettingsManager API for this root plugin, on DeckyKit's dk_fs.
 
-Decky's SettingsManager writes directly to the destination file and commits on
-every setSetting() call.  This compatible replacement deliberately keeps
-setSetting() memory-only and commits the complete object with an atomic rename.
-It also refuses non-regular files so a user-writable settings directory cannot
-turn a root plugin write into a symlink-following overwrite elsewhere.
+dk_fs does the file work: atomic private writes with fsync, symlinked files and folders and anything but a regular
+file refused, a .last-good copy, damaged bytes kept as .corrupt-<time>, "lost" when no good copy remains (an empty
+file too: this plugin alone writes its stores). This layer keeps what the backends rely on: setSetting() stays in
+memory until commit(), a failed commit puts the last saved state back (a refused hardware change can never reach
+the disk with the next commit), replace() is all-or-nothing, an unsafe path blocks every later access, the
+exceptions the backends catch (UnsafeSettingsPath, CorruptSettings), and the single-file helpers for journals and
+system files other modules write.
 """
 
 from __future__ import annotations
@@ -13,16 +15,16 @@ from __future__ import annotations
 import copy
 import json
 import os
-import secrets
 import stat
 import threading
-import time
 from typing import Any
+
+import dk_fs
 from diagnostics import event, transition
 
-
 MAX_SETTINGS_BYTES = 1024 * 1024
-MAX_SETTINGS_DEPTH = 64
+LEGACY_BACKUP = ".bak"  # the copy 2.4.0 and older kept: becomes .last-good once
+open_directory = dk_fs.open_directory
 
 
 class UnsafeSettingsPath(RuntimeError):
@@ -47,253 +49,63 @@ def _validate_leaf(name: str) -> str:
 def _validate_directory(directory: str) -> str:
     directory = os.path.abspath(os.fspath(directory))
     if os.path.lexists(directory):
-        initial = os.lstat(directory)
-        if stat.S_ISLNK(initial.st_mode):
-            raise UnsafeSettingsPath(
-                f"settings directory is a symbolic link: {directory}")
+        if stat.S_ISLNK(os.lstat(directory).st_mode):
+            raise UnsafeSettingsPath(f"settings directory {os.path.basename(directory)} is a symbolic link")
     else:
-        # Resolve only parent components.  /home may legitimately map to a
-        # persistent volume, but the plugin-specific final component may not be
-        # replaced with an attacker-controlled link.
-        directory = os.path.join(
-            os.path.realpath(os.path.dirname(directory)),
-            os.path.basename(directory),
-        )
+        # Resolve only parent components. /home may legitimately map to a persistent volume, but the
+        # plugin-specific final component may not be replaced with an attacker-controlled link.
+        directory = os.path.join(os.path.realpath(os.path.dirname(directory)), os.path.basename(directory))
     os.makedirs(directory, mode=0o755, exist_ok=True)
     info = os.lstat(directory)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise UnsafeSettingsPath(f"settings directory is not a real directory: {directory}")
+        raise UnsafeSettingsPath(f"settings directory {os.path.basename(directory)} is not a real directory")
     return directory
 
 
-def _open_readonly_nofollow(path: str) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    # A regular file can be replaced by a FIFO between lstat and open. The
-    # descriptor check must happen before any wait for a FIFO writer.
-    flags |= getattr(os, "O_NONBLOCK", 0)
-    try:
-        return os.open(path, flags)
-    except OSError:
-        # O_NOFOLLOW is the authoritative Linux check.  lstat below supplies a
-        # portable pre-check on hosts that do not expose it.
-        info = os.lstat(path)
-        if stat.S_ISLNK(info.st_mode):
-            raise UnsafeSettingsPath(f"settings path is a symbolic link: {path}")
-        raise
-
-
-def _harden_regular_file(path: str) -> None:
-    """Make an existing settings file private without following a symlink."""
-    if os.name != "posix":
-        info = os.lstat(path)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise UnsafeSettingsPath(
-                f"settings path is not a regular file: {path}")
-        return
-    fd = _open_readonly_nofollow(path)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise UnsafeSettingsPath(
-                f"settings path is not a regular file: {path}")
-        os.fchmod(fd, 0o600)
-    finally:
-        os.close(fd)
-
-
-def open_directory(parts, fd=None, create=None, check=None) -> int:
-    """Directory fd at `parts` below directory `fd` (default /; taken over), one component at a time, never
-    through a symlink. `create(part)` gives (mode, uid, gid) for a missing component; `check(fd)` vets each."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open("/", flags) if fd is None else fd
-    try:
-        for part in parts:
-            owner = None
-            try:
-                child = os.open(part, flags, dir_fd=fd)
-            except FileNotFoundError:
-                if create is None:
-                    raise
-                mode, *owner = create(part)
-                os.mkdir(part, mode, dir_fd=fd)
-                child = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
-            if owner:
-                os.fchown(fd, *owner)
-            if check:
-                check(fd)
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def _validate_json_depth(payload: dict[str, Any]) -> None:
-    # JSON's decoder can accept structures deep enough to exhaust deepcopy()
-    # later. Bound container nesting without recursively walking untrusted data.
-    containers = [iter((payload,))]
-    while containers:
-        try:
-            value = next(containers[-1])
-        except StopIteration:
-            containers.pop()
-            continue
-        if isinstance(value, dict):
-            children = value.values()
-        elif isinstance(value, list):
-            children = value
-        else:
-            continue
-        if len(containers) > MAX_SETTINGS_DEPTH:
-            raise CorruptSettings(f"settings nesting exceeds {MAX_SETTINGS_DEPTH} containers")
-        containers.append(iter(children))
-
-
 def load_json_object(path: str, *, missing_ok: bool = False) -> dict[str, Any] | None:
-    """Read a bounded regular JSON object without following a final symlink."""
+    """A bounded regular JSON object, never through a symlink; it never writes (journals, files of others)."""
     try:
-        info = os.lstat(path)
+        return dk_fs.parse_json(dk_fs.read_bytes(path, MAX_SETTINGS_BYTES, no_links=True), dk_fs.require_object)
     except FileNotFoundError:
         if missing_ok:
             return None
         raise
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise UnsafeSettingsPath(f"settings path is not a regular file: {path}")
-    if info.st_size > MAX_SETTINGS_BYTES:
-        raise CorruptSettings(f"settings file exceeds {MAX_SETTINGS_BYTES} bytes")
-
-    fd = _open_readonly_nofollow(path)
-    try:
-        opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode):
-            raise UnsafeSettingsPath(f"opened settings path is not regular: {path}")
-        if opened.st_size > MAX_SETTINGS_BYTES:
-            raise CorruptSettings(f"settings file exceeds {MAX_SETTINGS_BYTES} bytes")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            encoded = handle.read(MAX_SETTINGS_BYTES + 1)
-            if len(encoded) > MAX_SETTINGS_BYTES:
-                raise CorruptSettings(f"settings file exceeds {MAX_SETTINGS_BYTES} bytes")
-            payload = json.loads(encoded.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+    except dk_fs.UnsafePath as exc:
+        raise UnsafeSettingsPath(str(exc)) from exc
+    except dk_fs.Damaged as exc:
         raise CorruptSettings(f"invalid JSON settings: {exc}") from exc
-    finally:
-        if fd >= 0:
-            os.close(fd)
-    if not isinstance(payload, dict):
-        raise CorruptSettings("settings root is not an object")
-    _validate_json_depth(payload)
-    return payload
 
 
 def _atomic_write_bytes(path: str, payload: bytes, mode: int = 0o600, *,
                         keep_existing: bool = False, strict_sync: bool = False) -> None:
     """Atomically replace a regular file.
 
-    `keep_existing` keeps the mode and owner of the file being replaced (system
-    files such as /etc/iwd/main.conf); `strict_sync` makes a failed directory
-    fsync an error instead of a warning (recovery journals).
+    `keep_existing` keeps the mode and owner of the file being replaced (system files such as /etc/iwd/main.conf);
+    `strict_sync` makes a failed directory fsync an error instead of a warning (recovery journals).
     """
-    directory = _validate_directory(os.path.dirname(path))
-    leaf = _validate_leaf(os.path.basename(path))
-    temporary = f".{leaf}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-    if os.name != "posix":
-        # Windows is only a development/test host for this plugin.  It does not
-        # implement the dir_fd variants below, but replace within the same real
-        # directory still gives the crash-safety property the tests exercise.
-        temporary_path = os.path.join(directory, temporary)
-        try:
-            try:
-                existing = os.lstat(path)
-            except FileNotFoundError:
-                existing = None
-            if existing is not None and not stat.S_ISREG(existing.st_mode):
-                raise UnsafeSettingsPath(
-                    f"settings target is not a regular file: {path}")
-            if keep_existing and existing is not None:
-                mode = stat.S_IMODE(existing.st_mode)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(temporary_path, flags, mode)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_path, path)
-        finally:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-        return
-
-    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    dir_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    dir_fd = os.open(directory, dir_flags)
-    tmp_fd = -1
+    _validate_directory(os.path.dirname(path))
+    _validate_leaf(os.path.basename(path))
+    if keep_existing and os.path.lexists(path):
+        mode = None
     try:
-        try:
-            existing = os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None and not stat.S_ISREG(existing.st_mode):
-            raise UnsafeSettingsPath(f"settings target is not a regular file: {path}")
-        if keep_existing and existing is not None:
-            mode, owner = stat.S_IMODE(existing.st_mode), existing
-        else:
-            owner = os.fstat(dir_fd)
-
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        tmp_fd = os.open(temporary, flags, mode, dir_fd=dir_fd)
-        os.fchmod(tmp_fd, mode)
-        if hasattr(os, "fchown"):
-            try:
-                os.fchown(tmp_fd, owner.st_uid, owner.st_gid)
-            except PermissionError:
-                # Non-root unit tests cannot chown, while the root Decky process
-                # can and does preserve the settings-directory owner.
-                pass
-        with os.fdopen(tmp_fd, "wb") as handle:
-            tmp_fd = -1
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(
-            temporary,
-            leaf,
-            src_dir_fd=dir_fd,
-            dst_dir_fd=dir_fd,
-        )
-        try:
-            os.fsync(dir_fd)
-        except OSError as exc:
-            if strict_sync:
-                raise
-            # The new primary is already visible and its bytes were fsynced.
-            # Raising here would falsely restore the old in-memory settings
-            # and invite callers to roll hardware back against the new file.
-            _log("warning", "directory_durability_unconfirmed",
-                 store=os.path.basename(path), error=exc)
-    finally:
-        if tmp_fd >= 0:
-            os.close(tmp_fd)
-        try:
-            os.unlink(temporary, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
-        os.close(dir_fd)
+        confirmed = dk_fs.write_atomic(path, payload, mode, no_links=True, strict_sync=strict_sync)
+    except dk_fs.UnsafePath as exc:
+        raise UnsafeSettingsPath(str(exc)) from exc
+    if not confirmed:
+        # The new file is visible and its bytes were fsynced: raising here would roll hardware back against it.
+        _log("warning", "directory_durability_unconfirmed", store=os.path.basename(path))
 
 
 def _encode_json_object(payload: dict[str, Any]) -> bytes:
     if not isinstance(payload, dict):
         raise TypeError("settings root must be an object")
-    _validate_json_depth(payload)
-    encoded = (json.dumps(payload, indent=4, ensure_ascii=False) + "\n").encode("utf-8")
+    encoded = (json.dumps(payload, indent=4, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
     if len(encoded) > MAX_SETTINGS_BYTES:
         raise ValueError(f"settings exceed {MAX_SETTINGS_BYTES} bytes")
+    try:
+        dk_fs.parse_json(encoded, dk_fs.require_object)  # never write what the reader would refuse
+    except dk_fs.Damaged as exc:
+        raise ValueError(f"settings cannot be stored: {exc}") from exc
     return encoded
 
 
@@ -307,23 +119,25 @@ class AtomicSettingsManager:
     def __init__(self, name: str, settings_directory: str) -> None:
         leaf = _validate_leaf(name) + ".json"
         self._store_name = name
-        self.directory = _validate_directory(settings_directory)
-        self.path = os.path.join(self.directory, leaf)
-        self.backup_path = self.path + ".bak"
         self.settings: dict[str, Any] = {}
         self._committed_settings: dict[str, Any] = {}
         self._storage_hardened = False
         self._lock = threading.RLock()
         self._blocked_reason = ""
-        # Missing settings are a first install; corrupt settings with no usable
-        # recovery copy are lost user intent. Consumers such as module gating
-        # must be able to distinguish those cases before applying defaults.
+        # Missing settings are a first install; corrupt settings with no usable recovery copy are lost user
+        # intent. Consumers such as module gating must be able to distinguish those cases before applying defaults.
         self._recovery_error = ""
         try:
+            self.directory = _validate_directory(settings_directory)
+            self.path = os.path.join(self.directory, leaf)
+            self.backup_path = self.path + dk_fs.LAST_GOOD
             self.read()
         except UnsafeSettingsPath as exc:
             # Keep the module importable so the other companion modules can run,
             # but fail every later access closed instead of touching the path.
+            self.directory = os.path.abspath(os.fspath(settings_directory))
+            self.path = os.path.join(self.directory, leaf)
+            self.backup_path = self.path + dk_fs.LAST_GOOD
             self._blocked_reason = str(exc)
             _log("error", "unsafe_storage", store=self._store_name, error=exc)
 
@@ -334,79 +148,59 @@ class AtomicSettingsManager:
     @property
     def recovery_error(self) -> str:
         """Why all saved copies were lost; empty for new or recovered storage."""
-        with self._lock:
-            return self._recovery_error
+        # An immutable string published under the writer's lock: admission and status checks read it without
+        # waiting for a commit's fsync, which would stall Decky's event loop while storage is slow.
+        return self._recovery_error
 
-    def _quarantine_corrupt_primary(self) -> None:
+    def _adopt_legacy_backup(self) -> None:
+        """2.4.0 and older kept <file>.bak: it becomes the .last-good copy, so a damaged file right after the update
+        still has its recovery copy (and a damaged .bak still tells lost intent from a first install); after a
+        downgrade and an update again a newer, good .bak replaces the copy."""
+        legacy = self.path + LEGACY_BACKUP
         try:
-            info = os.lstat(self.path)
-            if not stat.S_ISREG(info.st_mode):
-                raise UnsafeSettingsPath(
-                    f"settings path is not a regular file: {self.path}")
-            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            destination = f"{self.path}.corrupt-{stamp}-{secrets.token_hex(3)}"
-            os.replace(self.path, destination)
-            _log("warning", "corrupt_primary_quarantined", store=self._store_name)
+            info = os.lstat(legacy)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafeSettingsPath(f"{os.path.basename(legacy)} is not a regular file")
+        try:
+            if os.lstat(self.backup_path).st_mtime >= info.st_mtime:
+                return
+            load_json_object(legacy)  # a damaged old copy never replaces an existing one
         except FileNotFoundError:
             pass
+        except CorruptSettings:
+            return
+        os.replace(legacy, self.backup_path)
 
     def read(self) -> None:
         with self._lock:
             self._ensure_safe()
-            corrupt_copies = []
             try:
-                payload = load_json_object(self.path, missing_ok=True)
-                if payload is not None:
-                    self.settings = payload
-                    self._committed_settings = copy.deepcopy(payload)
-                    self._recovery_error = ""
-                    if not self._storage_hardened:
-                        try:
-                            _harden_regular_file(self.path)
-                            if os.path.lexists(self.backup_path):
-                                _harden_regular_file(self.backup_path)
-                            else:
-                                # A valid file inherited from the standalone
-                                # plugin may never be committed during startup.
-                                # Give it recovery immediately, not only after a
-                                # user changes a setting.
-                                atomic_write_json(self.backup_path, payload)
-                            self._storage_hardened = True
-                        except UnsafeSettingsPath:
-                            raise
-                        except OSError as exc:
-                            # The primary data was read successfully. A read-only
-                            # or full filesystem should not make the module
-                            # disappear; retry later and report on the next write.
-                            _log("warning", "storage_hardening_failed", store=self._store_name, error=exc)
-                    return
-            except UnsafeSettingsPath:
+                self._adopt_legacy_backup()
+                # The store is made private once per process, not on every read (backends read on most RPCs).
+                loaded = dk_fs.load_json(self.path, {}, MAX_SETTINGS_BYTES, validate=dk_fs.require_object,
+                                         no_links=True, mode=None if self._storage_hardened else 0o600,
+                                         empty_is_missing=False)
+            except dk_fs.UnsafePath as exc:
+                raise UnsafeSettingsPath(str(exc)) from exc
+            except OSError as exc:
+                # A read-only or failing filesystem must not make the module disappear: the next read retries.
+                _log("warning", "storage_read_failed", store=self._store_name, error=exc)
                 raise
-            except CorruptSettings as exc:
-                corrupt_copies.append(f"primary: {exc}")
-                _log("warning", "primary_corrupt", store=self._store_name, error=exc)
-
-            try:
-                backup = load_json_object(self.backup_path, missing_ok=True)
-            except UnsafeSettingsPath:
-                raise
-            except CorruptSettings as exc:
-                corrupt_copies.append(f"backup: {exc}")
-                _log("warning", "backup_corrupt", store=self._store_name, error=exc)
-                backup = None
-
-            if backup is None and corrupt_copies:
-                self._recovery_error = "No usable settings copy remains (" + "; ".join(corrupt_copies) + ")."
-            # Retain an unrecoverable primary so a later process still sees
-            # lost intent, rather than interpreting quarantine as first install.
-            if backup is not None and os.path.lexists(self.path):
-                self._quarantine_corrupt_primary()
-            self.settings = backup if backup is not None else {}
-            if backup is not None:
-                atomic_write_json(self.path, self.settings)
+            if loaded.status == "recovered":
+                _log("warning", "backup_restored", store=self._store_name, error=loaded.detail)
+            elif loaded.status == "lost":
+                _log("warning", "primary_corrupt", store=self._store_name, error=loaded.detail)
+            self._storage_hardened = True
+            if loaded.status == "lost":
+                self._recovery_error = f"No usable settings copy remains ({loaded.detail})."
+            elif loaded.status != "missing":
+                # A lost store whose file was then deleted stays lost in this process: only a good file or a commit
+                # (the user's explicit repair) clears it, never a missing file read as a first install.
                 self._recovery_error = ""
-                _log("warning", "backup_restored", store=self._store_name)
-            self._committed_settings = copy.deepcopy(self.settings)
+            self.settings = loaded.value
+            self._committed_settings = copy.deepcopy(loaded.value)
 
     def getSetting(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -423,30 +217,25 @@ class AtomicSettingsManager:
             self._ensure_safe()
             snapshot = copy.deepcopy(self.settings)
             try:
-                encoded = _encode_json_object(snapshot)
-                _atomic_write_bytes(self.path, encoded)
+                if not isinstance(snapshot, dict):
+                    raise TypeError("settings root must be an object")
+                refreshed = dk_fs.write_json(self.path, snapshot, 0o600, limit=MAX_SETTINGS_BYTES,
+                                             validate=dk_fs.require_object, no_links=True, folder_mode=0o755)
             except Exception as exc:
-                # A failed user operation must not remain visible through
-                # getSetting() when the durable file still holds the previous
-                # transaction.  This also makes a later unrelated commit unable
-                # to smuggle the rejected values onto disk.
+                # A failed user operation must not remain visible through getSetting() when the durable file still
+                # holds the previous transaction. This also makes a later unrelated commit unable to smuggle the
+                # rejected values onto disk.
                 self.settings = copy.deepcopy(self._committed_settings)
                 _log("error", "primary_commit_failed", store=self._store_name, error=exc)
+                if isinstance(exc, dk_fs.UnsafePath):
+                    raise UnsafeSettingsPath(str(exc)) from exc
                 raise
             # The snapshot already owns a deep copy, separate from live settings.
             self._committed_settings = snapshot
             self._recovery_error = ""
-            try:
-                _atomic_write_bytes(self.backup_path, encoded)
-                self._storage_hardened = True
-                transition("settings", "backup_refresh", True, store=self._store_name,
-                           outcome="confirmed", initial=False)
-            except Exception as exc:
-                # The primary transaction is already durable.  Reporting this as
-                # a failed user operation would invite a hardware rollback even
-                # though the requested value was committed successfully.
-                transition("settings", "backup_refresh", False, level="warning",
-                           store=self._store_name, error=exc, outcome="failed")
+            # The primary transaction is durable either way: a failed copy is never a failed user operation.
+            transition("settings", "backup_refresh", refreshed, level="info" if refreshed else "warning",
+                       store=self._store_name, outcome="confirmed" if refreshed else "failed", initial=False)
 
     def replace(self, payload: dict[str, Any]) -> None:
         """Atomically replace the complete object in one durable commit."""
@@ -463,5 +252,5 @@ class AtomicSettingsManager:
                 raise
 
 
-# Drop-in name for the three imported backends.
+# Drop-in name for the imported backends.
 SettingsManager = AtomicSettingsManager

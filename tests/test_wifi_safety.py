@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import AsyncMock, patch
 import threading
 
 import support  # Install isolated Decky stubs before backend imports.
@@ -27,7 +27,8 @@ class WifiSafetyTests(unittest.TestCase):
             info = target.stat()
             self.assertEqual(target.read_text(encoding='utf-8'), 'new')
             self.assertEqual(info.st_mode & 0o777, 0o640)
-            chown.assert_called_once_with(ANY, info.st_uid, info.st_gid)
+            # dk_fs gives the file away only when its owner is not the writer's (dk_fs tests cover root's chown).
+            self.assertTrue(all(call.args[1:] == (info.st_uid, info.st_gid) for call in chown.call_args_list))
             link = Path(folder) / 'link.conf'
             link.symlink_to(target)
             with self.assertRaises(UnsafeSettingsPath):
@@ -55,7 +56,7 @@ class WifiSafetyTests(unittest.TestCase):
     def test_lost_ownership_cannot_be_reported_as_preference_off(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "wifi_settings.json"
-            backup = Path(str(path) + ".bak")
+            backup = Path(str(path) + ".last-good")
             path.write_text("{broken", encoding="utf-8")
             backup.write_text("[]", encoding="utf-8")
             with patch.object(wifi, "SETTINGS_FILE", str(path)), \
@@ -81,7 +82,7 @@ class WifiSafetyTests(unittest.TestCase):
             state.update(band_policy=wifi.BAND_POLICY_HIGH_ONLY,
                          band_preference_enabled=True,
                          band_policy_state={"original": {"iwd": {"modifier_present": False}}})
-            Path(str(path) + ".bak").write_text(json.dumps(state), encoding="utf-8")
+            Path(str(path) + ".last-good").write_text(json.dumps(state), encoding="utf-8")
             with patch.object(wifi, "SETTINGS_FILE", str(path)), \
                  patch.object(wifi, "_SETTINGS_MANAGER", None), \
                  patch.object(wifi, "_SETTINGS_MANAGER_PATH", ""):

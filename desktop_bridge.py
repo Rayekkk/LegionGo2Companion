@@ -24,6 +24,10 @@ def _reject_constant(name):
     raise ValueError(f'Non-finite number {name}')
 
 
+class Refused(RuntimeError):
+    """A D2 refusal of the plugin's RPC, answered to the native app as a 409 with its text."""
+
+
 class DesktopBridge:
     def __init__(self, plugin, methods, context=None, overrides=None, read_logs=None):
         self.plugin = plugin
@@ -75,12 +79,20 @@ class DesktopBridge:
             return await self.read_logs()
         if method not in self.methods or method.startswith('_'):
             raise ValueError('RPC is not available in Desktop Mode.')
-        function = self.overrides.get(method) or getattr(self.plugin, method, None)
+        override = self.overrides.get(method)
+        function = override or getattr(self.plugin, method, None)
         if not callable(function) or not inspect.iscoroutinefunction(function):
             raise ValueError('RPC unavailable.')
         inspect.signature(function).bind(*args)
         with diagnostics.source_context('desktop'):
-            return await function(*args)
+            result = await function(*args)
+        # The plugin's RPCs answer D2 ({ok, error?, state?}); the native app keeps its HTTP contract: the state
+        # (also of a refusal that carries one: the app reads its own success field) or a 409 with the error.
+        if override is not None or not isinstance(result, dict) or 'ok' not in result:
+            return result
+        if result['ok'] or 'state' in result:
+            return result.get('state')
+        raise Refused(result.get('error') or "Companion couldn't complete this. Try again.")
 
     async def _client(self, reader, writer):
         if self.closing or len(self.clients) >= MAX_CLIENTS:
@@ -173,7 +185,8 @@ class DesktopBridge:
             result = await asyncio.wait_for(asyncio.shield(operation), RPC_SECONDS)
             await self._reply(writer, 200, {'result': result})
         except (ValueError, TypeError, RuntimeError) as exc:
-            if not isinstance(exc, module_runtime.AdmissionClosed):
+            # A D2 refusal is already logged at the RPC boundary.
+            if not isinstance(exc, (module_runtime.AdmissionClosed, Refused)):
                 diagnostics.event('desktop', 'rpc_rejected', level='warning', error=exc, repeat=60)
             await self._reply(writer, 409, {'error': str(exc)[:1000]})
         except asyncio.TimeoutError:

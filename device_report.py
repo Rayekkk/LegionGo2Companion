@@ -30,7 +30,8 @@ import module_runtime
 import rgb_backend
 import tdp_backend
 from fan_guardian import validated_firmware
-from system_process import run
+from dk_fs import open_directory
+from dk_process import run
 
 TOTAL_SECONDS = 15.0
 COMMAND_SECONDS = 4.0
@@ -632,9 +633,79 @@ def collect(facts, seconds=TOTAL_SECONDS, stopped=lambda: False):
         run_sections(((DSDT_TITLE, _dsdt),))) + "\n"
 
 
+def _open_home(home, uid, gid):
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ValueError("Safe saving to the user's folders is available only on SteamOS/Linux.")
+    if type(uid) is not int or uid <= 0:
+        raise ValueError("The desktop user is unavailable; the file cannot be saved safely.")
+    if (not isinstance(home, str) or not home.startswith("/") or home == "/" or
+            os.path.normpath(home) != home or type(gid) is not int or gid < 0):
+        raise ValueError("The console user's home directory could not be verified.")
+    def owned(fd):
+        if os.fstat(fd).st_uid != uid:
+            raise ValueError("The home directory does not belong to the console user.")
+    parts = home.lstrip("/").split("/")
+    return open_directory(parts[-1:], open_directory(parts[:-1]), check=owned)
+
+
+def _user_dir_components(home, home_fd, key, default):
+    """The XDG_<key>_DIR of user-dirs.dirs below `home` as path components, else [default]."""
+    config_fd = None
+    try:
+        config_fd = os.open(".config", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=home_fd)
+        fd = os.open("user-dirs.dirs", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=config_fd)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return [default]
+            raw = stream.read(8193)
+        if len(raw) > 8192:
+            return [default]
+        for line in raw.decode("utf-8").splitlines():
+            match = re.fullmatch(rf'\s*XDG_{key}_DIR="([^"\r\n]*)"\s*', line)
+            if not match:
+                continue
+            path = match.group(1)
+            if path.startswith("$HOME/"):
+                path = home + path[5:]
+            if any(c in path for c in ("$", "`", "\\")):
+                break
+            if (not path.startswith(home + "/") or
+                    os.path.normpath(path) != path):
+                break
+            return path[len(home) + 1:].split("/")
+    except (OSError, UnicodeError):
+        pass
+    finally:
+        if config_fd is not None:
+            os.close(config_fd)
+    return [default]
+
+
+def open_user_dir(home, uid, gid, key, default, cancel=None):
+    """(fd, path) of the console user's XDG_<key>_DIR (user-dirs.dirs, else ~/<default>). Root opens it one
+    component at a time without following links, creates a missing one 0700 for that user and requires
+    every component to be the user's own. `cancel` runs before each next component."""
+    def owned(fd):
+        if os.fstat(fd).st_uid != uid:
+            raise ValueError(f"The {default} directory does not belong to the console user.")
+        if cancel:
+            cancel()
+    fd = _open_home(home, uid, gid)
+    try:
+        parts = _user_dir_components(home, fd, key, default)
+        if cancel:
+            cancel()
+    except BaseException:
+        os.close(fd)
+        raise
+    fd = open_directory(parts, fd, lambda part: (0o700, uid, gid), owned)
+    return fd, home + "/" + "/".join(parts)
+
+
 def save(text, home, uid, gid):
     """Write the report as a new file in the console user's Desktop folder, owned by that user; the path."""
-    from companion_updates import open_user_dir
     directory, path = open_user_dir(home, uid, gid, "DESKTOP", "Desktop")
     stem = "LegionGoCompanion-device-report-" + datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y%m%d-%H%M%S")

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Network waits must never own the hardware RPC gate or outlive shutdown."""
 import asyncio
+import inspect
 import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -8,30 +9,35 @@ from unittest.mock import AsyncMock, Mock, patch
 import support
 import main
 import test_modules as fixtures
-from companion_updates import CompanionUpdates
+import dk_update
 
 
 class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def make_plugin(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._check_guard = AsyncMock()
         plugin._updates = Mock()
-        plugin._updates.check.return_value = {'success': True, 'no_release': True}
+        plugin._updates_home = True
+        plugin._updates.check.return_value = {'ok': True, 'no_release': True}
         return plugin
 
     async def test_checks_work_with_tdp_disabled_and_do_not_initialize_hardware(self):
         plugin = self.make_plugin()
         plugin._module_state['tdp'] = {'enabled': False}
         self.assertTrue((await plugin.updates_check())['success'])
-        plugin._updates.check.assert_called_once_with()
+        plugin._updates.check.assert_called_once_with(True)  # a click asks GitHub again (DeckyKit dk_update)
         self.assertFalse(plugin._modules_started)
 
     async def test_exact_selected_version_reaches_backend_and_unknown_rpcs_stay_gated(self):
         plugin = self.make_plugin()
-        plugin._updates.download.return_value = {'success': True, 'version': '0.7.0'}
+        plugin._updates.download.return_value = {'ok': True, 'version': '0.7.0'}
         await plugin.updates_download('0.7.0')
         plugin._updates.download.assert_called_once_with('0.7.0')
-        self.assertEqual(main._rpc_module('updates_future_hardware_write'), 'tdp')
+        with self.assertRaises(KeyError):  # a new RPC without a module is caught when main.py is imported
+            main._rpc_module('updates_future_hardware_write')
+        public = [name for name, fn in vars(main.Plugin).items()
+                  if not name.startswith('_') and name not in main._UNGUARDED_RPCS and inspect.iscoroutinefunction(fn)]
+        self.assertEqual({name for name in public if main._rpc_module(name) == 'tdp'}, main.TDP_RPCS)
 
     async def test_blocked_or_closing_never_starts_network_work(self):
         for field in ('_guard_blocked', '_closing'):
@@ -51,7 +57,7 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
             started.set()
             if not release.wait(3):
                 raise RuntimeError('test worker timed out')
-            return {'success': True}
+            return {'ok': True}
         plugin._updates.download.side_effect = download
         plugin._tdp = Mock(get_settings=AsyncMock(return_value={'spl': 25000}))
         task = asyncio.create_task(plugin.updates_download('0.7.0'))
@@ -71,7 +77,7 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(3):
                 raise RuntimeError('test worker timed out')
             stopped.set()
-            return {'success': False, 'error': 'closed'}
+            return {'ok': False, 'error': 'closed'}
         plugin._updates.download.side_effect = download
         plugin._updates.close.side_effect = release.set
         task = asyncio.create_task(plugin.updates_download('0.7.0'))
@@ -104,7 +110,7 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
             started.set()
             if not release.wait(3):
                 raise RuntimeError('test worker timed out')
-            return {'success': False}
+            return {'ok': False}
         plugin._updates.download.side_effect = download
         task = asyncio.create_task(plugin.updates_download('0.7.0'))
         unload = None
@@ -134,15 +140,17 @@ class UpdateLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(task, *([unload] if unload else []), return_exceptions=True)
 
     async def test_decky_account_is_used_instead_of_root_or_first_login(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         account = Mock(pw_dir='/home/player', pw_uid=1001, pw_gid=1001)
         with patch.object(support.decky, 'DECKY_USER', 'player', create=True), \
              patch('pwd.getpwnam', return_value=account) as lookup, \
-             patch.object(main, 'CompanionUpdates') as updater:
+             patch.object(main.dk_update, 'Updates') as updater:
             plugin._ensure_updates()
             plugin._ensure_updates()
             lookup.assert_called_once_with('player')
-            updater.assert_called_once_with(main.PLUGIN_DIR, '/home/player', 1001, 1001)
+            updater.assert_called_once()
+            self.assertEqual((updater.call_args.kwargs['home'], updater.call_args.kwargs['uid']), ('/home/player', 1001))
+            self.assertEqual(updater.call_args.kwargs['flags'], ['root'])
 
 
 class UpdateCloseResponsivenessTests(unittest.IsolatedAsyncioTestCase):
@@ -151,7 +159,8 @@ class UpdateCloseResponsivenessTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = fixtures.ModuleGateTests.asyncTearDown
 
     def slow_close(self, observations):
-        updater = CompanionUpdates(self.folder.name, '', -1, -1)
+        updater = dk_update.Updates(repo='Rayekkk/LegionGo2Companion', folder='LegionGo2Companion',
+                                    plugin_name='Legion Go 2 Companion', current='2.4.0', home=self.folder.name)
         self.plugin._updates = updater
         loop = asyncio.get_running_loop()
         close = updater.close
@@ -186,7 +195,8 @@ class UpdateCloseResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updater._closed.is_set())
 
     async def test_repeated_unload_cancellation_finishes_publication_and_module_cleanup(self):
-        updater = CompanionUpdates(self.folder.name, '', -1, -1)
+        updater = dk_update.Updates(repo='Rayekkk/LegionGo2Companion', folder='LegionGo2Companion',
+                                    plugin_name='Legion Go 2 Companion', current='2.4.0', home=self.folder.name)
         self.plugin._updates = updater
         self.plugin._modules_started = True
         entered, release = threading.Event(), threading.Event()

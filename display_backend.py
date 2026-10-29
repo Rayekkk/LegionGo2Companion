@@ -23,7 +23,7 @@ import functools
 import hashlib
 import os
 import posixpath
-from system_process import PYTHON, run, system_env as _system_env
+from dk_process import PYTHON, run, system_env as _system_env
 import signal
 import stat
 import subprocess

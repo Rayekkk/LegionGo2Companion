@@ -20,7 +20,7 @@ from typing import Any
 
 import decky
 from diagnostics import event, transition
-from system_process import run
+from dk_process import run
 import module_runtime
 
 from safe_settings import SettingsManager

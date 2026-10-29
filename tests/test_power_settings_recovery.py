@@ -17,7 +17,7 @@ class PowerSettingsRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "tdp.json"
             path.write_text("{broken", encoding="utf-8")
-            Path(str(path) + ".bak").write_text("[]", encoding="utf-8")
+            Path(str(path) + ".last-good").write_text("[]", encoding="utf-8")
             manager = AtomicSettingsManager("tdp", raw)
             with patch.object(tdp, "settings", manager), \
                  patch.object(tdp, "_apply_limits_with_saved_cpu_power") as apply, \
@@ -31,13 +31,13 @@ class PowerSettingsRecoveryTests(unittest.TestCase):
                 apply.assert_not_called()
                 restore.assert_not_called()
             self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
-            self.assertEqual(Path(str(path) + ".bak").read_text(encoding="utf-8"), "[]")
+            self.assertEqual(Path(str(path) + ".last-good").read_text(encoding="utf-8"), "[]")
 
     def test_corrupt_vibration_copies_block_migration_profiles_and_hardware(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "vibe.json"
             path.write_text("{broken", encoding="utf-8")
-            Path(str(path) + ".bak").write_text("[]", encoding="utf-8")
+            Path(str(path) + ".last-good").write_text("[]", encoding="utf-8")
             manager = AtomicSettingsManager("vibe", raw)
             with patch.object(vibe, "settings", manager), \
                  patch.object(vibe, "_write_attr") as write:
@@ -50,7 +50,7 @@ class PowerSettingsRecoveryTests(unittest.TestCase):
                             operation()
                 write.assert_not_called()
             self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
-            self.assertEqual(Path(str(path) + ".bak").read_text(encoding="utf-8"), "[]")
+            self.assertEqual(Path(str(path) + ".last-good").read_text(encoding="utf-8"), "[]")
 
     def test_first_install_still_migrates_and_uses_defaults(self):
         for backend in (tdp, vibe):

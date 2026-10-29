@@ -15,7 +15,7 @@ import time
 import decky
 from diagnostics import event as diagnostic_event, transition as diagnostic_transition
 import module_runtime
-from system_process import PYTHON, system_env
+from dk_process import PYTHON, system_env
 from safe_settings import SettingsManager
 from fan_ec import BETA_MODELS, MODELS as FAN_MODELS, platform_check
 from fan_guardian import secure_root, check_owners, Sensors, outcome_of

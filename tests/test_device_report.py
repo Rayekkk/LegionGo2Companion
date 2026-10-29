@@ -545,7 +545,7 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as settings, \
                 patch.object(main.decky, "DECKY_PLUGIN_SETTINGS_DIR", settings), \
                 patch.object(main, "_installed_standalone_plugins", return_value=[]):
-            plugin = main.Plugin()
+            plugin = support.LegacyPlugin()
             plugin._applicable = {name: False for name in main.MODULE_NAMES}
             plugin._device = {"console": None, "model": None}
             plugin._tdp = types.SimpleNamespace(get_caps=AsyncMock(return_value={"tdp_available": False}))
@@ -569,7 +569,7 @@ class ReportRpc(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as settings, \
                 patch.object(main.decky, "DECKY_PLUGIN_SETTINGS_DIR", settings), \
                 patch.object(main, "_installed_standalone_plugins", return_value=[]):
-            plugin = main.Plugin()
+            plugin = support.LegacyPlugin()
             plugin._applicable = {name: False for name in main.MODULE_NAMES}
             plugin._device = {"console": None, "model": None}
             plugin._tdp = types.SimpleNamespace(get_caps=AsyncMock(return_value={"tdp_available": False}))

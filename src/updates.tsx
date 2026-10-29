@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable } from "@decky/api";
+
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 import { DEVICE_REPORT_DESCRIPTION, DEVICE_REPORT_TITLE, type DeviceReport, deviceReportResult,
   type UpdateCheck, updateStatus } from "../desktop/native/updates.mjs";
-import { errorText, infoRow } from "./shared";
+import { errorText, infoRow, rpc } from "./shared";
 
 interface UpdateDownload {
   success: boolean;
@@ -22,9 +22,9 @@ type UpdateState = {
   error?: string;
 };
 
-const checkUpdates = callable<[], UpdateCheck>("updates_check");
-const downloadUpdate = callable<[string], UpdateDownload>("updates_download");
-const saveDeviceReport = callable<[], DeviceReport>("save_device_report");
+const checkUpdates = rpc<[], UpdateCheck>("updates_check");
+const downloadUpdate = rpc<[string], UpdateDownload>("updates_download");
+const saveDeviceReport = rpc<[], DeviceReport>("save_device_report");
 const listeners = new Set<(state: UpdateState) => void>();
 let state: UpdateState = { busy: null };
 let generation = 0;

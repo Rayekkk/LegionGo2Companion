@@ -614,7 +614,7 @@ class SysfsReaderTests(unittest.TestCase):
 
 class PluginInstallTests(unittest.IsolatedAsyncioTestCase):
     async def test_controller_writes_are_paused_only_while_an_admitted_install_runs(self):
-        plugin = main.Plugin()
+        plugin = support.LegacyPlugin()
         plugin._check_guard = AsyncMock()
         plugin._controller = Mock(_status_cache=('cached', {}))
         finished = asyncio.Event()

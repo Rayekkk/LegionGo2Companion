@@ -18,7 +18,7 @@ from typing import Callable, Any
 
 import module_runtime
 from diagnostics import event
-from system_process import run
+from dk_process import run
 
 
 BUSCTL = "/usr/bin/busctl"

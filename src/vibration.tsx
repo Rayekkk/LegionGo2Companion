@@ -11,15 +11,11 @@ import {
   Spinner,
   ToggleField,
 } from "@decky/ui";
-import {
-  addEventListener,
-  callable,
-  removeEventListener,
-  toaster,
-  useQuickAccessVisible,
-} from "@decky/api";
+import { addEventListener, removeEventListener, toaster, useQuickAccessVisible } from "@decky/api";
 import { useState, useEffect, useCallback, useRef } from "react";
-import { detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp } from "./shared";
+import {
+  detailsRows, errorText, infoRow, mutationQueue, runningApp, watchRunningApp, type RunningApp, rpc
+} from "./shared";
 import { betaText, driverNotice, failureText, FALLBACK_MODES, LEVELS_SHORT, modeShort, touchpadStrengthEditable } from "../desktop/native/vibration.mjs";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -69,22 +65,22 @@ const LEVEL_NOTCHES = LEVELS_SHORT;
 
 // ── Backend callables ─────────────────────────────────────────────────────────
 
-const isReady = callable<[], ReadyState>("vibe_is_ready");
-const getSettings = callable<[], SettingsResponse>("vibe_get_settings");
-const setActiveApp = callable<[string], SettingsResponse & { success: boolean; changed: boolean }>("vibe_set_active_app");
+const isReady = rpc<[], ReadyState>("vibe_is_ready");
+const getSettings = rpc<[], SettingsResponse>("vibe_get_settings");
+const setActiveApp = rpc<[string], SettingsResponse & { success: boolean; changed: boolean }>("vibe_set_active_app");
 
-const setIntensity = callable<[number, string, string], ApplyResponse>("vibe_set_intensity");
-const setRumbleMode = callable<[number, string, string], ApplyResponse>("vibe_set_rumble_mode");
-const setTouchpadIntensity = callable<[number, string, string], ApplyResponse>("vibe_set_touchpad_intensity");
-const setTouchpadEnabled = callable<[boolean, string, string], ApplyResponse>("vibe_set_touchpad_enabled");
-const resetToDefault = callable<[string, string], ApplyResponse>("vibe_reset_to_default");
-const reapply = callable<[], ApplyResponse>("vibe_reapply");
+const setIntensity = rpc<[number, string, string], ApplyResponse>("vibe_set_intensity");
+const setRumbleMode = rpc<[number, string, string], ApplyResponse>("vibe_set_rumble_mode");
+const setTouchpadIntensity = rpc<[number, string, string], ApplyResponse>("vibe_set_touchpad_intensity");
+const setTouchpadEnabled = rpc<[boolean, string, string], ApplyResponse>("vibe_set_touchpad_enabled");
+const resetToDefault = rpc<[string, string], ApplyResponse>("vibe_reset_to_default");
+const reapply = rpc<[], ApplyResponse>("vibe_reapply");
 
-const setProfileOverwrite = callable<[string, boolean, string], ApplyResponse & { overwrite: boolean }>("vibe_set_profile_overwrite");
+const setProfileOverwrite = rpc<[string, boolean, string], ApplyResponse & { overwrite: boolean }>("vibe_set_profile_overwrite");
 
-const getDriverStatus = callable<[], DriverStatus>("vibe_get_driver_status");
-const getCapabilities = callable<[], { intensity: string[]; mode: string[]; tp_intensity: string[] }>("vibe_get_capabilities");
-const testVibration = callable<[number], { success: boolean; error?: string }>("vibe_test_vibration");
+const getDriverStatus = rpc<[], DriverStatus>("vibe_get_driver_status");
+const getCapabilities = rpc<[], { intensity: string[]; mode: string[]; tp_intensity: string[] }>("vibe_get_capabilities");
+const testVibration = rpc<[number], { success: boolean; error?: string }>("vibe_test_vibration");
 
 // ── Toasts ────────────────────────────────────────────────────────────────────
 

@@ -21,10 +21,10 @@ from desktop_bridge import DesktopBridge
 
 class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def desktop_dns_shutdown(self, method):
-        import bounded_http
+        import dk_net
+        import dk_process
+        import dk_update
         import tdp_backend
-        import tdp_updater
-        from companion_updates import CompanionUpdates
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             (directory / 'package.json').write_text('{"version":"2.1.0"}')
@@ -32,13 +32,13 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
             source = support.dns_stall_source(marker)
             plugin = self.plugin()
             plugin._tdp = tdp_backend.Plugin()
-            plugin._updates = CompanionUpdates(raw, raw, 1000, 1000)
+            plugin._updates = dk_update.Updates(repo='Rayekkk/LegionGo2Companion', folder='LegionGo2Companion',
+                plugin_name='Legion Go 2 Companion', current='2.1.0', home=raw)
             bridge = DesktopBridge(plugin, [method])
             plugin._desktop = bridge
             await bridge.start()
-            downloader = tdp_updater.Updater(user_agent='test')
             def ensure_helper(cancel=None):
-                downloader.download_to('https://github.com/test/helper', io.BytesIO(), 3, cancel=cancel)
+                dk_net.get('https://github.com/test/helper', 1024, hosts={'github.com'}, deadline=3, cancel=cancel)
                 return True
             children = []
             launch = support.stalled_child_launcher(source, children)
@@ -48,7 +48,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 f'Origin: {bridge.origin}\r\nAuthorization: Bearer {bridge.token}\r\n'
                 f'Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n').encode()
             shutdown = None
-            with patch.object(bounded_http.subprocess, 'Popen', side_effect=launch), \
+            with patch.object(dk_process.subprocess, 'Popen', side_effect=launch), \
                     patch.object(tdp_backend, '_ensure_ryzenadj', side_effect=ensure_helper):
                 try:
                     writer.write(headers + body)
@@ -175,7 +175,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         plugin=self.plugin();plugin._firmware=Mock(status=Mock(side_effect=slow),check=Mock(side_effect=slow))
         for method in (plugin.firmware_get_status,plugin.firmware_check):
             result=await method()
-            self.assertEqual(result['phase'],'installing')
+            self.assertEqual(result['state']['phase'],'installing')
         self.assertEqual(observed,[True,True],'firmware result observation blocked Decky loop')
 
     def plugin(self):
@@ -193,15 +193,15 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     'rpm': 1800, 'apu_temperature': 45, 'ownership': {'blocked': False}}):
             plugin._fan = fan_backend.Plugin(); plugin._fan._supported = True; plugin._fan._load()
             bridge = DesktopBridge(plugin, ['fan_get_state', 'fan_save_curve', 'fan_save_unit'])
-            before = await plugin.fan_get_state()  # Exactly the public Decky RPC.
+            before = (await plugin.fan_get_state())['state']  # Exactly the public Decky RPC (D2).
             curve = copy.deepcopy(DEFAULT_CURVE); curve[6][0] = 94
             desktop = await bridge.dispatch('fan_save_curve', ['global', curve, before['settings']['revision']])
-            decky = await plugin.fan_get_state()
+            decky = (await plugin.fan_get_state())['state']
             self.assertEqual(decky['settings'], desktop['settings'])
             self.assertEqual(decky['settings']['global_curve'], curve)
-            updated = await plugin.fan_save_unit('percent', decky['settings']['revision'])
+            updated = (await plugin.fan_save_unit('percent', decky['settings']['revision']))['state']
             self.assertEqual((await bridge.dispatch('fan_get_state', []))['settings'], updated['settings'])
-            with self.assertRaises(ValueError):
+            with self.assertRaises(RuntimeError):  # the stale revision refused: a 409 for the native app
                 await bridge.dispatch('fan_save_curve', ['global', curve, before['settings']['revision']])
             fresh = fan_backend.Plugin(); fresh._load()
             self.assertEqual(fresh._state, updated['settings'])
@@ -258,9 +258,9 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_paused_modules_cannot_hide_firmware_outcome_or_enable_an_update(self):
         plugin=self.plugin();plugin._check_guard=AsyncMock();plugin._guard_blocked=True
         plugin._firmware=Mock(status=Mock(return_value={'phase':'installing'}))
-        self.assertEqual((await plugin.firmware_get_status())['phase'],'installing')
+        self.assertEqual((await plugin.firmware_get_status())['state']['phase'],'installing')
         for method in (plugin.firmware_check,plugin.firmware_download,lambda:plugin.firmware_install('token')):
-            with self.assertRaises(RuntimeError):await method()
+            self.assertFalse((await method())['ok'])
         plugin._firmware.check.assert_not_called();plugin._firmware.admit_install.assert_not_called()
 
     async def test_failed_publication_closes_bridge_without_stopping_modules(self):
@@ -272,7 +272,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'PLUGIN_DIR', temporary.name), patch.object(main.DesktopInstall, 'for_decky', return_value=installer):
             await plugin._start_desktop()
         self.assertIsNone(plugin._desktop)
-        self.assertEqual(await plugin.get_settings(), {'spl': 15000})
+        self.assertEqual(await plugin.get_settings(), {'ok': True, 'state': {'spl': 15000}})
         await plugin._unload()
 
     async def test_cancelled_startup_publication_is_drained_before_unload(self):

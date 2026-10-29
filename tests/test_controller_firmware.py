@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch, Mock
 import support
 import controller_firmware as fw
-import system_process
+import dk_process
 import subprocess
 import urllib.request
 import controller_firmware
@@ -71,7 +71,7 @@ class PolicyTests(unittest.TestCase):
         worker = Mock(returncode=0)
         worker.poll.return_value = 0
         worker.communicate.return_value = (bytes(release.size), None)
-        with patch.object(system_process.subprocess, 'Popen', return_value=worker) as spawn:
+        with patch.object(dk_process.subprocess, 'Popen', return_value=worker) as spawn:
             self.assertEqual(len(fw.download_image(release, threading.Event())), release.size)
             args, kwargs = spawn.call_args
             self.assertEqual(args[0][-5:], ['--download-data', 'left', release.version, release.url, str(release.size)])
@@ -81,12 +81,12 @@ class PolicyTests(unittest.TestCase):
         worker = Mock(returncode=None)
         worker.poll.return_value = None
         worker.communicate.side_effect = [subprocess.TimeoutExpired('helper', .2), (b'', None)]
-        with patch.object(system_process.subprocess, 'Popen', return_value=worker), patch.object(system_process.time, 'monotonic', side_effect=[0., 0., 36.]):
+        with patch.object(dk_process.subprocess, 'Popen', return_value=worker), patch.object(dk_process.time, 'monotonic', side_effect=[0., 0., 36.]):
             with self.assertRaises(fw.FirmwareError):
                 fw.download_image(release, threading.Event())
         worker.kill.assert_called_once()
         cancelled = threading.Event(); cancelled.set()
-        with patch.object(system_process.subprocess, 'Popen') as spawn:
+        with patch.object(dk_process.subprocess, 'Popen') as spawn:
             with self.assertRaises(fw.FirmwareError): fw.download_image(release, cancelled)
             spawn.assert_not_called()
 
@@ -97,7 +97,7 @@ class PolicyTests(unittest.TestCase):
             timer = threading.Timer(.3, cancelled.set)
             timer.start()
             try:
-                with patch.object(system_process.subprocess, 'Popen', return_value=child):
+                with patch.object(dk_process.subprocess, 'Popen', return_value=child):
                     with self.assertRaises(fw.FirmwareError):
                         fw.download_image(fw.release_for('left'), cancelled)
                 self.assertIsNotNone(child.poll())

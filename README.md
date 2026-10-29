@@ -842,29 +842,25 @@ ZIP. It links SteamOS's system Qt (6.9 or newer) instead of bundling Qt, and cal
 Python backend as the Decky panel over an authenticated loopback connection. See the
 [Desktop app notes](docs/DESKTOP_UI.md) for its architecture, lifecycle, build and tests.
 
-Requires Node.js 24, Git and `tar` (the packager writes the ZIP itself). Backend tests
-require Python 3.10+. The native Desktop build additionally requires CMake, Ninja, a C++17 compiler and
-a Qt 6.9 SDK.
+Requires Node.js 24, Git and Python 3.14 (the version Decky Loader 3.3.1 and SteamOS use). The native
+Desktop build additionally requires CMake, Ninja, a C++17 compiler and a Qt 6.9 SDK.
 
 ```bash
 npm ci
-npm run typecheck      # frontend types
-npm run test:frontend  # frontend regression suites
-npm test               # Python backend tests
-npm run build          # compile and validate the frontend
 python scripts/build-native.py --qt /path/to/Qt/6.9.1/gcc_64 --build /tmp/companion-native --test --bundle dist/desktop
-npm run test:desktop   # native API/source contract; Qt tests run in the command above
-npm run package        # create LegionGo2Companion-<version>.zip and its .sha256
+npm run check          # types, backend and frontend tests, build, then the package below
+npm run package        # artifacts/LegionGo2Companion-<version>.zip and its .sha256, checked
 ```
 
-**Build before packaging:** package uses the existing frontend build and the native app in
-`dist/desktop` from the command above (`npm run build` keeps `dist/desktop`). Tracked files come
-from the committed `HEAD`, so the same commit and build give a byte-identical ZIP. Install the result through Decky; a source checkout with
-`node_modules` is not an installation package.
+**Build before packaging:** package uses the frontend build and the native app in `dist/desktop` from
+the command above (`npm run build` keeps `dist/desktop`), reads the ZIP back, and checks that the
+updaters of earlier releases accept it. The same files give a byte-identical ZIP;
+`npm run package -- --release` also refuses uncommitted changes. Install the result through Decky; a
+source checkout with `node_modules` is not an installation package.
 
-GitHub Actions runs the backend tests on Linux/Python 3.10 and 3.14 and Windows/Python 3.13,
-plus frontend tests, build and package validation on Node.js 24 LTS. The native app is built
-against Qt 6.9.1 and its tests run again on the newest Qt 6. Linux-specific checks skip on
+GitHub Actions runs the backend tests on Linux and Windows with Python 3.14, plus frontend tests,
+build and package validation on Node.js 24 LTS. The native app is built against Qt 6.9.1 and its
+tests run again on the newest Qt 6. Linux-specific checks skip on
 Windows. Hardware calls are mocked; device testing is still required for startup, wake, game
 transitions and native Steam UI behaviour. CI does not publish releases.
 
@@ -913,7 +909,7 @@ design and safety decisions, reviewed the results and chose what was released.
 The AI was used to:
 
 - write and refactor the Python backend, the Decky panel and the native Desktop app;
-- build the automated test suites (about 1,300 tests run on Linux and Windows for every change);
+- build the automated test suites (about 1,600 tests run on Linux and Windows for every change);
 - audit the code for bugs, security issues and wasted work, with every finding checked by
   independent review passes and, where possible, reproduced before it was fixed;
 - research hardware interfaces and write this documentation.

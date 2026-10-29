@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -11,7 +11,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { infoRow, mutationQueue, statusPlaceholder } from "./shared";
+import { infoRow, mutationQueue, statusPlaceholder, rpc } from "./shared";
 import { BUTTONS, enableNote, mappingEditable } from "../desktop/native/remap.mjs";
 
 interface ActionOption {
@@ -40,14 +40,14 @@ interface RemapResult {
 
 // Accepted edits survive page close. Every later menu/page snapshot follows them.
 const mutations = mutationQueue();
-const readRemapStatus = callable<[], RemapStatus>("remap_get_status");
+const readRemapStatus = rpc<[], RemapStatus>("remap_get_status");
 export const getRemapStatus = async () => {
   if (mutations.pending) await mutations.tail;
   return readRemapStatus();
 };
-const setRemapEnabled = callable<[boolean], RemapResult>("remap_set_enabled");
-const setRemapAction = callable<[string, string], RemapResult>("remap_set_action");
-const restoreRemapDefaults = callable<[], RemapResult>("remap_restore_defaults");
+const setRemapEnabled = rpc<[boolean], RemapResult>("remap_set_enabled");
+const setRemapAction = rpc<[string, string], RemapResult>("remap_set_action");
+const restoreRemapDefaults = rpc<[], RemapResult>("remap_restore_defaults");
 
 // Every status lists all actions with labels, and saved actions are always one of them.
 const actionLabel = (status: RemapStatus | undefined, action: string) =>

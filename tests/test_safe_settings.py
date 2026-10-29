@@ -30,9 +30,9 @@ class AtomicSettingsTests(unittest.TestCase):
         manager.setSetting("second", {"value": 2})
         self.assertFalse(Path(manager.path).exists())
 
-        with patch.object(safe_settings, "_encode_json_object", wraps=safe_settings._encode_json_object) as encode:
+        with patch.object(safe_settings.dk_fs, "write_json", wraps=safe_settings.dk_fs.write_json) as write:
             manager.commit()
-        self.assertEqual(encode.call_count, 1)
+        self.assertEqual(write.call_count, 1)
         self.assertEqual(Path(manager.path).read_bytes(), Path(manager.backup_path).read_bytes())
         self.assertEqual(
             json.loads(Path(manager.path).read_text(encoding="utf-8")),
@@ -107,12 +107,12 @@ class AtomicSettingsTests(unittest.TestCase):
     def test_backup_write_failure_keeps_primary_and_in_memory_commit(self):
         manager = self.manager()
         manager.replace({"value": "old"})
-        write_bytes = safe_settings._atomic_write_bytes
-        def fail_backup(path, payload):
+        write_atomic = safe_settings.dk_fs.write_atomic
+        def fail_backup(path, payload, *args, **kwargs):
             if path == manager.backup_path:
                 raise OSError("backup unavailable")
-            return write_bytes(path, payload)
-        with patch.object(safe_settings, "_atomic_write_bytes", side_effect=fail_backup), \
+            return write_atomic(path, payload, *args, **kwargs)
+        with patch.object(safe_settings.dk_fs, "write_atomic", side_effect=fail_backup), \
              patch.object(safe_settings, "transition") as log:
             manager.replace({"value": "new"})
         self.assertEqual(manager.getSetting("value"), "new")
@@ -129,19 +129,22 @@ class AtomicSettingsTests(unittest.TestCase):
     def test_directory_fsync_failure_after_replace_keeps_committed_value(self):
         manager = self.manager()
         manager.replace({"value": "old"})
-        original_fsync = safe_settings.os.fsync
+        original_fsync = safe_settings.dk_fs.os.fsync
         def fail_directory(fd):
             if stat.S_ISDIR(os.fstat(fd).st_mode):
                 raise OSError("injected directory fsync failure")
             return original_fsync(fd)
-        with patch.object(safe_settings.os, "fsync", side_effect=fail_directory), \
+        with patch.object(safe_settings.dk_fs.os, "fsync", side_effect=fail_directory), \
              patch.object(safe_settings, "_log") as log:
             manager.replace({"value": "new"})
+            safe_settings._atomic_write_bytes(str(self.root / "journal.json"), b"{}")
+            with self.assertRaises(OSError):
+                safe_settings._atomic_write_bytes(str(self.root / "journal.json"), b"{}", strict_sync=True)
         self.assertEqual(manager.getSetting("value"), "new")
         self.assertEqual(json.loads(Path(manager.path).read_text(encoding="utf-8")),
                          {"value": "new"})
         self.assertTrue(any(call.args == ("warning", "directory_durability_unconfirmed")
-                            and call.kwargs.get("store") == "module.json"
+                            and call.kwargs.get("store") == "journal.json"
                             for call in log.call_args_list))
 
     def test_existing_primary_gets_a_recovery_backup_on_first_read(self):
@@ -168,8 +171,9 @@ class AtomicSettingsTests(unittest.TestCase):
         manager = self.manager()
         self.assertEqual(manager.settings, {})
         self.assertEqual(path.read_text(encoding="utf-8"), "[]")
-        self.assertEqual(len(list(self.root.glob("module.json.corrupt-*"))), 0)
-        self.assertIn("primary:", manager.recovery_error)
+        evidence = list(self.root.glob("module.json.corrupt-*"))  # kept: the repair commit replaces the file
+        self.assertEqual([copy.read_text(encoding="utf-8") for copy in evidence], ["[]"])
+        self.assertIn("module.json:", manager.recovery_error)
         # Neither a component reload nor a new process may treat data loss as
         # first install before the caller persists its recovery choice.
         manager.read()
@@ -184,10 +188,10 @@ class AtomicSettingsTests(unittest.TestCase):
         (self.root / "module.json.bak").write_text("[]", encoding="utf-8")
         manager = self.manager()
         self.assertEqual(manager.settings, {})
-        self.assertIn("primary:", manager.recovery_error)
-        self.assertIn("backup:", manager.recovery_error)
+        self.assertIn("module.json:", manager.recovery_error)
+        self.assertIn("last-good copy:", manager.recovery_error)
         manager.setSetting("enabled", False)
-        with patch.object(safe_settings, "_atomic_write_bytes", side_effect=OSError("disk full")):
+        with patch.object(safe_settings.dk_fs, "write_atomic", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 manager.commit()
         self.assertTrue(manager.recovery_error)
@@ -206,7 +210,7 @@ class AtomicSettingsTests(unittest.TestCase):
     def test_corrupt_backup_without_primary_reports_lost_intent(self):
         (self.root / "module.json.bak").write_text("null", encoding="utf-8")
         manager = self.manager()
-        self.assertIn("backup:", manager.recovery_error)
+        self.assertIn("last-good copy:", manager.recovery_error)
 
     def test_excessively_nested_primary_recovers_valid_backup(self):
         # 2000 trips JSON's parser; 600 used to parse successfully and fail in
@@ -335,13 +339,32 @@ class AtomicSettingsTests(unittest.TestCase):
         self.assertEqual(manager.settings, {"kept": 1, "pending": 2})
 
 
-class NonblockingMetadataTests(unittest.TestCase):
-    def test_settings_open_cannot_wait_for_a_fifo_replaced_after_lstat(self):
-        with patch.object(safe_settings.os, 'O_NONBLOCK', 0x800, create=True), \
-                patch.object(safe_settings.os, 'open', return_value=42) as opened:
-            self.assertEqual(safe_settings._open_readonly_nofollow('fixture.json'), 42)
-        self.assertTrue(opened.call_args.args[1] & 0x800,
-                        'A later descriptor type check cannot help if open itself blocks on a replaced FIFO.')
+class LegacyBackupTests(unittest.TestCase):
+    """2.4.0 kept <file>.bak; dk_fs keeps <file>.last-good."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_a_damaged_file_right_after_the_update_is_restored_from_the_old_backup(self):
+        (self.root / "module.json").write_text("{broken", encoding="utf-8")
+        (self.root / "module.json.bak").write_text('{"enabled": true}', encoding="utf-8")
+        manager = safe_settings.AtomicSettingsManager("module", str(self.root))
+        self.assertEqual((manager.settings, manager.recovery_error), ({"enabled": True}, ""))
+        self.assertFalse((self.root / "module.json.bak").exists())
+        self.assertEqual(json.loads((self.root / "module.json.last-good").read_text(encoding="utf-8")),
+                         {"enabled": True})
+
+    def test_a_damaged_old_backup_never_replaces_a_good_copy(self):
+        safe_settings.AtomicSettingsManager("module", str(self.root)).replace({"enabled": True})
+        good = self.root / "module.json.last-good"
+        os.utime(good, (1, 1))
+        (self.root / "module.json.bak").write_text("{broken", encoding="utf-8")
+        (self.root / "module.json").write_text("{broken", encoding="utf-8")
+        manager = safe_settings.AtomicSettingsManager("module", str(self.root))
+        self.assertEqual(manager.settings, {"enabled": True})
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX dir_fd and symlink semantics")

@@ -29,7 +29,7 @@ class SharedLifecycleEdges(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.object(fan_backend,'read_automatic',return_value={
             'valid':True,'automatic':True,'rpm':1500,'apu_temperature':45,
             'ownership':{'blocked':False,'state':'firmware_auto'}}))
-        self.plugin=main.Plugin();self.plugin._check_guard=AsyncMock()
+        self.plugin=support.LegacyPlugin();self.plugin._check_guard=AsyncMock()
         self.plugin._module_state={};self.plugin._module_health={}
         self.plugin._module_store=SettingsManager('module_settings',str(self.root))
         self.plugin._fan=fan_backend.Plugin();self.plugin._fan._supported=True;self.plugin._fan._load()
@@ -65,15 +65,15 @@ class SharedLifecycleEdges(unittest.IsolatedAsyncioTestCase):
 
     def hold_commit(self,path):
         arrived,release=threading.Event(),threading.Event();self.releases.append(release)
-        original=safe_settings._atomic_write_bytes
+        original=safe_settings.dk_fs.write_atomic
         held=False
-        def write(target,payload):
+        def write(target,payload,*args,**kwargs):
             nonlocal held
             if target==path and not held:
                 held=True;arrived.set()
                 if not release.wait(3):raise TimeoutError('Test commit barrier was not released')
-            return original(target,payload)
-        self.stack.enter_context(patch.object(safe_settings,'_atomic_write_bytes',side_effect=write))
+            return original(target,payload,*args,**kwargs)
+        self.stack.enter_context(patch.object(safe_settings.dk_fs,'write_atomic',side_effect=write))
         return arrived,release
 
     async def test_simultaneous_decky_and_http_curve_saves_have_one_canonical_winner(self):

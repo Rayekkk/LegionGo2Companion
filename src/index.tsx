@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
-import { addEventListener, removeEventListener, callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
+import { addEventListener, removeEventListener, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
   Field,
@@ -29,7 +29,7 @@ import { BatteryPage, getBatteryStatus, getControllerBatteryLevels, batterySumma
 import { ControllerPage, getControllerStatus, controllerSummary, type ControllerStatus } from "./controller";
 import { DeviceReportSection, UpdateSection, startUpdates, stopUpdates } from "./updates";
 import { FirmwarePanel } from "./firmware";
-import { errorText, infoRow } from "./shared";
+import { errorText, infoRow, rpc } from "./shared";
 import { strengthOnly } from "../desktop/native/vibration.mjs";
 import { betaNoticeText, betaNoticeTitle, cleanupRetryShown, consoleDetecting, MODULE_LABELS, moduleChecked, moduleLocked, moduleNote, moduleShown, moduleStartingText, startRetryShown } from "../desktop/native/modules.mjs";
 
@@ -42,7 +42,7 @@ type Device = {console?: string | null; model?: string | null; firmware?: boolea
 // Key order is the menu and Manage Modules order.
 const moduleLabels: Record<ModuleKey, string> = MODULE_LABELS;
 const moduleEnabled = (modules: ModuleStates, key: ModuleKey) => moduleShown(modules[key]) && modules[key]?.enabled !== false && modules[key]?.ready !== false && !modules[key]?.pending;
-const setModuleEnabled = callable<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
+const setModuleEnabled = rpc<[ModuleKey, boolean], ModuleStates>("modules_set_enabled");
 
 interface TdpSettings {
   enabled?: boolean;
@@ -96,7 +96,7 @@ interface GuardStatus {
   guard_error?: string;
   message?: string;
 }
-const getVersion = callable<[], GuardStatus>("get_version");
+const getVersion = rpc<[], GuardStatus>("get_version");
 // Injected by rollup from package.json; shown until the backend reports its own version.
 declare const __PLUGIN_VERSION__: string;
 const PLUGIN_VERSION = __PLUGIN_VERSION__;
@@ -158,10 +158,10 @@ const refreshGuard = async () => {
     pauseUnavailableGuard();
   } finally { if (guardRead === request) guardRead = null; }
 };
-const getTdpSettings = callable<[], TdpSettings>("get_settings");
+const getTdpSettings = rpc<[], TdpSettings>("get_settings");
 const getVibeSettings = getVibrationSettings;
-const getDriverStatus = callable<[], DriverStatus>("vibe_get_driver_status");
-const getDisplayState = callable<[], DisplayState>("display_get_state");
+const getDriverStatus = rpc<[], DriverStatus>("vibe_get_driver_status");
+const getDisplayState = rpc<[], DisplayState>("display_get_state");
 
 // Keep confirmed summaries and in-flight reads across QAM remounts. Each source
 // publishes independently, so a slow hardware/network probe cannot hide ready data.

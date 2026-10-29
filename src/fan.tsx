@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { toaster, useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow, ToggleField, Focusable, GamepadButton,
   DropdownItem, Dropdown, DialogHeader, DialogBody, DialogLabel,
   DialogFooter, DialogButton, ModalRoot, showModal, type GamepadEvent } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
-import { errorText, infoRow } from "./shared";
+import { errorText, infoRow, rpc } from "./shared";
 import { curveName as title, editPoint, fanStatus, nudgeSpeed, pointText, saveLabel, speedText } from "../desktop/native/fan.mjs";
 import { FAN_BETA_TEXT } from "../desktop/native/modules.mjs";
 
@@ -23,11 +23,11 @@ export interface FanState {
   telemetry?: { active: boolean; automatic: boolean; error?: string; rpm?: number; target?: number;
     override?: number; effective?: number; stop_verified?: boolean; temperatures?: Record<string, number> };
 }
-const readState = callable<[], FanState>("fan_get_state");
-const requestEnabled = callable<[boolean], FanState>("fan_set_enabled");
-const requestCurve = callable<[string, Curve | null, number], FanState>("fan_save_curve");
-const requestUnit = callable<["rpm" | "percent", number], FanState>("fan_save_unit");
-const requestAssignments = callable<[boolean, number], FanState>("fan_save_assignment_mode");
+const readState = rpc<[], FanState>("fan_get_state");
+const requestEnabled = rpc<[boolean], FanState>("fan_set_enabled");
+const requestCurve = rpc<[string, Curve | null, number], FanState>("fan_save_curve");
+const requestUnit = rpc<["rpm" | "percent", number], FanState>("fan_save_unit");
+const requestAssignments = rpc<[boolean, number], FanState>("fan_save_assignment_mode");
 const timed = async (operation: () => Promise<FanState>) => {
   const started = Date.now(), next = await operation(), receivedAt = Date.now();
   return { ...next, receivedAt, readings: next.readings && { ...next.readings,

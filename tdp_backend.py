@@ -4,7 +4,7 @@
 
 import decky
 from diagnostics import event, transition
-from system_process import system_env
+from dk_process import system_env
 import module_runtime
 from active_app import normalise_app_id, resolve_running_app, scan_proc_for_appid
 import asyncio
@@ -31,7 +31,7 @@ if PLUGIN_DIR not in sys.path:
 
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
 # name before we are imported, and sys.modules wins over sys.path.
-from tdp_updater import Updater  # noqa: E402 - needs the sys.path line above
+import dk_net  # noqa: E402 - needs the sys.path line above
 
 # Root's own directory outside Decky's tree: Decky deletes the plugin directory on
 # every update (it uninstalls first), and the helper has to outlive that.
@@ -44,8 +44,11 @@ RYZENADJ_URL  = (
 RYZENADJ_SHA256 = "d04547f111c6af3e40d3f210468adb884561618ddade0b640d90e50c88d03444"
 RYZENADJ_BINARY_SHA256 = "18a61170efec95d2366355b9dd5c75a961a9e8008d42e3471f4f414a6faec471"
 
-# The pinned RyzenAdj download uses TLS verification and a host allowlist.
-updater = Updater(user_agent="LeGoTDP")
+# The pinned RyzenAdj download: verified TLS, GitHub's release page then only its asset hosts (dk_net).
+RYZENADJ_HOSTS = frozenset({"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"})
+RYZENADJ_REDIRECTS = RYZENADJ_HOSTS - {"github.com"}
+MAX_DOWNLOAD_BYTES = 48 * 1024 * 1024
+MAX_DOWNLOAD_SECONDS = 120
 
 # The Legion Go 2's firmware ceilings, used only on a Go 2 whose firmware does not
 # answer. The frontend carries the same numbers as FALLBACK_STD until get_caps() returns.
@@ -790,20 +793,18 @@ def _helper_verified() -> bool:
 def _download_ryzenadj(cancel=None) -> None:
     decky.logger.info(f"[legotdp] Downloading ryzenadj from {RYZENADJ_URL}")
     _helper_dir()
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
-    os.close(tmp_fd)
     bin_tmp = ""
     try:
-        with open(tmp_path, "wb") as out:
-            updater.download_to(RYZENADJ_URL, out, timeout=30, cancel=cancel)
-
-        actual = _sha256_file(tmp_path)
-        if actual != RYZENADJ_SHA256:
-            raise RuntimeError(
-                f"ryzenadj archive checksum mismatch: got {actual}, "
-                f"expected {RYZENADJ_SHA256}")
-
-        with tarfile.open(tmp_path, "r:gz") as tar:
+        # dk_net checks the pinned SHA-256 and hands the archive over as an anonymous file in root's folder
+        # (not /tmp: RAM); a kill mid-download leaves nothing behind.
+        try:
+            archive = dk_net.spool(RYZENADJ_URL, BIN_DIR, MAX_DOWNLOAD_BYTES, RYZENADJ_SHA256, hosts=RYZENADJ_HOSTS,
+                                   redirects=RYZENADJ_REDIRECTS, deadline=MAX_DOWNLOAD_SECONDS, cancel=cancel)
+        except dk_net.NetError as error:
+            if cancel is not None and cancel():
+                raise InterruptedError("RyzenAdj download was cancelled") from None
+            raise RuntimeError(f"RyzenAdj download failed: {error}") from error
+        with archive, tarfile.open(fileobj=archive, mode="r:gz") as tar:
             member = next(
                 (m for m in tar.getmembers()
                  if os.path.basename(m.name) == "ryzenadj" and m.isfile()),
@@ -830,13 +831,11 @@ def _download_ryzenadj(cancel=None) -> None:
         bin_tmp = ""
         event('tdp','helper_installed',source='ryzenadj',outcome='verified')
     finally:
-        for path in (tmp_path, bin_tmp):
-            if not path:
-                continue
+        if bin_tmp:
             try:
-                os.unlink(path)
+                os.unlink(bin_tmp)
             except OSError:
-                pass
+                pass  # already gone
 
 
 def _ensure_ryzenadj(cancel=None, download=True) -> bool:
@@ -3004,7 +3003,7 @@ class Plugin:
                 return
             # Resolve the trust store now so the log states up front whether downloads
             # and update checks will be able to verify certificates.
-            await _offload(updater.ssl_context)
+            await _offload(dk_net.tls_context)
             # Seed this so the first enforce pass does not report a phantom AC change.
             _current_ac_online = await _offload(_get_ac_online)
             # Establish the suspend-clock baseline before the workers start, so

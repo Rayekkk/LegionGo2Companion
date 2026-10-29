@@ -426,16 +426,17 @@ class RpcLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.seen=patch.object(diag,'_seen',collections.OrderedDict());self.seen.start();self.addCleanup(self.seen.stop)
         self.sink=patch.object(diag,'_sink',lambda text,level:self.records.append(json.loads(text)))
         self.sink.start();self.addCleanup(self.sink.stop)
-        self.plugin=main.Plugin();self.plugin._check_guard=AsyncMock()
+        self.plugin=support.LegacyPlugin();self.plugin._check_guard=AsyncMock()
         self.plugin._module_state={name:{'enabled':True} for name in main.MODULE_NAMES}
         self.plugin._module_health={name:{'ready':True} for name in main.MODULE_NAMES}
 
     async def test_both_frontends_failures_and_success_keep_result_and_operation_context(self):
         from unittest.mock import AsyncMock
         from desktop_bridge import DesktopBridge
+        self.plugin.__class__=self.main.Plugin  # both frontends see the D2 face
         self.plugin._tdp=Mock(apply_tdp=AsyncMock(return_value={'success':False,'stderr':'token=SECRET'}))
         failure=await self.plugin.apply_tdp(15000,18000,20000)
-        self.assertFalse(failure['success'])
+        self.assertEqual((failure['ok'],failure['state']['success']),(False,False))
         self.plugin._tdp.apply_tdp.return_value={'success':True,'private':'not logged'}
         bridge=DesktopBridge(self.plugin,['apply_tdp'])
         success=await bridge.dispatch('apply_tdp',[15000,18000,20000])

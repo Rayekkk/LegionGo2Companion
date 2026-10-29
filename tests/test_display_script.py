@@ -19,7 +19,7 @@ import display_backend as display
 import display_native as native
 import display_script_io
 from safe_settings import AtomicSettingsManager, CorruptSettings
-from system_process import PYTHON
+from dk_process import PYTHON
 from test_display_edid import edid_fixture
 
 
@@ -416,7 +416,7 @@ class DisplayStartTests(unittest.TestCase):
 
     def test_lost_settings_block_startup_and_every_write(self):
         primary = self.root / "display_settings.json"
-        backup = Path(str(primary) + ".bak")
+        backup = Path(str(primary) + ".last-good")
         primary.write_text("{broken primary")
         backup.write_text("{broken backup")
         manager = AtomicSettingsManager("display_settings", str(self.root))

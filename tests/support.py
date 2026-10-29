@@ -1,39 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Shared test fixture: a stub `decky`, isolated settings and install dirs.
+"""Legion's test fixture on DeckyKit's _harness (decky stand-in with a real logger, temp folders, hang watchdog):
+isolated settings and install dirs, Decky's socket shape for main's unload workaround, POSIX stubs on Windows.
 
 Import this before `main` or any backend.
 """
 import contextlib
-import faulthandler
 import sys
 import tempfile
 import types
 from pathlib import Path
 
-
-# A hung run ends with every thread's stack instead of stalling (the suite takes ~2 min, CI allows 10).
-# A wait_for cannot bound a stuck _unload: it resists cancellation, and so does the test loop's teardown.
-faulthandler.dump_traceback_later(480, exit=True)
+import _harness
 
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_ROOT = Path(tempfile.mkdtemp(prefix="legiongo2companion-tests-"))
 CURRENT_SETTINGS = SETTINGS_ROOT / "LegionGo2Companion"
 CURRENT_SETTINGS.mkdir()
-
-
-class Logger:
-    def info(self, _message):
-        pass
-
-    def warning(self, _message):
-        pass
-
-    def error(self, _message):
-        pass
-
-    def debug(self, _message):
-        pass
 
 
 class _Socket:  # Shape of Decky's UnixSocket, so main's unload workaround finds its listener.
@@ -50,11 +33,9 @@ def _emitter(sandboxed):
 emit = _emitter(types.SimpleNamespace(_socket=_Socket()))
 
 
-decky = types.ModuleType("decky")
-decky.logger = Logger()
+decky = _harness.install()
 decky.emit = emit
 decky.DECKY_PLUGIN_SETTINGS_DIR = str(CURRENT_SETTINGS)
-sys.modules["decky"] = decky
 
 
 for unix_only in ("fcntl", "pwd"):
@@ -77,6 +58,16 @@ ISOLATED_INSTALL = SETTINGS_ROOT / "plugins" / "LegionGo2Companion"
 ISOLATED_INSTALL.mkdir(parents=True)
 (ISOLATED_INSTALL / "plugin.json").write_bytes((ROOT / "plugin.json").read_bytes())
 main.PLUGIN_DIR = str(ISOLATED_INSTALL)
+
+
+class LegacyPlugin(main.Plugin):
+    """main.Plugin with its RPCs as below the D2 face (payloads and exceptions as the backends give them), for the
+    behaviour tests; test_rpc_d2 covers the face itself (main._d2, dk_rpc.boundary, the Desktop bridge)."""
+
+
+for _name, _method in tuple(vars(main.Plugin).items()):
+    if hasattr(_method, "legacy"):
+        setattr(LegacyPlugin, _name, _method.legacy)
 # No file sink unless a test injects its own directory: never the real /var/log.
 DEFAULT_LOG_DIR, main.diagnostics.LOG_DIR = main.diagnostics.LOG_DIR, None
 import battery_backend  # noqa: E402
@@ -164,8 +155,8 @@ GO1_POWER_LED_FIELDS = [(None, 0x50 * 8), (b"ADPT", 1), (b"BAIN", 1), (b"LIDF", 
 
 
 def dns_stall_source(marker):
-    """Child source: bounded_http's --fetch helper whose resolver records `marker`, then stalls."""
-    helper = str(ROOT / "bounded_http.py")
+    """Child source: dk_net's --fetch helper whose resolver records `marker`, then stalls."""
+    helper = str(ROOT / "dk_net.py")
     return ("import runpy,socket,sys,time; from pathlib import Path\n"
             "def resolver(*args,**kwargs):\n"
             f" Path({str(marker)!r}).write_text('entered')\n"

@@ -3,13 +3,15 @@
 import asyncio
 import collections
 import json
-from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-import companion_updates as updates
+import support  # noqa: F401 - installs the fake decky module
 import controller_firmware as fw
 import diagnostics
+import dk_net
+import dk_update
+import main
 
 
 class UpdateDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -41,14 +43,17 @@ class UpdateDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assert_private()
 
     async def test_cached_release_error_does_not_repeat_network_or_diagnostics(self):
-        updater=updates.CompanionUpdates(str(Path(__file__).resolve().parents[1]),'unused',1000,1000)
-        with patch.object(updater,'_metadata',side_effect=OSError('private-secret-marker /home/private/full-path')) as metadata:
-            result=updater.check();count=len(self.records)
-            for _ in range(20):self.assertEqual(updater.check(),result)
+        updater=dk_update.Updates(repo='Rayekkk/LegionGo2Companion',folder='LegionGo2Companion',
+            plugin_name='Legion Go 2 Companion',current='2.4.0',home='/home/private/full-path',
+            on_event=main._update_event)
+        failure=dk_net.NetError('private-secret-marker /home/private/full-path')
+        with patch.object(dk_net,'get',side_effect=failure) as metadata:
+            result=main._legacy_update(updater.check());count=len(self.records)
+            for _ in range(20):self.assertEqual(main._legacy_update(updater.check()),result)
         self.assertFalse(result['success']);self.assertEqual(metadata.call_count,1)
         self.assertEqual(len(self.records),count)
         fault=next(value for value in self.records if value['event']=='release_check_failed')
-        self.assertEqual(fault['context']['stage'],'metadata');self.assertEqual(fault['error']['type'],'OSError')
+        self.assertEqual((fault['level'],fault['context']['outcome']),('warning','failed'))
         self.assert_private()
 
 

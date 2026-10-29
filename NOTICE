@@ -62,9 +62,8 @@ https://www.npmjs.com/package/@decky/api/v/1.1.3
 License: GNU Lesser General Public License v2.1
 
 The compiled frontend bundles portions of @decky/api. The release archive
-therefore includes its license under THIRD_PARTY_LICENSES, its complete package
-under THIRD_PARTY_SOURCES, and the plugin frontend source/build inputs described
-in SOURCE.md.
+therefore includes its license and its complete package under third_party/decky-api,
+and the plugin frontend source/build inputs described in SOURCE.md.
 
 The display module shells out to xprop from SteamOS. xprop is not redistributed.
 

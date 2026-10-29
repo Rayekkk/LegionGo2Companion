@@ -32,7 +32,8 @@ import vibration_backend
 import wifi_backend
 import module_runtime
 import diagnostics
-from companion_updates import CompanionUpdates
+import dk_rpc
+import dk_update
 import device_report
 from controller_firmware import FirmwarePreparation, INSTALL_SECONDS, updater_running, applies as firmware_applies
 from safe_settings import SettingsManager
@@ -48,6 +49,13 @@ UPDATE_RPCS = frozenset({'updates_check', 'updates_download'}) | FIRMWARE_RPCS
 # Read-only and for any console: no module of its own, also during controller maintenance (it opens no
 # controller), never while the conflict guard has paused Companion (another plugin may be calling the firmware).
 REPORT_RPCS = frozenset({'save_device_report'})
+# TDP's RPCs predate module prefixes. Every other public RPC has a prefix or is module-less (_rpc_module).
+TDP_RPCS = frozenset({
+    'is_ready', 'get_settings', 'get_cpu_power_controls', 'set_cpu_boost', 'set_epp', 'get_power_source',
+    'retry_extras', 'get_extras_unlocked', 'set_extras_unlocked', 'set_advanced_tdp_control',
+    'set_separate_battery_presets', 'get_game_profile', 'list_game_profiles', 'set_game_ac_profile',
+    'delete_game_profile', 'set_game_profile_active', 'set_plugin_enabled', 'get_caps', 'set_panel_active',
+    'reapply', 'set_active_app', 'get_tdp_info', 'apply_tdp'})
 # Admission exceptions (_guard_component_calls). By default a public RPC waits for startup, is refused while the
 # conflict guard is blocked/failed or the plugin closes, and needs its module (_rpc_module) enabled, ready and
 # not paused; module-less calls (modules_*, updates) also wait while controllers are paused and drain admitted RPCs.
@@ -79,6 +87,31 @@ _ADVISORY_RPCS = frozenset({'set_panel_active', 'set_active_app', 'vibe_set_acti
 # Preconditions the backend checks before changing anything; the reply already tells the user why.
 _REFUSALS = frozenset({'unsupported_backend', 'unsupported_device', 'preflight_failed', 'no_wifi',
                        'backend_inactive', 'iwd_inactive', 'preference_disabled', 'managed_profile_not_active'})
+
+
+# DeckyKit D2: no exception reaches the panel or the Desktop app; RuntimeError/ValueError (and the backends' own
+# subclasses: AdmissionClosed, BatteryError, FirmwareError...) carry text written for users.
+_rpc = dk_rpc.boundary(decky.logger, shown=(RuntimeError, ValueError))
+
+
+def _d2(result):
+    """A component's answer as D2: its payload is the state, unchanged (the legacy `success` too, until the module's
+    step 2 in DeckyKit PLAN Etap C2); a payload with success False is a refusal that still carries it."""
+    if isinstance(result, dict) and result.get('success') is False:
+        error = next((str(result[key]).strip() for key in ('error', 'reason', 'stderr')
+                      if result.get(key) and str(result[key]).strip()), '')
+        return dk_rpc.fail(error or "The change wasn't confirmed. Check the current value.", state=result)
+    return dk_rpc.ok(result)
+
+
+def _public_rpc(function):
+    """The D2 face of a guarded RPC; `legacy` keeps the guarded call for tests of the behaviour below it."""
+    @functools.wraps(function)
+    async def answer(self, *args, **kwargs):
+        return _d2(await function(self, *args, **kwargs))
+    public = _rpc(answer)
+    public.legacy = function
+    return public
 
 
 def _refused_before_change(exc):
@@ -137,11 +170,34 @@ def _logged_rpc(function, name):
     return logged
 
 def _rpc_module(name):
+    """The module that admits this RPC, None for module-less ones; a name with neither is a bug, not TDP."""
     for prefix, module in (('fan_', 'fan'), ('vibe_', 'vibration'), ('display_', 'display'), ('wifi_', 'wifi'),
                            ('rgb_', 'rgb'), ('remap_', 'remap'), ('battery_', 'battery'), ('controller_', 'controller')):
         if name.startswith(prefix):
             return module
-    return None if name.startswith('modules_') or name in UPDATE_RPCS or name in REPORT_RPCS else 'tdp'
+    if name.startswith('modules_') or name in UPDATE_RPCS or name in REPORT_RPCS:
+        return None
+    if name in TDP_RPCS:
+        return 'tdp'
+    raise KeyError(f'{name}: no module admits this RPC; give it a module prefix or add it to TDP_RPCS')
+
+
+def _update_event(name, outcome, duration_ms, **fields):
+    """dk_update's diagnostics as the device report's `updates` events (no path, no error text)."""
+    action = ('release_check' if name == 'check' else 'download') + ('_failed' if outcome == 'failed' else '_finished')
+    diagnostics.event('updates', action, level='warning' if outcome == 'failed' else 'info', outcome=outcome,
+                      duration_ms=duration_ms, version=fields.get('latest') or fields.get('version'),
+                      stage=fields.get('stage'), repeat=60)
+
+
+def _legacy_update(view):
+    """dk_update's D2 view in the shape the panel and the Desktop app read until step 2 (DeckyKit PLAN Etap C2):
+    `success`, and a newer release that cannot be offered gives its reason as `error`."""
+    view = dict(view)
+    view['success'] = view.pop('ok')
+    if view['success'] and view.get('update_available') and not view.get('download_available') and view.get('message'):
+        view['error'] = view['message']
+    return view
 
 
 def _plugin_version() -> str:
@@ -254,9 +310,12 @@ def _end_decky_listener_at_eof():
 
 
 def _guard_component_calls(cls):
-    """Default-deny every public component RPC, including future additions."""
+    """Default-deny every public component RPC, including future additions; every answer is D2."""
     for name, method in tuple(vars(cls).items()):
-        if name.startswith("_") or name in _UNGUARDED_RPCS or not inspect.iscoroutinefunction(method):
+        if name.startswith("_") or not inspect.iscoroutinefunction(method):
+            continue
+        if name in _UNGUARDED_RPCS:
+            setattr(cls, name, _public_rpc(method))
             continue
         def wrap(fn):
             name = fn.__name__
@@ -308,7 +367,7 @@ def _guard_component_calls(cls):
                         await module_runtime.complete(self._drain_rpc_jobs())
                         return await module_runtime.complete(fn(self, *args, **kwargs))
                 return await module_runtime.complete(task)
-            return _logged_rpc(guarded, name)
+            return _public_rpc(_logged_rpc(guarded, name))
         setattr(cls, name, wrap(method))
     return cls
 
@@ -350,6 +409,7 @@ class Plugin:
         self._closing = False
         self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
         self._updates = None
+        self._updates_home = False
         self._firmware = FirmwarePreparation(pads=lambda: self._controller._controller_batteries(max_age=0))
         self._desktop = None
         self._desktop_install = None
@@ -394,8 +454,13 @@ class Plugin:
         if self._updates is not None:
             return
         account = _session_account()
-        self._updates = CompanionUpdates(PLUGIN_DIR, *((account.pw_dir, account.pw_uid, account.pw_gid)
-                                                       if account else ('', -1, -1)))
+        self._updates_home = account is not None
+        self._updates = dk_update.Updates(
+            repo="Rayekkk/LegionGo2Companion", folder="LegionGo2Companion", plugin_name="Legion Go 2 Companion",
+            package_name="legiongo2companion", flags=["root"],
+            current=os.environ.get("DECKY_PLUGIN_VERSION") or _plugin_version(),
+            home=account.pw_dir if account else "", uid=account.pw_uid if account else None,
+            logger=decky.logger, on_event=_update_event)
 
     async def _run_rpc(self, resource, function, args, kwargs):
         async with self._rpc_locks[resource]:
@@ -1178,10 +1243,12 @@ class Plugin:
     # Updates are explicit user actions, independent of hardware module toggles.
 
     async def updates_check(self):
-        return await asyncio.to_thread(self._updates.check)
+        return _legacy_update(await asyncio.to_thread(self._updates.check, True))
 
     async def updates_download(self, expected_version: str):
-        return await asyncio.to_thread(self._updates.download, expected_version)
+        if not self._updates_home:
+            return {'success': False, 'error': "The desktop user is unavailable; the file cannot be saved safely."}
+        return _legacy_update(await asyncio.to_thread(self._updates.download, expected_version))
 
     async def save_device_report(self):
         """A read-only hardware and firmware report in the console user's Desktop folder (device_report)."""

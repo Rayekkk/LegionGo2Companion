@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Desktop RPC allowlist = the Decky panels' public RPCs that the native app uses.
 // Without --check it regenerates both copies; --check fails on a stale committed copy.
-import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync,readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 const root=resolve(import.meta.dirname,'..');
 const methods=new Set();
-for(const file of ['index','tdp','fan','vibration','rgb','remap','controller','battery','display','wifi','updates','firmware']) {
-  const code=readFileSync(resolve(root,`src/${file}.tsx`),'utf8');
-  for(const match of code.matchAll(/callable\s*<[\s\S]*?>\s*\(\s*"([a-z_]+)"/g))methods.add(match[1]);
+for(const file of readdirSync(resolve(root,'src')).filter(name=>/\.tsx?$/.test(name)&&!name.endsWith('.d.ts'))) {
+  const code=readFileSync(resolve(root,'src',file),'utf8');
+  for(const match of code.matchAll(/\b(?:callable|rpc)\s*<[\s\S]*?>\s*\(\s*"([a-z_]+)"/g))methods.add(match[1]);
 }
 // Steam foreground-app hints need Steam's view; the rest is unused by the native app.
 for(const name of ['set_active_app','vibe_set_active_app','is_ready'])methods.delete(name);

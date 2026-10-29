@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-import { callable, toaster, useQuickAccessVisible } from "@decky/api";
+import { toaster, useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { confirmAction, detailsRows, infoRow, statusPlaceholder } from "./shared";
+import { confirmAction, detailsRows, infoRow, statusPlaceholder, rpc } from "./shared";
 import {
   actionShown, backendName, bandNote, bandOptions, canRun, CHANGED, CONFIRMATIONS, driverText, frequencyText, linkText, networkName,
   operationVerified, POLICY_ACTIONS, savedPolicy, UNVERIFIED, wifiNotice, type Policy, type WifiAction, type WifiStatus,
@@ -20,9 +20,9 @@ interface WifiResult {
   frequency?: number | null;
 }
 
-export const getWifiStatus = callable<[], WifiStatus>("wifi_get_status");
-const setBandPolicy = callable<[mode: Policy, allowUnverifiedScan?: boolean], WifiResult>("wifi_set_band_policy");
-const rescanAndReconnect = callable<[targetBand?: "high" | "six"], WifiResult>(
+export const getWifiStatus = rpc<[], WifiStatus>("wifi_get_status");
+const setBandPolicy = rpc<[mode: Policy, allowUnverifiedScan?: boolean], WifiResult>("wifi_set_band_policy");
+const rescanAndReconnect = rpc<[targetBand?: "high" | "six"], WifiResult>(
   "wifi_rescan_and_reconnect",
 );
 

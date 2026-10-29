@@ -449,14 +449,14 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(fan.settings.getSetting('state')['enabled'])
 
     async def test_module_disable_releases_fan_even_when_module_settings_cannot_save(self):
-        p=main.Plugin();p._fan.set_enabled=AsyncMock()
+        p=support.LegacyPlugin();p._fan.set_enabled=AsyncMock()
         with patch.object(main,'_installed_standalone_plugins',return_value=[]), \
                 patch.object(p,'_save_modules',side_effect=OSError('disk full')):
             with self.assertRaises(OSError): await p.modules_set_enabled('fan',False)
         p._fan.set_enabled.assert_awaited_once_with(False)
 
     async def test_fan_rpcs_are_namespaced_and_module_guarded(self):
-        p=main.Plugin();p._module_state['fan']={'enabled':False}
+        p=support.LegacyPlugin();p._module_state['fan']={'enabled':False}
         with patch.object(main,'_installed_standalone_plugins',return_value=[]):
             for name,args in [('fan_get_state',()),('fan_set_enabled',(True,)),('fan_save_curve',('global',DEFAULT_CURVE,0)),('fan_save_unit',('percent',0)),('fan_save_assignment_mode',(True,0))]:
                 with self.assertRaisesRegex(RuntimeError,'disabled'): await getattr(p,name)(*args)
@@ -464,7 +464,7 @@ class FanBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_manage_modules_withdrawal_and_reenable_keep_curves_custom_off(self):
         curve=copy.deepcopy(DEFAULT_CURVE);curve[6][0]=90
         await self.p.save_curve('global',curve,0)
-        p=main.Plugin();p._fan=self.p
+        p=support.LegacyPlugin();p._fan=self.p
         with patch.object(main,'_installed_standalone_plugins',return_value=[]), \
                 patch.object(fan,'platform_check',return_value={}), \
                 patch.object(self.p,'_start_client',new=AsyncMock()) as start:

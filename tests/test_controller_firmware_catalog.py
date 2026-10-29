@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import support
 import controller_firmware as fw
 import controller_firmware_catalog as catalog
-import system_process
+import dk_process
 
 GO2 = 'Legion Go 8ASP2'
 
@@ -149,19 +149,19 @@ class CatalogTests(unittest.TestCase):
     def test_parent_deadline_cancel_and_isolated_command(self):
         worker = Mock(returncode=0); worker.poll.return_value = 0
         worker.communicate.return_value = (json.dumps(result()).encode(), None)
-        with patch.object(system_process.subprocess, 'Popen', return_value=worker) as spawn:
+        with patch.object(dk_process.subprocess, 'Popen', return_value=worker) as spawn:
             self.assertEqual(catalog.check_catalog(threading.Event(), GO2), result())
             self.assertEqual(spawn.call_args.args[0][-2:], ['--catalog-data', GO2])
             self.assertIn('-I', spawn.call_args.args[0])
             self.assertNotIn('shell', spawn.call_args.kwargs)
         worker = Mock(returncode=None); worker.poll.return_value = None
         worker.communicate.side_effect = [subprocess.TimeoutExpired('helper', .2), (b'', None)]
-        with patch.object(system_process.subprocess, 'Popen', return_value=worker), patch.object(
-                system_process.time, 'monotonic', side_effect=[0., 0., catalog.WALL_SECONDS + 1.]):
+        with patch.object(dk_process.subprocess, 'Popen', return_value=worker), patch.object(
+                dk_process.time, 'monotonic', side_effect=[0., 0., catalog.WALL_SECONDS + 1.]):
             with self.assertRaises(catalog.CatalogError): catalog.check_catalog(threading.Event(), GO2)
         worker.kill.assert_called_once()
         cancelled = threading.Event(); cancelled.set()
-        with patch.object(system_process.subprocess, 'Popen') as spawn:
+        with patch.object(dk_process.subprocess, 'Popen') as spawn:
             with self.assertRaises(catalog.CatalogError): catalog.check_catalog(cancelled, GO2)
             spawn.assert_not_called()
 
@@ -170,7 +170,7 @@ class CatalogTests(unittest.TestCase):
         with support.stalled_child() as child:
             timer = threading.Timer(.3, cancelled.set); timer.start()
             try:
-                with patch.object(system_process.subprocess, 'Popen', return_value=child):
+                with patch.object(dk_process.subprocess, 'Popen', return_value=child):
                     with self.assertRaises(catalog.CatalogError): catalog.check_catalog(cancelled, GO2)
                 self.assertIsNotNone(child.poll())
             finally:
