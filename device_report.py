@@ -314,7 +314,7 @@ def _controllers(context):
         try:
             vendor = _read(os.path.join(device, "idVendor"), 8).lower()
         except Exception:
-            continue
+            continue  # an unplugged or unreadable device: the report lists only what it can read
         if vendor not in USB_VENDORS:
             continue
         product = _value(os.path.join(device, "idProduct"), 8)
@@ -437,7 +437,7 @@ def _network(context):
                 continue
             ids = f"{_read(os.path.join(device, 'vendor'), 16)[2:]}:{_read(os.path.join(device, 'device'), 16)[2:]}"
         except Exception:
-            continue
+            continue  # an unplugged or unreadable device: the report lists only what it can read
         lines.append(f"PCI {os.path.basename(device)} {ids} driver={_driver(device)}")
     if not lines:
         lines.append("PCI network controllers: none")

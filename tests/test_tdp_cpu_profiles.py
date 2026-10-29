@@ -986,6 +986,7 @@ class CpuProfileTests(unittest.TestCase):
     def test_main_passes_scope_and_expected_game_without_dropping_arguments(self):
         plugin = main.Plugin()
         plugin._check_guard = AsyncMock()
+        plugin._startup.set()  # RPCs without _main
         plugin._tdp = type('FakeTdp', (), {
             'get_cpu_power_controls': AsyncMock(return_value={}),
             'set_cpu_boost': AsyncMock(return_value={}),

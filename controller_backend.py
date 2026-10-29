@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import decky
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 from safe_settings import SettingsManager
 from inputplumber_process import (
     DEVICE_PATH_RE, INTERFACE, SERVICE, ProcessWatch,
@@ -442,7 +442,7 @@ class Plugin:
                         break
             except Exception as exc:
                 event('controller', 'battery_read_failed', level='warning', error=exc, repeat=60)
-                result = self._battery_result(reason=str(exc))
+                result = self._battery_result(reason=shown(exc))
             finally:
                 if fd is not None:
                     os.close(fd)
@@ -481,7 +481,7 @@ class Plugin:
                         if not available:
                             reason = imu.get("reason") or "Controller motion controls are unavailable."
                     except Exception as exc:
-                        reason = str(exc)
+                        reason = shown(exc)
                 result = {"available": available, "reason": reason, "gyro_source": state["gyro_source"],
                           "applied_source": applied, "controlled": controlled, "conflict": self._conflict,
                           "error": self._error, "physical": physical, "virtual": virtual,
@@ -585,7 +585,7 @@ class Plugin:
                     except Exception as rollback:
                         failures.append(str(rollback))
                 if failures:
-                    self._error = f"{exc} Recovery is pending: {'; '.join(failures)}"
+                    self._error = f"{shown(exc)} Recovery is pending: {'; '.join(failures)}"
                     raise ControllerError(self._error) from exc
                 raise
             self._generation = device["generation"]
@@ -678,7 +678,7 @@ class Plugin:
                     except Exception as rollback:
                         failures.append(str(rollback))
                 if failures:
-                    raise ControllerError(f"{exc} Restoration remains pending: {'; '.join(failures)}") from exc
+                    raise ControllerError(f"{shown(exc)} Restoration remains pending: {'; '.join(failures)}") from exc
                 raise
             # Release is successful even when externally modified fields were
             # preserved. Do not leave a sticky conflict that prevents re-entry.
@@ -693,7 +693,7 @@ class Plugin:
         try:
             await _offload(self._select, source)
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             self._status_cache = None
             raise
         self._ensure_watch()
@@ -717,7 +717,7 @@ class Plugin:
                     ok = controller_imu.apply_sleep({"left": minutes, "right": minutes})
                     error = "" if ok else "The controllers have not confirmed the sleep time yet. Companion tries again when they respond."
                 except Exception as exc:
-                    ok, error = False, str(exc)
+                    ok, error = False, shown(exc)
                 transition("controller", "sleep_time", ok, level="info" if ok else "warning",
                            outcome="confirmed" if ok else "deferred", initial=False)
             if error != self._sleep_error:
@@ -824,7 +824,7 @@ class Plugin:
                 try:
                     readers[_open_reader(record)] = kind
                 except Exception as exc:
-                    capture[kind]["error"] = str(exc)
+                    capture[kind]["error"] = shown(exc)
                     event("controller", "diagnostics_stream", level="warning", error=exc,
                           source=kind, stage="open", repeat=60)
             while readers and not stop.is_set():
@@ -844,7 +844,7 @@ class Plugin:
                         continue
                     except OSError as exc:
                         with self._capture_lock:
-                            capture[kind]["error"] = str(exc)
+                            capture[kind]["error"] = shown(exc)
                         event("controller", "diagnostics_stream", level="warning", error=exc,
                               source=kind, stage="read", repeat=60)
                         os.close(fd)
@@ -864,7 +864,7 @@ class Plugin:
                 capture["reason"] = "unavailable"
         except Exception as exc:
             with self._capture_lock:
-                capture["reason"] = str(exc)
+                capture["reason"] = shown(exc)
             event("controller", "diagnostics_worker", level="warning", error=exc,
                   outcome="failed", repeat=60)
         finally:
@@ -970,7 +970,7 @@ class Plugin:
             except module_runtime.ControllerPaused:
                 continue
             except Exception as exc:
-                self._error = str(exc)
+                self._error = shown(exc)
                 transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
                            level="warning", error=exc,
                            outcome="deferred", pending=not self._conflict)
@@ -983,7 +983,7 @@ class Plugin:
         try:
             source = (await _offload(_state))["gyro_source"]
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             raise
         self._closed = False
         self._generation = None
@@ -995,7 +995,7 @@ class Plugin:
                 await _offload(self._select, source, reconcile=True)
                 transition("controller", "managed_profile", True, outcome="confirmed", initial=False)
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
                        level="warning", error=exc,
                        outcome="deferred", pending=not self._conflict)
@@ -1016,7 +1016,7 @@ class Plugin:
         try:
             await _offload(self._release, persist=False)
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             event('controller','restore_failed',level='warning',error=exc,stage='unload',pending=True,restored=False)
         finally:
             self._service_watch.clear()

@@ -17,7 +17,7 @@ start removes what is left of it (_remove_old_scripts, _drop_retired_settings).
 
 import asyncio
 import copy
-from diagnostics import event as diagnostic_event, transition as diagnostic_transition
+from diagnostics import event as diagnostic_event, shown, transition as diagnostic_transition
 import errno
 import functools
 import hashlib
@@ -994,7 +994,7 @@ class Plugin:
             raise
         except Exception as e:
             if required:
-                raise RuntimeError(f"Could not save display recovery state: {e}") from e
+                raise RuntimeError(f"Could not save display recovery state: {shown(e)}") from e
             diagnostic_event('display', 'store_settings_failed', level='warning', error=e, repeat=60)
 
     @staticmethod
@@ -1349,7 +1349,7 @@ class Plugin:
         try:
             await _offload(Plugin._read_settings)
         except Exception as error:
-            Plugin._state["settings_error"] = f"Display settings are unavailable; the module was not started. {error}"
+            Plugin._state["settings_error"] = f"Display settings are unavailable; the module was not started. {shown(error)}"
             diagnostic_event('display', 'settings_unavailable', level='error', error=error)
             raise
         Plugin._state["settings_error"] = ""

@@ -3,7 +3,7 @@
 # https://github.com/Rayekkk/LeGoTDP
 
 import decky
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 from dk_process import system_env
 import module_runtime
 from active_app import normalise_app_id, resolve_running_app, scan_proc_for_appid
@@ -803,7 +803,7 @@ def _download_ryzenadj(cancel=None) -> None:
         except dk_net.NetError as error:
             if cancel is not None and cancel():
                 raise InterruptedError("RyzenAdj download was cancelled") from None
-            raise RuntimeError(f"RyzenAdj download failed: {error}") from error
+            raise RuntimeError(f"RyzenAdj download failed: {shown(error)}") from error
         with archive, tarfile.open(fileobj=archive, mode="r:gz") as tar:
             member = next(
                 (m for m in tar.getmembers()
@@ -1650,7 +1650,7 @@ def _release_controls_locked() -> dict:
             if result.get("success") is not True:
                 errors.append(f"{name}: {result.get('error') or result.get('stderr') or 'restoration was not confirmed'}")
         except Exception as exc:
-            errors.append(f"{name}: {exc}")
+            errors.append(f"{name}: {shown(exc)}")
     return {"success": not errors, "error": "; ".join(errors)}
 
 
@@ -1792,7 +1792,7 @@ def _capture_cpu_boost() -> dict:
             originals[path] = raw
             states.append(state)
     except (OSError, ValueError) as exc:
-        result["error"] = f"CPU Boost state unavailable: {exc}"
+        result["error"] = f"CPU Boost state unavailable: {shown(exc)}"
         return result
     result.update(available=True, can_set=True, originals=originals)
     if all(state == states[0] for state in states):
@@ -1850,7 +1850,7 @@ def _capture_epp() -> dict:
             originals[path] = current
             preference_lists.append(_preference_tokens(path))
     except (OSError, ValueError) as exc:
-        result["error"] = f"EPP state unavailable: {exc}"
+        result["error"] = f"EPP state unavailable: {shown(exc)}"
         return result
     common = set(preference_lists[0]).intersection(*preference_lists[1:])
     numeric_supported = "custom" in common
@@ -1918,7 +1918,7 @@ def _rollback_cpu_power_write(
                     f"{_sysfs_short_name(path)} rollback readback mismatch")
         except (OSError, ValueError) as exc:
             failures.append(
-                f"{_sysfs_short_name(path)} rollback failed: {exc}")
+                f"{_sysfs_short_name(path)} rollback failed: {shown(exc)}")
     return external, failures
 
 
@@ -1958,8 +1958,9 @@ def _transactional_cpu_power_write(
         rollback = external + failures
         suffix = (f"; rollback incomplete: {'; '.join(rollback)}" if rollback
                   else "; previous state restored")
+        event('tdp', 'cpu_power_write_failed', level='warning', error=exc, restored=not failures)
         # Only our own value left behind is unrestored; a third party's is not ours to undo.
-        return {"success": False, "error": f"{label} write failed: {exc}{suffix}",
+        return {"success": False, "error": f"{label} write failed: {shown(exc)}{suffix}",
                 "restored": not failures}
     return {"success": True, "error": ""}
 
@@ -2136,7 +2137,7 @@ def _best_effort_reapply_saved_cpu_power_locked(state: dict) -> list[str]:
             if not result["success"]:
                 errors.append(result["error"])
     except Exception as exc:
-        errors = [f"CPU power restore failed: {exc}"]
+        errors = [f"CPU power restore failed: {shown(exc)}"]
         event('tdp','cpu_power_restore_failed',level='warning',error=exc,stage='saved_cpu_controls',repeat=60)
     else:
         if errors:
@@ -2219,7 +2220,7 @@ def _tdp_user_transaction():
             yield restore_failed
         except Exception as exc:
             detail = restore_detail()
-            raise RuntimeError(f"TDP operation failed: {exc}; {detail}") from exc
+            raise RuntimeError(f"TDP operation failed: {shown(exc)}; {detail}") from exc
 
 
 def _set_cpu_control_locked(field: str, value, selected: str, ac_profile: bool,
@@ -2273,7 +2274,7 @@ def _set_cpu_control_locked(field: str, value, selected: str, ac_profile: bool,
         # the baseline, so a crash mid-write cannot orphan a changed control.
         _write_keys(values)
     except Exception as exc:
-        return False, f"settings persist failed: {exc}"
+        return False, f"settings persist failed: {shown(exc)}"
     if active:
         transaction = apply(canonical)
         if not transaction["success"]:
@@ -2282,7 +2283,7 @@ def _set_cpu_control_locked(field: str, value, selected: str, ac_profile: bool,
                 try:
                     _write_keys(previous)
                 except Exception as exc:
-                    return False, f"{transaction['error']}; settings revert failed: {exc}"
+                    return False, f"{transaction['error']}; settings revert failed: {shown(exc)}"
             return False, transaction["error"]
     event("tdp", "cpu_profile_saved", attribute=field,
           scope=("game_ac" if ac_profile else "game") if selected else "global",
@@ -2322,7 +2323,7 @@ def _save_inactive_global_tdp_locked(s: dict, spl: int, sppt: int, fppt: int,
     try:
         _save_settings(s)
     except Exception as exc:
-        return _fail(f"Could not save global TDP settings: {exc}",
+        return _fail(f"Could not save global TDP settings: {shown(exc)}",
                      applied=False, saved_only=False)
     return _ok(applied=False, saved_only=True, message=(
         "Global TDP settings saved. They will apply when no game profile is active."))
@@ -2496,13 +2497,13 @@ class Plugin:
                 return {"success": True}
             except Exception as exc:
                 if not cancelled():
-                    self._helper_error = str(exc)
+                    self._helper_error = shown(exc)
                     transition("tdp", "helper_ready", False, level="warning", error=exc,
                                outcome="deferred", retryable=True)
                 else:
                     event("tdp", "helper_job", outcome="cancelled",
                           reason="module_shutdown" if unload.is_set() else "extras_off")
-                return {"success": False, "error": str(exc)}
+                return {"success": False, "error": shown(exc)}
         return await _offload(retry)
 
     async def get_extras_unlocked(self) -> bool:
@@ -2985,7 +2986,7 @@ class Plugin:
         try:
             await _offload(_migrate)
         except Exception as e:
-            Plugin._setup_error = f"settings migration failed: {e}"
+            Plugin._setup_error = f"settings migration failed: {shown(e)}"
             event('tdp','migration_failed',level='error',error=e)
 
     async def _main(self):
@@ -3016,7 +3017,7 @@ class Plugin:
                     await _offload(lambda: _ensure_ryzenadj(download=False)))
             except Exception as e:
                 _ryzenadj_available = False
-                self._helper_error = str(e)
+                self._helper_error = shown(e)
                 transition('tdp','helper_ready',False,level='warning',error=e,outcome='deferred',retryable=True)
             def _apply_saved() -> dict:
                 global _current_game_id, _last_cpu_power_check
@@ -3071,7 +3072,7 @@ class Plugin:
         except module_runtime.StartStopped:
             raise  # The stop ends the start, not an error: main reports the module as not ready.
         except Exception as e:
-            Plugin._setup_error = str(e)
+            Plugin._setup_error = shown(e)
             event('tdp','startup_failed',level='error',error=e)
             raise
 

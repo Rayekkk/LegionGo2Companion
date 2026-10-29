@@ -3,7 +3,7 @@
 # The native Desktop app for the shared checks.yml (DeckyKit runs it before `npm run package`, which needs
 # dist/desktop): built against the minimum supported Qt (= SteamOS's system Qt), its C++ and QML tests, and the same
 # binaries on the newest Qt 6 runtime. Also fetches the release tags whose in-plugin updaters must accept the ZIP.
-# CI only (Ubuntu 24.04 runner with sudo); locally use scripts/build-native.py as CLAUDE.md describes.
+# CI only (Ubuntu 24.04 runner with sudo); locally use scripts/build-native.py as README.md describes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 qt=/tmp/companion-qt

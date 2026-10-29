@@ -29,6 +29,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     def plugin(self):
         plugin = main.Plugin()
         plugin._check_guard = AsyncMock()
+        plugin._startup.set()  # RPCs without _main
         plugin._module_state = {name: {'enabled': True} for name in main.MODULE_NAMES}
         plugin._module_health = {name: {'ready': True} for name in main.MODULE_NAMES}
         return plugin

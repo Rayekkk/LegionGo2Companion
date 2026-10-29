@@ -3,6 +3,7 @@
 /dist/
 /build/
 /bin/
+/artifacts/
 *.zip
 *.zip.sha256
 

@@ -74,6 +74,13 @@ def safe_text(value, limit=256):
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', value)[:limit]
 
 
+def shown(error):
+    """Error text for the panel: an OSError's description without the path it names (event() logs the rest)."""
+    if isinstance(error, OSError) and (error.strerror or error.filename is not None):
+        return error.strerror or type(error).__name__
+    return str(error)
+
+
 def _name(value):
     return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', value) else 'unknown'
 
@@ -155,7 +162,7 @@ def _fallback(text, level):
             logger = decky.logger
         getattr(logger, level if level != 'critical' else 'error')(text)
     except Exception:
-        pass
+        pass  # logging is best effort: a broken handler never fails the caller
 
 
 def event(component, action, /, *, level='info', error=None, repeat=0, **fields):
@@ -214,7 +221,7 @@ def _record(component, action, level, error, repeat, fields):
             # hardware/asyncio transaction; configure() writes these later.
             _early.append((text, level))
     except Exception:
-        pass
+        pass  # logging is best effort: a broken sink never fails the operation it describes
 
 
 def transition(component, action, state, /, *, level='info', error=None, initial=True, **fields):
@@ -249,7 +256,7 @@ def transition(component, action, state, /, *, level='info', error=None, initial
             fields = {**fields, 'repeated': repeated}
         event(component, action, level=level, error=error, **{**fields, 'status': str(state)})
     except Exception:
-        pass
+        pass  # logging is best effort: a broken sink never fails the operation it describes
 
 
 @contextlib.contextmanager
@@ -453,7 +460,7 @@ def _flush_early():
         try:
             _sink(text, level)
         except Exception:
-            pass
+            pass  # logging is best effort: a record the sink refuses is dropped, the rest still go out
 
 
 def close():
@@ -464,7 +471,7 @@ def close():
         try:
             writer.close()
         except Exception:
-            pass
+            pass  # closing at shutdown: a failed flush loses the last records, nothing else
     if _asyncio_filter is not None:
         logging.getLogger('asyncio').removeFilter(_asyncio_filter)
         _asyncio_filter = None

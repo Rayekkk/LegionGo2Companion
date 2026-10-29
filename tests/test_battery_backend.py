@@ -196,6 +196,14 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.writes, ["Long_Life", "Fast"])
         self.assertFalse(self.plugin._load()["managed"])
 
+    async def test_an_os_error_shows_only_its_description_not_the_path(self):
+        with patch.object(self.plugin, "_save", side_effect=PermissionError(
+                errno.EACCES, "Permission denied", "/home/deck/private/battery.json")):
+            result = await self.plugin.set_enabled(True)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "Battery setting failed: Permission denied. Previous settings were restored.")
+        self.assertNotIn("battery.json", json.dumps(result))
+
     async def test_commit_failure_restores_hardware_and_durable_settings(self):
         self.store.replace({"unrelated": "keep"})
         snapshot = copy.deepcopy(self.store.settings)

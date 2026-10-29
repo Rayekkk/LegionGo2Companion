@@ -181,6 +181,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def plugin(self):
         plugin = main.Plugin()
         plugin._check_guard = AsyncMock()
+        plugin._startup.set()  # RPCs without _main
         plugin._tdp = Mock(set_panel_active=AsyncMock(), get_settings=AsyncMock(return_value={'spl': 15000}))
         plugin._display = Mock(get_state=AsyncMock(return_value={'edid_fix': True}))
         return plugin

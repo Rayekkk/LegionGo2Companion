@@ -64,6 +64,10 @@ class LegacyPlugin(main.Plugin):
     """main.Plugin with its RPCs as below the D2 face (payloads and exceptions as the backends give them), for the
     behaviour tests; test_rpc_d2 covers the face itself (main._d2, dk_rpc.boundary, the Desktop bridge)."""
 
+    def __init__(self):
+        super().__init__()
+        self._startup.set()  # most behaviour tests call RPCs without _main; _main closes it again
+
 
 for _name, _method in tuple(vars(main.Plugin).items()):
     if hasattr(_method, "legacy"):

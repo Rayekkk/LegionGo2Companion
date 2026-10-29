@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Any
 
 import module_runtime
-from diagnostics import event
+from diagnostics import event, shown
 from dk_process import run
 
 
@@ -40,7 +40,7 @@ def run_busctl(args: list[str], *, timeout: float = 5.0) -> str:
         result = run([BUSCTL, *args], timeout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                      text=True, encoding="utf-8", errors="replace")
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise InputPlumberError(f"InputPlumber did not respond: {exc}") from exc
+        raise InputPlumberError(f"InputPlumber did not respond: {shown(exc)}") from exc
     if result.returncode != 0:
         message = (result.stderr or result.stdout).strip()
         raise InputPlumberError(message[:500] or "InputPlumber rejected the request.")

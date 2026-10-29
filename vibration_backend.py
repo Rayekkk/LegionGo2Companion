@@ -5,7 +5,7 @@
 
 import decky
 import module_runtime
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 from active_app import DEFAULT_APP, normalise_app_id, resolve_running_app, scan_proc_for_appid
 import copy
 import os
@@ -904,7 +904,7 @@ async def _monitor_hotplug() -> None:
         try:
             loop.remove_reader(monitor.fileno())
         except Exception:
-            pass
+            pass  # the monitor is already closed; nothing left to remove
 
 
 @module_runtime.controller_operation('vibration')
@@ -1022,7 +1022,7 @@ class Plugin:
         try:
             await _offload(_migrate)
         except Exception as exc:
-            Plugin._setup_error = f"settings migration failed: {exc}"
+            Plugin._setup_error = f"settings migration failed: {shown(exc)}"
             self._migration_error = Plugin._setup_error
             event('vibration','migration_failed',level='error',error=exc)
 
@@ -1044,7 +1044,7 @@ class Plugin:
             # Preserve migration failures, while a successful retry clears a
             # transient startup failure from the previous attempt.
         except Exception as exc:
-            Plugin._setup_error = str(exc)
+            Plugin._setup_error = shown(exc)
             event('vibration','startup_failed',level='error',error=exc)
             raise
 
@@ -1291,6 +1291,6 @@ class Plugin:
         except Exception as exc:
             _ff_device_cache["node"] = None
             event('vibration', 'test_failed', level='warning', error=exc)
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "error": shown(exc)}
         finally:
             _ff_busy = False

@@ -13,7 +13,7 @@ import threading
 import time
 
 import decky
-from diagnostics import event as diagnostic_event, transition as diagnostic_transition
+from diagnostics import event as diagnostic_event, shown, transition as diagnostic_transition
 import module_runtime
 from dk_process import PYTHON, system_env
 from safe_settings import SettingsManager
@@ -416,7 +416,7 @@ class Plugin:
             raw = settings.getSetting('state', None)
             self._state = defaults() if raw is None else validate_settings(raw)
         except (ValueError, TypeError, OSError) as exc:
-            self._state = defaults(); self._error = str(exc); self._settings_valid = False
+            self._state = defaults(); self._error = shown(exc); self._settings_valid = False
             diagnostic_transition('fan', 'settings', 'unavailable', level='warning', error=exc,
                                   store='fan_settings', pending=True)
         self._loaded = True
@@ -522,9 +522,9 @@ class Plugin:
                 await module_runtime.offload('fan', release_orphan)
             except Exception as error:
                 diagnostic_event('fan', 'orphan_release_failed', level='error', error=error, stage='session_end')
-                raise RuntimeError(f'{exc} Leftover fan override release failed: {error}') from exc
+                raise RuntimeError(f'{shown(exc)} Leftover fan override release failed: {shown(error)}') from exc
             self._client = None  # Its override is released; nothing is left to close.
-            return f'{exc} Firmware automatic restored by a release-only session.'
+            return f'{shown(exc)} Firmware automatic restored by a release-only session.'
 
     async def _end_session(self, exc):
         """Prove firmware automatic, then classify how the session ended."""
@@ -579,7 +579,7 @@ class Plugin:
                     return  # The resumed session start releases any leftover override.
             await self._release_leftover_override()
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             diagnostic_transition('fan', 'availability', 'unavailable', level='warning' if self._supported else 'info', error=exc,
                                   supported=self._supported, stage='startup')
             self._state['enabled'] = False
@@ -601,7 +601,7 @@ class Plugin:
             try:
                 await module_runtime.offload('fan', release_orphan)
             except Exception as exc:
-                self._error = f'Leftover fan override release failed: {exc}'
+                self._error = f'Leftover fan override release failed: {shown(exc)}'
                 diagnostic_event('fan', 'orphan_release_failed', level='error', error=exc, stage='startup')
 
     async def _start_client(self):
@@ -738,7 +738,7 @@ class Plugin:
                     # No background EC ownership, sensor polling or workers while off.
                     await self._shutdown()
             except Exception as exc:
-                self._error = str(exc)
+                self._error = shown(exc)
                 if enabled:
                     self._state['enabled'] = False; self._applied = None
                     if not self._closing:  # Unload never changes the saved intent.
@@ -806,7 +806,7 @@ class Plugin:
                     await self._apply()
                 except Exception as exc:
                     # A failed curve switch must not leave the previous mode armed.
-                    self._error = str(exc); self._applied = None
+                    self._error = shown(exc); self._applied = None
                     self._state = self._revised(enabled=False)
                     try:
                         await self._persist(self._state)

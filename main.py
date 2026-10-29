@@ -324,9 +324,8 @@ def _guard_component_calls(cls):
                 await self._ensure_guard()
                 if name in _ALWAYS_ADMITTED_RPCS:
                     return await fn(self, *args, **kwargs)
-                if self._startup is not None:
-                    # A request must not reach modules before _main has started them.
-                    await self._startup.wait()
+                # A request must not reach modules before _main has started them.
+                await self._startup.wait()
                 async with self._guard_lock:
                     if self._guard_blocked or self._guard_error or self._closing:
                         raise module_runtime.AdmissionClosed(self._guard_message())
@@ -404,7 +403,7 @@ class Plugin:
         self._guard_failures = 0
         self._guard_checked = False
         self._modules_started = False
-        self._startup = None  # Event while _main is starting modules; RPCs wait for it.
+        self._startup = asyncio.Event()  # Set once _main has started the modules (or failed); RPCs wait for it.
         self._ever_started = False
         self._closing = False
         self._uninstalling = False  # Diagnostic sink lifetime only, never admission.
@@ -569,7 +568,7 @@ class Plugin:
             diagnostics.event(name, 'module_start_stopped')
         except Exception as exc:
             diagnostics.event(name, 'module_start_failed', level='error', error=exc)
-            self._module_health[name] = {'ready': False, 'error': str(exc)}
+            self._module_health[name] = {'ready': False, 'error': diagnostics.shown(exc)}
             try:
                 await self._stop_component(name)
             except Exception as stop_error:
@@ -613,7 +612,7 @@ class Plugin:
                 self._module_state[name] = {'enabled': True}
                 await module_runtime.complete(asyncio.to_thread(self._save_modules))
             except Exception as exc:
-                self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+                self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': diagnostics.shown(exc)}
                 try:
                     await module_runtime.complete(asyncio.to_thread(self._save_modules))
                 finally:
@@ -644,7 +643,8 @@ class Plugin:
             try:
                 await self._withdraw_module(name, resume)
             except Exception as exc:
-                self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+                diagnostics.event(name, 'module_withdraw_failed', level='error', error=exc)
+                self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': diagnostics.shown(exc)}
                 await module_runtime.complete(asyncio.to_thread(self._save_modules))
         await self._publish_modules()
         return await asyncio.to_thread(self._module_status)
@@ -763,7 +763,7 @@ class Plugin:
                 break
             except (OSError, ValueError, TypeError) as exc:
                 if attempt == 2:
-                    self._guard_error = str(exc)
+                    self._guard_error = diagnostics.shown(exc)
                     diagnostics.event('plugin', 'guard_inspection_failed', level='error', error=exc, repeat=60)
                 else:
                     await asyncio.sleep(0.1)
@@ -836,7 +836,7 @@ class Plugin:
         try:
             await self._withdraw_module(name, resume)
         except Exception as exc:
-            self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': str(exc)}
+            self._module_state[name] = {'enabled': False, 'pending': True, 'resume': resume, 'error': diagnostics.shown(exc)}
             diagnostics.event(name, 'module_recovery_failed', level='error', error=exc)
             try:
                 await module_runtime.complete(asyncio.to_thread(self._save_modules))
@@ -858,7 +858,8 @@ class Plugin:
             await self._run_stage("_migration")
 
     async def _main(self):
-        startup = self._startup = asyncio.Event()
+        startup = self._startup
+        startup.clear()  # a test harness may have opened it for RPCs without _main
         try:
             await self._start(startup)
         finally:
@@ -953,7 +954,7 @@ class Plugin:
                                               attempts=1, error=exc)
                         continue
                     self._module_state[name] = {'enabled': False, 'pending': True,
-                                                'resume': entry['resume'], 'error': str(exc)}
+                                                'resume': entry['resume'], 'error': diagnostics.shown(exc)}
                     try:
                         await module_runtime.complete(asyncio.to_thread(self._save_modules))
                     except Exception as save_error:

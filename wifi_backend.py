@@ -10,7 +10,7 @@ import os
 import json
 import time
 import asyncio
-from diagnostics import configure_worker, event as diagnostic_event, transition as diagnostic_transition
+from diagnostics import configure_worker, event as diagnostic_event, shown, transition as diagnostic_transition
 import module_runtime
 from dk_process import PYTHON, run, system_env
 import subprocess
@@ -2073,7 +2073,7 @@ class Plugin:
                     else:
                         conflicts.append("iwd restore could not be verified")
                 except Exception as e:
-                    conflicts.append(f"iwd restore failed: {e}")
+                    conflicts.append(f"iwd restore failed: {shown(e)}")
             elif not self._iwd_snapshot_matches(current, before):
                 conflicts.append("iwd setting changed outside Legion Go 2 Companion")
 
@@ -2361,7 +2361,7 @@ class Plugin:
                         if key.startswith("wifi.backend") and val.strip() in ("iwd", "wpa_supplicant"):
                             return val.strip()
             except Exception:
-                continue
+                continue  # a missing or unreadable config file has no say; try the next one
         # With no authoritative config, competing managers are ambiguous.
         active = [name for name in ("iwd", "wpa_supplicant") if self._service_active(name)]
         return active[0] if len(active) == 1 else None
@@ -2407,7 +2407,7 @@ class Plugin:
             raise
         except Exception as e:
             diagnostic_event('wifi', 'main_failed', level='error', error=e, repeat=60)
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": shown(e)}
 
     async def _unload(self):
         self._high_band_monitor_ready = False

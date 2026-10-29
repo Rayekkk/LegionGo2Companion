@@ -184,6 +184,16 @@ again. A failed download never replaces an existing ZIP.
 
 </details>
 
+### Uninstalling
+
+Uninstall **Legion Go 2 Companion** in **Decky Settings → Plugins**. Before it stops, Companion
+hands the hardware back: the fan returns to firmware control, the display EDID is restored and
+the other modules return to the state they had before Companion managed them. The Desktop app is
+removed too. Decky handles an update as uninstall plus install, so Companion never deletes your
+settings on its own: they stay in `~/homebrew/settings/LegionGo2Companion/`, and its root-only
+state and logs in `/var/lib/legiongo2companion*` and `/var/log/legiongo2companion/`. Delete those
+folders after uninstalling for a full cleanup.
+
 ## Quick start
 
 Open Companion in Decky. **Hardware Controls** shows a short status for each module. Select

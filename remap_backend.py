@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 import decky
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 from dk_process import run
 import module_runtime
 
@@ -644,7 +644,7 @@ def _status_sync() -> dict[str, Any]:
             response["drift"] = True
             response["reason"] = "InputPlumber changed profile; Companion will restore the mappings."
     except Exception as exc:
-        response["reason"] = str(exc)
+        response["reason"] = shown(exc)
     return response
 
 
@@ -675,7 +675,7 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:
                 # The durable desired state remains enabled so startup/watchdog
                 # can finish an operation interrupted after the settings commit.
-                _last_error = str(exc)
+                _last_error = shown(exc)
                 raise
         else:
             try:
@@ -694,7 +694,7 @@ def _mutate_sync(changes: dict[str, Any]) -> dict[str, Any]:
                 _service_watch.clear()
                 _last_error = ""
             except Exception as exc:
-                _last_error = str(exc)
+                _last_error = shown(exc)
                 raise
     return _status_sync()
 
@@ -714,7 +714,7 @@ def _repair_sync() -> bool:
             transition("remap", "managed_profile", True, outcome="confirmed", initial=False)
             return True
         except Exception as exc:
-            _last_error = str(exc)
+            _last_error = shown(exc)
             transition("remap", "managed_profile", False, level="warning", error=exc,
                        outcome="deferred", retryable=True)
             return False
@@ -802,7 +802,8 @@ class Plugin:
             status = await module_runtime.offload('remap', _mutate_sync, changes)
             return {"success": True, "status": status}
         except Exception as exc:
-            return {"success": False, "error": str(exc), "status": await self.get_status()}
+            event('remap', 'change_failed', level='warning', error=exc)
+            return {"success": False, "error": shown(exc), "status": await self.get_status()}
 
     async def set_enabled(self, enabled):
         return await self._mutate({"enabled": enabled})

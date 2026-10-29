@@ -40,6 +40,14 @@ class EventTests(unittest.TestCase):
         self.assertNotIn('secret', json.dumps(record)); self.assertNotIn('private-wifi', json.dumps(record))
         self.assertNotIn('args', record.get('context', {})); self.assertNotIn('settings', record.get('context', {}))
 
+    def test_shown_keeps_an_os_error_description_without_its_path(self):
+        self.assertEqual(diag.shown(PermissionError(errno.EACCES, 'Permission denied', '/home/deck/.config/x')),
+                         'Permission denied')
+        self.assertEqual(diag.shown(OSError(errno.EIO, 'Input/output error')), 'Input/output error')
+        self.assertEqual(diag.shown(OSError(None, None, '/home/deck/x')), 'OSError')
+        self.assertEqual(diag.shown(OSError('EPP final readback mismatch')), 'EPP final readback mismatch')
+        self.assertEqual(diag.shown(ValueError('Unknown motion source.')), 'Unknown motion source.')
+
     def test_repeat_coalesces_per_store_and_reports_suppressed_count(self):
         with patch.object(diag.time, 'monotonic', return_value=100):
             for _ in range(5): diag.event('settings', 'backup_failed', level='warning', store='battery', error=OSError(errno.ENOSPC, 'full'), repeat=60)

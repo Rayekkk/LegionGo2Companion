@@ -20,7 +20,7 @@ import threading
 from typing import Any
 
 import dk_fs
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 
 MAX_SETTINGS_BYTES = 1024 * 1024
 LEGACY_BACKUP = ".bak"  # the copy 2.4.0 and older kept: becomes .last-good once
@@ -105,7 +105,7 @@ def _encode_json_object(payload: dict[str, Any]) -> bytes:
     try:
         dk_fs.parse_json(encoded, dk_fs.require_object)  # never write what the reader would refuse
     except dk_fs.Damaged as exc:
-        raise ValueError(f"settings cannot be stored: {exc}") from exc
+        raise ValueError(f"settings cannot be stored: {shown(exc)}") from exc
     return encoded
 
 

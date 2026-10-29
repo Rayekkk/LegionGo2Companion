@@ -21,7 +21,7 @@ from typing import Any
 
 import decky
 import module_runtime
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 from safe_settings import SettingsManager
 
 
@@ -243,7 +243,7 @@ class Plugin:
             retained = copy.deepcopy(previous)
             retained["pending"] = pending
             settings.settings = retained
-            raise BatteryError(f"Battery recovery could not be saved: {exc}") from exc
+            raise BatteryError(f"Battery recovery could not be saved: {shown(exc)}") from exc
         self._error = ""
 
     def _status(self) -> dict[str, Any]:
@@ -263,7 +263,7 @@ class Plugin:
                     out.update(success=False, recovery_pending=True,
                                error=self._error or "An interrupted battery change needs recovery before further changes.")
             except Exception as exc:
-                out.update(success=False, error=str(exc), reason="Saved settings could not be read.")
+                out.update(success=False, error=shown(exc), reason="Saved settings could not be read.")
                 return out
             try:
                 device = _detect()
@@ -274,7 +274,7 @@ class Plugin:
                     out["capacity"] = int(capacity)
                 out["charging_status"] = _optional_attr(device["battery"] / "status")
             except Exception as exc:
-                out.update(reason=str(exc), mode_conflict=isinstance(exc, ModeConflict))
+                out.update(reason=shown(exc), mode_conflict=isinstance(exc, ModeConflict))
             if self._error:
                 out["success"] = False
             return out
@@ -349,7 +349,7 @@ class Plugin:
                   error=exc if failures else None)
             if isinstance(exc, module_runtime.StartStopped) and not failures:
                 raise  # A stopped start, rolled back: not a battery failure.
-            raise BatteryError(f"Battery setting failed: {exc}.{suffix}") from exc
+            raise BatteryError(f"Battery setting failed: {shown(exc)}.{suffix}") from exc
 
     def _set(self, enabled: bool) -> dict[str, Any]:
         with self._lock:
@@ -426,7 +426,7 @@ class Plugin:
             except module_runtime.StartStopped:
                 raise  # The start ends here; its stop is no battery error.
             except Exception as exc:
-                message = str(exc)
+                message = shown(exc)
                 transition("battery", "managed_profile", False, level="warning", error=exc,
                            outcome="deferred", retryable=True)
                 self._error = message
@@ -487,7 +487,7 @@ class Plugin:
             # Decky also uninstalls before every update: keep the choice for the next _main.
             await self._thread(self._release, True)
         except Exception as exc:
-            self._error = str(exc)
+            self._error = shown(exc)
             event('battery','restore_failed',level='warning',stage='uninstall',reason='operation_unconfirmed',pending=True,restored=False)
 
     async def get_status(self):
@@ -501,21 +501,24 @@ class Plugin:
             status = await self._thread(self._set, enabled)
             return {"success": True, "status": status}
         except Exception as exc:
-            self._error = str(exc)
-            return {"success": False, "error": str(exc), "status": await self.get_status()}
+            self._error = shown(exc)
+            event('battery', 'change_failed', level='warning', error=exc)
+            return {"success": False, "error": self._error, "status": await self.get_status()}
 
     async def reset_charging_mode(self):
         try:
             status = await self._thread(self._reset_charging_mode)
             return {"success": True, "status": status}
         except Exception as exc:
-            self._error = str(exc)
-            return {"success": False, "error": str(exc), "status": await self.get_status()}
+            self._error = shown(exc)
+            event('battery', 'change_failed', level='warning', error=exc)
+            return {"success": False, "error": self._error, "status": await self.get_status()}
 
     async def release_control(self):
         try:
             status = await self._thread(self._release)
             return {"success": True, "status": status}
         except Exception as exc:
-            self._error = str(exc)
-            return {"success": False, "error": str(exc), "status": await self.get_status()}
+            self._error = shown(exc)
+            event('battery', 'change_failed', level='warning', error=exc)
+            return {"success": False, "error": self._error, "status": await self.get_status()}

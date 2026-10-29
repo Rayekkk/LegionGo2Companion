@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import module_runtime
+from diagnostics import shown
 
 SYS_ROOT = Path("/sys")
 HID_DEVICES = Path("/sys/bus/hid/devices")
@@ -194,7 +195,7 @@ def read_status() -> dict[str, Any]:
             return {"available": True, "actual": _values(device),
                     "identity": str(device), "reason": ""}
         except Exception as exc:
-            return {"available": False, "actual": None, "identity": None, "reason": str(exc)}
+            return {"available": False, "actual": None, "identity": None, "reason": shown(exc)}
 
 
 def desired_for_source(source: str, baseline: dict, actual: dict,
@@ -253,4 +254,4 @@ def apply(expected: dict, desired: dict) -> None:
                 except Exception as rollback:
                     failures.append(f"{side}: {rollback}")
             detail = " Rollback failed: " + "; ".join(failures) if failures else " Previous IMU values were restored."
-            raise ImuError(f"IMU bypass update failed: {exc}.{detail}") from exc
+            raise ImuError(f"IMU bypass update failed: {shown(exc)}.{detail}") from exc

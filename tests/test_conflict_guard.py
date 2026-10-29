@@ -260,6 +260,20 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         plugin._rgb._main.assert_awaited_once()
         await plugin._unload()
 
+    async def test_rpc_sent_before_main_is_called_waits_for_module_startup(self):
+        plugin = self.make_plugin(); plugin._module_state = {"rgb": {"enabled": False}}
+        plugin._startup.clear()  # as Decky creates the plugin: _main has not run yet
+        with patch.object(main, "_installed_standalone_plugins", return_value=[]),                 patch.object(main, "restore_intent", AsyncMock()), patch.object(plugin, "_start_desktop", AsyncMock()):
+            request = asyncio.create_task(plugin.modules_set_enabled("rgb", True))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertFalse(request.done())
+            plugin._rgb._main.assert_not_awaited()
+            await plugin._main()
+            await request
+        plugin._rgb._main.assert_awaited_once()
+        await plugin._unload()
+
     async def test_normal_lifecycle_still_runs_all_modules(self):
         plugin = self.make_plugin()
         with patch.object(main, "_installed_standalone_plugins", return_value=[]):

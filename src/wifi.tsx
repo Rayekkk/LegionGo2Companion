@@ -22,9 +22,7 @@ interface WifiResult {
 
 export const getWifiStatus = rpc<[], WifiStatus>("wifi_get_status");
 const setBandPolicy = rpc<[mode: Policy, allowUnverifiedScan?: boolean], WifiResult>("wifi_set_band_policy");
-const rescanAndReconnect = rpc<[targetBand?: "high" | "six"], WifiResult>(
-  "wifi_rescan_and_reconnect",
-);
+const rescanAndReconnect = rpc<[targetBand?: "high" | "six"], WifiResult>("wifi_rescan_and_reconnect");
 
 const resultMessage = (result: WifiResult) =>
   [result.message, result.detail].filter(Boolean).join(" — ") ||

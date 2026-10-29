@@ -9,10 +9,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import secrets
 import stat
 import sys
 
+import dk_fs
 from safe_settings import open_directory
 
 MARKER = 'LegionGo2Companion managed Desktop'
@@ -69,28 +69,13 @@ class DesktopInstall:
 
     def _write(self, relative, filename, content, mode=0o600):
         directory = self._directory(relative)
-        temp = '.companion-' + secrets.token_hex(12)
         try:
             # The executable cannot carry the marker; its fixed name in our 0700 directory is the claim.
             if filename != APP_ID and self._ours(directory, filename) is False:
                 raise ValueError('An unrecognized file occupies the Desktop app path.')
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-            try:
-                with os.fdopen(fd, 'wb', closefd=False) as target:
-                    target.write(content)
-                    target.flush()
-                    os.fsync(fd)
-                os.fchown(fd, self.uid, self.gid)
-                os.fchmod(fd, mode)
-            finally:
-                os.close(fd)
-            os.replace(temp, filename, src_dir_fd=directory, dst_dir_fd=directory)
-            os.fsync(directory)
+            dk_fs.write_atomic(filename, content, mode, folder_fd=directory, owner=(self.uid, self.gid),
+                               strict_sync=True)
         finally:
-            try:
-                os.unlink(temp, dir_fd=directory)
-            except FileNotFoundError:
-                pass
             os.close(directory)
 
     def _published(self, relative, filename, expected):

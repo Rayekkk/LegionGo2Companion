@@ -23,7 +23,7 @@ import time
 from typing import Any, Callable, NamedTuple
 
 import decky
-from diagnostics import event, transition
+from diagnostics import event, shown, transition
 import module_runtime
 
 from safe_settings import SettingsManager
@@ -907,7 +907,7 @@ def _transaction(
     try:
         _save_state(staged)
     except Exception as exc:
-        return False, f"Could not create the recovery record: {exc}"
+        return False, f"Could not create the recovery record: {shown(exc)}"
 
     try:
         applied = apply()
@@ -922,7 +922,7 @@ def _transaction(
             _save_state(candidate)
             return True, ""
         except Exception as exc:
-            detail = f"Could not save the new setting: {exc}"
+            detail = f"Could not save the new setting: {shown(exc)}"
     elif not detail:
         detail = "The hardware did not confirm the complete change."
 
