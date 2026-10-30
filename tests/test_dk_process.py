@@ -85,7 +85,10 @@ class ProcessTest(unittest.TestCase):
         folder = tempfile.mkdtemp()
         echo = [sys.executable, "-c", "import os, sys; sys.stdout.buffer.write(os.getcwd().encode() + sys.stdin.buffer.read())"]
         result = dk_process.run(echo, timeout=30, capture_output=True, input=b"|in", stdin=None, cwd=folder)
-        self.assertEqual(result.stdout, os.path.realpath(folder).encode() + b"|in")
+        cwd, given = result.stdout.rsplit(b"|", 1)
+        self.assertEqual(given, b"in")
+        # GitHub's Windows runner has an 8.3 TEMP (RUNNER~1): the child may see either spelling of the same folder.
+        self.assertEqual(os.path.realpath(cwd.decode()), os.path.realpath(folder))
         with mock.patch.object(dk_process.subprocess, "run") as run:
             dk_process.run(["x"], timeout=1, user="deck", group="deck", extra_groups=[], input=b"x", stdin=None)
         self.assertEqual({k: run.call_args.kwargs[k] for k in ("user", "group", "extra_groups", "input", "stdin")},
