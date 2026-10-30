@@ -644,6 +644,59 @@ class RgbBackendTests(unittest.TestCase):
                 self.assertEqual((led / "profile").read_text(), "\n")
                 self.assertEqual((led / "enabled").read_text().strip(), "false")
 
+    def test_out_of_range_driver_profile_is_rewritten_and_the_ring_heals(self):
+        # hid-lenovo-go reads effect/speed through USR_LIGHT_PROFILE_<profile>: a reply outside 1..3
+        # fails those reads (EINVAL) until a profile write replaces the driver's value.
+        real_read = rgb_backend._read_small
+        driver = {"profile": 3, "replies": []}
+
+        def driver_read(path, limit=512):
+            name = os.path.basename(path)
+            if name == "profile" and driver["replies"]:
+                driver["profile"] = driver["replies"].pop(0)
+            if name in ("profile", "effect", "speed") and not 1 <= driver["profile"] <= 3:
+                raise OSError(errno.EINVAL, "Invalid argument")
+            return real_read(path, limit)
+
+        def driver_write(path, flags, *args):
+            if os.path.basename(path) == "profile":
+                driver["profile"] = 3
+            return real_open(path, flags, *args)
+
+        real_open = os.open
+        with tempfile.TemporaryDirectory(prefix="lego-rgb-") as raw:
+            led = Path(raw)
+            make_led(led)
+            memory = MemorySettings()
+            plugin = rgb_backend.Plugin()
+            with (
+                patch.object(rgb_backend, "settings", memory),
+                patch.object(rgb_backend, "_rgb_capability", return_value=(str(led), "")),
+                patch.object(rgb_backend, "_power_capability", return_value=(False, "test")),
+                patch.object(rgb_backend, "_read_small", side_effect=driver_read),
+                patch.object(rgb_backend.os, "open", side_effect=driver_write),
+                patch.object(rgb_backend, "transition") as transition,
+                patch.object(rgb_backend.time, "sleep"),
+            ):
+                self.assertTrue(asyncio.run(plugin.set_control_enabled(True))["ok"])
+                self.assertTrue(asyncio.run(plugin.set_rings_enabled(True))["ok"])
+                driver["profile"] = 255
+                self.assertTrue(rgb_backend._reconcile(), "the profile write heals the ring")
+                self.assertEqual(driver["profile"], 3)
+                self.assertTrue(rgb_backend._reconcile())
+
+                # A stale out-of-range reply right after the write is waited out, not a failure.
+                driver["profile"], driver["replies"] = 255, [255, 255, 3]  # pre-read, readback, readback
+                self.assertTrue(rgb_backend._reconcile())
+                self.assertEqual(driver["replies"], [])
+
+                # A ring that stays unreadable is reported with the attribute that failed.
+                with patch.object(rgb_backend, "_apply_rgb_target", return_value=False):
+                    driver["profile"] = 255
+                    self.assertFalse(rgb_backend._reconcile())
+                self.assertEqual(transition.call_args.args[2], "ring_unavailable")
+                self.assertEqual(transition.call_args.kwargs["reason"], "ring_unavailable (speed unreadable)")
+
     def test_unreadable_profile_is_written_so_rings_turn_on_and_drift_heals(self):
         real_read = rgb_backend._read_small
 

@@ -127,6 +127,7 @@ _apply_lock = module_runtime.controller_config_lock  # shared with Vibration and
 _drift_task: asyncio.Task | None = None
 _resume_detected = module_runtime.ResumeWatch()
 _last_error = ""
+_last_unreadable = ""  # Why the last ring read failed, for the reconcile event.
 _power_capability_cache: tuple[bool, str] | None = None
 _power_capability_retry_at = 0.0
 _power_bios = ""
@@ -275,7 +276,13 @@ def _write_attr(path: str, attr: str, value: str, *, force: bool = False) -> boo
         # accept an unconfirmed target. Normal immediate readback adds no delay.
         deadline = time.monotonic() + 0.25
         for _ in range(14):
-            actual = _normalise_attr(attr, _read_small(target))
+            try:
+                actual = _normalise_attr(attr, _read_small(target))
+            except OSError as exc:
+                # A profile reply outside 1..3 can still precede this write's confirmation.
+                if attr != "profile" or exc.errno != errno.EINVAL:
+                    raise
+                actual = None
             if actual == expected:
                 return True
             if time.monotonic() >= deadline:
@@ -328,26 +335,36 @@ def _read_rgb_snapshot(path: str) -> dict[str, Any] | None:
 
 
 def _read_rgb_snapshot_once(path: str) -> dict[str, Any] | None:
+    global _last_unreadable
+    attr = "multi_index"
+
+    def read(name: str) -> str:
+        nonlocal attr
+        attr = name
+        return _read_small(os.path.join(path, name))
     try:
         maxima = _rgb_channel_maxima(path)
-        rgb = _parse_triplet(_read_small(os.path.join(path, "multi_intensity")))
-        brightness_max = int(_read_small(os.path.join(path, "max_brightness")))
-        brightness = int(_read_small(os.path.join(path, "brightness")))
-        speed = int(_read_small(os.path.join(path, "speed")))
-        enabled_text = _read_small(os.path.join(path, "enabled")).lower()
-        mode = _read_small(os.path.join(path, "mode")).lower()
-        effect = _read_small(os.path.join(path, "effect")).lower()
+        rgb = _parse_triplet(read("multi_intensity"))
+        brightness_max = int(read("max_brightness"))
+        brightness = int(read("brightness"))
+        speed = int(read("speed"))
+        enabled_text = read("enabled").lower()
+        mode = read("mode").lower()
+        effect = read("effect").lower()
         try:
-            profile = int(_read_small(os.path.join(path, "profile")))
+            profile = int(read("profile"))
         except (OSError, ValueError):
             # The firmware may report an invalid built-in profile before the
             # first user profile is selected.  It is safe to preserve every
             # other field and omit only that unrepresentable value.
             profile = None
     except (OSError, UnicodeError, ValueError):
+        _last_unreadable = f"{attr} unreadable"
         return None
     if enabled_text not in ("true", "false"):
+        _last_unreadable = "enabled invalid"
         return None
+    _last_unreadable = "value out of range"  # Only read when _sanitize_snapshot rejects it.
     return _sanitize_snapshot({
         "profile": profile,
         "mode": mode,
@@ -1001,23 +1018,28 @@ def _reconcile(*, force: bool = False, force_ring: bool = False) -> bool:
         state = _load_state()
         ok = True
         failure = ""
+        unreadable = ""
         if state["control_enabled"]:
             path, reason = _rgb_capability()
-            current = _read_rgb_snapshot(path) if path else None
-            if path is None or current is None:
+            if path is None:
                 ok = False
                 failure = "ring_unavailable"
                 _last_error = reason or "The joystick-ring state could not be read."
             else:
+                current = _read_rgb_snapshot(path)
+                unreadable = _last_unreadable if current is None else ""
                 try:
-                    drifted = not _rgb_matches(state, current, path)
+                    # Unreadable is drift too: an out-of-range profile in hid-lenovo-go
+                    # fails every effect/speed read until a profile write replaces it.
+                    drifted = current is None or not _rgb_matches(state, current, path)
                 except (OSError, ValueError):
                     drifted = True
                 if force or force_ring or drifted:
                     if not _apply_rgb_target(state, force=force or force_ring):
                         ok = False
-                        failure = "ring_write_unconfirmed"
-                        _last_error = "The joystick-ring settings could not be applied."
+                        failure = "ring_unavailable" if current is None else "ring_write_unconfirmed"
+                        _last_error = ("The joystick-ring state could not be read." if current is None
+                                       else "The joystick-ring settings could not be applied.")
         if state["power_led_managed"]:
             current_power = _read_power_led()
             if current_power is None:
@@ -1033,7 +1055,8 @@ def _reconcile(*, force: bool = False, force_ring: bool = False) -> bool:
             _last_error = ""
         transition("rgb", "reconcile", "confirmed" if ok else failure,
                    level="info" if ok else "warning", initial=False,
-                   reason="confirmed" if ok else (failure or "hardware_unconfirmed"))
+                   reason="confirmed" if ok else (failure or "hardware_unconfirmed")
+                   + (f" ({unreadable})" if unreadable else ""))
         return ok
 
 

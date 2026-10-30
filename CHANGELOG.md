@@ -64,6 +64,8 @@ All notable changes to Legion Go 2 Companion, newest first.
 - **Settings:** a damaged settings file is kept as `.corrupt-<time>` before it is replaced, so it can still be
   looked at.
 - **Settings:** settings that could not be read back are never written.
+- **RGB:** when the controller briefly reports an invalid lighting profile, Companion rewrites your lighting
+  at once instead of leaving the rings unread until the next restart.
 
 ## [2.4.0] - 2026-10-26
 
