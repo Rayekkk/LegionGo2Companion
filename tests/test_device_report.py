@@ -322,6 +322,49 @@ class ReportContent(_Fixture):
         # Worst-case lock hold: the run limit plus _spawn_ryzenadj's 2 s kill wait, inside the restore's 4 s wait.
         self.assertLess(helper.call_args.kwargs["timeout"] + 2.0, 4.0)
 
+    def test_fan_controller_users_name_what_blocks_fan_control(self):
+        self.write("/proc/modules", "lenovo_wmi_other 102400 0 - Live 0x0\nhid_lenovo_go 73728 0 - Live 0x0\n")
+        self.write("/proc/ioports", "0000-0cf7 : PCI Bus 0000:00\n  0000-0000 : EC data\n")
+        links = {}
+        for pid, comm, cmdline, target in (("40", "LeGo2 Fan Contr", b"LeGo2 Fan Control (/x/main.py)", "/dev/port"),
+                                           ("41", "python3", b"/usr/bin/python3\0-E\0/x/fan_guardian.py\0" + b"7", "/dev/port"),
+                                           ("42", "bash", b"bash", "/dev/tty")):
+            self.write(f"/proc/{pid}/comm", comm + "\n")
+            self.write(f"/proc/{pid}/cmdline", cmdline)
+            self.write(f"/proc/{pid}/fd/3", "")
+            links[os.path.normpath(str(self.root / f"proc/{pid}/fd/3"))] = target
+        real = os.readlink
+        with patch.object(device_report.os, "readlink", lambda path: links.get(os.path.normpath(path)) or real(path)):
+            text = device_report.collect(facts(fan={"supported": True, "beta": False, "error": "", "enabled": False}))
+        self.assertIn("Fan: supported=True beta=False control_on=False", text)
+        self.assertIn("== Fan controller users ==\nconflicting fan drivers: none\nEC ports 0x4E-0x4F claimed by: none\n"
+                      "/dev/port open by: LeGo2 Fan Contr (pid 40), python3 (pid 41, Companion Fan Control)\n", text)
+        self.write("/proc/modules", "gpd_fan 16384 0 - Live 0x0\n")
+        self.write("/proc/ioports", "0040-0043 : timer0\n004e-004f : legion_ec\n")
+        text = device_report.collect(facts())
+        self.assertIn("conflicting fan drivers: gpd_fan\nEC ports 0x4E-0x4F claimed by: legion_ec\n", text)
+
+    def test_decky_plugins_are_listed_with_version_and_disabled_state(self):
+        home = "/dh"
+        self.write(f"{home}/settings/loader.json", json.dumps({"disabled_plugins": ["Old Fan"], "user_info.user_name": USER}))
+        for folder, plugin, package in (("a", {"name": "LeGo2 Fan Control"}, {"version": "0.260430"}),
+                                        ("b", {"name": "Old Fan"}, None), ("c", None, {"version": "1"}),
+                                        ("d", {"name": "Bad\nNameé"}, {"version": "2"})):
+            if plugin is not None:
+                self.write(f"{home}/plugins/{folder}/plugin.json", json.dumps(plugin))
+            if package is not None:
+                self.write(f"{home}/plugins/{folder}/package.json", json.dumps(package))
+        text = device_report.collect(facts(decky_home=home))
+        self.assertIn("== Decky plugins ==\nLeGo2 Fan Control 0.260430\nOld Fan unknown (disabled)\nBad?Name? 2\n", text)
+        self.assertIn("== Decky plugins ==\nunavailable: Decky's folder is unknown", device_report.collect(facts()))
+
+    def test_events_name_the_state_a_transition_reached(self):
+        events = {"events": [{"time": "2999-01-01T00:00:00.000+00:00", "level": "warning", "component": "fan",
+                              "event": "ownership", "context": {"status": "unavailable"}}] * 2}
+        with patch("diagnostics_reader.read_events", return_value=events):
+            text = device_report.collect(facts())
+        self.assertIn("fan.ownership unavailable warning: 2", text)
+
     def test_scrub_removes_macs_private_lines_homes_and_the_user(self):
         text = device_report.scrub(f"a 00-11-22-33-44-55 b\nSerial: X\nbssid x\nkeep /home/{USER}/x\n{USER}'s deck\n"
                                    "steamdeck stays", USER)

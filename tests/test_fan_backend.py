@@ -667,6 +667,16 @@ class TelemetryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError,'Occupied'):await self.p.set_enabled(True)
             self.assertEqual(self.p._state,old);start.assert_not_awaited();self.assertIsNone(self.p._client)
 
+    async def test_passive_read_logs_ownership_state_without_its_reason(self):
+        for observed,state,level in ((dict(valid=False,ownership=dict(blocked=True,state='unavailable',reason='/secret')),'unavailable','warning'),
+                                     (dict(valid=True,automatic=False,ownership=dict(blocked=False,state='external_override',reason='')),'external_override','warning'),
+                                     (dict(valid=True,automatic=True,ownership=dict(blocked=False,state='firmware_auto',reason='')),'firmware_auto','info'),
+                                     (dict(valid=False,error='/secret'),'unavailable','warning')):
+            with self.subTest(state=state),patch.object(fan,'read_automatic',return_value=observed), \
+                    patch.object(fan,'diagnostic_transition') as transition:
+                await self.p.get_state()
+            transition.assert_called_once_with('fan','ownership',state,initial=False,level=level)
+
     async def test_units_are_durable_cas_metadata_with_no_controller_start_or_curve_mutation(self):
         before=copy.deepcopy(self.p._state)
         with patch.object(fan,'read_automatic',return_value=dict(valid=False,error='foreign')), \

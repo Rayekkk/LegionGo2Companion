@@ -1277,8 +1277,10 @@ class Plugin:
                      'modules': await asyncio.to_thread(self._module_status),
                      'inputplumber_restarts': recovery.restarts if recovery else None, 'tdp_caps': caps,
                      'fan': {'supported': self._fan._supported, 'beta': self._fan._beta, 'error': self._fan._error,
+                             'enabled': self._fan._state.get('enabled'),
                              'telemetry': self._fan._client.snapshot() if self._fan._client else None},
-                     'log_dir': diagnostics.LOG_DIR, 'user': account.pw_name}
+                     'log_dir': diagnostics.LOG_DIR, 'user': account.pw_name,
+                     'decky_home': getattr(decky, 'DECKY_HOME', None)}
             collecting = self._report_collecting = asyncio.ensure_future(asyncio.to_thread(
                 device_report.collect, facts, stopped=lambda: self._closing))
         try:

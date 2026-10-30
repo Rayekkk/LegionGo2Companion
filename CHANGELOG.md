@@ -8,6 +8,8 @@ All notable changes to Legion Go 2 Companion, newest first.
 
 - **About:** **Use Rayek's store** makes Rayek's store Decky's store channel after you confirm, so Decky's Store
   tab lists Rayek's plugins and offers their updates.
+- **Device report:** names what blocks Fan Control (another app holding the fan controller, a conflicting
+  driver), lists installed Decky plugins with their version and disabled state, and says whether Fan Control is on.
 
 ### 🔧 Changed
 

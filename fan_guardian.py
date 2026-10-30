@@ -254,12 +254,13 @@ def boot_gap(previous):
     return current
 
 
-def check_owners():
-    """Session start and every passive read; afterwards the override readback catches a foreign writer."""
-    modules = {line.split()[0] for line in pathlib.Path('/proc/modules').read_text().splitlines() if line.split()}
-    if modules.intersection(('legion_laptop', 'gpd_fan')):
-        raise RuntimeError('Conflicting fan driver is loaded.')
-    for line in pathlib.Path('/proc/ioports').read_text().splitlines():
+CONFLICTING_DRIVERS = ('legion_laptop', 'gpd_fan')
+
+
+def ec_port_claims(ioports):
+    """Names of the /proc/ioports entries that claim the EC index ports 0x4E-0x4F."""
+    claims = []
+    for line in ioports.splitlines():
         prefix, _, name = line.strip().partition(':')
         # PCI bus aperture is a parent allocation, not a port-consuming driver.
         if name.strip().startswith('PCI Bus '):
@@ -269,7 +270,17 @@ def check_owners():
         except ValueError:
             continue
         if lo <= 0x4F and hi >= 0x4E:
-            raise RuntimeError('Another driver is using the fan controller.')
+            claims.append(name.strip())
+    return claims
+
+
+def check_owners():
+    """Session start and every passive read; afterwards the override readback catches a foreign writer."""
+    modules = {line.split()[0] for line in pathlib.Path('/proc/modules').read_text().splitlines() if line.split()}
+    if modules.intersection(CONFLICTING_DRIVERS):
+        raise RuntimeError('Conflicting fan driver is loaded.')
+    if ec_port_claims(pathlib.Path('/proc/ioports').read_text()):
+        raise RuntimeError('Another driver is using the fan controller.')
     started = time.monotonic()
     # Plain str paths: pathlib costs over twice as much per fd and this runs on every passive read.
     for pid in os.listdir('/proc'):

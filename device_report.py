@@ -29,7 +29,7 @@ import zlib
 import module_runtime
 import rgb_backend
 import tdp_backend
-from fan_guardian import validated_firmware
+from fan_guardian import CONFLICTING_DRIVERS, ec_port_claims, validated_firmware
 from dk_fs import open_directory
 from dk_process import run
 
@@ -235,7 +235,7 @@ def _companion(context):
     else:
         lines.append(f"TDP: unavailable: {caps}")
     fan = facts.get("fan") or {}
-    lines.append(f"Fan: supported={fan.get('supported')} beta={fan.get('beta')}"
+    lines.append(f"Fan: supported={fan.get('supported')} beta={fan.get('beta')} control_on={fan.get('enabled')}"
                  + (f" error={str(fan['error'])[:100]}" if fan.get("error") else ""))
     try:  # The remembered file only; no EC access.
         pairs = sorted(validated_firmware())
@@ -386,6 +386,69 @@ def _fan(context):
     return lines or ["none"]
 
 
+def _printable(text, limit=64):
+    return re.sub(r"[^\x20-\x7e]", "?", str(text))[:limit]
+
+
+def _fan_users(context):
+    """What fan_guardian.check_owners refuses, by name: the reason Fan Control shows "Another app controls the fan"."""
+    modules = {line.split()[0] for line in _text_file("/proc/modules", 1 << 20).splitlines() if line.split()}
+    lines = ["conflicting fan drivers: " + (", ".join(sorted(modules.intersection(CONFLICTING_DRIVERS))) or "none"),
+             "EC ports 0x4E-0x4F claimed by: "
+             + (", ".join(_printable(name) for name in ec_port_claims(_text_file("/proc/ioports", 1 << 16))) or "none")]
+    holders = []
+    for pid in sorted(filter(str.isdigit, os.listdir(_path("/proc"))), key=int):
+        if time.monotonic() >= context.deadline:
+            raise _Unavailable("report time limit reached")
+        try:
+            fds = _path(f"/proc/{pid}/fd")
+            if not any(_link(os.path.join(fds, fd)) == "/dev/port" for fd in os.listdir(fds)):
+                continue
+            with open(_path(f"/proc/{pid}/cmdline"), "rb") as handle:
+                ours = b"fan_guardian.py" in handle.read(4096)
+            holders.append(f"{_printable(_read(_path(f'/proc/{pid}/comm'), 64))} (pid {pid}"
+                           + (", Companion Fan Control)" if ours else ")"))
+        except OSError:
+            continue  # The process ended during the scan.
+    lines.append("/dev/port open by: " + (", ".join(holders[:MAX_ENTRIES]) or "none"))
+    return lines
+
+
+def _link(path):
+    try:
+        return os.readlink(path)
+    except OSError:
+        return None
+
+
+def _decky_plugins(context):
+    """Installed Decky plugins by name, version and disabled state: other plugins can take the same hardware."""
+    home = context.facts.get("decky_home")
+    if not home:
+        raise _Unavailable("Decky's folder is unknown")
+
+    def load(path, limit=65536):
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return json.loads(handle.read(limit))
+    try:
+        disabled, note = set(load(_path(os.path.join(home, "settings", "loader.json")), 1 << 20)
+                             .get("disabled_plugins") or ()), []
+    except Exception as exc:
+        disabled, note = set(), [f"disabled plugins: unavailable: {_reason(exc)}"]
+    lines = []
+    for directory in _entries(os.path.join(home, "plugins", "*")):
+        try:
+            name = load(os.path.join(directory, "plugin.json"))["name"]
+        except Exception:
+            continue  # Not a plugin folder.
+        try:
+            version = load(os.path.join(directory, "package.json"))["version"]
+        except Exception:
+            version = "unknown"
+        lines.append(f"{_printable(name)} {_printable(version, 32)}" + (" (disabled)" if name in disabled else ""))
+    return (lines or ["none"]) + note
+
+
 def _edid_identity(data):
     """Manufacturer, product code and the 0xFC monitor name only; never the serial (bytes 12-15, 0xFF)."""
     if len(data) < 128 or data[:8] != EDID_HEADER:
@@ -481,9 +544,12 @@ def _events(context):
     for record in read_events(context.facts["log_dir"])["events"]:
         if record["level"] in ("warning", "error", "critical") and \
                 datetime.datetime.fromisoformat(record["time"]) >= since:
-            counts[(record["component"], record["event"], record["level"])] += 1
-    return [f"{component}.{event} {level}: {count}" for (component, event, level), count in sorted(counts.items())] \
-        or ["no warnings or errors"]
+            # A state change's new state (diagnostics.transition) tells which failure it was.
+            status = (record.get("context") or {}).get("status")
+            counts[(record["component"], record["event"], f" {_printable(status, 32)}" if status else "",
+                    record["level"])] += 1
+    return [f"{component}.{event}{status} {level}: {count}"
+            for (component, event, status, level), count in sorted(counts.items())] or ["no warnings or errors"]
 
 
 def _read_physical(base, length):
@@ -587,8 +653,9 @@ def _dsdt(context):
 SECTIONS = (("DMI", _dmi), ("System", _system), ("Companion", _companion),
             ("Firmware attributes", _firmware_attributes), ("Battery and power", _power),
             ("RyzenAdj limits", _ryzenadj), ("Controllers and input", _controllers), ("Fan sensors", _fan),
-            ("EC memory (read-only)", _ec), ("Display", _display), ("Network", _network),
-            ("fwupd devices", _fwupd), ("Companion events, last 24 hours", _events))
+            ("Fan controller users", _fan_users), ("EC memory (read-only)", _ec), ("Display", _display),
+            ("Network", _network), ("fwupd devices", _fwupd), ("Decky plugins", _decky_plugins),
+            ("Companion events, last 24 hours", _events))
 DSDT_TITLE = "ACPI DSDT (firmware table, not filtered)"
 
 
@@ -608,7 +675,8 @@ def scrub(text, user=""):
 
 
 def collect(facts, seconds=TOTAL_SECONDS, stopped=lambda: False):
-    """The report text. `facts`: version, device, modules, inputplumber_restarts, tdp_caps, fan, log_dir, user.
+    """The report text. `facts`: version, device, modules, inputplumber_restarts, tdp_caps, fan, log_dir, user,
+    decky_home.
     `stopped()`: Companion is stopping, so no further section starts."""
     context = _Context(facts, time.monotonic() + seconds, stopped)
 
