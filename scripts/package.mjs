@@ -20,6 +20,9 @@
  *   matching something, never absolute, "..", or with backslashes) plus @decky/api's licence and source under
  *   third_party/decky-api/. __pycache__, .pyc/.pyo, .DS_Store and nested tests/ folders are left out of listed
  *   folders. A top-level .py file that no entry lists fails the build unless "decky.exclude" names it.
+ * - CHANGELOG style (STANDARD §7): inside each version only the headings "### ✨ Added", "### 🔧 Changed",
+ *   "### 🐛 Fixed", "### 🗑️ Removed", in that order, each at most once; no other "###"/"####" headings; inside a
+ *   category the entries of one area stand together.
  * - Versions agree: plugin.json, package.json, package-lock.json (root and packages[""]), the newest CHANGELOG
  *   release section, and on a CI tag build the tag, with no [Unreleased] section above it; package and lockfile
  *   have the same name and licence; the shipped @decky/api is the version the lockfile pins; with "decky.flags"
@@ -76,6 +79,44 @@ const ARGS = new Set(["--check", "--release"]);
 
 class PackageError extends Error {}
 const fail = message => { throw new PackageError(message); };
+
+const CATEGORIES = ["### ✨ Added", "### 🔧 Changed", "### 🐛 Fixed", "### 🗑️ Removed"];
+
+/** STANDARD §7: each version holds only the four category headings, in order, each at most once. Inside a category
+ * the entries of one area stand together: below 5 entries as "- **Fan:** …" bullets, from 5 entries under one
+ * "**Fan**" line per area with plain "- …" bullets. */
+export function checkChangelogStyle(text) {
+  const SHORT = /^- \*\*([^*]+?):\*\*/, HEADER = /^\*\*([^*]+)\*\*$/;
+  let version = null, last = -1, category = null, areas = [], headers = 0, bullets = 0, plain = 0;
+  const close = () => {
+    if (category === null) return;
+    const where = `CHANGELOG ${version} ${category}`;
+    if (bullets >= 5 && !headers) fail(`${where}: ${bullets} entries need "**Area**" lines above each area's bullets`);
+    if (bullets < 5 && headers) fail(`${where}: under 5 entries use "- **Area:** …" bullets, not "**Area**" lines`);
+    if (headers && plain !== bullets) fail(`${where}: under "**Area**" lines the bullets do not repeat the area`);
+    if (!headers && plain) fail(`${where}: every entry starts with "- **Area:**"`);
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("## ")) { close(); category = null; version = line; last = -1; continue; }
+    if (line.startsWith("###")) {
+      close();
+      const at = CATEGORIES.indexOf(line.trimEnd());
+      if (version === null || at < 0) fail(`CHANGELOG heading "${line}" is not one of: ${CATEGORIES.join(", ")}`);
+      if (at <= last) fail(`CHANGELOG ${version}: "${line}" is out of order or repeated (${CATEGORIES.join(" > ")})`);
+      last = at; category = line.trim(); areas = []; headers = bullets = plain = 0;
+      continue;
+    }
+    if (category === null) continue;
+    const area = (HEADER.exec(line) ?? SHORT.exec(line))?.[1].trim().toLowerCase();
+    if (HEADER.test(line)) headers++;
+    if (line.startsWith("- ")) { bullets++; if (!SHORT.test(line)) plain++; }
+    if (area === undefined) continue;
+    if (areas.includes(area) && (areas.at(-1) !== area || HEADER.test(line)))
+      fail(`CHANGELOG ${version}: "${area}" entries are split up; keep one area's entries together`);
+    if (areas.at(-1) !== area) areas.push(area);
+  }
+  close();
+}
 
 /** Every entry under base/prefix ("dir/" for folders), refusing anything but regular files and folders. */
 function listTree(base, prefix) {
@@ -244,7 +285,9 @@ function main(args) {
   for (const [where, found] of [["package-lock.json", lock.name], ['package-lock.json packages[""]', lock.packages?.[""]?.name]])
     if (found !== pkg.name) fail(`${where} name ${found} != package.json ${pkg.name}`);
   if (lock.packages?.[""]?.license !== pkg.license) fail(`package-lock.json licence ${lock.packages?.[""]?.license} != ${pkg.license}`);
-  const sections = [...readFileSync(join(repoRoot, "CHANGELOG.md"), "utf8").matchAll(/^## \[([^\]]+)\]/gm)].map(m => m[1]);
+  const changelog = readFileSync(join(repoRoot, "CHANGELOG.md"), "utf8");
+  checkChangelogStyle(changelog);
+  const sections = [...changelog.matchAll(/^## \[([^\]]+)\]/gm)].map(m => m[1]);
   const released = sections.find(s => /^\d+\.\d+\.\d+$/.test(s));
   if (released !== version) fail(`version mismatch: plugin.json=${version}, newest CHANGELOG release=${released}`);
   if (process.env.GITHUB_REF_TYPE === "tag") {
