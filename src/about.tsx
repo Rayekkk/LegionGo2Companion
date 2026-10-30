@@ -11,11 +11,16 @@
 // for exactly that version; a re-check keeps a download of the same version, a failed one keeps it on screen; an answer
 // without update_available is a failure, never "Up to date"; answers are read as dk_update's own
 // ({ok, ...fields}) or wrapped as D2 state ({ok, error, state}); the states and texts are UI.md §3's table; a saved
-// path inside `home` shows as ~/…; AboutPage is always info first, then the plugin's own sections, Updates last.
-// Deliberately not here: automatic checks, a beta channel, installing (Decky installs the ZIP), RPC names.
+// path inside `home` shows as ~/…; AboutPage is always info first, then the plugin's own sections, Rayek's store,
+// Updates last. StoreSection switches Decky's store channel to Rayek's store only after the user confirms a dialog
+// that says what changes and how to go back; it writes the address before the channel (a failure in between leaves
+// the channel as it was) and reports success only when both read back as set; when Decky's settings cannot be read
+// or written it shows the manual steps instead; once selected it offers no button.
+// Deliberately not here: automatic checks, a beta channel, installing (Decky installs the ZIP), RPC names, a way
+// back to the official store (Decky's own Store channel setting does that).
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { ReactNode, useEffect, useState } from "react";
-import { ActionButton, infoRow } from "./ui";
+import { ActionButton, confirmAction, infoRow, notify } from "./ui";
 
 /** dk_update's check answer (DeckyKit D2). */
 export interface UpdateCheck {
@@ -50,9 +55,8 @@ const unwrap = <T extends { ok: boolean; error?: string }>(answer: Answer<T> | n
       ? { ...answer.state, ok: answer.ok, error: answer.error } as T : answer as T;
 
 /** What a failed request says: Decky rejects with an Error or a plain string. */
-const reason = (error: unknown) => (typeof error === "string" ? error
-  : error && typeof error === "object" && "message" in error ? String(error.message) : "").trim()
-  || "The update request failed. Try again.";
+const reason = (error: unknown, fallback = "The update request failed. Try again.") => (typeof error === "string" ? error
+  : error && typeof error === "object" && "message" in error ? String(error.message) : "").trim() || fallback;
 
 /** A request belongs to the plugin instance: switching pages or closing the QAM keeps its progress, and dispose()
  *  keeps old requests away from a reloaded plugin. `log` names the plugin in console warnings. */
@@ -157,10 +161,72 @@ export function UpdateSection({ controller, version, home = "", install = INSTAL
   </PanelSection>;
 }
 
+/** Rayek's plugin store (RayekDeckyStore): Decky's Custom store channel at this address. */
+export const STORE_URL = "https://decky.rayek.workers.dev";
+const CUSTOM = 2;  // Decky's Store enum: Default 0, Testing 1, Custom 2
+const STORE = "Rayek's store";
+const MANUAL = `Set it by hand: Decky settings → General → Store channel → Custom, then enter ${STORE_URL}.`;
+
+// Decky's own settings routes (what its Store channel setting uses): not plugin API, so a failure shows MANUAL.
+type Loader = { call(route: string, ...args: unknown[]): Promise<unknown> };
+const loader = () => {
+  const backend = (window as unknown as { DeckyBackend?: Loader }).DeckyBackend;
+  if (!backend?.call) throw new Error("Decky's settings are not available.");
+  return backend;
+};
+const storeSelected = async () => {
+  const backend = loader();
+  const [store, url] = await Promise.all([backend.call("utilities/settings/get", "store", null),
+    backend.call("utilities/settings/get", "store-url", null)]);
+  return store === CUSTOM && typeof url === "string" && url.trim().replace(/\/+$/, "") === STORE_URL;
+};
+
+/** Rayek's store: a button that makes it Decky's store channel, after the user confirms. */
+export function StoreSection() {
+  const [selected, setSelected] = useState<boolean | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { storeSelected().then(setSelected, () => setSelected(false)); }, []);
+  const use = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const backend = loader();
+      // The address first: should the channel write fail, Decky keeps the store it had.
+      await backend.call("utilities/settings/set", "store-url", STORE_URL);
+      await backend.call("utilities/settings/set", "store", CUSTOM);
+      if (!await storeSelected()) throw new Error("Decky did not keep the new store.");
+      setSelected(true);
+      notify(STORE, "Selected. Decky's Store tab now lists Rayek's plugins.");
+    } catch (e) {
+      console.warn(`[${STORE}] store_switch_failed`);
+      setError(reason(e, "Could not change Decky's store."));
+    } finally {
+      setBusy(false);
+    }
+  };
+  // "OK" instead of a verb (UI.md §6): the owner's choice for this dialog (2026-10-30).
+  const ask = () => confirmAction("Change Decky's store channel?", <div style={{ whiteSpace: "pre-line" }}>{
+    `You are changing Decky's default store channel to ${STORE} (${STORE_URL}).\n` +
+    "While it is selected, plugins from the official store get no update offers.\n" +
+    "This can be undone: set Store channel to Default in Decky settings → General."}</div>, "OK", () => void use());
+  return <PanelSection title={STORE}>
+    {selected
+      ? infoRow("Selected", "Decky's Store tab lists Rayek's plugins and offers their updates.")
+      : <>
+        {infoRow("Install and update from Decky", "Make Rayek's store Decky's store channel, so the Store tab lists these plugins.")}
+        <PanelSectionRow><ActionButton disabled={busy || selected === undefined} onClick={ask}>
+          {busy ? "Switching store…" : `Use ${STORE}`}
+        </ActionButton></PanelSectionRow>
+      </>}
+    {error && infoRow("Could not complete", <div role="alert">{error}<div style={{ marginTop: 6 }}>{MANUAL}</div></div>)}
+  </PanelSection>;
+}
+
 /**
  * The About page (UI.md §3), the same everywhere: the plugin's name, `Version X` and one sentence on what it does;
  * Author (Rayek · license · source, then license notes); credits; the plugin's own sections (`children`, e.g. a
- * device report); Updates at the very bottom.
+ * device report); Rayek's store; Updates at the very bottom.
  */
 export function AboutPage({ name, version, description, license, source, notes, credits = [], children, updates, home, install }: {
   name: string; version: string; description: string; license: string; source?: string; notes?: string;
@@ -173,6 +239,7 @@ export function AboutPage({ name, version, description, license, source, notes, 
       {credits.map(([label, text]) => <div key={label}>{infoRow(label, text)}</div>)}
     </PanelSection>
     {children}
-    {updates && <UpdateSection controller={updates} version={version} home={home} install={install} />}
+    <StoreSection />
+    {updates &&<UpdateSection controller={updates} version={version} home={home} install={install} />}
   </>;
 }

@@ -4,6 +4,11 @@ All notable changes to Legion Go 2 Companion, newest first.
 
 ## [Unreleased]
 
+### ✨ Added
+
+- **About:** **Use Rayek's store** makes Rayek's store Decky's store channel after you confirm, so Decky's Store
+  tab lists Rayek's plugins and offers their updates.
+
 ### 🔧 Changed
 
 **Panel**

@@ -20,7 +20,7 @@ run(async () => {
   assert.equal(about.props.license, 'BSD-3-Clause');
   assert.equal(about.props.home, '/home/deck');
   const page = about.type(about.props).props.children.filter(Boolean);
-  assert.deepEqual([...page].map(n => n.type?.name ?? n.type), ['PanelSection', 'DeviceReportSection', 'UpdateSection'], 'info, the device report, Updates last');
+  assert.deepEqual([...page].map(n => n.type?.name ?? n.type), ['PanelSection', 'DeviceReportSection', 'StoreSection', 'UpdateSection'], 'info, the device report, the store, Updates last');
 
   // The updater asks the plugin's own RPCs and reads their D2 answers.
   const view = mount('about.tsx', { component: 'UpdateSection' });
