@@ -28,7 +28,8 @@ python tests/native_capture.py --exe /tmp/companion-native/legiongo2companion --
   QT_QUICK_BACKEND=software ctest --test-dir /tmp/companion-native --output-on-failure
   python tests/native_capture.py --exe /tmp/companion-native/legiongo2companion --qt "$qt/6.11.2/gcc_64" \
     --output /tmp/companion-screens-newest
-  node scripts/check-desktop-build.mjs --runtime
 )
+# The bundle itself is verified by `npm run package` (check-desktop-build.mjs --runtime): it needs
+# dist/desktop/rpc-methods.json, which `npm run build` writes after this script.
 # scripts/check-legacy-updaters.py reads the updaters of these releases (the shared checkout has no tags).
 git fetch --no-tags --depth=1 origin 'refs/tags/2.1.0:refs/tags/2.1.0' 'refs/tags/2.2.0:refs/tags/2.2.0'
