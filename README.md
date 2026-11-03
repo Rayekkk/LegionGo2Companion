@@ -125,9 +125,10 @@ Legion Go S (83L3, 83N6). None of them depend on an exact BIOS or EC version:
   why; turning it on again repeats the check.
 
 Use only one fan controller at a time. Stop another EC fan-control tool and let it return
-control to firmware before enabling Companion's curve. Detected raw-port owners, an existing
-EC override or unknown ownership block activation; these checks cannot detect every
-non-cooperating EC writer.
+control to firmware before enabling Companion's curve. A program or driver that holds the fan
+controller blocks activation, and the page names it; uninstall that program (turning it off inside
+its own panel is not enough). When the page only failed to read the fan, **Take over fan control**
+makes one start attempt with every check. These checks cannot detect every non-cooperating EC writer.
 
 </details>
 
@@ -654,7 +655,8 @@ restarts it in the new version. Logs are described in [LOGGING.md](docs/LOGGING.
 | A module is missing | Check **Manage modules**: a disabled module is hidden; a failed start or cleanup has a retry button there. |
 | A control is unavailable | Read the reason on the page; some controls need system drivers or a specific model. |
 | Fan Control is not available | Check your model in [Requirements](#requirements). |
-| Another app controls the fan | Stop the other fan tool and let it return the fan to automatic. |
+| Another app controls the fan | The page names the app or driver. Uninstall that plugin or tool in Decky (turning it off in its own panel is not enough), then turn on Fan Control. |
+| Fan reading unavailable | Press **Take over fan control** for one start attempt; if it fails, the page says why. Save a device report for a bug report. |
 | Fan Control turned off after an error | Read the reason, let recovery finish, check your curve, then turn it on again. |
 | Turned off: the BIOS/EC version changed how the fan is controlled | The check after a firmware update failed. Turn Fan Control on again to repeat it; if it keeps failing, report it with your BIOS and EC versions. |
 | My curve is saved but the fan is on Automatic | Saving does not turn Fan Control on. Turn on **Enable fan control**. |
@@ -822,9 +824,11 @@ the saved curve with a fresh controller; transient software or timing errors **r
 three times in ten minutes; hardware evidence is a **fault** that saves Fan Control off with its
 reason. Every start repeats all checks (platform, ownership, both sensors, EC plausibility,
 backup readiness, sleep inhibitor, curve). The controller runs the curve from its own sensors,
-so a busy or detached Decky frontend does not end the session. Detected conflicting owners or
-unverifiable ownership block activation; a foreign raw-port reader can also block telemetry
-without proving an active fan override. A leftover EC override with no live owner, for example
+so a busy or detached Decky frontend does not end the session. Detected conflicting owners (a
+conflicting driver, a driver on the EC ports, another process with `/dev/port` open) block
+activation and are named; a foreign raw-port reader can also block telemetry without proving an
+active fan override. A passive reading that fails without an owner shows **Fan reading
+unavailable**; **Take over fan control** then starts a session, which still runs every check above. A leftover EC override with no live owner, for example
 after both fan processes were killed, is released to firmware automatic when the next session
 starts.
 

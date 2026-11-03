@@ -2,7 +2,7 @@
 
 All notable changes to Legion Go 2 Companion, newest first.
 
-## [Unreleased]
+## [2.4.1] - 2026-11-03
 
 ### ✨ Added
 
@@ -21,6 +21,8 @@ All notable changes to Legion Go 2 Companion, newest first.
   "Fan reading unavailable" with the reason instead.
 - If another app changes the fan speed while Companion controls it, the error names the apps that have
   the fan controller open.
+- The curve graph and the full screen editor use the shared frame and colors; B is now labeled "Done"
+  while editing.
 
 **Panel**
 - The Decky panel now looks and reads like the other Rayek plugins (same layout, texts and states).
@@ -56,10 +58,6 @@ All notable changes to Legion Go 2 Companion, newest first.
   "Retry settings" or "Check again").
 - When something fails unexpectedly, the panel and the Desktop app show a short message and the details
   go to the Decky log, never file paths.
-
-**Fan**
-- The curve graph and the full screen editor use the shared frame and colors; B is now labeled "Done"
-  while editing.
 
 **Wi-Fi**
 - When a band change or reconnect is refused, the Desktop app shows the reason in words instead of an
