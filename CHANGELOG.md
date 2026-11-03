@@ -10,8 +10,17 @@ All notable changes to Legion Go 2 Companion, newest first.
   tab lists Rayek's plugins and offers their updates.
 - **Device report:** names what blocks Fan Control (another app holding the fan controller, a conflicting
   driver), lists installed Decky plugins with their version and disabled state, and says whether Fan Control is on.
+- **Fan Control:** **Take over fan control** appears when Fan Control is off and blocked. It makes one start
+  attempt with every safety check; if another app still uses the fan controller, Fan Control stays off and
+  names it.
 
 ### 🔧 Changed
+
+**Fan Control**
+- "Another app controls the fan" now names the app or driver. A fan reading that merely failed shows
+  "Fan reading unavailable" with the reason instead.
+- If another app changes the fan speed while Companion controls it, the error names the apps that have
+  the fan controller open.
 
 **Panel**
 - The Decky panel now looks and reads like the other Rayek plugins (same layout, texts and states).

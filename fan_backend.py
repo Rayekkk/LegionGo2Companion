@@ -57,7 +57,13 @@ def read_automatic():
     try:
         platform_check()
         owner = secure_root()
-        check_owners()
+        try:
+            check_owners()
+        except Retry:
+            raise  # A slow scan is a failed read, not an owner.
+        except RuntimeError as exc:
+            return dict(valid=False, error=str(exc), ownership=dict(blocked=True, state='foreign_owner',
+                        reason=str(exc), checked_at=time.monotonic()))
         sensors = Sensors()
         temperatures = sensors.read()
         port = Ports()
@@ -686,8 +692,8 @@ class Plugin:
                     limits=dict(min_rpm=MIN_RPM, last_min_rpm=LAST_MIN_RPM, max_rpm=MAX_RPM, step=RPM_STEP,
                                 hard_max=HARD_MAX_C), presets=list(PRESETS), templates=copy.deepcopy(TEMPLATES))
 
-    async def set_enabled(self, enabled):
-        if type(enabled) is not bool:
+    async def set_enabled(self, enabled, take_over=False):
+        if type(enabled) is not bool or type(take_over) is not bool:
             raise ValueError('Enabled must be a boolean.')
         async with self._mutation:
             await self._ensure_loaded()
@@ -697,7 +703,11 @@ class Plugin:
                 raise RuntimeError(self._error or 'Unsupported fan platform.')
             if enabled and not self._settings_valid:
                 raise RuntimeError('Review and save a valid curve before enabling Fan Control.')
-            if enabled and not (self._client and self._client.snapshot().get('active')):
+            if take_over and enabled:
+                # One start attempt without the passive read: the guardian's own start still refuses a live
+                # owner (by name) and verifies the EC before any write.
+                diagnostic_event('fan', 'take_over', stage='requested')
+            elif enabled and not (self._client and self._client.snapshot().get('active')):
                 ownership = await module_runtime.complete(module_runtime.offload('fan', read_automatic))
                 if ownership.get('ownership', {}).get('blocked', True):
                     raise RuntimeError(ownership.get('ownership', {}).get('reason') or 'Fresh exclusive fan ownership is required.')

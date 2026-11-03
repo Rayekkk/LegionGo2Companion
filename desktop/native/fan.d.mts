@@ -9,5 +9,7 @@ export function pointText(index: number, count: number, temperature: number, spe
 export function readingFresh(readings: { valid?: boolean; age_seconds?: number } | undefined, transportAge: number): boolean;
 export function speedText(rpm: number | undefined, unit: string | undefined, maxRpm: number | undefined): string;
 export function fanStatus(state: object | undefined, startingFor?: number): { headline: string; detail: string; starting?: boolean };
+export function canTakeOver(state: object | undefined): boolean;
+export const TAKE_OVER_NOTE: string;
 export function editPoint(curve: Curve, index: number, axis: 0 | 1, value: number, limits: Limits): Curve;
 export function nudgeSpeed(rpm: number, delta: number, minRpm: number): number;

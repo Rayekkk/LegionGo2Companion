@@ -450,6 +450,13 @@ TestCase {
         publish(false);
         verify(!toggle.enabled,"Blocked ownership still prevents turning Fan Control on");
         compare(toggle.note,blocked.reason);
+        const takeOver=findChild(fan,"fanTakeOver");verify(takeOver!==null);
+        verify(fan.takeOverShown,"A blocked, off Fan Control offers one take-over attempt");
+        verify(takeOver.enabled,"The take-over attempt is not blocked by the ownership it overrides");
+        takeOver.clicked();const request=fake.calls[fake.calls.length-1];
+        compare(request.method,"fan_set_enabled");compare(request.args,[true,true]);
+        publish(true);
+        verify(!fan.takeOverShown,"No take-over while Fan Control is on");
     }
     function test_combinedControllerBoundsReadsDuringDiagnosticsAndStopsOnLeave() {
         model.page="controller";

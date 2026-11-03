@@ -59,9 +59,9 @@ ColumnLayout {
         backend.mutate("fan_save_unit",[value,unitExpectedRevision]);
     }
     function curvesOf(value) { return JSON.stringify([value.global_curve,value.presets]); }
-    function switchControl(value) {
+    function switchControl(value, takeOver) {
         enableExpectedRevision=Number(settings.revision);enableCurves=curvesOf(settings);
-        backend.mutate("fan_set_enabled",[value]);
+        backend.mutate("fan_set_enabled",[value,!!takeOver]);
     }
     function speed(rpm) { return Fan.speedText(rpm,unit,limits.max_rpm); }
     onUnitChanged: speedStep=unit==="percent"?Math.max(1,Math.round(Number(limits.max_rpm || 4800)/100)):100
@@ -88,6 +88,7 @@ ColumnLayout {
     UiModuleNotice { Layout.fillWidth:true;status:moduleStatus;onManageRequested:panel.navigate("modules") }
     Label { textFormat:Text.PlainText; text:moduleStatus.ready && typeof backend.moduleError==="function"?backend.moduleError("fan"):"";visible:text.length>0;color:theme.warning;wrapMode:Text.WordWrap;Layout.fillWidth:true }
     readonly property bool betaShown:!!fanState.beta
+    readonly property bool takeOverShown:Fan.canTakeOver(fanState)
     RowLayout { objectName:"fanBeta"; visible:panel.betaShown; Layout.fillWidth:true; spacing:12
         UiBadge { text:"Beta"; tone:"amber"; Layout.alignment:Qt.AlignTop }
         Label { objectName:"fanBetaText"; textFormat:Text.PlainText; text:Modules.FAN_BETA_TEXT; color:theme.muted; wrapMode:Text.WordWrap; Layout.fillWidth:true }
@@ -112,6 +113,10 @@ ColumnLayout {
                 panel.status.detail
             onEdited: function(value) { panel.switchControl(value); }
         }
+        UiButton { objectName:"fanTakeOver"; text:"Take Over Fan Control"; visible:panel.takeOverShown
+            enabled:panel.editable && !panel.dirty && !fanState.needs_curve_review; onClicked:panel.switchControl(true,true) }
+        Label { textFormat:Text.PlainText; text:Fan.TAKE_OVER_NOTE; visible:panel.takeOverShown; color:theme.muted
+            font.pixelSize:theme.fontTiny; wrapMode:Text.WordWrap; Layout.fillWidth:true }
     }
     UiCard {
         Layout.fillWidth:true

@@ -83,7 +83,7 @@ def confirm_override_change(ec, sample, expected):
     if first == current['override'] == 0:
         raise Retry(f'Firmware took the fan back {detail}.')
     if current['override'] != expected:
-        raise RuntimeError(f'Fan override changed outside its owner {detail}.')
+        raise RuntimeError(f'Fan override changed outside its owner {detail}.{foreign_writers()}')
     diagnostic_event('fan', 'override_misread', level='warning', reason=detail)
     check_ec_temperature(sample)
     return current
@@ -274,13 +274,8 @@ def ec_port_claims(ioports):
     return claims
 
 
-def check_owners():
-    """Session start and every passive read; afterwards the override readback catches a foreign writer."""
-    modules = {line.split()[0] for line in pathlib.Path('/proc/modules').read_text().splitlines() if line.split()}
-    if modules.intersection(CONFLICTING_DRIVERS):
-        raise RuntimeError('Conflicting fan driver is loaded.')
-    if ec_port_claims(pathlib.Path('/proc/ioports').read_text()):
-        raise RuntimeError('Another driver is using the fan controller.')
+def port_holders():
+    """pid of every other process with /dev/port open; Retry past the scan's time budget."""
     started = time.monotonic()
     # Plain str paths: pathlib costs over twice as much per fd and this runs on every passive read.
     for pid in os.listdir('/proc'):
@@ -291,13 +286,46 @@ def check_owners():
             for fd in os.listdir(fds):
                 try:
                     if os.readlink(fds+fd) == '/dev/port':
-                        raise RuntimeError('Another app is using the fan controller.')
+                        yield int(pid)
+                        break
                 except FileNotFoundError:
                     pass
         except FileNotFoundError:
             pass
         if time.monotonic()-started > 0.5:
             raise Retry('Raw-port ownership scan exceeded its time budget.')
+
+
+def holder(pid):
+    """(text, companion) naming a /dev/port holder by its process name only: comm carries no arguments."""
+    try:
+        name = ''.join(c if ' ' <= c <= '~' else '?' for c in pathlib.Path(f'/proc/{pid}/comm').read_text().strip())[:32]
+        companion = b'fan_guardian.py' in pathlib.Path(f'/proc/{pid}/cmdline').read_bytes()[:4096]
+    except OSError:
+        name, companion = '', False
+    if companion:
+        return f'Another Companion Fan Control session (pid {pid})', True
+    return f'{name or "Another app"} (pid {pid})', False
+
+
+def foreign_writers():
+    """' X (pid n) has the fan controller open.' for the fault text; this session's backup fork is not foreign."""
+    try:
+        names = [text for text, companion in map(holder, port_holders()) if not companion]
+    except (Retry, OSError):
+        return ''  # Naming is best effort: it never replaces the fault's own reason.
+    return f' {", ".join(names[:3])} {"has" if len(names) == 1 else "have"} the fan controller open.' if names else ''
+
+
+def check_owners():
+    """Session start and every passive read; afterwards the override readback catches a foreign writer."""
+    modules = {line.split()[0] for line in pathlib.Path('/proc/modules').read_text().splitlines() if line.split()}
+    if conflicting := sorted(modules.intersection(CONFLICTING_DRIVERS)):
+        raise RuntimeError(f'Conflicting fan driver {", ".join(conflicting)} is loaded.')
+    if claims := ec_port_claims(pathlib.Path('/proc/ioports').read_text()):
+        raise RuntimeError(f'Another driver ({", ".join(claims)[:64]}) is using the fan controller.')
+    for pid in port_holders():
+        raise RuntimeError(f'{holder(pid)[0]} is using the fan controller.')
 
 
 def independent_hard_max(ec, root, temperature):

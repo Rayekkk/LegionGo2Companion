@@ -667,6 +667,27 @@ class TelemetryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError,'Occupied'):await self.p.set_enabled(True)
             self.assertEqual(self.p._state,old);start.assert_not_awaited();self.assertIsNone(self.p._client)
 
+    async def test_take_over_makes_one_start_attempt_past_a_blocked_passive_read(self):
+        blocked=dict(valid=False,ownership=dict(blocked=True,state='unavailable',reason='Passive fan reading exceeded its time budget.'))
+        with patch.object(fan,'read_automatic',return_value=blocked) as passive, \
+                patch.object(self.p,'_start_client',new=AsyncMock()) as start, \
+                patch.object(self.p,'_monitor',new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError,'time budget'):await self.p.set_enabled(True)
+            start.assert_not_awaited()
+            passive.reset_mock()
+            await self.p.set_enabled(True,True)
+            passive.assert_not_called();start.assert_awaited_once()
+            self.assertTrue(self.p._state['enabled'],'nobody else took it: Fan Control runs normally')
+            await self.p.set_enabled(False)
+        # A live owner still refuses the guardian's start: Fan Control stays off and names it.
+        refusal=RuntimeError('LeGo2 Fan Contr (pid 9) is using the fan controller.')
+        with patch.object(fan,'read_automatic',return_value=blocked), \
+                patch.object(self.p,'_start_client',new=AsyncMock(side_effect=refusal)) as start:
+            with self.assertRaisesRegex(RuntimeError,'LeGo2 Fan Contr'):await self.p.set_enabled(True,True)
+            start.assert_awaited_once()
+        self.assertFalse(self.p._state['enabled']);self.assertIn('LeGo2 Fan Contr (pid 9)',self.p._error)
+        with self.assertRaises(ValueError):await self.p.set_enabled(True,'yes')
+
     async def test_passive_read_logs_ownership_state_without_its_reason(self):
         for observed,state,level in ((dict(valid=False,ownership=dict(blocked=True,state='unavailable',reason='/secret')),'unavailable','warning'),
                                      (dict(valid=True,automatic=False,ownership=dict(blocked=False,state='external_override',reason='')),'external_override','warning'),
@@ -812,7 +833,7 @@ class SafetyInputTests(unittest.TestCase):
                     patch.object(Path,'read_text',lambda p:modules if p.name=='modules' else ''), \
                     patch.object(guard.os,'listdir',return_value=[]):
                 if blocked:
-                    with self.assertRaisesRegex(RuntimeError,'Conflicting fan driver'):guard.check_owners()
+                    with self.assertRaisesRegex(RuntimeError,f'Conflicting fan driver {modules.split()[0]} is loaded'):guard.check_owners()
                 else:guard.check_owners()
 
     def test_raw_port_scan_finds_dev_port_holder_and_skips_vanished_entries(self):
@@ -830,7 +851,7 @@ class SafetyInputTests(unittest.TestCase):
         with patch.object(Path,'read_text',return_value=''), \
                 patch.object(guard.os,'listdir',side_effect=listdir), \
                 patch.object(guard.os,'readlink',side_effect=readlink):
-            with self.assertRaisesRegex(RuntimeError,'Another app is using the fan controller'):guard.check_owners()
+            with self.assertRaisesRegex(RuntimeError,r'^Another app \(pid 9\) is using the fan controller\.$'):guard.check_owners()
             links['/proc/9/fd/4']='/dev/tty'
             guard.check_owners()
             with patch.object(guard.time,'monotonic',side_effect=[0,0.6]):
@@ -843,5 +864,46 @@ class SafetyInputTests(unittest.TestCase):
             with patch.object(Path,'read_text',lambda p:text if p.name=='ioports' else ''), \
                     patch.object(guard.os,'listdir',return_value=[]):
                 if blocked:
-                    with self.assertRaisesRegex(RuntimeError,'Another driver is using the fan controller'): guard.check_owners()
+                    with self.assertRaisesRegex(RuntimeError,r'Another driver \(unknown ec driver\) is using the fan controller'): guard.check_owners()
                 else:guard.check_owners()
+
+    def test_port_holders_are_named_by_process_name_and_companion_sessions_are_marked(self):
+        from pathlib import Path
+        files={'/proc/9/comm':'LeGo2 Fan Contr\n','/proc/9/cmdline':b'LeGo2 Fan Control (/home/deck/x/main.py)',
+               '/proc/5/comm':'python3\n','/proc/5/cmdline':b'/usr/bin/python3\0-E\0/p/fan_guardian.py\x003',
+               '/proc/4/comm':'bad\x1bname\n','/proc/4/cmdline':b'bad'}
+        def text(p):
+            if str(p).replace('\\','/') not in files:raise FileNotFoundError(p)
+            return files[str(p).replace('\\','/')]
+        with patch.object(Path,'read_text',text),patch.object(Path,'read_bytes',text):
+            self.assertEqual(guard.holder(9),('LeGo2 Fan Contr (pid 9)',False))
+            self.assertEqual(guard.holder(5),('Another Companion Fan Control session (pid 5)',True))
+            self.assertEqual(guard.holder(4),('bad?name (pid 4)',False))
+            self.assertEqual(guard.holder(3),('Another app (pid 3)',False),'a vanished process')
+            with patch.object(guard,'port_holders',return_value=iter([5,9])):
+                self.assertEqual(guard.foreign_writers(),' LeGo2 Fan Contr (pid 9) has the fan controller open.',
+                                 "this session's own backup fork is not a foreign writer")
+            with patch.object(guard,'port_holders',return_value=iter([5])):
+                self.assertEqual(guard.foreign_writers(),'')
+            with patch.object(guard,'port_holders',side_effect=guard.Retry('slow')):
+                self.assertEqual(guard.foreign_writers(),'')
+
+    def test_a_confirmed_foreign_override_names_who_has_the_port_open(self):
+        from unittest.mock import Mock
+        ec=Mock()
+        with patch.object(guard,'read_ec_status',return_value=dict(override=2400,power_mode=0)), \
+                patch.object(guard.time,'sleep'), \
+                patch.object(guard,'foreign_writers',return_value=' LeGo2 Fan Contr (pid 9) has the fan controller open.'):
+            with self.assertRaisesRegex(RuntimeError,r'outside its owner \(read 2400 then 2400, expected 1800, power mode 0\)\. '
+                                                      r'LeGo2 Fan Contr \(pid 9\) has the fan controller open\.'):
+                guard.confirm_override_change(ec,dict(override=2400),1800)
+
+    def test_passive_read_tells_a_named_owner_from_a_failed_read(self):
+        with patch.object(fan,'platform_check'),patch.object(fan,'secure_root',return_value=71),patch.object(fan.os,'close'):
+            with patch.object(fan,'check_owners',side_effect=RuntimeError('LeGo2 Fan Contr (pid 9) is using the fan controller.')):
+                owner=fan.read_automatic()['ownership']
+            self.assertEqual((owner['blocked'],owner['state'],owner['reason']),
+                             (True,'foreign_owner','LeGo2 Fan Contr (pid 9) is using the fan controller.'))
+            with patch.object(fan,'check_owners',side_effect=fan.Retry('Raw-port ownership scan exceeded its time budget.')):
+                owner=fan.read_automatic()['ownership']
+            self.assertEqual((owner['blocked'],owner['state']),(True,'unavailable'),'a slow scan is not an owner')

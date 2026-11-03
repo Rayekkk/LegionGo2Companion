@@ -36,14 +36,24 @@ export function fanStatus(state, startingFor = 0) {
   if (enabled && !telemetry?.active) return { headline: "Starting your curve…", starting: true, detail: startingFor >= STARTING_STUCK_MS
     ? "Still starting. Turn Fan Control off and on to retry." : "No action needed." };
   if (!enabled && state.error) return { headline: "Turned off after an error", detail: `${state.error} Turn on to try again.` };
-  if (!enabled && ownership.blocked) return { headline: "Another app controls the fan", detail: ownership.reason || "" };
+  // Only a named owner is "another app"; a failed read is not.
+  if (!enabled && ownership.blocked) return { headline: ownership.state === "foreign_owner"
+    ? "Another app controls the fan" : "Fan reading unavailable", detail: ownership.reason || "" };
   if (enabled) return { headline: !state.active_curve || state.active_curve === "global" ? "Global curve" : `${curveName(state.active_curve)} TDP curve`,
     detail: "Turn off to return the fan to automatic." };
-  if (state.readings?.valid && state.readings.automatic === false) return { headline: "Another app controls the fan", detail: "" };
+  if (state.readings?.valid && state.readings.automatic === false) return { headline: "Another app controls the fan",
+    detail: "Turn on Fan Control to take the fan over." };
   if (telemetry && !telemetry.automatic) return { headline: "Returning fan to automatic…", detail: "No action needed." };
   return { headline: "Automatic", detail: settings.assign_tdp_presets
     ? "Global curve with optional Companion TDP assignments." : "Uses your saved global curve." };
 }
+
+/**
+ * "Take over fan control": one start attempt past a blocked passive read. The backend's start
+ * still refuses a live owner and names it, so it is offered whenever Fan Control is off and blocked.
+ */
+export const canTakeOver = state => !!state?.supported && !state.settings?.enabled && !!state.ownership?.blocked;
+export const TAKE_OVER_NOTE = "Tries once. If another app still uses the fan, Companion names it and stays off.";
 
 /** Set one axis of one point. A speed between 0 and the minimum running speed snaps to the nearer of the two. */
 export function editPoint(curve, index, axis, value, limits) {

@@ -6,7 +6,8 @@ import { FC, useEffect, useRef, useState } from "react";
 import { CurveAxes, CurveDialog, CurveGraph as Graph, curveLayout, type CurveLayout, type CurveSize, type Point } from "./curve";
 import { errorText, rpc } from "./shared";
 import { colors, infoRow, notify as toast } from "./ui";
-import { curveName as title, editPoint, fanStatus, nudgeSpeed, pointText, saveLabel, speedText } from "../desktop/native/fan.mjs";
+import { canTakeOver, curveName as title, editPoint, fanStatus, nudgeSpeed, pointText, saveLabel, speedText,
+  TAKE_OVER_NOTE } from "../desktop/native/fan.mjs";
 import { FAN_BETA_TEXT } from "../desktop/native/modules.mjs";
 
 export type Curve = [number, number][];
@@ -25,7 +26,7 @@ export interface FanState {
     override?: number; effective?: number; stop_verified?: boolean; temperatures?: Record<string, number> };
 }
 const readState = rpc<[], FanState>("fan_get_state");
-const requestEnabled = rpc<[boolean], FanState>("fan_set_enabled");
+const requestEnabled = rpc<[boolean, boolean], FanState>("fan_set_enabled");
 const requestCurve = rpc<[string, Curve | null, number], FanState>("fan_save_curve");
 const requestUnit = rpc<["rpm" | "percent", number], FanState>("fan_save_unit");
 const requestAssignments = rpc<[boolean, number], FanState>("fan_save_assignment_mode");
@@ -34,7 +35,7 @@ const timed = async (operation: () => Promise<FanState>) => {
   return { ...next, receivedAt, readings: next.readings && { ...next.readings,
     age_seconds: (next.readings.age_seconds ?? 0) + Math.max(0, receivedAt-started)/1000 } };
 };
-const setEnabled = (enabled: boolean) => timed(() => requestEnabled(enabled));
+const setEnabled = (enabled: boolean, takeOver = false) => timed(() => requestEnabled(enabled, takeOver));
 const saveCurve = (scope: string, curve: Curve | null, revision: number) => timed(() => requestCurve(scope, curve, revision));
 const saveUnit = (unit: "rpm" | "percent", revision: number) => timed(() => requestUnit(unit, revision));
 const saveAssignments = (enabled: boolean, revision: number) => timed(() => requestAssignments(enabled, revision));
@@ -289,9 +290,9 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
     void mutate(async()=>{const next=await saveAssignments(enabled,expected);rebase(expected,next.settings.revision);return next;},"assign");
   };
   const curvesOf = (state: FanState) => JSON.stringify([state.settings.global_curve,state.settings.presets]);
-  const toggle = (enabled: boolean) => {
+  const toggle = (enabled: boolean, takeOver = false) => {
     const expected=status.settings.revision, curves=curvesOf(status);
-    void mutate(async()=>{const next=await setEnabled(enabled);
+    void mutate(async()=>{const next=await setEnabled(enabled,takeOver);
       // fan_set_enabled has no expected revision: rebase only when its own +1 is the sole change.
       if(next.settings.revision===expected+1 && curvesOf(next)===curves)rebase(expected,next.settings.revision);
       return next;},"enabled");
@@ -355,7 +356,9 @@ export const FanPage: FC<{viewVisible?: boolean; isViewVisible?: () => boolean; 
       <PanelSectionRow><ToggleField label="Enable fan control" checked={status.settings.enabled}
         disabled={busy || !status.settings.enabled && (!status.supported || !!status.ownership?.blocked || dirty || !!status.needs_curve_review)}
         description={enableDescription}
-        onChange={toggle} /></PanelSectionRow>
+        onChange={enabled=>toggle(enabled)} /></PanelSectionRow>
+      {canTakeOver(status) && <PanelSectionRow><ButtonItem layout="below" disabled={busy || dirty || !!status.needs_curve_review}
+        description={TAKE_OVER_NOTE} onClick={()=>toggle(true,true)}>Take over fan control</ButtonItem></PanelSectionRow>}
     </PanelSection>
     <PanelSection title={dirty ? "Curve · unsaved" : undefined}>
       {assignmentMode && <PanelSectionRow><DropdownItem label="Curve" selectedOption={scope} disabled={busy}

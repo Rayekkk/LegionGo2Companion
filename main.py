@@ -1411,8 +1411,8 @@ class Plugin:
     async def fan_get_state(self):
         return await self._fan.get_state()
 
-    async def fan_set_enabled(self, enabled):
-        return await self._fan.set_enabled(enabled)
+    async def fan_set_enabled(self, enabled, take_over=False):
+        return await self._fan.set_enabled(enabled, take_over)
 
     async def fan_save_curve(self, scope, curve, expected_revision):
         return await self._fan.save_curve(scope, curve, expected_revision)

@@ -272,7 +272,15 @@ run(async()=>{
 
   const blocked=harness({...initial,ownership:{blocked:true,state:'unavailable',reason:'Another process owns raw EC ports.'}});
   blocked.render();await flush();tree=blocked.render();assert.equal(label(tree,'Enable fan control').props.disabled,true);
-  assert.match(label(tree,'Enable fan control').props.description,/Another process/);blocked.unmount();
+  assert.match(label(tree,'Enable fan control').props.description,/Another process/);
+  const takeOver=button(tree,'Take over fan control');assert.equal(takeOver.props.disabled,false,'a blocked, off Fan Control offers one attempt');
+  takeOver.props.onClick();await flush();tree=blocked.render();
+  assert.deepEqual(blocked.calls.filter(c=>c.name==='fan_set_enabled').at(-1).args,[true,true]);
+  assert.equal(find(tree,n=>n.type==='ButtonItem'&&n.props.children==='Take over fan control'),undefined,'no take-over while Fan Control is on');
+  blocked.unmount();
+  const free=harness();free.render();await flush();tree=free.render();
+  assert.equal(find(tree,n=>n.type==='ButtonItem'&&n.props.children==='Take over fan control'),undefined,'nothing to take over when the fan is free');
+  free.unmount();
   {
     const draft=harness();draft.render();await flush();let view=draft.render();
     find(view,n=>n.type===draft.exports.CurveGraph).props.edit(1,4000,0);view=draft.render();
@@ -317,9 +325,10 @@ run(async()=>{
     [s=>{s.settings.enabled=true;},['Starting your curve…','No action needed.']],
     [s=>{s.settings.enabled=true;},['Starting your curve…','Still starting. Turn Fan Control off and on to retry.'],30000],
     [s=>{s.error='Fan stalled.';},['Turned off after an error','Fan stalled. Turn on to try again.']],
-    [s=>{s.ownership={blocked:true,state:'x',reason:'Another driver is using the fan controller.'};},['Another app controls the fan','Another driver is using the fan controller.']],
+    [s=>{s.ownership={blocked:true,state:'foreign_owner',reason:'Another driver (legion_ec) is using the fan controller.'};},['Another app controls the fan','Another driver (legion_ec) is using the fan controller.']],
+    [s=>{s.ownership={blocked:true,state:'unavailable',reason:'Passive fan reading exceeded its time budget.'};},['Fan reading unavailable','Passive fan reading exceeded its time budget.']],
     [s=>{s.settings.enabled=true;s.telemetry.active=true;s.active_curve='max';},['Maximum TDP curve','Turn off to return the fan to automatic.']],
-    [s=>{s.readings.automatic=false;},['Another app controls the fan',undefined]],
+    [s=>{s.readings.automatic=false;},['Another app controls the fan','Turn on Fan Control to take the fan over.']],
     [s=>{s.telemetry.automatic=false;},['Returning fan to automatic…','No action needed.']],
     [s=>{s.settings.assign_tdp_presets=false;},['Automatic','Uses your saved global curve.']],
   ];
