@@ -2,7 +2,7 @@
 
 All notable changes to Legion Go 2 Companion, newest first.
 
-## [Unreleased]
+## [2.4.2] - 2026-11-12
 
 ### 🐛 Fixed
 
