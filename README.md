@@ -450,7 +450,8 @@ available. The power-button light needs the BIOS to describe the light as explai
 
 Turn on **Enable button mapping**, then choose actions for the left controller's
 **Desktop button** (upper extra button) and **Page button** (lower extra button): Steam menus,
-the on-screen keyboard, screenshots, window switching, navigation keys, F1–F12 or **Disabled**.
+the on-screen keyboard, screenshots, Steam zoom (Steam + LB), window switching, navigation keys, F1–F12 or
+**Disabled**.
 
 <a href="docs/screenshots/button-remapper.png"><img src="docs/screenshots/button-remapper.png" alt="Separate Desktop and Page button mappings" width="360"></a>
 

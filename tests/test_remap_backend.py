@@ -343,6 +343,18 @@ mapping:
         self.assertEqual(events["Keyboard"], [("keyboard", "KeyEsc")])
         self.assertEqual(events["QuickAccess2"], [])
 
+    def test_zoom_sends_the_steam_lb_chord_from_either_button(self):
+        for button in ("desktop", "page"):
+            other = "page" if button == "desktop" else "desktop"
+            state = remap_backend._sanitize_state({"enabled": True, "baseline_profile": BASE_PROFILE,
+                                                   f"{button}_action": "zoom", f"{other}_action": "default"})
+            self.assertEqual(state[f"{button}_action"], "zoom")
+            result = remap_backend._build_profile(BASE_PROFILE, state)
+            self.assertTrue(remap_backend._profile_matches(result, state))
+            events = {remap_backend._source_for_block(block): remap_backend._events_for_block(block)
+                      for block in remap_backend._mapping_blocks(result)[1]}
+            self.assertEqual(events[remap_backend.BUTTON_SOURCES[button]], [("gamepad", "Guide"), ("gamepad", "LeftBumper")])
+
     def test_default_restores_custom_baseline_and_preserves_unrelated_live_edits(self):
         baseline = BASE_PROFILE.replace(
             "  - gamepad:\n      button: Guide\n  - gamepad:\n      button: North\n",

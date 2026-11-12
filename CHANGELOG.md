@@ -4,6 +4,10 @@ All notable changes to Legion Go 2 Companion, newest first.
 
 ## [2.4.2] - 2026-11-12
 
+### ✨ Added
+
+- **Button mapping:** **Zoom (Steam + LB)** for the Desktop and Page buttons turns on Steam's screen zoom.
+
 ### 🐛 Fixed
 
 - **Fan Control:** works again after the battery ran completely flat ("Unknown initial EC selector"); Companion
