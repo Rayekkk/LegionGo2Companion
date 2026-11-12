@@ -403,7 +403,7 @@ def stop_release(ec, root, reason, outcome, sole_writer=False):
             return dict(result, outcome=first['outcome'])
         except Exception as exc:
             errors.append(str(exc)); time.sleep(0.1)
-    raise RuntimeError('EC recovery is pending: ' + '; '.join(errors))
+    raise RuntimeError('EC recovery is pending: ' + '; '.join(dict.fromkeys(errors)))
 
 
 def confirm_automatic(ec):

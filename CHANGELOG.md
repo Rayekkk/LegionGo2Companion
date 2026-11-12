@@ -8,6 +8,7 @@ All notable changes to Legion Go 2 Companion, newest first.
 
 - **Fan Control:** works again after the battery ran completely flat ("Unknown initial EC selector"); Companion
   resets the fan controller's selector to its normal state once and logs the value it found.
+- **Fan Control:** an error repeated by several recovery attempts is shown once instead of up to eight times.
 
 ## [2.4.1] - 2026-11-03
 
