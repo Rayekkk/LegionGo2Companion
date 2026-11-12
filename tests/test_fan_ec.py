@@ -127,15 +127,19 @@ class FanTransportTests(unittest.TestCase):
             self.assertEqual(seen[-1],0)
             self.assertTrue(all(v==0 or MIN_RPM<=v<=MAX_RPM for v in seen),(old,seen))
 
-    def test_snapshot_accepts_any_ec_selector_and_leaves_a_foreign_one_untouched(self):
+    def test_snapshot_accepts_any_ec_selector_and_repairs_one_left_by_an_ec_reset(self):
         for secondary in (0x10,0x11,0x12):
             p=ModelPorts();p.secondary=secondary;e=EC(p)
             self.assertEqual(e.snapshot()['secondary'],secondary)
             self.assertEqual((p.primary,p.secondary,p.hi,p.lo),(0xAA,secondary,0xC6,0xC9))
-        p=ModelPorts();p.secondary=0x07
-        with self.assertRaisesRegex(RuntimeError,'Unknown initial EC selector'): EC(p).snapshot()
-        self.assertEqual(p.primary,0xAA,'the firmware must get its own primary selector back')
-        self.assertEqual(p.writes,[])
+        for secondary in (0x00,0x07,0xFF):  # issue #8: after a full power loss the EC starts outside 0x10-0x12
+            p=ModelPorts();p.secondary=secondary;e=EC(p)
+            with patch.object(fan_ec,'diagnostic_event') as logged:
+                self.assertEqual(e.snapshot()['secondary'],0x12)
+            logged.assert_called_once_with('fan','ec_selector_reset',level='warning',previous=secondary)
+            self.assertEqual((p.primary,p.secondary,p.hi,p.lo),(0xAA,0x12,0xC6,0xC9),'firmware primary back, data selector left')
+            self.assertEqual(p.writes,[],'no EC data write')
+            self.assertEqual(EC(p).snapshot()['secondary'],0x12,'the next session starts clean')
 
     @unittest.skipUnless(hasattr(os,'pread'),'POSIX positional I/O')
     def test_port_io_touches_exactly_one_port(self):

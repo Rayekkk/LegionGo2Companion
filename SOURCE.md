@@ -95,7 +95,8 @@ positive-to-positive intermediate remains between 1500 and 4800. Tests cover
 every pair, individual IO interruptions and process death after each target
 byte. Lease withdrawal is rechecked immediately before each data write;
 recovery releases the target and restores the pre-session selectors under the
-same lock. A conflicting owner causes withdrawal.
+same lock. A secondary selector outside 0x10-0x12 (the EC after a full power
+loss; no ACPI code uses these ports) is restored as the data selector 0x12 and logged. A conflicting owner causes withdrawal.
 
 The custom curve holds its first speed below its first editable temperature and
 interpolates across the ordered 0–100°C domain. Only its last point is fixed:

@@ -10,6 +10,7 @@ import os
 import pathlib
 import platform
 import time
+from diagnostics import event as diagnostic_event
 from fan_policy import MIN_RPM, MAX_RPM, STOP_OVERRIDE, encode_target
 from fan_sleep import Retry
 
@@ -157,8 +158,10 @@ class EC:
         primary = self.p.read(0x4E)
         self.primary(0x2E); secondary = self.p.read(0x4F)
         if secondary not in (0x10, 0x11, 0x12):
-            self.primary(primary)
-            raise RuntimeError('Unknown initial EC selector.')
+            # A full power loss resets the EC to a selector nothing else sets again (no ACPI uses 0x4E/0x4F):
+            # leave the data selector, the state every I2EC user leaves, so later sessions start clean (issue #8).
+            diagnostic_event('fan', 'ec_selector_reset', level='warning', previous=secondary)
+            secondary = 0x12
         self.baseline = dict(primary=primary, secondary=secondary,
                              hi=self.selector_read(0x11), lo=self.selector_read(0x10))
         self.restore()
