@@ -102,6 +102,28 @@ run(async () => {
   await settle(); assert.equal(find(source.render(), node => node.type === 'DropdownItem').props.selectedOption, 'left');
   assert.equal(source.count('controller_start_diagnostics'), 0, 'saving does not start diagnostics');
   source.unmount();
+
+  const emulation = harness();
+  emulation.render();
+  const modes = {
+    selected: 'system', active: 'steam', options: ['steam', 'xbox-elite', 'ds5'], reason: '',
+  };
+  emulation.respond('controller_get_status', { ...status, emulation: modes });
+  await settle();
+  const picker = () => find(emulation.render(), node => node.props?.label === 'Emulated controller');
+  assert.equal(picker().props.rgOptions.map(option => option.label).join(', '),
+    'System default, Steam Controller, Xbox Elite, DualSense (PS5)');
+  assert.match(picker().props.description, /Active: Steam Controller/);
+  picker().props.onChange({ data: 'ds5' });
+  await settle();
+  assert.equal(emulation.calls.find(call => call.name === 'controller_set_emulation').args[0], 'ds5');
+  assert.equal(picker().props.disabled, true);
+  emulation.respond('controller_set_emulation', { ...status, emulation: { ...modes, selected: 'ds5', active: 'ds5' } });
+  await settle();
+  assert.equal(picker().props.selectedOption, 'ds5');
+  assert.match(picker().props.description, /Active: DualSense/);
+  emulation.unmount();
+
   // Native Steam dropdowns hide QAM before delivering the selected option.
   const overlay = harness(); await ready(overlay);
   const nativeDropdown = find(overlay.render(), node => node.type === 'DropdownItem');

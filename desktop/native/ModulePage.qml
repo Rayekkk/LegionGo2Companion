@@ -427,7 +427,10 @@ RowLayout {
                     {note:b.note,visible:()=>s("remap_get_status").supported===true,available:()=>Remap.mappingEditable(s("remap_get_status"))})),
                 action("Restore defaults","remap_restore_defaults",null,{visible:()=>s("remap_get_status").supported===true})
             ]}],
-            controller:[{title:"Gyro & touchpad",column:1,barTitle:"Troubleshooting",fields:[
+            controller:[{title:Gyro.EMULATION_TITLE,column:0,visible:()=>!!gyro().emulation,fields:[
+                choices(Gyro.EMULATION_LABEL,()=>Gyro.emulationValue(gyro()),v=>change("controller_set_emulation",[v]),()=>Gyro.emulationOptions(gyro()),
+                    {available:()=>!!gyro().emulation?.active && !testRunning(),note:()=>Gyro.emulationNote(gyro())})
+            ]},{title:"Gyro & touchpad",column:1,barTitle:"Troubleshooting",fields:[
                 notice("",()=>gyro().recovery_pending?"A controller change didn't finish. Restore the previous settings first.":gyro().error || (gyro().available===false || gyro().conflict?gyro().reason || "":"")),
                 choices("Gyro source",()=>gyro().gyro_source,v=>change("controller_set_gyro_source",[v]),()=>Object.keys(Gyro.SOURCE_LABELS).map(id=>({id:id,label:Gyro.SOURCE_LABELS[id]})),
                     {kind:"options",available:()=>!Gyro.sourceLocked(gyro(),testRunning()),note:()=>Gyro.sourceNote(gyro())}),
