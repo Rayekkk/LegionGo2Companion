@@ -34,7 +34,7 @@ import decky
 from diagnostics import event, shown, transition
 from safe_settings import SettingsManager
 from inputplumber_process import (
-    DEVICE_PATH_RE, INTERFACE, SERVICE, ProcessWatch,
+    DEVICE_PATH_RE, INTERFACE, SERVICE, SETTLE_S, ProcessWatch,
     json_value as _json_value, run_busctl as _run_busctl,
 )
 import controller_imu
@@ -62,6 +62,7 @@ LEASE_SECONDS = 3.0
 CAPTURE_SECONDS = 30.0
 CHECK_SECONDS = 60.0
 RECOVERY_RETRY_SECONDS = 5.0
+EMULATION_RETRY_SECONDS = 60.0  # avoid a continuous target switch if SteamOS keeps restoring its default
 BATTERY_SAMPLE_TIMEOUT_SECONDS = 0.25
 BATTERY_CACHE_SECONDS = 15.0
 # Minutes, the choices Legion Space offers for the detached controllers; 0 turns the timer off.
@@ -387,6 +388,10 @@ class Plugin:
         self._sleep_retry = RECOVERY_RETRY_SECONDS
         self._sleep_due = 0.0  # monotonic time of the next sleep-time check
         self._emulation_owner: tuple[str, str] | None = None
+        self._emulation_targets: list[str] = []
+        self._emulation_candidate: tuple | None = None
+        self._emulation_retry_at = 0.0
+        self._emulation_enabled = False
 
     @staticmethod
     def _battery_result(sample: dict | None = None, reason: str = "") -> dict:
@@ -767,6 +772,10 @@ class Plugin:
                 emulation.switch(device, emulation.targets(device), active)
                 raise
             self._emulation_owner = (device["generation"], device["path"]) if mode != "system" else None
+            self._emulation_targets = [target if kind == active else kind for kind in current]
+            self._emulation_enabled = mode != "system"
+            self._emulation_candidate = None
+            self._emulation_retry_at = 0.0
 
     async def set_emulation(self, mode: str) -> dict:
         if not isinstance(mode, str) or (mode != "system" and mode not in controller_emulation.MODES):
@@ -774,12 +783,18 @@ class Plugin:
         await _offload(self._set_emulation, mode)
         return await _offload(self._status, True)
 
-    def _sync_emulation(self, *, release=False) -> None:
+    def _sync_emulation(self, *, release=False, now=None, resumed=False) -> None:
         with self._operation:
+            if self._closed and not release:
+                return
             saved = _emulation_choice()
             if not saved or _console() != "go2" or (release and not self._emulation_owner):
                 return
             emulation = controller_emulation
+            now = time.monotonic() if now is None else now
+            if resumed:
+                self._emulation_candidate = None
+                self._emulation_retry_at = 0.0
             try:
                 physical = _hid_inventory()[0]
                 if release and not physical:
@@ -788,29 +803,63 @@ class Plugin:
                     return
                 device = self._emulation_device(physical)
                 current = emulation.targets(device)
-                active = emulation.gamepad(current)
+                active = emulation.gamepad(current, allow_missing=True)
                 owner = (device["generation"], device["path"])
                 if release:
                     if active == saved["target"] and self._emulation_owner == owner:
                         emulation.switch(device, current, saved["baseline"])
+                    elif active is None and self._emulation_owner == owner and self._emulation_targets:
+                        emulation.recover(device, current, self._emulation_targets,
+                                          saved["baseline"], saved["baseline"])
                     self._emulation_owner = None
+                    self._emulation_targets = []
+                    return
+                if active == saved["target"]:
+                    self._emulation_owner = owner
+                    self._emulation_targets = current
+                    self._emulation_candidate = None
+                    return
+
+                missing = active is None and owner == self._emulation_owner and bool(self._emulation_targets)
+                reset = active is not None and emulation.GAMEPADS[active] == emulation.GAMEPADS[saved["baseline"]]
+                if not (missing or reset):
+                    # An unrelated target or an unverified composite belongs to its current owner.
+                    self._emulation_candidate = None
+                    return
+                with self._capture_lock:
+                    if self._capture and self._capture["active"]:
+                        self._emulation_candidate = None
+                        return
+                # SteamOS can detach and reattach targets asynchronously. Confirm the
+                # same reset or absence on two ticks before sending another request.
+                candidate = (owner, tuple(sorted(current)))
+                previous, self._emulation_candidate = self._emulation_candidate, candidate
+                if candidate != previous or now < self._emulation_retry_at:
+                    return
+                self._emulation_retry_at = now + EMULATION_RETRY_SECONDS
+                if saved["target"] not in emulation.modes(device).values():
+                    return
+                if missing:
+                    emulation.recover(device, current, self._emulation_targets,
+                                      saved["target"], saved["baseline"])
                 else:
-                    # Respect a different live target on a composite we already configured.
-                    if active != saved["target"] and self._emulation_owner != owner and active == saved["baseline"]:
-                        with self._capture_lock:
-                            if self._capture and self._capture["active"]:
-                                return
-                        if saved["target"] in emulation.modes(device).values():
-                            emulation.switch(device, current, saved["target"])
-                            active = saved["target"]
-                    if active == saved["target"]:
-                        self._emulation_owner = owner
+                    emulation.switch(device, current, saved["target"])
+                self._emulation_owner = owner
+                self._emulation_targets = emulation.targets(device)
+                self._emulation_candidate = None
                 self._status_cache = None
-                transition("controller", "emulation_sync", True, outcome="confirmed", initial=False)
+                event("controller", "emulation_recovered", mode=saved["target"],
+                      reason="missing_target" if missing else "system_target")
             except (ControllerError, emulation.InputPlumberError) as exc:
                 if release:
                     raise
+                self._emulation_candidate = None
+                self._status_cache = None
                 transition("controller", "emulation_sync", False, level="warning", error=exc, outcome="deferred", initial=False)
+
+    @module_runtime.controller_operation('controller')
+    async def _emulation_pass(self, now: float, resumed: bool) -> None:
+        await _offload(self._sync_emulation, now=now, resumed=resumed)
 
     def _sleep_status(self) -> dict:
         # The pads' own value is not shown: the driver can report a stale cached one.
@@ -1044,7 +1093,6 @@ class Plugin:
         if resumed:
             await _offload(self._stop_capture)
             self._generation = None
-        await _offload(self._sync_emulation)
         source = (await _offload(_state))["gyro_source"]
         if source != "system":
             await _offload(self._select, source, reconcile=True)
@@ -1058,14 +1106,23 @@ class Plugin:
         # Healthy devices and externally changed ownership stay at one minute.
         retry_delay = RECOVERY_RETRY_SECONDS
         next_check = now + (retry_delay if self._error and not self._conflict else CHECK_SECONDS)
+        emulation_resume_at = None
         self._sleep_due = now  # startup, an update or re-enabling: one check on the first tick
         while not self._closed:
             await asyncio.sleep(5)
             if module_runtime.is_paused('controller'):
                 continue
             now, resumed = time.monotonic(), resume()
+            if resumed:
+                emulation_resume_at = now + SETTLE_S
             if resumed or now >= self._sleep_due:
                 await self._sleep_check(now, resumed)
+            if self._emulation_enabled and (emulation_resume_at is None or now >= emulation_resume_at):
+                try:
+                    await self._emulation_pass(now, emulation_resume_at is not None)
+                except module_runtime.ControllerPaused:
+                    continue
+                emulation_resume_at = None
             service_exited = self._service_watch.consume_exit()
             if service_exited:
                 # Only advance the schedule. _select still verifies the actual
@@ -1110,7 +1167,9 @@ class Plugin:
             transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
                        level="warning", error=exc,
                        outcome="deferred", pending=not self._conflict)
-        await _offload(self._sync_emulation)
+        self._emulation_enabled = (await _offload(_emulation_choice)) is not None
+        self._emulation_candidate = None
+        self._emulation_retry_at = 0.0
         self._ensure_watch()
 
     async def _unload(self) -> None:

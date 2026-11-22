@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
+import asyncio
+import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from test_controller_backend import MemorySettings
 
@@ -51,6 +53,24 @@ class TargetTests(unittest.TestCase):
                     emulation.switch(DEVICE, BASE, "xbox-elite")
         write.assert_not_called()
 
+    def test_missing_gamepad_is_recreated_with_confirmed_auxiliaries(self):
+        current = ["keyboard"]
+        expected = ["xbox-elite", *BASE[1:]]
+        with (patch.object(emulation, "targets", side_effect=[current, expected]),
+              patch.object(emulation, "_set_targets") as write):
+            emulation.recover(DEVICE, current, BASE, "xbox-elite", "deck-uhid")
+        self.assertEqual(write.call_args.args[0], DEVICE)
+        self.assertCountEqual(write.call_args.args[1], expected)
+
+    def test_failed_missing_gamepad_recovery_leaves_a_steam_target(self):
+        current = list(BASE[1:])
+        with (patch.object(emulation, "targets", return_value=current),
+              patch.object(emulation, "_wait_for", side_effect=[False, True]),
+              patch.object(emulation, "_set_targets") as write):
+            with self.assertRaisesRegex(emulation.InputPlumberError, "previous mode is active"):
+                emulation.recover(DEVICE, current, BASE, "xbox-elite", "deck-uhid")
+        self.assertCountEqual(write.call_args.args[1], BASE)
+
 
 class EmulationPreferenceTests(unittest.TestCase):
     def setUp(self):
@@ -82,15 +102,74 @@ class EmulationPreferenceTests(unittest.TestCase):
         self.assertEqual(self.live, BASE)
         self.assertIsNone(self.state.committed["emulation"])
 
-    def test_choice_is_restored_on_a_new_composite_without_overwriting_an_external_change(self):
+    def test_choice_is_restored_on_a_reset_without_overwriting_an_external_mode(self):
         self.plugin._set_emulation("ds5")
         self.plugin._sync_emulation(release=True)
         self.assertEqual(self.live, BASE)
-        self.plugin._sync_emulation()
-        self.assertEqual(self.live[0], "ds5")
-        self.live = list(BASE)
-        self.plugin._sync_emulation()
+        self.plugin._sync_emulation(now=5)
         self.assertEqual(self.live, BASE)
+        self.plugin._sync_emulation(now=10)
+        self.assertEqual(self.live[0], "ds5")
+        self.live = ["xbox-elite", *BASE[1:]]
+        self.plugin._sync_emulation(now=75)
+        self.plugin._sync_emulation(now=80)
+        self.assertEqual(self.live[0], "xbox-elite")
+
+    def test_resume_reapplies_saved_mode_on_the_same_composite(self):
+        self.plugin._set_emulation("xbox-elite")
+        self.live = BASE.copy()
+        self.plugin._emulation_retry_at = 100
+        self.plugin._sync_emulation(now=15, resumed=True)
+        self.assertEqual(self.live, BASE)
+        self.plugin._sync_emulation(now=20)
+        self.assertEqual(self.live[0], "xbox-elite")
+        self.assertEqual(self.state.committed["emulation"]["target"], "xbox-elite")
+
+    def test_gamepad_temporarily_missing_after_exiting_a_game(self):
+        self.plugin._set_emulation("xbox-elite")
+        self.live = BASE[1:]
+        with patch.object(emulation, "recover") as recover:
+            self.plugin._sync_emulation(now=5)
+            recover.assert_not_called()
+            self.plugin._sync_emulation(now=10)
+            recover.assert_called_once_with(DEVICE, BASE[1:], ["xbox-elite", *BASE[1:]],
+                                            "xbox-elite", "deck-uhid")
+
+    def test_reset_cannot_cause_a_switch_every_poll(self):
+        self.plugin._set_emulation("xbox-elite")
+        self.live = BASE.copy()
+        self.plugin._sync_emulation(now=5)
+        self.plugin._sync_emulation(now=10)
+        self.assertEqual(self.live[0], "xbox-elite")
+        self.live = BASE.copy()
+        self.plugin._sync_emulation(now=15)
+        self.plugin._sync_emulation(now=20)
+        self.assertEqual(self.live, BASE)
+        self.assertEqual(self.state.committed["emulation"]["target"], "xbox-elite")
+
+    def test_watch_waits_for_resume_to_settle_and_checks_again(self):
+        self.plugin._set_emulation("xbox-elite")
+        clock = [0.0]
+        live_after_tick = {}
+
+        async def sleep(seconds):
+            live_after_tick[clock[0]] = self.live[0]
+            clock[0] += seconds
+            if clock[0] == 5:
+                self.live = BASE.copy()
+            if clock[0] > 25:
+                raise asyncio.CancelledError
+
+        with (patch.object(backend, "time", types.SimpleNamespace(monotonic=lambda: clock[0])),
+              patch.object(backend.asyncio, "sleep", side_effect=sleep),
+              patch.object(backend.module_runtime, "suspend_offset", side_effect=lambda: 10 if clock[0] else 0),
+              patch.object(self.plugin, "_sleep_check", new_callable=AsyncMock),
+              patch.object(self.plugin, "_watch_check", new_callable=AsyncMock)):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(self.plugin._watch())
+        self.assertEqual(live_after_tick[15], "deck-uhid")
+        self.assertEqual(live_after_tick[20], "deck-uhid")
+        self.assertEqual(live_after_tick[25], "xbox-elite")
 
     def test_switch_during_diagnostics_does_not_change_the_gamepad(self):
         self.plugin._capture = {"active": True}

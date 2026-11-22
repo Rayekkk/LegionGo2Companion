@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections import Counter
 
 from inputplumber_process import INTERFACE, InputPlumberError, json_value, run_busctl
 
@@ -40,11 +41,11 @@ def targets(device: dict) -> list[str]:
     return kinds
 
 
-def gamepad(kinds: list[str]) -> str:
+def gamepad(kinds: list[str], *, allow_missing: bool = False) -> str | None:
     pads = [kind for kind in kinds if kind in GAMEPADS]
-    if len(pads) != 1 or set(kinds) - GAMEPADS.keys() - AUXILIARY:
+    if set(kinds) - GAMEPADS.keys() - AUXILIARY or len(pads) > 1 or (not pads and not allow_missing):
         raise InputPlumberError("InputPlumber must have one supported gamepad target.")
-    return pads[0]
+    return pads[0] if pads else None
 
 
 def modes(device: dict) -> dict[str, str]:
@@ -79,9 +80,22 @@ def switch(device: dict, current: list[str], target: str) -> None:
     previous = gamepad(current)
     if previous == target:
         return
+    expected = [target if kind == previous else kind for kind in current]
+    _change_targets(device, current, expected, current)
+
+
+def recover(device: dict, current: list[str], confirmed: list[str], target: str, baseline: str) -> None:
+    """Reattach a missing target using this composite's last confirmed auxiliary devices."""
+    if gamepad(current, allow_missing=True) is not None:
+        raise InputPlumberError("The controller already has a gamepad target.")
+    previous = gamepad(confirmed)
+    auxiliary = list((Counter(current) | Counter(kind for kind in confirmed if kind != previous)).elements())
+    _change_targets(device, current, [target, *auxiliary], [baseline, *auxiliary])
+
+
+def _change_targets(device: dict, current: list[str], expected: list[str], fallback: list[str]) -> None:
     if sorted(targets(device)) != sorted(current):
         raise InputPlumberError("Controller targets changed. Try again.")
-    expected = [target if kind == previous else kind for kind in current]
     try:
         _set_targets(device, expected)
     except InputPlumberError:
@@ -94,10 +108,10 @@ def switch(device: dict, current: list[str], target: str) -> None:
     restored = False
     try:
         actual = targets(device)
-        restored = sorted(actual) == sorted(current)
-        if not restored and set(actual) <= set(current + expected):
-            _set_targets(device, current)
-            restored = _wait_for(device, current)
+        restored = sorted(actual) == sorted(fallback)
+        if not restored and set(actual) <= set(current + expected + fallback):
+            _set_targets(device, fallback)
+            restored = _wait_for(device, fallback)
     except InputPlumberError:
         pass
     if restored:
