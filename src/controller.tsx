@@ -7,6 +7,7 @@ import { FirmwarePanel } from "./firmware";
 import { errorText, mutationQueue, rpc } from "./shared";
 import { detailsRows, infoRow, notify as toast, statusPlaceholder } from "./ui";
 import { reportingText, SLEEP_DEFAULT, SLEEP_LABEL, SLEEP_TITLE, sleepChange, sleepNote, sleepOptions, sleepShown, sleepText,
+  EMULATION_TITLE, EMULATION_LABEL, emulationNote, emulationOptions, emulationValue, type EmulationMode, type EmulationStatus,
   sleepValue, SOURCE_LABELS as sourceLabels, sourceLabel, sourceLocked, sourceNote, streamText, touchText,
   vectorText } from "../desktop/native/controller.mjs";
 
@@ -27,6 +28,7 @@ export interface ControllerStatus {
   recovery_pending?: boolean;
   imu?: { available: boolean; actual: { left: boolean; right: boolean } | null; reason?: string };
   sleep?: { available: boolean; minutes: number | null; error: string };
+  emulation?: EmulationStatus | null;
 }
 
 interface Stream<T> {
@@ -64,6 +66,7 @@ const stopDiagnostics = rpc<[string], ControllerDiagnostics>("controller_stop_di
 const setGyroSource = rpc<[GyroSource], ControllerStatus>("controller_set_gyro_source");
 const releaseControl = rpc<[], ControllerStatus>("controller_release_control");
 const setSleepTime = rpc<[number], ControllerStatus>("controller_set_sleep_time");
+const setEmulation = rpc<[EmulationMode], ControllerStatus>("controller_set_emulation");
 
 const sourceOptions: DropdownOption[] = Object.entries(sourceLabels).map(([data, label]) => ({ data, label }));
 
@@ -86,6 +89,7 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [emulationError, setEmulationError] = useState("");
   const [error, setError] = useState("");
   const [testError, setTestError] = useState("");
   const [details, setDetails] = useState(false);
@@ -235,7 +239,8 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
   }, [beginPolling]);
 
   const apply = useCallback(async (operation: () => Promise<ControllerStatus>, message: string,
-    problem = (next: ControllerStatus) => next.error || (next.conflict ? next.reason || "Another controller configuration is active." : "")) => {
+    problem = (next: ControllerStatus) => next.error || (next.conflict ? next.reason || "Another controller configuration is active." : ""),
+    setActionError = setError) => {
     // A native dropdown invokes its selection while QAM can still be hidden.
     // Visibility gates polling, not the user's explicit selection callback.
     if (!mounted.current || saving.current || startInFlight.current || stopInFlight.current || token.current) return;
@@ -244,8 +249,8 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
     const activeGeneration = generation.current;
     statusRevision.current += 1;
     setBusy(true);
-    setError("");
-    const fail = (text: string) => { setError(text); notify(text); };
+    setActionError("");
+    const fail = (text: string) => { setActionError(text); notify(text); };
     const run = async () => {
       try {
         await previousRead?.catch(() => undefined);
@@ -277,8 +282,29 @@ export const ControllerPage: FC<{ visible: boolean; firmware?: boolean }> = ({ v
   const blocked = busy || testing;
   const remaining = diagnostics?.active && finite(diagnostics.remaining_s) ? Math.ceil(diagnostics.remaining_s) : null;
   const physical = diagnostics?.physical.sample, steam = diagnostics?.virtual.sample;
+  const emulationChoices = emulationOptions(status);
 
   return <>
+    {status.emulation && <PanelSection title={EMULATION_TITLE}>
+      <PanelSectionRow>
+        <DropdownItem
+          label={EMULATION_LABEL}
+          description={emulationError || emulationNote(status)}
+          strDefaultLabel="System default"
+          selectedOption={emulationValue(status)}
+          rgOptions={emulationChoices.map(({ id, label }) => ({ data: id, label }))}
+          disabled={blocked || !status.emulation.active}
+          onChange={(option) => {
+            const choice = emulationChoices.find(({ id }) => id === option.data);
+            if (!choice || !status.emulation?.active) return;
+            void apply(() => setEmulation(choice.id), `Emulated controller: ${choice.label}.`, (next) => {
+              const current = next.emulation;
+              return current?.reason || (current?.selected === choice.id ? "" : "The controller mode was not confirmed.");
+            }, setEmulationError);
+          }}
+        />
+      </PanelSectionRow>
+    </PanelSection>}
     <PanelSection title="Gyro & touchpad">
       {status.recovery_pending ? infoRow("A controller change didn't finish", "Restore the previous settings first.")
         : status.conflict ? infoRow("Another app changed the controller settings", status.reason || "Restore the previous settings to take them back.")

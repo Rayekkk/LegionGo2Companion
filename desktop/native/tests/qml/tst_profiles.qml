@@ -261,7 +261,7 @@ TestCase {
         const hidden=["Fan Control","Vibration","Button mapping","Gyro & touchpad","Display"],kept=["TDP","Lighting","Battery","Wi-Fi"];
         fake.data=Object.assign({},fake.data,{get_version:all,rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true},power_led:{supported:true,current:true}}});
         panel.page="controller";
-        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,controller,firmware");
+        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,controller,controller,firmware");
         for(const name of hidden.concat(kept))verify(field("modules",name).visible(),name);
         compare(field("modules","Lighting").note(),"Stick lights and power button light.");
         verify(field("rgb","Power button light").visible());
@@ -314,6 +314,26 @@ TestCase {
         verify(!panel.fieldEnabled("controller",field("controller","Controller test")),"No physical controller: no test");
     }
     // Shown only where both pads have the timer; nothing is claimed or written until the user picks a time.
+    function test_controllerEmulationWaitsForSupportAndDiagnostics() {
+        fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{controller:{enabled:true,ready:true}}}});
+        panel.page="controller";
+        const emulation=panel.cards.find(card=>card.title==="Controller emulation");
+        verify(emulation!==undefined);
+        verify(!emulation.visible(),"No emulation block on controllers that do not report support");
+        fake.data=Object.assign({},fake.data,{controller_get_status:{emulation:{
+            selected:"system",active:"steam",options:["steam","xbox-elite","ds5"],reason:""}}});
+        verify(emulation.visible());
+        const selector=field("controller","Emulated controller");
+        compare(selector.get(),"system");
+        compare(selector.choices().map(option=>option.id).join(","),"system,steam,xbox-elite,ds5");
+        fake.diagnosticToken="test";
+        verify(!selector.available());
+        fake.diagnosticToken="";
+        verify(selector.available());
+        selector.set("ds5");
+        compare(fake.calls[0].method,"controller_set_emulation");
+        compare(fake.calls[0].args.join(","),"ds5");
+    }
     function test_controllerSleepWaitsForTheUsersChoice() {
         fake.data=Object.assign({},fake.data,{get_version:{blocked:false,modules:{controller:{enabled:true,ready:true}}},
             controller_get_status:{available:true,physical:{path:"/dev/hidraw1"},sleep:{available:false,minutes:null,error:""}}});
@@ -456,7 +476,7 @@ TestCase {
             vibe_is_ready:{ready:true},vibe_get_settings:{settings:{},app_id:"0",profile_id:"0"},
             rgb_get_status:{settings:{control_enabled:true},rgb:{supported:true}},remap_get_status:{supported:true}});
         panel.page="controller";
-        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,controller,firmware","Firmware stays last");
+        compare(panel.cards.map(card=>card.owner).join(","),"vibration,remap,controller,controller,controller,firmware","Firmware stays last");
         const firmware=panel.cards.find(c=>c.owner==="firmware");
         verify(firmware!==undefined);
         panel.page="rgb";compare(panel.cards.map(card=>card.owner).join(","),"rgb");panel.page="controller";

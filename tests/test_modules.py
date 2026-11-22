@@ -805,8 +805,10 @@ class WorkerDrainTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_controller_withdraws_after_close_without_restarting_monitor(self):
         c = types.SimpleNamespace(_unload=AsyncMock(), _release=lambda **kw: None, _release_sleep=lambda: None)
+        c._sync_emulation = unittest.mock.Mock()
         await module_control.withdraw('controller', c)
         c._unload.assert_awaited_once()
+        c._sync_emulation.assert_called_once_with(release=True)
 
     async def test_wifi_cleanup_keeps_saved_profiles(self):
         import wifi_backend

@@ -77,6 +77,7 @@ async def withdraw(name, component):
     elif name == 'remap':
         check(await component.set_enabled(False))
     elif name == 'controller':
+        await asyncio.to_thread(component._sync_emulation, release=True)
         await asyncio.to_thread(component._release, persist=True)
         await asyncio.to_thread(component._release_sleep)
     elif name == 'battery':

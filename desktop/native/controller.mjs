@@ -12,6 +12,28 @@ export const sourceNote = status => `Which controller's motion Steam uses. Syste
 /** The gyro source waits for InputPlumber, for another app to give the controller back, and for the controller test to end. */
 export const sourceLocked = (status, testing) => !status?.available || !!status.conflict || !!testing;
 
+export const EMULATION_TITLE = "Controller emulation";
+export const EMULATION_LABEL = "Emulated controller";
+const EMULATION_LABELS = {
+  system: "System default", steam: "Steam Controller", "xbox-elite": "Xbox Elite", ds5: "DualSense (PS5)",
+};
+export const emulationOptions = status => Object.keys(EMULATION_LABELS)
+  .filter(id => id === "system" || status?.emulation?.options.includes(id))
+  .map(id => ({ id, label: EMULATION_LABELS[id] }));
+export const emulationValue = status => {
+  const value = status?.emulation;
+  return value?.selected === "system" ? "system" : value?.active || value?.selected || "system";
+};
+export const emulationNote = status => {
+  const { active, selected, reason } = status?.emulation || {};
+  if (reason) return reason;
+  const details = active === "xbox-elite" ? " Xbox Elite does not expose gyro to games."
+    : " Changing the controller briefly disconnects the gamepad.";
+  const saved = selected && selected !== "system" && selected !== active
+    ? ` Saved: ${EMULATION_LABELS[selected]}.` : "";
+  return active ? `Active: ${EMULATION_LABELS[active]}.${saved}${details}` : "";
+};
+
 const finite = value => typeof value === "number" && Number.isFinite(value);
 /** "X 12 · Y -3 · Z 840" in raw sensor counts, or a dash when nothing arrived. */
 export const vectorText = value => value

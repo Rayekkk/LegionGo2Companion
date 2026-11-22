@@ -38,6 +38,7 @@ from inputplumber_process import (
     json_value as _json_value, run_busctl as _run_busctl,
 )
 import controller_imu
+import controller_emulation
 import module_runtime
 
 
@@ -336,6 +337,16 @@ def _sleep_minutes() -> int | None:
     return minutes if type(minutes) is int and minutes in SLEEP_MINUTES else None
 
 
+def _emulation_choice() -> dict | None:
+    value = settings.getSetting("emulation", None)
+    if not isinstance(value, dict):
+        return None
+    keys = ("baseline", "target")
+    if not all(isinstance(value.get(key), str) and value[key] in controller_emulation.GAMEPADS for key in keys):
+        return None
+    return value
+
+
 def _imu_status() -> dict:
     status = controller_imu.read_status()
     if not status.get("available") or not isinstance(status.get("actual"), dict):
@@ -375,6 +386,7 @@ class Plugin:
         self._sleep_error = ""
         self._sleep_retry = RECOVERY_RETRY_SECONDS
         self._sleep_due = 0.0  # monotonic time of the next sleep-time check
+        self._emulation_owner: tuple[str, str] | None = None
 
     @staticmethod
     def _battery_result(sample: dict | None = None, reason: str = "") -> dict:
@@ -465,6 +477,7 @@ class Plugin:
                 applied = None
                 available = False
                 controlled = False
+                device = None
                 imu = controller_imu.read_status() if physical else {"available": False, "actual": None}
                 if physical:
                     try:
@@ -487,7 +500,8 @@ class Plugin:
                           "error": self._error, "physical": physical, "virtual": virtual,
                           "imu": imu,
                           "recovery_pending": bool(state["ownership"] and state["ownership"].get("pending")),
-                          "sleep": self._sleep_status()}
+                           "sleep": self._sleep_status(),
+                           "emulation": self._emulation_status(physical, device)}
                 self._status_cache = (now, copy.deepcopy(result))
             with self._capture_lock:
                 result["diagnostics_active"] = bool(self._capture and self._capture["active"])
@@ -701,6 +715,102 @@ class Plugin:
 
     async def release_control(self) -> dict:
         return await self.set_gyro_source("system")
+
+    def _emulation_device(self, physical=None) -> dict:
+        if _console() != "go2":
+            raise ControllerError("Controller emulation is limited to the Legion Go 2.")
+        physical = physical or _hid_inventory()[0]
+        if not physical:
+            raise ControllerError("The Legion Go 2 controller is unavailable.")
+        return _discover(physical, require_exclusive=False)
+
+    def _emulation_status(self, physical, device) -> dict | None:
+        if _console() != "go2":
+            return None
+        emulation = controller_emulation
+        saved = _emulation_choice()
+        selected = emulation.GAMEPADS[saved["target"]] if saved else "system"
+        try:
+            device = device or self._emulation_device(physical)
+            active = emulation.gamepad(emulation.targets(device))
+            options = list(emulation.modes(device))
+            if not options:
+                raise ControllerError("This InputPlumber build does not expose the supported gamepad types.")
+        except (ControllerError, emulation.InputPlumberError) as exc:
+            return {"selected": selected, "active": None, "options": [], "reason": shown(exc)}
+        return {"selected": selected, "active": emulation.GAMEPADS[active], "options": options, "reason": ""}
+
+    def _set_emulation(self, mode: str) -> None:
+        with self._operation:
+            if self._closed:
+                raise ControllerError("Controller support is stopped.")
+            with self._capture_lock:
+                if self._capture and self._capture["active"]:
+                    raise ControllerError("Stop the controller test before changing emulation.")
+            emulation = controller_emulation
+            device = self._emulation_device()
+            current = emulation.targets(device)
+            active = emulation.gamepad(current)
+            saved = _emulation_choice()
+            baseline = saved["baseline"] if saved and saved["target"] == active else active
+            target = baseline if mode == "system" else emulation.modes(device).get(mode)
+            if not target:
+                raise ControllerError("This InputPlumber build does not support the selected controller.")
+            self._status_cache = None
+            # A Linux Deck target may already be the one this system uses for Steam.
+            if mode != "system" and emulation.GAMEPADS[active] == mode:
+                target = active
+            emulation.switch(device, current, target)
+            try:
+                _save({"baseline": baseline, "target": target} if mode != "system" else None, "emulation")
+            except Exception:
+                emulation.switch(device, emulation.targets(device), active)
+                raise
+            self._emulation_owner = (device["generation"], device["path"]) if mode != "system" else None
+
+    async def set_emulation(self, mode: str) -> dict:
+        if not isinstance(mode, str) or (mode != "system" and mode not in controller_emulation.MODES):
+            raise ValueError("Unknown controller emulation mode.")
+        await _offload(self._set_emulation, mode)
+        return await _offload(self._status, True)
+
+    def _sync_emulation(self, *, release=False) -> None:
+        with self._operation:
+            saved = _emulation_choice()
+            if not saved or _console() != "go2" or (release and not self._emulation_owner):
+                return
+            emulation = controller_emulation
+            try:
+                physical = _hid_inventory()[0]
+                if release and not physical:
+                    # The composite is gone. Its next instance will start with the system targets.
+                    self._emulation_owner = None
+                    return
+                device = self._emulation_device(physical)
+                current = emulation.targets(device)
+                active = emulation.gamepad(current)
+                owner = (device["generation"], device["path"])
+                if release:
+                    if active == saved["target"] and self._emulation_owner == owner:
+                        emulation.switch(device, current, saved["baseline"])
+                    self._emulation_owner = None
+                else:
+                    # Respect a different live target on a composite we already configured.
+                    if active != saved["target"] and self._emulation_owner != owner and active == saved["baseline"]:
+                        with self._capture_lock:
+                            if self._capture and self._capture["active"]:
+                                return
+                        if saved["target"] in emulation.modes(device).values():
+                            emulation.switch(device, current, saved["target"])
+                            active = saved["target"]
+                    if active == saved["target"]:
+                        self._emulation_owner = owner
+                self._status_cache = None
+                transition("controller", "emulation_sync", True, outcome="confirmed", initial=False)
+            except (ControllerError, emulation.InputPlumberError) as exc:
+                if release:
+                    raise
+                transition("controller", "emulation_sync", False, level="warning", error=exc, outcome="deferred", initial=False)
 
     def _sleep_status(self) -> dict:
         # The pads' own value is not shown: the driver can report a stale cached one.
@@ -934,6 +1044,7 @@ class Plugin:
         if resumed:
             await _offload(self._stop_capture)
             self._generation = None
+        await _offload(self._sync_emulation)
         source = (await _offload(_state))["gyro_source"]
         if source != "system":
             await _offload(self._select, source, reconcile=True)
@@ -999,6 +1110,7 @@ class Plugin:
             transition("controller", "managed_profile", "conflict" if self._conflict else "deferred",
                        level="warning", error=exc,
                        outcome="deferred", pending=not self._conflict)
+        await _offload(self._sync_emulation)
         self._ensure_watch()
 
     async def _unload(self) -> None:
@@ -1013,6 +1125,10 @@ class Plugin:
         # Closing our own read-only observers is permitted during maintenance;
         # this path never restores hardware or user intent.
         await module_runtime.complete(asyncio.to_thread(self._stop_capture))
+        try:
+            await _offload(self._sync_emulation, release=True)
+        except Exception as exc:
+            event('controller', 'emulation_restore_failed', level='warning', error=exc)
         try:
             await _offload(self._release, persist=False)
         except Exception as exc:

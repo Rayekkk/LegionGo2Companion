@@ -468,6 +468,10 @@ elsewhere.
 
 ### Gyro & touchpad
 
+On the Legion Go 2, open **Gyro & touchpad → Controller emulation** to choose **Steam Controller**, **Xbox Elite**, or **DualSense (PS5)**. **System default** hands the choice back to InputPlumber. The row shows which controller is active and the available options for your InputPlumber build.
+
+Changing the emulated controller briefly disconnects the gamepad. Change it before opening a game, or restart the game if it still lists the old controller. Xbox Elite does not expose gyro to games. The controller test can show physical inputs in all modes, while its Steam report is specific to Steam Controller mode.
+
 Choose the **Gyro source**: **Left controller**, **Right controller**, **Both controllers** or
 **System default**. The gyros are in the removable handles; Both averages them.
 
